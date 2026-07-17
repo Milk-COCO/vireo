@@ -296,6 +296,24 @@ impl Renderer {
 
 use crate::text::TextEntryList;
 
+/// 形状变换。内部使用，通过 `set_position` / `set_rotation` / `set_scale` / `set_pivot` 设置。
+#[derive(Clone, Copy)]
+struct Transform {
+    x: f32,
+    y: f32,
+    px: f32,
+    py: f32,
+    rotation: f32,
+    sx: f32,
+    sy: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0, px: 0.0, py: 0.0, rotation: 0.0, sx: 1.0, sy: 1.0 }
+    }
+}
+
 /// 批量绘制单元 —— 容纳一组形状顶点、文本条目和可选纹理。
 ///
 /// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
@@ -305,6 +323,7 @@ pub struct DrawBatch {
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
     pub texture: Option<wgpu::BindGroup>,
+    transform: Option<Transform>,
 }
 
 impl DrawBatch {
@@ -314,6 +333,7 @@ impl DrawBatch {
             indices: Vec::new(),
             texts: TextEntryList::new(),
             texture: None,
+            transform: None,
         }
     }
 
@@ -322,6 +342,85 @@ impl DrawBatch {
         self.indices.clear();
         self.texts.clear();
         self.texture = None;
+        self.transform = None;
+    }
+
+    /// 设置平移（屏幕坐标）。
+    pub fn set_position(&mut self, x: f32, y: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        t.x = x;
+        t.y = y;
+        self.transform = Some(t);
+    }
+
+    /// 设置旋转弧度（顺时针）。默认绕 (0,0)，用 `set_pivot` 指定旋转中心。
+    pub fn set_rotation(&mut self, rad: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        t.rotation = rad;
+        self.transform = Some(t);
+    }
+
+    /// 设置旋转中心（形状局部坐标）。
+    pub fn set_pivot(&mut self, px: f32, py: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        t.px = px;
+        t.py = py;
+        self.transform = Some(t);
+    }
+
+    /// 设置缩放（1.0 = 原始大小）。
+    pub fn set_scale(&mut self, sx: f32, sy: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        t.sx = sx;
+        t.sy = sy;
+        self.transform = Some(t);
+    }
+
+    /// 一次性设置完整变换。
+    pub fn set_transform(&mut self, x: f32, y: f32, px: f32, py: f32, rotation: f32, sx: f32, sy: f32) {
+        self.transform = Some(Transform { x, y, px, py, rotation, sx, sy });
+    }
+
+    /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。
+    pub fn orbit_transform(
+        &mut self, cx: f32, cy: f32, orbit_radius: f32, orbit_angle: f32,
+        px: f32, py: f32, self_rotation: f32, sx: f32, sy: f32,
+    ) {
+        let x = cx + orbit_angle.cos() * orbit_radius;
+        let y = cy + orbit_angle.sin() * orbit_radius;
+        self.set_transform(x, y, px, py, self_rotation, sx, sy);
+    }
+
+    /// 清除变换，后续形状以原始坐标绘制。
+    pub fn clear_transform(&mut self) {
+        self.transform = None;
+    }
+
+    /// 添加单个顶点（自动应用当前 transform）。
+    pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
+        let (tx, ty) = self.transform_vertex(x, y);
+        self.vertices.push(Vertex::new(tx, ty, color));
+    }
+
+    /// 添加带 UV 的顶点（自动应用当前 transform）。
+    pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
+        let (tx, ty) = self.transform_vertex(x, y);
+        self.vertices.push(Vertex::new_uv(tx, ty, u, v, color));
+    }
+
+    /// 应用当前变换到顶点：绕 pivot 旋转 → 缩放 → 平移
+    fn transform_vertex(&self, vx: f32, vy: f32) -> (f32, f32) {
+        let t = match self.transform {
+            Some(t) => t,
+            None => return (vx, vy),
+        };
+        let cos = t.rotation.cos();
+        let sin = t.rotation.sin();
+        let dx = vx - t.px;
+        let dy = vy - t.py;
+        let rx = dx * cos - dy * sin;
+        let ry = dx * sin + dy * cos;
+        (t.x + rx * t.sx, t.y + ry * t.sy)
     }
 
     /// 克隆 batch（vertices、indices、texts 完全复制，rasterizer 清空）
@@ -331,6 +430,7 @@ impl DrawBatch {
             indices: self.indices.clone(),
             texture: self.texture.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
+            transform: self.transform,
         }
     }
 
@@ -344,7 +444,7 @@ impl DrawBatch {
         self.add_quad_uv(x, y, w, h, 0.0, 0.0, 1.0, 1.0, color);
     }
 
-    /// 添加带自定义 UV 坐标的四边形（用于纹理子区域）。
+    /// 添加带自定义 UV 坐标的四边形（用于纹理子区域）。受当前 transform 影响。
     pub fn add_quad_uv(
         &mut self,
         x: f32,
@@ -361,10 +461,15 @@ impl DrawBatch {
         let x2 = x + w;
         let y2 = y + h;
 
-        self.vertices.push(Vertex::new_uv(x, y, u0, v0, color));
-        self.vertices.push(Vertex::new_uv(x2, y, u1, v0, color));
-        self.vertices.push(Vertex::new_uv(x2, y2, u1, v1, color));
-        self.vertices.push(Vertex::new_uv(x, y2, u0, v1, color));
+        let (tx, ty) = self.transform_vertex(x, y);
+        let (tx2, ty2) = self.transform_vertex(x2, y);
+        let (tx3, ty3) = self.transform_vertex(x2, y2);
+        let (tx4, ty4) = self.transform_vertex(x, y2);
+
+        self.vertices.push(Vertex::new_uv(tx, ty, u0, v0, color));
+        self.vertices.push(Vertex::new_uv(tx2, ty2, u1, v0, color));
+        self.vertices.push(Vertex::new_uv(tx3, ty3, u1, v1, color));
+        self.vertices.push(Vertex::new_uv(tx4, ty4, u0, v1, color));
 
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

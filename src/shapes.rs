@@ -4,7 +4,6 @@ use std::f32::consts::{PI, FRAC_PI_2};
 
 use crate::color::Color;
 use crate::context::DrawBatch;
-use crate::gpu::Vertex;
 
 /// 绘制矩形
 /// 填充矩形。
@@ -26,13 +25,13 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
     let base = batch.vertices.len() as u32;
 
     // 圆心
-    batch.vertices.push(Vertex::new(cx, cy, color));
+    batch.push_vertex(cx, cy, color);
 
     for i in 0..segments {
         let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let x = cx + r * angle.cos();
         let y = cy + r * angle.sin();
-        batch.vertices.push(Vertex::new(x, y, color));
+        batch.push_vertex(x, y, color);
     }
 
     for i in 0..segments {
@@ -69,10 +68,10 @@ pub fn draw_line(
 
     let base = batch.vertices.len() as u32;
 
-    batch.vertices.push(Vertex::new(x1 + nx, y1 + ny, color));
-    batch.vertices.push(Vertex::new(x1 - nx, y1 - ny, color));
-    batch.vertices.push(Vertex::new(x2 - nx, y2 - ny, color));
-    batch.vertices.push(Vertex::new(x2 + nx, y2 + ny, color));
+    batch.push_vertex(x1 + nx, y1 + ny, color);
+    batch.push_vertex(x1 - nx, y1 - ny, color);
+    batch.push_vertex(x2 - nx, y2 - ny, color);
+    batch.push_vertex(x2 + nx, y2 + ny, color);
 
     batch
         .indices
@@ -96,13 +95,13 @@ pub fn draw_ellipse(
     let segments = segments.max(3);
     let base = batch.vertices.len() as u32;
 
-    batch.vertices.push(Vertex::new(cx, cy, color));
+    batch.push_vertex(cx, cy, color);
 
     for i in 0..segments {
         let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let x = cx + rx * angle.cos();
         let y = cy + ry * angle.sin();
-        batch.vertices.push(Vertex::new(x, y, color));
+        batch.push_vertex(x, y, color);
     }
 
     for i in 0..segments {
@@ -135,7 +134,7 @@ pub fn draw_rounded_rect(
     // 中心
     let cx = x + w * 0.5;
     let cy = y + h * 0.5;
-    batch.vertices.push(Vertex::new(cx, cy, color));
+    batch.push_vertex(cx, cy, color);
 
     let corners = [
         (x + r, y + r, 0),           // 左上（从 PI 到 1.5*PI）
@@ -151,7 +150,7 @@ pub fn draw_rounded_rect(
             let angle = start_angle + t * std::f32::consts::FRAC_PI_2;
             let vx = corner_x + r * angle.cos();
             let vy = corner_y + r * angle.sin();
-            batch.vertices.push(Vertex::new(vx, vy, color));
+            batch.push_vertex(vx, vy, color);
         }
     }
 
@@ -183,9 +182,9 @@ pub fn draw_triangle(
     }
 
     let base = batch.vertices.len() as u32;
-    batch.vertices.push(Vertex::new(x1, y1, color));
-    batch.vertices.push(Vertex::new(x2, y2, color));
-    batch.vertices.push(Vertex::new(x3, y3, color));
+    batch.push_vertex(x1, y1, color);
+    batch.push_vertex(x2, y2, color);
+    batch.push_vertex(x3, y3, color);
     batch.indices.extend_from_slice(&[base, base + 1, base + 2]);
 }
 
@@ -198,7 +197,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
     let base = batch.vertices.len() as u32;
 
     for (px, py) in points {
-        batch.vertices.push(Vertex::new(*px, *py, color));
+        batch.push_vertex(*px, *py, color);
     }
 
     for i in 1..points.len() as u32 - 1 {
@@ -224,14 +223,14 @@ pub fn draw_arc(
     let segments = segments.max(2);
     let base = batch.vertices.len() as u32;
 
-    batch.vertices.push(Vertex::new(cx, cy, color));
+    batch.push_vertex(cx, cy, color);
 
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
         let angle = start_angle + t * (end_angle - start_angle);
         let vx = cx + r * angle.cos();
         let vy = cy + r * angle.sin();
-        batch.vertices.push(Vertex::new(vx, vy, color));
+        batch.push_vertex(vx, vy, color);
     }
 
     for i in 0..segments {
@@ -266,8 +265,8 @@ pub fn draw_circle_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, thic
         let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let cos = angle.cos();
         let sin = angle.sin();
-        batch.vertices.push(Vertex::new(cx + inner_r * cos, cy + inner_r * sin, color));
-        batch.vertices.push(Vertex::new(cx + r * cos, cy + r * sin, color));
+        batch.push_vertex(cx + inner_r * cos, cy + inner_r * sin, color);
+        batch.push_vertex(cx + r * cos, cy + r * sin, color);
     }
 
     for i in 0..segments {
@@ -294,8 +293,8 @@ pub fn draw_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry
         let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let cos = angle.cos();
         let sin = angle.sin();
-        batch.vertices.push(Vertex::new(cx + inner_rx * cos, cy + inner_ry * sin, color));
-        batch.vertices.push(Vertex::new(cx + rx * cos, cy + ry * sin, color));
+        batch.push_vertex(cx + inner_rx * cos, cy + inner_ry * sin, color);
+        batch.push_vertex(cx + rx * cos, cy + ry * sin, color);
     }
 
     for i in 0..segments {
@@ -385,10 +384,10 @@ pub fn draw_rounded_rect_outline(
     let total = outer.len();
     let base = batch.vertices.len() as u32;
     for i in 0..total {
-        batch.vertices.push(Vertex::new(outer[i].0, outer[i].1, color));
+        batch.push_vertex(outer[i].0, outer[i].1, color);
     }
     for i in 0..total {
-        batch.vertices.push(Vertex::new(inner[i].0, inner[i].1, color));
+        batch.push_vertex(inner[i].0, inner[i].1, color);
     }
     for i in 0..total {
         let j = (i + 1) % total;
