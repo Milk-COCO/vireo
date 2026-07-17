@@ -456,13 +456,61 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
     if points.len() < 2 || thickness == 0.0 || color.a == 0.0 {
         return;
     }
-    for i in 0..points.len() - 1 {
-        draw_line(batch, points[i].0, points[i].1, points[i + 1].0, points[i + 1].1, thickness, color);
+    let n = points.len();
+    let closed = n > 2
+        && (points[0].0 - points[n - 1].0).abs() < 0.001
+        && (points[0].1 - points[n - 1].1).abs() < 0.001;
+    // 闭合时首尾重复，顶点数减一
+    let vcount = if closed { n - 1 } else { n };
+    if vcount < 2 { return; }
+
+    let h = thickness * 0.5;
+
+    // 每条线段的方向和法线
+    let mut norms: Vec<(f32, f32)> = Vec::new();
+    for i in 0..vcount {
+        let j = (i + 1) % n; // 闭合时最后一根线段回到 point[0]
+        let dx = points[j].0 - points[i].0;
+        let dy = points[j].1 - points[i].1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.001 {
+            norms.push((0.0, 1.0));
+        } else {
+            norms.push((-dy / len, dx / len));
+        }
     }
-    // 圆角衔接：每个内部顶点画小圆填补线段间的缺口
-    let r = thickness * 0.5;
-    for i in 1..points.len() - 1 {
-        draw_circle(batch, points[i].0, points[i].1, r, color, 8);
+
+    let base = batch.vertices.len() as u32;
+
+    // 每个顶点生成偏移顶点对（外侧 + 内侧），使用 miter join
+    for i in 0..vcount {
+        let n_prev = norms[(i + vcount - 1) % vcount];
+        let n_next = norms[i];
+        let dot = n_prev.0 * n_next.0 + n_prev.1 * n_next.1;
+
+        // miter offset = (n0 + n1) * h / (1 + dot)
+        let denom = (1.0 + dot).max(0.05);
+        let ox = (n_prev.0 + n_next.0) * h / denom;
+        let oy = (n_prev.1 + n_next.1) * h / denom;
+
+        batch.push_vertex(points[i].0 + ox, points[i].1 + oy, color);
+        batch.push_vertex(points[i].0 - ox, points[i].1 - oy, color);
+    }
+
+    // 三角形条带（闭合时最后一根回到 vertex 0）
+    for i in 0..vcount - 1 {
+        let o0 = base + (i * 2) as u32;
+        let i0 = o0 + 1;
+        let o1 = base + ((i + 1) * 2) as u32;
+        let i1 = o1 + 1;
+        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
+    }
+    if closed {
+        let o0 = base + ((vcount - 1) * 2) as u32;
+        let i0 = o0 + 1;
+        let o1 = base;
+        let i1 = base + 1;
+        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
     }
 }
 
@@ -504,18 +552,15 @@ pub fn draw_arc_outline(
     let ex = cx + r * end_angle.cos();
     let ey = cy + r * end_angle.sin();
 
-    // 半径线段
-    draw_line(batch, cx, cy, sx, sy, thickness, color);
-    draw_line(batch, cx, cy, ex, ey, thickness, color);
-
-    // 弧线
-    let mut points = vec![(sx, sy)];
+    // 连续折线：圆心 → 弧 → 圆心（闭合）
+    let mut points = vec![(cx, cy), (sx, sy)];
     for i in 1..segments {
         let t = i as f32 / segments as f32;
         let angle = start_angle + t * (end_angle - start_angle);
         points.push((cx + r * angle.cos(), cy + r * angle.sin()));
     }
     points.push((ex, ey));
+    points.push((cx, cy));
     draw_line_chain(batch, &points, thickness, color);
 }
 
