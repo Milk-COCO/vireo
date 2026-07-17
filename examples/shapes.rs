@@ -21,7 +21,7 @@ fn main() {
         draw_rectangle(&mut batch, 20.0, 20.0, 100.0, 80.0, RED);
         draw_circle(&mut batch, 200.0, 60.0, 40.0, GREEN);
         draw_ellipse(&mut batch, 340.0, 60.0, 60.0, 40.0, Color::new(0.2, 0.6, 1.0, 1.0));
-        draw_rounded_rect(&mut batch, 460.0, 20.0, 100.0, 80.0, 20.0, ORANGE, 16);
+        draw_rounded_rect(&mut batch, 460.0, 20.0, 100.0, 80.0, 20.0, ORANGE);
         draw_triangle(&mut batch, 620.0, 100.0, 580.0, 20.0, 660.0, 20.0, YELLOW);
         draw_polygon(&mut batch, &[(720.0, 20.0), (780.0, 20.0), (810.0, 70.0), (780.0, 100.0), (720.0, 80.0)], PURPLE);
         draw_arc(&mut batch, 930.0, 60.0, 50.0, 0.0, PI * 0.75, PINK, 24);

@@ -21,7 +21,7 @@ impl OffscreenCanvas {
     pub fn with_aa(gpu: &Arc<GpuContext>, width: u32, height: u32, aa: AntiAliasing) -> Self {
         let texture = Texture::new(&gpu.device, width, height, gpu.surface_format,
             &gpu.texture_bind_group_layout, &gpu.default_sampler);
-        let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa);
+        let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa, 1.0);
         Self { texture, renderer }
     }
 

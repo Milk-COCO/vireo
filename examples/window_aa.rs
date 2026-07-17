@@ -4,6 +4,7 @@ use vireo::prelude::*;
 
 fn draw_shapes(batch: &mut DrawBatch, sdf: f32) {
     batch.sdf_feather = sdf;
+    draw_rounded_rect(batch, 300.0, 20.0, 180.0, 100.0, 25.0, Color::new(0.15, 0.5, 0.3, 1.0));
     draw_triangle(batch, 150.0, 280.0, 60.0, 40.0, 350.0, 60.0, YELLOW);
     draw_triangle(batch, 250.0, 120.0, 380.0, 250.0, 180.0, 280.0, ORANGE);
     draw_circle(batch, 420.0, 190.0, 70.0, Color::new(0.2, 0.6, 1.0, 1.0));

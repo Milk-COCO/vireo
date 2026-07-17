@@ -4,7 +4,7 @@ use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let off_idx = app.offscreen(256, 256);
+    let off_idx = app.offscreen(256, 256, AntiAliasing::None);
     let idx = app.window(WindowDesc::new("Offscreen Render", 800, 600), None::<fn()>);
 
     app.run(move |app| {

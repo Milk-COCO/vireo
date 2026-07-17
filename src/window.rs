@@ -859,6 +859,7 @@ impl App {
                 aa: AntiAliasing,
         ) -> VireoWindow {
                 let render_scale = if high_dpi { 1.0 } else { window.scale_factor() as f32 };
+                let dpi = window.scale_factor() as f32;
                 let renderer = crate::context::Renderer::new(
                     gpu.clone(),
                     logical_width,
@@ -867,6 +868,7 @@ impl App {
                     window.inner_size().height,
                     render_scale,
                     aa,
+                    dpi,
                 );
 
                 VireoWindow {

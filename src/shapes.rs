@@ -56,15 +56,7 @@ pub fn draw_texture(batch: &mut DrawBatch, tex: &impl TextureSource, opts: Textu
 
 /// 填充矩形。
 pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
-    let base = batch.vertices.len() as u32;
-    let x2 = x + w;
-    let y2 = y + h;
-    batch.push_vertex(x,  y,  color);
-    batch.push_vertex(x2, y,  color);
-    batch.push_vertex(x2, y2, color);
-    batch.push_vertex(x,  y2, color);
-    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    draw_rounded_rect(batch, x, y, w, h, 0.0, color);
 }
 
 /// 填充圆（shader SDF，完美边缘）。
@@ -133,58 +125,25 @@ pub fn draw_ellipse(
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制圆角矩形
+/// 填充圆角矩形（shader SDF）。
 pub fn draw_rounded_rect(
-    batch: &mut DrawBatch,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radius: f32,
-    color: Color,
-    corner_segments: u32,
+    batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32,
+    radius: f32, color: Color,
 ) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 {
-        return;
-    }
-
+    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
-    let cs = corner_segments.max(2);
-    let base = batch.vertices.len() as u32;
-
-    // 中心
     let cx = x + w * 0.5;
     let cy = y + h * 0.5;
-    batch.push_vertex(cx, cy, color);
-
-    let corners = [
-        (x + r, y + r, 0),           // 左上（从 PI 到 1.5*PI）
-        (x + w - r, y + r, 1),       // 右上（1.5*PI 到 2*PI）
-        (x + w - r, y + h - r, 2),   // 右下（0 到 0.5*PI）
-        (x + r, y + h - r, 3),       // 左下（0.5*PI 到 PI）
-    ];
-
-    for (corner_x, corner_y, quadrant) in &corners {
-        let start_angle = std::f32::consts::PI * (1.0 + *quadrant as f32 * 0.5);
-        for i in 0..cs {
-            let t = i as f32 / cs as f32;
-            let angle = start_angle + t * std::f32::consts::FRAC_PI_2;
-            let vx = corner_x + r * angle.cos();
-            let vy = corner_y + r * angle.sin();
-            batch.push_vertex(vx, vy, color);
-        }
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let f = batch.sdf_feather;
+    let base = batch.vertices.len() as u32;
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(cx + dx * hw, cy + dy * hh, r, f, color);
+        v.circle = [cx, cy, hw, -hh]; // circle.w < 0 = rounded rect
+        batch.vertices.push(v);
     }
-
-    let total_samples = cs * 4;
-    let center_idx = base;
-    let perimeter_start = base + 1;
-
-    for i in 0..total_samples {
-        let next = (i + 1) % total_samples;
-        batch.indices.push(center_idx);
-        batch.indices.push(perimeter_start + i);
-        batch.indices.push(perimeter_start + next);
-    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 绘制三角形
@@ -602,16 +561,15 @@ mod tests {
     #[test]
     fn rounded_rect_produces_faces() {
         let mut batch = test_batch();
-        draw_rounded_rect(&mut batch, 10.0, 10.0, 100.0, 60.0, 10.0, GREEN, 4);
-        // 1 center + 4 corners * 4 = 17 vertices, 16 * 3 = 48 indices
-        assert_eq!(batch.vertices.len(), 17);
-        assert_eq!(batch.indices.len(), 48);
+        draw_rounded_rect(&mut batch, 10.0, 10.0, 100.0, 60.0, 10.0, GREEN);
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
     fn rounded_rect_zero_size_skipped() {
         let mut batch = test_batch();
-        draw_rounded_rect(&mut batch, 0.0, 0.0, 0.0, 100.0, 5.0, WHITE, 4);
+        draw_rounded_rect(&mut batch, 0.0, 0.0, 0.0, 100.0, 5.0, WHITE);
         assert!(batch.vertices.is_empty());
     }
 

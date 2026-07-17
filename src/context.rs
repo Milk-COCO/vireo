@@ -39,6 +39,7 @@ pub struct Renderer {
     physical_width: u32,
     physical_height: u32,
     scale: f32,
+    dpi_scale: f32,
     sample_count: u32,
     alpha_to_coverage: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
@@ -53,12 +54,16 @@ impl Renderer {
         physical_height: u32,
         scale: f32,
         aa: crate::window::AntiAliasing,
+        dpi_scale: f32,
     ) -> Self {
         let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
+        let mut camera_raw = [0u8; 80];
+        camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
+        camera_raw[64..68].copy_from_slice(&dpi_scale.to_le_bytes());
         let camera_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera buffer"),
-            contents: bytemuck::cast_slice(&camera_data),
+            contents: &camera_raw,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -79,6 +84,7 @@ impl Renderer {
             physical_width,
             physical_height,
             scale,
+            dpi_scale,
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
             msaa_tex: RefCell::new(None),
@@ -117,6 +123,9 @@ impl Renderer {
     pub fn resize(&mut self, logical_width: u32, logical_height: u32, physical_width: u32, physical_height: u32, scale: f32) {
         let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
+        let mut camera_raw = [0u8; 80];
+        camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
+        camera_raw[64..68].copy_from_slice(&self.dpi_scale.to_le_bytes());
         let camera_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("camera bind group"),
             layout: &self.gpu.camera_bind_group_layout,
@@ -124,7 +133,7 @@ impl Renderer {
                 binding: 0,
                 resource: self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("camera buffer"),
-                    contents: bytemuck::cast_slice(&camera_data),
+                    contents: &camera_raw,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 }).as_entire_binding(),
             }],
@@ -388,7 +397,7 @@ pub struct DrawBatch {
     pub(crate) texture: Option<wgpu::BindGroup>,
     texture_segments: Vec<TextureSegment>,
     transform: Option<Transform>,
-    /// SDF 柔边宽度（物理像素，0.0 = 关闭）。
+    /// SDF 柔边宽度（物理像素，0.0 = 关闭）。窗口 draw 时自动除以 dpi_scale。
     pub sdf_feather: f32,
 }
 
@@ -529,7 +538,7 @@ impl DrawBatch {
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: crate::color::Color) { crate::shapes::draw_circle(self, cx, cy, r, c); }
     pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
     pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: crate::color::Color) { crate::shapes::draw_ellipse(self, cx, cy, rx, ry, c); }
-    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: crate::color::Color, cs: u32) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c, cs); }
+    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: crate::color::Color) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c); }
     pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: crate::color::Color) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: crate::color::Color) { crate::shapes::draw_polygon(self, pts, c); }
     pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c, seg); }
