@@ -66,47 +66,36 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(cx + dx * r, cy + dy * r, 0.0, 0.0, color);
-        v.circle = [cx, cy, r, r];
+        v.sdf_params = [cx, cy, r, r];
         v.uv = [f, 0.0];
+        v.sdf_type = 1; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
     }
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制线段
+/// 绘制线段（shader SDF）。
 pub fn draw_line(
-    batch: &mut DrawBatch,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    thickness: f32,
-    color: Color,
+    batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32,
+    thickness: f32, color: Color,
 ) {
-    if thickness == 0.0 || color.a == 0.0 {
-        return;
-    }
-
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len == 0.0 {
-        return;
-    }
-
-    let nx = -dy / len * thickness * 0.5;
-    let ny = dx / len * thickness * 0.5;
-
+    if thickness == 0.0 || color.a == 0.0 { return; }
+    if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 { return; }
+    let h = thickness * 0.5;
+    let f = batch.sdf_feather;
+    let pad = h + f;
+    let min_x = x1.min(x2) - pad;
+    let min_y = y1.min(y2) - pad;
+    let max_x = x1.max(x2) + pad;
+    let max_y = y1.max(y2) + pad;
     let base = batch.vertices.len() as u32;
-
-    batch.push_vertex(x1 + nx, y1 + ny, color);
-    batch.push_vertex(x1 - nx, y1 - ny, color);
-    batch.push_vertex(x2 - nx, y2 - ny, color);
-    batch.push_vertex(x2 + nx, y2 + ny, color);
-
-    batch
-        .indices
-        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
+        let mut v = Vertex::new_uv(*cx, *cy, h, 0.0, color);
+        v.sdf_params = [x1, y1, x2, y2];
+        v.sdf_type = 3; v.sdf_feather = batch.sdf_feather;
+        batch.vertices.push(v);
+    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 填充椭圆（shader SDF）。
@@ -118,8 +107,9 @@ pub fn draw_ellipse(
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(cx + dx * rx, cy + dy * ry, 0.0, 0.0, color);
-        v.circle = [cx, cy, rx, ry];
+        v.sdf_params = [cx, cy, rx, ry];
         v.uv = [f, 0.0];
+        v.sdf_type = 1; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
     }
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -140,32 +130,31 @@ pub fn draw_rounded_rect(
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(cx + dx * hw, cy + dy * hh, r, f, color);
-        v.circle = [cx, cy, hw, -hh]; // circle.w < 0 = rounded rect
+        v.sdf_params = [cx, cy, hw, hh];
+        v.sdf_type = 2; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
     }
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制三角形
+/// 绘制三角形（shader SDF）。
 pub fn draw_triangle(
-    batch: &mut DrawBatch,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    x3: f32,
-    y3: f32,
-    color: Color,
+    batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, color: Color,
 ) {
-    if color.a == 0.0 {
-        return;
-    }
-
+    if color.a == 0.0 { return; }
+    let f = batch.sdf_feather;
+    let min_x = x1.min(x2).min(x3) - f;
+    let min_y = y1.min(y2).min(y3) - f;
+    let max_x = x1.max(x2).max(x3) + f;
+    let max_y = y1.max(y2).max(y3) + f;
     let base = batch.vertices.len() as u32;
-    batch.push_vertex(x1, y1, color);
-    batch.push_vertex(x2, y2, color);
-    batch.push_vertex(x3, y3, color);
-    batch.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
+        let mut v = Vertex::new_uv(*cx, *cy, x3, y3, color);
+        v.sdf_params = [x1, y1, x2, y2];
+        v.sdf_type = 4; v.sdf_feather = batch.sdf_feather;
+        batch.vertices.push(v);
+    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 绘制任意凸多边形（顶点按逆时针顺序）
@@ -577,8 +566,8 @@ mod tests {
     fn triangle_produces_one_face() {
         let mut batch = test_batch();
         draw_triangle(&mut batch, 0.0, 0.0, 100.0, 0.0, 50.0, 100.0, RED);
-        assert_eq!(batch.vertices.len(), 3);
-        assert_eq!(batch.indices.len(), 3);
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
@@ -621,7 +610,7 @@ mod tests {
         draw_circle(&mut batch, 100.0, 100.0, 5.0, BLUE);
         draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, GREEN);
 
-        assert_eq!(batch.vertices.len(), 4 + 4 + 3);
-        assert_eq!(batch.indices.len(), 6 + 6 + 3);
+        assert_eq!(batch.vertices.len(), 4 + 4 + 4);
+        assert_eq!(batch.indices.len(), 6 + 6 + 6);
     }
 }

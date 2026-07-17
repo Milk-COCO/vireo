@@ -9,13 +9,14 @@ use std::f32::consts::PI;
 fn main() {
     let mut app = App::new();
     let idx = app.window(
-        WindowDesc::new("Vireo Shapes Demo", 1000, 450).anti_aliasing(AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true }),
+        WindowDesc::new("Vireo Shapes Demo", 1000, 450),
         None::<fn()>,
     );
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
         let mut batch = DrawBatch::new();
+        batch.sdf_feather = 2.0;
 
         // ====== 填充形状 ======
         draw_rectangle(&mut batch, 20.0, 20.0, 100.0, 80.0, RED);

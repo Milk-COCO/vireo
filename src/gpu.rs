@@ -307,26 +307,18 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
-    pub circle: [f32; 4], // (cx, cy, r, feather) — 非 circle 时为 (0,0,0,0)
+    pub sdf_params: [f32; 4],
+    pub sdf_type: u32,    // 0=none, 1=circle, 2=rect, 3=line, 4=triangle
+    pub sdf_feather: f32, // logical px
 }
 
 impl Vertex {
     pub fn new(x: f32, y: f32, color: crate::color::Color) -> Self {
-        Self {
-            position: [x, y],
-            uv: [0.0, 0.0],
-            color: [color.r, color.g, color.b, color.a],
-            circle: [0.0; 4],
-        }
+        Self { position: [x, y], uv: [0.0; 2], color: [color.r, color.g, color.b, color.a], sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0 }
     }
 
     pub fn new_uv(x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) -> Self {
-        Self {
-            position: [x, y],
-            uv: [u, v],
-            color: [color.r, color.g, color.b, color.a],
-            circle: [0.0; 4],
-        }
+        Self { position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a], sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0 }
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -340,6 +332,8 @@ impl Vertex {
                 wgpu::VertexAttribute { offset: S2, format: wgpu::VertexFormat::Float32x2, shader_location: 1 },
                 wgpu::VertexAttribute { offset: S2 * 2, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2, format: wgpu::VertexFormat::Uint32, shader_location: 4 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 4, format: wgpu::VertexFormat::Float32, shader_location: 5 },
             ],
         }
     }
