@@ -25,6 +25,7 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var tex_sampler: sampler;
+@group(2) @binding(0) var<storage> polygon_edges: array<vec4<f32>>;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -69,6 +70,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d_ab = dot(in.local_pos - a, n_ab); let d_bc = dot(in.local_pos - b, n_bc); let d_ca = dot(in.local_pos - c, n_ca);
             let inside = d_ab > -0.0001 && d_bc > -0.0001 && d_ca > -0.0001;
             let d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);
+            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
+            else { if d > 0.0 { out_color.a = 0.0; } }
+        } else if in.sdf_type == 6u {
+            // polygon: sdf_params=(start_idx_f32, count_f32, 0, 0)
+            // 每条边存 vec4(nx, ny, dot(vi, n), 0)
+            let start = u32(in.sdf_params.x); let count = u32(in.sdf_params.y);
+            var d_max = -1e10;
+            var d_min = 1e10;
+            var inside = true;
+            for (var i = start; i < start + count; i++) {
+                let e = polygon_edges[i];
+                let sd = dot(in.local_pos, e.xy) - e.z;
+                if sd < -0.0001 { inside = false; }
+                d_max = max(d_max, -sd);
+                d_min = min(d_min, sd);
+            }
+            let d = select(d_max, -d_min, inside);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         } else {

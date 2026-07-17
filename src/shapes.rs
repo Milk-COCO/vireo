@@ -129,7 +129,7 @@ pub fn draw_rounded_rect(
     let f = batch.sdf_feather;
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        let mut v = Vertex::new_uv(cx + dx * hw, cy + dy * hh, r, f, color);
+        let mut v = Vertex::new_uv(cx + dx * (hw + f), cy + dy * (hh + f), r, f, color);
         v.sdf_params = [cx, cy, hw, hh];
         v.sdf_type = 2; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
@@ -157,21 +157,59 @@ pub fn draw_triangle(
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制任意凸多边形（顶点按逆时针顺序）
+/// 绘制凸多边形（shader SDF，边数据通过 storage buffer 传递）。
+/// 顶点须按逆时针排列。
 pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
-    if points.len() < 3 || color.a == 0.0 {
-        return;
-    }
+    if points.len() < 3 || color.a == 0.0 { return; }
 
-    let base = batch.vertices.len() as u32;
+    let n = points.len();
+    let f = batch.sdf_feather;
 
+    // 计算包围盒
+    let mut min_x = f32::MAX; let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN; let mut max_y = f32::MIN;
     for (px, py) in points {
-        batch.push_vertex(*px, *py, color);
+        min_x = min_x.min(*px); min_y = min_y.min(*py);
+        max_x = max_x.max(*px); max_y = max_y.max(*py);
     }
 
-    for i in 1..points.len() as u32 - 1 {
-        batch.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+    // 计算边的内法线，追加到 batch 的 polygon_edges
+    let start_idx = batch.polygon_edges.len() as u32;
+    let mut edge_count: u32 = 0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let dx = points[j].0 - points[i].0;
+        let dy = points[j].1 - points[i].1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.001 { continue; }
+        // 内法线（CCW 逆时针，Y 轴向下）：(-dy, dx)/len
+        let nx = -dy / len;
+        let ny = dx / len;
+        let offset = nx * points[i].0 + ny * points[i].1;
+        batch.polygon_edges.push(nx);
+        batch.polygon_edges.push(ny);
+        batch.polygon_edges.push(offset);
+        batch.polygon_edges.push(0.0);
+        edge_count += 1;
     }
+    if edge_count < 3 { return; }
+
+    let start_f = start_idx as f32;
+    let count_f = edge_count as f32;
+
+    // 包围 quad + feather 余量
+    let base = batch.vertices.len() as u32;
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(
+            if *dx < 0.0 { min_x - f } else { max_x + f },
+            if *dy < 0.0 { min_y - f } else { max_y + f },
+            start_f, count_f, color,
+        );
+        v.sdf_params = [start_f, count_f, 0.0, 0.0];
+        v.sdf_type = 6; v.sdf_feather = batch.sdf_feather;
+        batch.vertices.push(v);
+    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 绘制弧线/扇形（shader SDF）。
@@ -559,7 +597,6 @@ mod tests {
         let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
         draw_polygon(&mut batch, &pts, WHITE);
         assert_eq!(batch.vertices.len(), 4);
-        // fan: 2 triangles = 6 indices
         assert_eq!(batch.indices.len(), 6);
     }
 

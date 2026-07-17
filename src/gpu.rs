@@ -14,10 +14,12 @@ pub struct GpuContext {
     pub render_pipeline: wgpu::RenderPipeline,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
+    pub polygon_bind_group_layout: wgpu::BindGroupLayout,
     pub default_sampler: wgpu::Sampler,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub white_bind_group: Arc<wgpu::BindGroup>,
+    pub polygon_dummy_bind_group: wgpu::BindGroup,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
     pipelines: RefCell<HashMap<u32, wgpu::RenderPipeline>>,
@@ -100,6 +102,21 @@ impl GpuContext {
                 ],
             });
 
+        let polygon_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("polygon bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
         let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("default sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -159,6 +176,22 @@ impl GpuContext {
             ],
         }));
 
+        // Dummy polygon storage buffer（无多边形时仍满足 pipeline layout）
+        let polygon_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("polygon dummy buffer"),
+            size: 16, // 1 个 vec4
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let polygon_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("polygon dummy bind group"),
+            layout: &polygon_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: polygon_dummy_buf.as_entire_binding(),
+            }],
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -166,7 +199,7 @@ impl GpuContext {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vireo pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bind_group_layout), Some(&texture_bind_group_layout)],
+            bind_group_layouts: &[Some(&camera_bind_group_layout), Some(&texture_bind_group_layout), Some(&polygon_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -210,10 +243,12 @@ impl GpuContext {
             render_pipeline,
             camera_bind_group_layout,
             texture_bind_group_layout,
+            polygon_bind_group_layout,
             default_sampler,
             white_texture,
             white_texture_view,
             white_bind_group,
+            polygon_dummy_bind_group,
             surface_format,
             text_ctx,
             pipelines: RefCell::new(pipelines),

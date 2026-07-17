@@ -43,6 +43,7 @@ pub struct Renderer {
     sample_count: u32,
     alpha_to_coverage: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
 }
 
 impl Renderer {
@@ -88,6 +89,7 @@ impl Renderer {
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
             msaa_tex: RefCell::new(None),
+            polygon_edge_buf: RefCell::new(None),
         }
     }
 
@@ -197,9 +199,34 @@ impl Renderer {
         let mut vertex_count: u32 = 0;
         let mut ndx_accum: u32 = 0;
 
-        for batch in batches {
+        // 计算多边形边的全局偏移量（每条边 4 个 f32 = 1 个 vec4）
+        let mut polygon_edges_global: Vec<f32> = Vec::new();
+        let mut batch_poly_base: Vec<u32> = Vec::new();
+        {
+            let mut offset: u32 = 0;
+            for batch in batches {
+                batch_poly_base.push(offset);
+                let count = batch.polygon_edges.len() as u32 / 4;
+                offset += count;
+                polygon_edges_global.extend_from_slice(&batch.polygon_edges);
+            }
+        }
+
+        for (bi, batch) in batches.iter().enumerate() {
             let shape = if !batch.vertices.is_empty() {
-                let vdata: &[u8] = bytemuck::cast_slice(&batch.vertices);
+                let mut vdata_owned: Vec<Vertex>;
+                let vdata: &[u8] = if !batch.polygon_edges.is_empty() {
+                    vdata_owned = batch.vertices.clone();
+                    let base = batch_poly_base[bi] as f32;
+                    for v in &mut vdata_owned {
+                        if v.sdf_type == 6 {
+                            v.sdf_params[0] += base;
+                        }
+                    }
+                    bytemuck::cast_slice(&vdata_owned)
+                } else {
+                    bytemuck::cast_slice(&batch.vertices)
+                };
                 let idata: &[u8] = bytemuck::cast_slice(&batch.indices);
 
                 let total_vbytes = (vertex_count as usize * std::mem::size_of::<Vertex>()) as u64 + vdata.len() as u64;
@@ -242,6 +269,28 @@ impl Renderer {
 
             batch_infos.push(BatchInfo { shape, text: None });
         }
+
+        // ---- 上传多边形边数据到 storage buffer ----
+        let polygon_bind_group: Option<wgpu::BindGroup> = if !polygon_edges_global.is_empty() {
+            let size = (polygon_edges_global.len() * 4) as u64;
+            self.ensure_polygon_edge_buffer(size);
+            {
+                let buf = self.polygon_edge_buf.borrow();
+                let buf_ref = buf.as_ref().unwrap();
+                self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&polygon_edges_global));
+            }
+            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("polygon bind group"),
+                layout: &self.gpu.polygon_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.polygon_edge_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
+                }],
+            });
+            Some(bg)
+        } else {
+            None
+        };
 
         // ---- 准备所有文本 ----
         // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
@@ -286,6 +335,7 @@ impl Renderer {
                 if let Some(ref shape) = info.shape {
                     pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage));
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_bind_group(2, polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group), &[]);
                     pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
                     pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
                     for seg in &shape.segments {
@@ -357,6 +407,27 @@ impl Renderer {
             *self.index_cap.borrow_mut() = new_cap;
         }
     }
+
+    fn ensure_polygon_edge_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let needs_create = {
+            let buf = self.polygon_edge_buf.borrow();
+            buf.is_none() || buf.as_ref().unwrap().1 < size
+        };
+        if needs_create {
+            let new_cap = match &*self.polygon_edge_buf.borrow() {
+                None => size.next_power_of_two().max(64),
+                Some(_) => (self.polygon_edge_buf.borrow().as_ref().unwrap().1 * 2).max(size),
+            };
+            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("polygon edge buffer"),
+                size: new_cap,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            *self.polygon_edge_buf.borrow_mut() = Some((buf, new_cap));
+        }
+    }
 }
 
 use crate::text::TextEntryList;
@@ -399,6 +470,9 @@ pub struct DrawBatch {
     transform: Option<Transform>,
     /// SDF 柔边宽度（物理像素，0.0 = 关闭）。窗口 draw 时自动除以 dpi_scale。
     pub sdf_feather: f32,
+    /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
+    /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
+    pub polygon_edges: Vec<f32>,
 }
 
 impl DrawBatch {
@@ -411,6 +485,7 @@ impl DrawBatch {
             texture_segments: Vec::new(),
             transform: None,
             sdf_feather: 0.0,
+            polygon_edges: Vec::new(),
         }
     }
 
@@ -422,6 +497,7 @@ impl DrawBatch {
         self.texture_segments.clear();
         self.transform = None;
         self.sdf_feather = 0.0;
+        self.polygon_edges.clear();
     }
 
     /// 设置平移（屏幕坐标）。
@@ -522,6 +598,7 @@ impl DrawBatch {
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             sdf_feather: self.sdf_feather,
+            polygon_edges: self.polygon_edges.clone(),
         }
     }
 
