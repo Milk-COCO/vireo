@@ -19,6 +19,21 @@ pub struct TextContext {
     pub text_atlas: TextAtlas,
     pub text_renderer: TextRenderer,
     pub viewport: Viewport,
+    sample_count: u32,
+}
+
+impl TextContext {
+    /// 确保 TextRenderer 匹配给定 sample_count
+    pub fn ensure_sample_count(&mut self, device: &Device, count: u32) {
+        if self.sample_count != count {
+            self.text_renderer = TextRenderer::new(
+                &mut self.text_atlas, device,
+                MultisampleState { count, ..Default::default() },
+                None,
+            );
+            self.sample_count = count;
+        }
+    }
 }
 
 impl TextContext {
@@ -50,6 +65,7 @@ impl TextContext {
             text_atlas,
             text_renderer,
             viewport,
+            sample_count: 1,
         }
     }
 }

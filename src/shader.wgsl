@@ -10,7 +10,7 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) circle: vec4<f32>,
-    @location(3) local_pos: vec2<f32>,
+    @location(3) @interpolate(linear, sample) local_pos: vec2<f32>,
 };
 
 struct Camera {
@@ -39,9 +39,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // SDF shape: circle.z = rx, circle.w = ry（>0 触发）
     if in.circle.z > 0.0 {
         let d = length((in.local_pos - in.circle.xy) / vec2(in.circle.z, in.circle.w));
-        if d > 1.0 { discard; }
-        let alpha = 1.0 - smoothstep(0.98, 1.0, d);
-        out_color.a *= alpha;
+        let feather = in.uv.x; // logical px
+        if feather > 0.0 {
+            let r_max = max(in.circle.z, in.circle.w);
+            let k = feather / r_max;
+            out_color.a *= 1.0 - smoothstep(1.0 - k, 1.0, d);
+        } else {
+            // no feather: hard clip via alpha（兼容 MSAA 的 alpha-to-coverage）
+            if d > 1.0 { out_color.a = 0.0; }
+        }
     }
     return out_color;
 }

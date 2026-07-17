@@ -1,6 +1,7 @@
 //! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glyphon::ColorMode;
@@ -19,6 +20,9 @@ pub struct GpuContext {
     pub white_bind_group: Arc<wgpu::BindGroup>,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
+    pipelines: RefCell<HashMap<u32, wgpu::RenderPipeline>>,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
 }
 
 impl GpuContext {
@@ -197,6 +201,9 @@ impl GpuContext {
 
         let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode));
 
+        let mut pipelines = HashMap::new();
+        pipelines.insert(1, render_pipeline.clone());
+
         Self {
             device,
             queue,
@@ -209,7 +216,46 @@ impl GpuContext {
             white_bind_group,
             surface_format,
             text_ctx,
+            pipelines: RefCell::new(pipelines),
+            shader,
+            pipeline_layout,
         }
+    }
+
+    /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）
+    pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool) -> wgpu::RenderPipeline {
+        let key = sample_count | ((alpha_to_coverage as u32) << 16);
+        let mut pipes = self.pipelines.borrow_mut();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
+        }
+        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vireo pipeline"),
+            layout: Some(&self.pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &self.shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(Vertex::desc())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &self.shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState { count: sample_count, alpha_to_coverage_enabled: alpha_to_coverage, ..Default::default() },
+            multiview_mask: None,
+            cache: None,
+        });
+        pipes.insert(key, p.clone());
+        p
     }
 
     /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。

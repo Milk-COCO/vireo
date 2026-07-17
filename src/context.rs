@@ -39,6 +39,9 @@ pub struct Renderer {
     physical_width: u32,
     physical_height: u32,
     scale: f32,
+    sample_count: u32,
+    alpha_to_coverage: bool,
+    msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
 }
 
 impl Renderer {
@@ -49,6 +52,7 @@ impl Renderer {
         physical_width: u32,
         physical_height: u32,
         scale: f32,
+        aa: crate::window::AntiAliasing,
     ) -> Self {
         let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
@@ -75,7 +79,38 @@ impl Renderer {
             physical_width,
             physical_height,
             scale,
+            sample_count: aa.sample_count(),
+            alpha_to_coverage: aa.alpha_to_coverage(),
+            msaa_tex: RefCell::new(None),
         }
+    }
+
+    /// 更新抗锯齿设置。
+    pub fn update_aa(&mut self, aa: crate::window::AntiAliasing) {
+        self.sample_count = aa.sample_count();
+        self.alpha_to_coverage = aa.alpha_to_coverage();
+        *self.msaa_tex.borrow_mut() = None;
+    }
+
+    /// 获取匹配当前 sample_count 的 pipeline
+
+    /// 获取 multisampled 视图（必要时创建），无 MSAA 返回 None
+    fn msaa_view(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
+        if self.sample_count <= 1 { return None; }
+        let mut mt = self.msaa_tex.borrow_mut();
+        if mt.is_none() || mt.as_ref().unwrap().0.width() != self.physical_width {
+            let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa"),
+                size: wgpu::Extent3d { width: self.physical_width, height: self.physical_height, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2, format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            *mt = Some((tex, view));
+        }
+        Some(mt.as_ref().unwrap().1.clone())
     }
 
     /// 更新相机投影（窗口 resize 时调用）
@@ -98,6 +133,7 @@ impl Renderer {
         self.physical_width = physical_width;
         self.physical_height = physical_height;
         self.scale = scale;
+        *self.msaa_tex.borrow_mut() = None;
     }
 
     /// 渲染并提交
@@ -199,6 +235,8 @@ impl Renderer {
         }
 
         // ---- 准备所有文本 ----
+        // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
+        self.gpu.text_ctx.borrow_mut().ensure_sample_count(&self.gpu.device, self.sample_count);
         // Clear 颜色代表新帧开始，此时清空旧的 glyph 数据；Load 是增量叠加，保留。
         if clear_color.is_some() {
             let mut text_ctx = self.gpu.text_ctx.borrow_mut();
@@ -214,11 +252,16 @@ impl Renderer {
         // ---- 单 pass：按 batch 顺序穿插 shapes → texts ----
         let has_any_content = batch_infos.iter().any(|b| b.shape.is_some() || b.text.is_some());
         if has_any_content {
+            let msaa_view = self.msaa_view(self.gpu.surface_format); // offscreen uses same format via Texture::new
+            let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) = match &msaa_view {
+                Some(msaa) => (msaa, Some(target_view)),
+                None => (target_view, None),
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vireo render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
-                    resolve_target: None,
+                    view: color_view,
+                    resolve_target: resolve,
                     ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
@@ -232,7 +275,7 @@ impl Renderer {
             for info in &batch_infos {
                 // 先画本 batch 的形状（重新设置 pipeline——glyphon 的 render_range 会改状态）
                 if let Some(ref shape) = info.shape {
-                    pass.set_pipeline(&self.gpu.render_pipeline);
+                    pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage));
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
                     pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
@@ -345,6 +388,8 @@ pub struct DrawBatch {
     pub(crate) texture: Option<wgpu::BindGroup>,
     texture_segments: Vec<TextureSegment>,
     transform: Option<Transform>,
+    /// SDF 柔边宽度（物理像素，0.0 = 关闭）。
+    pub sdf_feather: f32,
 }
 
 impl DrawBatch {
@@ -356,6 +401,7 @@ impl DrawBatch {
             texture: None,
             texture_segments: Vec::new(),
             transform: None,
+            sdf_feather: 0.0,
         }
     }
 
@@ -366,6 +412,7 @@ impl DrawBatch {
         self.texture = None;
         self.texture_segments.clear();
         self.transform = None;
+        self.sdf_feather = 0.0;
     }
 
     /// 设置平移（屏幕坐标）。
@@ -455,6 +502,7 @@ impl DrawBatch {
             texture_segments: self.texture_segments.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
+            sdf_feather: self.sdf_feather,
         }
     }
 

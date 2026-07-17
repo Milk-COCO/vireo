@@ -70,10 +70,12 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
 /// 填充圆（shader SDF，完美边缘）。
 pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
     if r == 0.0 || color.a == 0.0 { return; }
+    let f = batch.sdf_feather;
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(cx + dx * r, cy + dy * r, 0.0, 0.0, color);
         v.circle = [cx, cy, r, r];
+        v.uv = [f, 0.0];
         batch.vertices.push(v);
     }
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -120,10 +122,12 @@ pub fn draw_ellipse(
     batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, color: Color,
 ) {
     if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
+    let f = batch.sdf_feather;
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(cx + dx * rx, cy + dy * ry, 0.0, 0.0, color);
         v.circle = [cx, cy, rx, ry];
+        v.uv = [f, 0.0];
         batch.vertices.push(v);
     }
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

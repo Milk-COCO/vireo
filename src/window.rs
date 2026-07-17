@@ -23,6 +23,23 @@ pub use winit::window::WindowLevel;
 use winit::window::Cursor;
 
 /// 窗口描述符（用于配置待创建窗口）
+/// 抗锯齿模式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntiAliasing {
+    None,
+    Msaa { samples: u32, alpha_to_coverage: bool },
+}
+
+impl AntiAliasing {
+    pub fn sample_count(&self) -> u32 {
+        match self { AntiAliasing::None => 1, AntiAliasing::Msaa { samples, .. } => *samples }
+    }
+
+    pub fn alpha_to_coverage(&self) -> bool {
+        match self { AntiAliasing::None => false, AntiAliasing::Msaa { alpha_to_coverage, .. } => *alpha_to_coverage }
+    }
+}
+
 pub struct WindowDesc {
     pub title: String,
     pub width: u32,
@@ -47,6 +64,7 @@ pub struct WindowDesc {
     pub enabled_buttons: winit::window::WindowButtons,
     pub blur: bool,
     pub present_mode: wgpu::PresentMode,
+    pub anti_aliasing: AntiAliasing,
 }
 
 impl WindowDesc {
@@ -75,6 +93,7 @@ impl WindowDesc {
             enabled_buttons: winit::window::WindowButtons::all(),
             blur: false,
             present_mode: wgpu::PresentMode::AutoVsync,
+            anti_aliasing: AntiAliasing::None,
         }
     }
 
@@ -190,6 +209,11 @@ impl WindowDesc {
 
     pub fn present_mode(mut self, mode: wgpu::PresentMode) -> Self {
         self.present_mode = mode;
+        self
+    }
+
+    pub fn anti_aliasing(mut self, aa: AntiAliasing) -> Self {
+        self.anti_aliasing = aa;
         self
     }
 }
@@ -488,9 +512,9 @@ impl App {
     }
 
     /// 创建离屏画布。与 window() 对称，可在 run() 之前调用。
-    pub fn offscreen(&mut self, width: u32, height: u32) -> OffscreenIndex {
+    pub fn offscreen(&mut self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
         let idx = self.offscreens.len();
-        let offscreen = OffscreenCanvas::new(&self.gpu, width, height);
+        let offscreen = OffscreenCanvas::with_aa(&self.gpu, width, height, aa);
         self.offscreens.push(offscreen);
         OffscreenIndex(idx)
     }
@@ -618,6 +642,7 @@ impl App {
                     self.app.windows.push(Self::build_window(
                         gpu, window, surface, surface_config, desc.width, desc.height,
                         desc.scale_factor_override.is_some(),
+                        desc.anti_aliasing,
                     ));
                     self.app.close_hooks.push(self.close_hooks[i].take());
                 }
@@ -831,14 +856,17 @@ impl App {
                 logical_width: u32,
                 logical_height: u32,
                 high_dpi: bool,
+                aa: AntiAliasing,
         ) -> VireoWindow {
+                let render_scale = if high_dpi { 1.0 } else { window.scale_factor() as f32 };
                 let renderer = crate::context::Renderer::new(
                     gpu.clone(),
                     logical_width,
                     logical_height,
                     window.inner_size().width,
                     window.inner_size().height,
-                    if high_dpi { 1.0 } else { window.scale_factor() as f32 },
+                    render_scale,
+                    aa,
                 );
 
                 VireoWindow {
@@ -991,6 +1019,11 @@ impl VireoWindow {
     /// 设置窗口装饰（标题栏边框）
     pub fn set_decorations(&self, decorations: bool) {
         self.inner.set_decorations(decorations);
+    }
+
+    /// 切换抗锯齿（运行时重建 msaa 纹理）。
+    pub fn set_anti_aliasing(&self, aa: AntiAliasing) {
+        self.renderer.borrow_mut().update_aa(aa);
     }
 
     /// 设置窗口图标

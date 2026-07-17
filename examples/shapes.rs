@@ -8,7 +8,10 @@ use std::f32::consts::PI;
 
 fn main() {
     let mut app = App::new();
-    let idx = app.window(WindowDesc::new("Vireo Shapes Demo", 1000, 450), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("Vireo Shapes Demo", 1000, 450).anti_aliasing(AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true }),
+        None::<fn()>,
+    );
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();

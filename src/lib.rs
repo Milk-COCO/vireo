@@ -64,6 +64,7 @@ pub mod prelude {
     pub use crate::input::TouchEvent;
     pub use crate::input::TouchPhase;
 
+    pub use crate::window::AntiAliasing;
     pub use crate::window::App;
     pub use crate::window::Fullscreen;
     pub use crate::window::Icon;
