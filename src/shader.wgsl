@@ -60,8 +60,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d = length(in.local_pos - (a + t * ab)) - in.uv.x;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
-        } else {
-            // triangle (ty==4.0)
+        } else if in.sdf_type == 4u {
+            // triangle
             let a = in.sdf_params.xy; let b = in.sdf_params.zw; let c = in.uv;
             let n_ab = normalize(vec2(-(b.y - a.y), b.x - a.x));
             let n_bc = normalize(vec2(-(c.y - b.y), c.x - b.x));
@@ -69,6 +69,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d_ab = dot(in.local_pos - a, n_ab); let d_bc = dot(in.local_pos - b, n_bc); let d_ca = dot(in.local_pos - c, n_ca);
             let inside = d_ab > -0.0001 && d_bc > -0.0001 && d_ca > -0.0001;
             let d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);
+            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
+            else { if d > 0.0 { out_color.a = 0.0; } }
+        } else {
+            // arc (ty==5): sdf_params=(cx,cy,r,0), uv=(start_angle, end_angle)
+            let center = in.sdf_params.xy; let r = in.sdf_params.z;
+            let to_p = in.local_pos - center;
+            let d_circle = length(to_p) - r;
+            let sa = in.uv.x; let ea = in.uv.y;
+            // radial edge normals (pointing inward)
+            let n_start = vec2(sin(sa), -cos(sa));
+            let n_end = vec2(-sin(ea), cos(ea));
+            let d_start = dot(to_p, n_start);
+            let d_end = dot(to_p, n_end);
+            let d = max(d_circle, max(d_start, d_end));
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         }

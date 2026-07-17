@@ -174,39 +174,22 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
     }
 }
 
-/// 绘制弧线（实心扇形）
+/// 绘制弧线/扇形（shader SDF）。
 pub fn draw_arc(
-    batch: &mut DrawBatch,
-    cx: f32,
-    cy: f32,
-    r: f32,
-    start_angle: f32,
-    end_angle: f32,
-    color: Color,
-    segments: u32,
+    batch: &mut DrawBatch, cx: f32, cy: f32, r: f32,
+    start_angle: f32, end_angle: f32, color: Color,
 ) {
-    if r == 0.0 || color.a == 0.0 {
-        return;
-    }
-
-    let segments = segments.max(2);
+    if r == 0.0 || color.a == 0.0 { return; }
+    let f = batch.sdf_feather;
+    let ext = r + f;
     let base = batch.vertices.len() as u32;
-
-    batch.push_vertex(cx, cy, color);
-
-    for i in 0..=segments {
-        let t = i as f32 / segments as f32;
-        let angle = start_angle + t * (end_angle - start_angle);
-        let vx = cx + r * angle.cos();
-        let vy = cy + r * angle.sin();
-        batch.push_vertex(vx, vy, color);
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(cx + dx * ext, cy + dy * ext, start_angle, end_angle, color);
+        v.sdf_params = [cx, cy, r, 0.0];
+        v.sdf_type = 5; v.sdf_feather = f;
+        batch.vertices.push(v);
     }
-
-    for i in 0..segments {
-        batch.indices.push(base);
-        batch.indices.push(base + 1 + i);
-        batch.indices.push(base + 1 + i + 1);
-    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 描边矩形
@@ -590,16 +573,15 @@ mod tests {
     #[test]
     fn arc_produces_faces() {
         let mut batch = test_batch();
-        draw_arc(&mut batch, 0.0, 0.0, 50.0, 0.0, std::f32::consts::PI, RED, 8);
-        // 1 center + 9 perimeter = 10 vertices, 8 * 3 = 24 indices
-        assert_eq!(batch.vertices.len(), 10);
-        assert_eq!(batch.indices.len(), 24);
+        draw_arc(&mut batch, 0.0, 0.0, 50.0, 0.0, std::f32::consts::PI, RED);
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
     fn arc_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_arc(&mut batch, 0.0, 0.0, 0.0, 0.0, 1.0, RED, 8);
+        draw_arc(&mut batch, 0.0, 0.0, 0.0, 0.0, 1.0, RED);
         assert!(batch.vertices.is_empty());
     }
 

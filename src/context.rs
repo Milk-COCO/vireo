@@ -481,6 +481,16 @@ impl DrawBatch {
         self.vertices.push(Vertex::new(tx, ty, color));
     }
 
+    /// 添加 SDF 顶点（自动应用当前 transform）。
+    pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
+        let (vx, vy) = self.transform_vertex(x, y);
+        let mut v = Vertex::new_uv(vx, vy, u, v, color);
+        v.sdf_params = params;
+        v.sdf_type = ty;
+        v.sdf_feather = feather;
+        self.vertices.push(v);
+    }
+
     /// 添加带 UV 的顶点（自动应用当前 transform）。
     pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
         let (tx, ty) = self.transform_vertex(x, y);
@@ -541,7 +551,7 @@ impl DrawBatch {
     pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: crate::color::Color) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c); }
     pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: crate::color::Color) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: crate::color::Color) { crate::shapes::draw_polygon(self, pts, c); }
-    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c, seg); }
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: crate::color::Color) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c); }
     pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_rect_outline(self, x, y, w, h, t, c); }
     pub fn circle_outline(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_circle_outline(self, cx, cy, r, t, c, seg); }
     pub fn ellipse_outline(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_ellipse_outline(self, cx, cy, rx, ry, t, c, seg); }

@@ -307,9 +307,17 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// SDF 形状参数，含义由 `sdf_type` 决定：
+    /// 1 circle/ellipse: (cx,cy,rx,ry)
+    /// 2 rect/rounded_rect: (cx,cy,hw,hh); uv.x=corner_radius
+    /// 3 line: (x1,y1,x2,y2); uv.x=half_thickness
+    /// 4 triangle: (x1,y1,x2,y2); uv=(x3,y3)
+    /// 5 arc: (cx,cy,r,0); uv=(start_angle, end_angle)
     pub sdf_params: [f32; 4],
-    pub sdf_type: u32,    // 0=none, 1=circle, 2=rect, 3=line, 4=triangle
-    pub sdf_feather: f32, // logical px
+    /// 0=none, 1=circle, 2=rect, 3=line, 4=triangle, 5=arc
+    pub sdf_type: u32,
+    /// SDF 柔边宽度（逻辑像素）
+    pub sdf_feather: f32,
 }
 
 impl Vertex {
