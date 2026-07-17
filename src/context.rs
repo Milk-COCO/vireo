@@ -132,11 +132,15 @@ impl Renderer {
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
         // 每个 batch 的数据连续排列，记录每个 batch 的 offset
-        struct ShapeInfo {
-            base_vertex: i32,
+        struct ShapeSegment {
             ndx_start: u32,
             ndx_count: u32,
-            texture: Option<wgpu::BindGroup>,
+            bind_group: wgpu::BindGroup,
+        }
+
+        struct ShapeInfo {
+            base_vertex: i32,
+            segments: Vec<ShapeSegment>,
         }
 
         struct BatchInfo {
@@ -167,11 +171,22 @@ impl Renderer {
                     self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), ndx_accum as u64 * 4, idata);
                 }
 
+                // 构建 texture segments（相对于 batch 的偏移量转为全局偏移量）
+                let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
+                    // 没有 segment：整批用 batch.texture（或 white）
+                    let bg = batch.texture.clone().unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone());
+                    vec![ShapeSegment { ndx_start: ndx_accum, ndx_count: batch.indices.len() as u32, bind_group: bg }]
+                } else {
+                    batch.texture_segments.iter().map(|s| ShapeSegment {
+                        ndx_start: ndx_accum + s.ndx_start,
+                        ndx_count: s.ndx_count,
+                        bind_group: s.bind_group.clone(),
+                    }).collect()
+                };
+
                 let info = ShapeInfo {
                     base_vertex: vertex_count as i32,
-                    ndx_start: ndx_accum,
-                    ndx_count: batch.indices.len() as u32,
-                    texture: batch.texture.clone(),
+                    segments: segs,
                 };
                 vertex_count += batch.vertices.len() as u32;
                 ndx_accum += batch.indices.len() as u32;
@@ -221,16 +236,14 @@ impl Renderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
                     pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
-                    if let Some(ref tex_bg) = shape.texture {
-                        pass.set_bind_group(1, tex_bg, &[]);
-                    } else {
-                        pass.set_bind_group(1, self.gpu.white_bind_group.as_ref(), &[]);
+                    for seg in &shape.segments {
+                        pass.set_bind_group(1, &seg.bind_group, &[]);
+                        pass.draw_indexed(
+                            seg.ndx_start..seg.ndx_start + seg.ndx_count,
+                            shape.base_vertex,
+                            0..1,
+                        );
                     }
-                    pass.draw_indexed(
-                        shape.ndx_start..shape.ndx_start + shape.ndx_count,
-                        shape.base_vertex,
-                        0..1,
-                    );
                 }
 
                 // 再画本 batch 的文本（glyphon 有自己的 pipeline/bind groups）
@@ -318,11 +331,19 @@ impl Default for Transform {
 ///
 /// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
 /// 多个 batch 按提交顺序叠加，后面的覆盖前面的。
+#[derive(Clone)]
+struct TextureSegment {
+    ndx_start: u32,
+    ndx_count: u32,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
-    pub texture: Option<wgpu::BindGroup>,
+    pub(crate) texture: Option<wgpu::BindGroup>,
+    texture_segments: Vec<TextureSegment>,
     transform: Option<Transform>,
 }
 
@@ -333,6 +354,7 @@ impl DrawBatch {
             indices: Vec::new(),
             texts: TextEntryList::new(),
             texture: None,
+            texture_segments: Vec::new(),
             transform: None,
         }
     }
@@ -342,6 +364,7 @@ impl DrawBatch {
         self.indices.clear();
         self.texts.clear();
         self.texture = None;
+        self.texture_segments.clear();
         self.transform = None;
     }
 
@@ -429,13 +452,26 @@ impl DrawBatch {
             vertices: self.vertices.clone(),
             indices: self.indices.clone(),
             texture: self.texture.clone(),
+            texture_segments: self.texture_segments.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
         }
     }
 
-    /// 绑定纹理到此 batch。后续 `draw_quad_uv` 使用此纹理进行采样。
+    /// 直接设置 bind group（高级用法，如离屏画布贴回窗口）。
+    pub fn set_bind_group(&mut self, bg: wgpu::BindGroup) { self.texture = Some(bg); }
+
+    /// 绑定纹理到整个 batch（draw_texture 内部也使用此方法记录当前纹理）。
     pub fn set_texture(&mut self, texture: &crate::texture::Texture) {
         self.texture = Some(texture.bind_group.clone());
+    }
+
+    /// 记录纹理段（由 draw_texture 调用）：自上次段以来的所有新顶点归入此 bind group。
+    pub(crate) fn add_texture_segment(&mut self, bg: wgpu::BindGroup) {
+        let start = self.texture_segments.last().map_or(0, |s| s.ndx_start + s.ndx_count);
+        let end = self.indices.len() as u32;
+        if end > start {
+            self.texture_segments.push(TextureSegment { ndx_start: start, ndx_count: end - start, bind_group: bg });
+        }
     }
 }

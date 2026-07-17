@@ -23,7 +23,7 @@ fn main() {
     let mut app = App::new();
     let logo_idx = app.load_texture("logo.png").ok();
     let idx = app.window(
-        WindowDesc::new("ciallo, Vireo!", 640, 420).icon_from_path("logo.png"),
+        WindowDesc::new("Ciallo, Vireo!", 640, 420).icon_from_path("logo.png"),
         None::<fn()>,
     );
 
@@ -49,8 +49,8 @@ fn main() {
         let mut logo_batch = DrawBatch::new();
         if let Some(logo) = logo_idx.and_then(|i| app.texture(i)) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
-            logo_batch.set_texture(logo);
-            draw_quad_uv(&mut logo_batch, cx - s / 2.0, cy - s / 2.0, s, s, 0.0, 0.0, 1.0, 1.0, WHITE);
+            draw_texture(&mut logo_batch, &logo,
+                TextureOptions::default().rect(cx - s / 2.0, cy - s / 2.0, s, s));
         }
 
         // 文字

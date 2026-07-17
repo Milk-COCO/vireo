@@ -32,7 +32,6 @@ pub mod prelude {
     pub use crate::context::DrawBatch;
     pub use crate::context::RenderTarget;
     pub use crate::context::Renderer;
-    pub use crate::texture::RenderTexture;
     pub use crate::texture::Texture;
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::Vertex;
@@ -48,6 +47,9 @@ pub mod prelude {
     pub use crate::text::TextEntryList;
     pub use crate::text::TextOptions;
     pub use crate::text::draw_text;
+    pub use crate::shapes::TextureOptions;
+    pub use crate::shapes::TextureSource;
+    pub use crate::shapes::draw_texture;
 
     // 输入系统
     pub use crate::input::ElementState;

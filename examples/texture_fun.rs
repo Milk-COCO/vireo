@@ -4,7 +4,8 @@ use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let logo_idx = app.load_texture("logo_bg.png").expect("load logo");
+    let logo_idx = app.load_texture("logo.png").expect("load logo");
+    let logo_bg_idx = app.load_texture("logo_bg.png").expect("load logo_bg");
     let idx = app.window(
         WindowDesc::new("可是我觉得这很神圣啊", 600, 400),
         None::<fn()>,
@@ -14,6 +15,7 @@ fn main() {
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
         let logo = app.texture(logo_idx).unwrap();
+        let logo_bg = app.texture(logo_bg_idx).unwrap();
         angle += 0.012;
 
         let cx = 300.0;
@@ -29,9 +31,9 @@ fn main() {
                 Color::new(1.0, 0.9, 0.5, 0.08 - a * 0.01), 48);
         }
 
-        // Batch 2: 四张缩略图围绕中心旋转 + 一起上下浮动
+        // Batch 2: 四张部分围绕中心旋转 + 一起上下浮动
         let mut batch = DrawBatch::new();
-        batch.set_texture(logo);
+        // texture set via draw_texture
 
         for i in 0..4 {
             let a = angle + i as f32 * std::f32::consts::FRAC_PI_2;
@@ -45,11 +47,13 @@ fn main() {
                 2 => (0.0, 0.5),
                 _ => (0.5, 0.5),
             };
-            draw_quad_uv(&mut batch, x, y, 80.0, 80.0, u0, v0, u0 + 0.5, v0 + 0.5, WHITE);
+            draw_texture(&mut batch, &logo_bg,
+                TextureOptions::default().rect(x, y, 80.0, 80.0).uv(u0, v0, u0 + 0.5, v0 + 0.5));
         }
 
         // 中间原图
-        draw_quad_uv(&mut batch, cx - 50.0, cy + float - 50.0, 100.0, 100.0, 0.0, 0.0, 1.0, 1.0, WHITE);
+        draw_texture(&mut batch, &logo,
+            TextureOptions::default().rect(cx - 50.0, cy + float - 50.0, 100.0, 100.0));
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&glow, &batch]);
 

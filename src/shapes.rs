@@ -3,32 +3,67 @@
 use std::f32::consts::{PI, FRAC_PI_2};
 
 use crate::color::Color;
+use crate::color::colors::WHITE;
 use crate::context::DrawBatch;
 
-/// 带自定义 UV 的四边形（用于纹理子区域）。
-pub fn draw_quad_uv(
-    batch: &mut DrawBatch,
-    x: f32, y: f32, w: f32, h: f32,
-    u0: f32, v0: f32, u1: f32, v1: f32,
-    color: Color,
-) {
+/// 纹理绘制选项，链式 setter。
+pub struct TextureOptions {
+    pub x: f32, pub y: f32, pub w: f32, pub h: f32,
+    pub u0: f32, pub v0: f32, pub u1: f32, pub v1: f32,
+    pub color: Color,
+}
+
+impl Default for TextureOptions {
+    fn default() -> Self {
+        Self { x:0.0, y:0.0, w:0.0, h:0.0, u0:0.0, v0:0.0, u1:1.0, v1:1.0, color: WHITE }
+    }
+}
+
+impl TextureOptions {
+    pub fn rect(mut self, x: f32, y: f32, w: f32, h: f32) -> Self { self.x=x; self.y=y; self.w=w; self.h=h; self }
+    pub fn uv(mut self, u0: f32, v0: f32, u1: f32, v1: f32) -> Self { self.u0=u0; self.v0=v0; self.u1=u1; self.v1=v1; self }
+    pub fn color(mut self, c: Color) -> Self { self.color = c; self }
+}
+
+/// 可被 draw_texture 使用的纹理源。
+pub trait TextureSource {
+    fn bind_group(&self) -> &wgpu::BindGroup;
+}
+
+impl TextureSource for crate::texture::Texture {
+    fn bind_group(&self) -> &wgpu::BindGroup { &self.bind_group }
+}
+
+impl TextureSource for &crate::texture::Texture {
+    fn bind_group(&self) -> &wgpu::BindGroup { &self.bind_group }
+}
+
+/// 在矩形上绘制纹理。支持同一 batch 内多次调用用不同纹理。
+///
+/// 对于离屏画布，你可以直接拿他的 pub `texture` 参数。
+pub fn draw_texture(batch: &mut DrawBatch, tex: &impl TextureSource, opts: TextureOptions) {
+    let base = batch.vertices.len() as u32;
+    let x2 = opts.x + opts.w;
+    let y2 = opts.y + opts.h;
+    batch.push_vertex_uv(opts.x, opts.y, opts.u0, opts.v0, opts.color);
+    batch.push_vertex_uv(x2,     opts.y, opts.u1, opts.v0, opts.color);
+    batch.push_vertex_uv(x2,     y2,     opts.u1, opts.v1, opts.color);
+    batch.push_vertex_uv(opts.x, y2,     opts.u0, opts.v1, opts.color);
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    batch.add_texture_segment(tex.bind_group().clone());
+}
+
+/// 填充矩形。
+pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
+    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
     let base = batch.vertices.len() as u32;
     let x2 = x + w;
     let y2 = y + h;
-    batch.push_vertex_uv(x,  y,  u0, v0, color);
-    batch.push_vertex_uv(x2, y,  u1, v0, color);
-    batch.push_vertex_uv(x2, y2, u1, v1, color);
-    batch.push_vertex_uv(x,  y2, u0, v1, color);
+    batch.push_vertex(x,  y,  color);
+    batch.push_vertex(x2, y,  color);
+    batch.push_vertex(x2, y2, color);
+    batch.push_vertex(x,  y2, color);
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-/// 绘制矩形
-/// 填充矩形。
-pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 {
-        return;
-    }
-    draw_quad_uv(batch, x, y, w, h, 0.0, 0.0, 1.0, 1.0, color);
 }
 
 /// 绘制圆形（用三角形逼近）

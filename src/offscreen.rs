@@ -4,17 +4,18 @@ use std::sync::Arc;
 
 use crate::context::{DrawBatch, Renderer};
 use crate::gpu::GpuContext;
-use crate::texture::RenderTexture;
+use crate::texture::Texture;
 
 /// 离屏画布 — 与 VireoWindow 对等，但不依赖 winit
 pub struct OffscreenCanvas {
-    pub texture: RenderTexture,
+    pub texture: Texture,
     renderer: Renderer,
 }
 
 impl OffscreenCanvas {
     pub fn new(gpu: &Arc<GpuContext>, width: u32, height: u32) -> Self {
-        let texture = RenderTexture::new(&gpu.device, width, height, gpu.surface_format);
+        let texture = Texture::new(&gpu.device, width, height, gpu.surface_format,
+            &gpu.texture_bind_group_layout, &gpu.default_sampler);
         let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0);
         Self { texture, renderer }
     }
@@ -30,21 +31,9 @@ impl OffscreenCanvas {
         &self.texture.view
     }
 
-    /// 获取纹理的 bind group
-    pub fn bind_group(&self, gpu: &GpuContext) -> wgpu::BindGroup {
-        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("offscreen bind group"),
-            layout: &gpu.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.default_sampler),
-                },
-            ],
-        })
+    /// 获取纹理 bind group（用于贴回窗口）。
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.texture.bind_group
     }
+
 }
