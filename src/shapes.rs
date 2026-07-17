@@ -5,13 +5,30 @@ use std::f32::consts::{PI, FRAC_PI_2};
 use crate::color::Color;
 use crate::context::DrawBatch;
 
+/// 带自定义 UV 的四边形（用于纹理子区域）。
+pub fn draw_quad_uv(
+    batch: &mut DrawBatch,
+    x: f32, y: f32, w: f32, h: f32,
+    u0: f32, v0: f32, u1: f32, v1: f32,
+    color: Color,
+) {
+    let base = batch.vertices.len() as u32;
+    let x2 = x + w;
+    let y2 = y + h;
+    batch.push_vertex_uv(x,  y,  u0, v0, color);
+    batch.push_vertex_uv(x2, y,  u1, v0, color);
+    batch.push_vertex_uv(x2, y2, u1, v1, color);
+    batch.push_vertex_uv(x,  y2, u0, v1, color);
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 /// 绘制矩形
 /// 填充矩形。
 pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
     if w == 0.0 || h == 0.0 || color.a == 0.0 {
         return;
     }
-    batch.add_quad(x, y, w, h, color);
+    draw_quad_uv(batch, x, y, w, h, 0.0, 0.0, 1.0, 1.0, color);
 }
 
 /// 绘制圆形（用三角形逼近）

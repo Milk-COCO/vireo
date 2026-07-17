@@ -434,44 +434,8 @@ impl DrawBatch {
         }
     }
 
-    /// 设置此帧批处理的纹理
+    /// 绑定纹理到此 batch。后续 `draw_quad_uv` 使用此纹理进行采样。
     pub fn set_texture(&mut self, texture: &crate::texture::Texture) {
         self.texture = Some(texture.bind_group.clone());
-    }
-
-    /// 添加一个填满 UV (0,0)→(1,1) 的四边形（用于纯色形状）。
-    pub fn add_quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: crate::color::Color) {
-        self.add_quad_uv(x, y, w, h, 0.0, 0.0, 1.0, 1.0, color);
-    }
-
-    /// 添加带自定义 UV 坐标的四边形（用于纹理子区域）。受当前 transform 影响。
-    pub fn add_quad_uv(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        u0: f32,
-        v0: f32,
-        u1: f32,
-        v1: f32,
-        color: crate::color::Color,
-    ) {
-        let base = self.vertices.len() as u32;
-        let x2 = x + w;
-        let y2 = y + h;
-
-        let (tx, ty) = self.transform_vertex(x, y);
-        let (tx2, ty2) = self.transform_vertex(x2, y);
-        let (tx3, ty3) = self.transform_vertex(x2, y2);
-        let (tx4, ty4) = self.transform_vertex(x, y2);
-
-        self.vertices.push(Vertex::new_uv(tx, ty, u0, v0, color));
-        self.vertices.push(Vertex::new_uv(tx2, ty2, u1, v0, color));
-        self.vertices.push(Vertex::new_uv(tx3, ty3, u1, v1, color));
-        self.vertices.push(Vertex::new_uv(tx4, ty4, u0, v1, color));
-
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }

@@ -50,7 +50,7 @@ fn main() {
         if let Some(logo) = logo_idx.and_then(|i| app.texture(i)) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
             logo_batch.set_texture(logo);
-            logo_batch.add_quad_uv(cx - s / 2.0, cy - s / 2.0, s, s, 0.0, 0.0, 1.0, 1.0, WHITE);
+            draw_quad_uv(&mut logo_batch, cx - s / 2.0, cy - s / 2.0, s, s, 0.0, 0.0, 1.0, 1.0, WHITE);
         }
 
         // 文字

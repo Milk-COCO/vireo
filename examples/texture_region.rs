@@ -17,18 +17,18 @@ fn main() {
         batch.set_texture(tex);
 
         // 画整张纹理（缩小 20%）
-        batch.add_quad_uv(20.0, 20.0, tex.width as f32 * 0.5, tex.height as f32 * 0.5,
+        draw_quad_uv(&mut batch, 20.0, 20.0, tex.width as f32 * 0.5, tex.height as f32 * 0.5,
             0.0, 0.0, 1.0, 1.0, WHITE);
 
         // 左上角 1/2 区域
         let w2 = tex.width / 2;
         let h2 = tex.height / 2;
         let (u0, v0, u1, v1) = tex.uv(0, 0, w2, h2);
-        batch.add_quad_uv(320.0, 20.0, w2 as f32, h2 as f32, u0, v0, u1, v1, WHITE);
+        draw_quad_uv(&mut batch, 320.0, 20.0, w2 as f32, h2 as f32, u0, v0, u1, v1, WHITE);
 
         // 右下角 1/2 区域
         let (u0, v0, u1, v1) = tex.uv(w2, h2, w2, h2);
-        batch.add_quad_uv(320.0, 220.0, w2 as f32, h2 as f32, u0, v0, u1, v1, WHITE);
+        draw_quad_uv(&mut batch, 320.0, 220.0, w2 as f32, h2 as f32, u0, v0, u1, v1, WHITE);
 
         // 标签
         draw_text(&mut batch.texts, "Full texture (50%)",

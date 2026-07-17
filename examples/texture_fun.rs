@@ -45,11 +45,11 @@ fn main() {
                 2 => (0.0, 0.5),
                 _ => (0.5, 0.5),
             };
-            batch.add_quad_uv(x, y, 80.0, 80.0, u0, v0, u0 + 0.5, v0 + 0.5, WHITE);
+            draw_quad_uv(&mut batch, x, y, 80.0, 80.0, u0, v0, u0 + 0.5, v0 + 0.5, WHITE);
         }
 
         // 中间原图
-        batch.add_quad_uv(cx - 50.0, cy + float - 50.0, 100.0, 100.0, 0.0, 0.0, 1.0, 1.0, WHITE);
+        draw_quad_uv(&mut batch, cx - 50.0, cy + float - 50.0, 100.0, 100.0, 0.0, 0.0, 1.0, 1.0, WHITE);
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&glow, &batch]);
 
