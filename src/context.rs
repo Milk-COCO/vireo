@@ -1,3 +1,5 @@
+//! 渲染核心：批量绘制、渲染目标和渲染器。
+
 use std::cell::RefCell;
 
 use wgpu::util::DeviceExt;
@@ -5,7 +7,9 @@ use wgpu::util::DeviceExt;
 pub use crate::gpu::Vertex;
 use crate::gpu::GpuContext;
 
-/// 渲染目标，持有用于 render pass 的 TextureView
+/// 渲染目标，封装用于 render pass 的 `TextureView`。
+///
+/// 窗口和离屏纹理都通过此类型提交绘制。
 pub struct RenderTarget {
     pub view: wgpu::TextureView,
 }
@@ -22,7 +26,9 @@ impl RenderTarget {
     }
 }
 
-/// 渲染器 —— 管理 vertex/index buffer 复用，提供统一的 render pass 执行
+/// 渲染器 —— 管理 vertex/index buffer 复用，执行单 pass 渲染。
+///
+/// 内部维护 GPU buffer，支持在多 batch 间以偏移量追加写入。
 pub struct Renderer {
     gpu: std::sync::Arc<GpuContext>,
     camera_bind_group: wgpu::BindGroup,
@@ -290,6 +296,10 @@ impl Renderer {
 
 use crate::text::TextEntryList;
 
+/// 批量绘制单元 —— 容纳一组形状顶点、文本条目和可选纹理。
+///
+/// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
+/// 多个 batch 按提交顺序叠加，后面的覆盖前面的。
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -329,10 +339,12 @@ impl DrawBatch {
         self.texture = Some(texture.bind_group.clone());
     }
 
+    /// 添加一个填满 UV (0,0)→(1,1) 的四边形（用于纯色形状）。
     pub fn add_quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: crate::color::Color) {
         self.add_quad_uv(x, y, w, h, 0.0, 0.0, 1.0, 1.0, color);
     }
 
+    /// 添加带自定义 UV 坐标的四边形（用于纹理子区域）。
     pub fn add_quad_uv(
         &mut self,
         x: f32,

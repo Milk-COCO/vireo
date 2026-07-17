@@ -1,9 +1,9 @@
 [Tap to English README](README.md)
 # Vireo
 
-Vireo只是一种可爱的小鸟！
+Vireo 只是一种可爱的小鸟！
 
-或者说 —— Vault's Interface and Rendering Engine for Optics !
+或者说 —— **V**ault's **I**nterface and **R**endering **E**ngine for **O**ptics。
 
 当然，它也是基于 `wgpu` + `winit 的 2D GPU 渲染库！
 

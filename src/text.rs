@@ -1,3 +1,5 @@
+//! 文本渲染：glyphon + cosmic-text，使用系统字体。
+
 use glyphon::{
     Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -168,7 +170,10 @@ pub struct TextEntry {
     pub options: TextOptions,
 }
 
-/// 文本条目列表
+/// 文本条目列表，存储一组待渲染的文本。
+///
+/// 通过 `draw_text(&mut list, "text", options)` 添加条目，
+/// 或直接调用 `push("text", options)`。
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
 }

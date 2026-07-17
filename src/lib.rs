@@ -1,3 +1,19 @@
+//! # Vireo — 2D 渲染库
+//!
+//! ```rust
+//! use vireo::prelude::*;
+//! let mut app = App::new();
+//! let win = app.window(WindowDesc::new("Hello", 400, 300), None::<fn()>);
+//! app.run(move |app| {
+//!     let mut batch = DrawBatch::new();
+//!     draw_rectangle(&mut batch, 10.0, 10.0, 100.0, 80.0, RED);
+//!     draw_text(&mut batch.texts, "Hello!", TextOptions::default()
+//!         .x(20.0).y(20.0).font_size(16.0).color(WHITE));
+//!     app.window_ref(&win).unwrap().draw(Some(BLACK), &[&batch]);
+//!     true
+//! });
+//! ```
+
 pub mod color;
 pub mod context;
 pub mod gpu;
@@ -8,6 +24,7 @@ pub mod text;
 pub mod texture;
 pub mod window;
 
+/// 一次导入所有常用类型。
 pub mod prelude {
     pub use crate::color::colors::*;
     pub use crate::color::Color;

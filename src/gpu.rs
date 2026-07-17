@@ -1,3 +1,5 @@
+//! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
+
 use std::cell::RefCell;
 use std::sync::Arc;
 

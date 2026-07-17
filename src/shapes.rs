@@ -1,3 +1,5 @@
+//! 形状绘制：填充和描边函数。所有函数追加顶点到给定的 `DrawBatch`。
+
 use std::f32::consts::{PI, FRAC_PI_2};
 
 use crate::color::Color;
@@ -5,6 +7,7 @@ use crate::context::DrawBatch;
 use crate::gpu::Vertex;
 
 /// 绘制矩形
+/// 填充矩形。
 pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
     if w == 0.0 || h == 0.0 || color.a == 0.0 {
         return;
@@ -13,6 +16,7 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
 }
 
 /// 绘制圆形（用三角形逼近）
+/// 填充圆。`segments` 越大越圆滑。
 pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color, segments: u32) {
     if r == 0.0 || color.a == 0.0 {
         return;

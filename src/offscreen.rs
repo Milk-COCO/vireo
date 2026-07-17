@@ -1,3 +1,5 @@
+//! 离屏画布 —— 不依赖 winit，可独立渲染。结果可贴回窗口。
+
 use std::sync::Arc;
 
 use crate::context::{DrawBatch, Renderer};

@@ -1,6 +1,10 @@
+//! 纹理和离屏渲染目标。
+
 use crate::gpu::GpuContext;
 
-/// 离屏渲染纹理
+/// 离屏渲染纹理——可作为 render pass 目标，也可贴回窗口。
+///
+/// 使用 `RenderTexture::new()` 创建，`target()` 获取 `RenderTarget`。
 pub struct RenderTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -27,7 +31,9 @@ impl RenderTexture {
     }
 }
 
-/// 从文件/字节加载的纹理（PNG/JPG/BMP 等）
+/// 从文件/字节/RGBA 加载的纹理（PNG/JPG/BMP）。
+///
+/// 创建后通过 `set_texture()` 绑定到 `DrawBatch`，调用 `uv()` 获取子区域坐标。
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
