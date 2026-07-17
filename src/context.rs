@@ -474,4 +474,24 @@ impl DrawBatch {
             self.texture_segments.push(TextureSegment { ndx_start: start, ndx_count: end - start, bind_group: bg });
         }
     }
+
+    // ---- 形状委托（去 draw_ 前缀） ----
+
+    pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: crate::color::Color) { crate::shapes::draw_rectangle(self, x, y, w, h, c); }
+    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_circle(self, cx, cy, r, c, seg); }
+    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
+    pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_ellipse(self, cx, cy, rx, ry, c, seg); }
+    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: crate::color::Color, cs: u32) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c, cs); }
+    pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: crate::color::Color) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: crate::color::Color) { crate::shapes::draw_polygon(self, pts, c); }
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c, seg); }
+    pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_rect_outline(self, x, y, w, h, t, c); }
+    pub fn circle_outline(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_circle_outline(self, cx, cy, r, t, c, seg); }
+    pub fn ellipse_outline(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_ellipse_outline(self, cx, cy, rx, ry, t, c, seg); }
+    pub fn rounded_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, c: crate::color::Color, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, x, y, w, h, r, t, c, cs); }
+    pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_line_chain(self, pts, t, c); }
+    pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
+    pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
+    pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
+    pub fn texture(&mut self, tex: &impl crate::shapes::TextureSource, opts: crate::shapes::TextureOptions) { crate::shapes::draw_texture(self, tex, opts); }
 }
