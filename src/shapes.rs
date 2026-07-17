@@ -378,7 +378,7 @@ pub fn draw_rounded_rect_outline(
     let cs = corner_segments.max(2);
     let inner_r = (r - thickness).max(0.0);
 
-    // Outer perimeter (counter-clockwise, from 12 o'clock)
+    // Outer perimeter (clockwise, from 12 o'clock)
     let mut outer: Vec<(f32, f32)> = Vec::new();
     // Top-left corner
     let (cx, cy) = (x + r, y + r);
@@ -405,30 +405,30 @@ pub fn draw_rounded_rect_outline(
         outer.push((cx + r * angle.cos(), cy + r * angle.sin()));
     }
 
-    // Inner perimeter (clockwise, same order as outer)
+    // Inner perimeter (clockwise, same order and direction as outer)
     let mut inner: Vec<(f32, f32)> = Vec::new();
-    // Bottom-left corner
-    let (cx, cy) = (x + r, y + h - r);
-    for i in 0..=cs {
-        let angle = FRAC_PI_2 + ((cs - i) as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Bottom-right corner
-    let (cx, cy) = (x + w - r, y + h - r);
-    for i in 0..=cs {
-        let angle = 0.0 + ((cs - i) as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Top-right corner
-    let (cx, cy) = (x + w - r, y + r);
-    for i in 0..=cs {
-        let angle = PI * 1.5 + ((cs - i) as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Top-left corner
+    // Top-left
     let (cx, cy) = (x + r, y + r);
     for i in 0..=cs {
-        let angle = PI + ((cs - i) as f32 / cs as f32) * FRAC_PI_2;
+        let angle = PI + (i as f32 / cs as f32) * FRAC_PI_2;
+        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
+    }
+    // Top-right
+    let (cx, cy) = (x + w - r, y + r);
+    for i in 0..=cs {
+        let angle = PI * 1.5 + (i as f32 / cs as f32) * FRAC_PI_2;
+        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
+    }
+    // Bottom-right
+    let (cx, cy) = (x + w - r, y + h - r);
+    for i in 0..=cs {
+        let angle = 0.0 + (i as f32 / cs as f32) * FRAC_PI_2;
+        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
+    }
+    // Bottom-left
+    let (cx, cy) = (x + r, y + h - r);
+    for i in 0..=cs {
+        let angle = FRAC_PI_2 + (i as f32 / cs as f32) * FRAC_PI_2;
         inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
     }
 
@@ -458,6 +458,11 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
     }
     for i in 0..points.len() - 1 {
         draw_line(batch, points[i].0, points[i].1, points[i + 1].0, points[i + 1].1, thickness, color);
+    }
+    // 圆角衔接：每个内部顶点画小圆填补线段间的缺口
+    let r = thickness * 0.5;
+    for i in 1..points.len() - 1 {
+        draw_circle(batch, points[i].0, points[i].1, r, color, 8);
     }
 }
 
