@@ -10,7 +10,7 @@ fn main() {
         let mut batch = DrawBatch::new();
 
         draw_rectangle(&mut batch, 100.0, 100.0, 200.0, 150.0, RED);
-        draw_circle(&mut batch, 500.0, 300.0, 80.0, BLUE, 64);
+        draw_circle(&mut batch, 500.0, 300.0, 80.0, BLUE);
         draw_line(&mut batch, 50.0, 50.0, 750.0, 550.0, 2.0, GREEN);
 
         win.draw(Some(BLACK), &[&batch]);

@@ -49,13 +49,13 @@ fn main() {
         draw_line(&mut batch, cx, cy - 20.0, cx, cy + 20.0, 1.0, Color::new(1.0, 0.0, 0.0, 0.5));
 
         // 中心点
-        draw_circle(&mut batch, cx, cy, 3.0, RED, 16);
+        draw_circle(&mut batch, cx, cy, 3.0, RED);
 
         // 四角标记
-        draw_circle(&mut batch, tx, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7), 12);
-        draw_circle(&mut batch, tx + tw, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7), 12);
-        draw_circle(&mut batch, tx, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7), 12);
-        draw_circle(&mut batch, tx + tw, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7), 12);
+        draw_circle(&mut batch, tx, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
+        draw_circle(&mut batch, tx + tw, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
+        draw_circle(&mut batch, tx, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
+        draw_circle(&mut batch, tx + tw, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
 
         // 文本
         let text_opts = TextOptions::default().font_size(font_size).x(tx).y(ty).color(WHITE);

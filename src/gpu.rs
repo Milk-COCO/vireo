@@ -261,6 +261,7 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    pub circle: [f32; 4], // (cx, cy, r, feather) — 非 circle 时为 (0,0,0,0)
 }
 
 impl Vertex {
@@ -269,6 +270,7 @@ impl Vertex {
             position: [x, y],
             uv: [0.0, 0.0],
             color: [color.r, color.g, color.b, color.a],
+            circle: [0.0; 4],
         }
     }
 
@@ -277,29 +279,21 @@ impl Vertex {
             position: [x, y],
             uv: [u, v],
             color: [color.r, color.g, color.b, color.a],
+            circle: [0.0; 4],
         }
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        const S2: wgpu::BufferAddress = std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress;
+        const S4: wgpu::BufferAddress = std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress;
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    format: wgpu::VertexFormat::Float32x2,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 2]>() * 2) as wgpu::BufferAddress,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 2,
-                },
+                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x2, shader_location: 0 },
+                wgpu::VertexAttribute { offset: S2, format: wgpu::VertexFormat::Float32x2, shader_location: 1 },
+                wgpu::VertexAttribute { offset: S2 * 2, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
             ],
         }
     }

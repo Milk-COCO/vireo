@@ -42,7 +42,7 @@ fn main() {
             let r = 150.0 + (t * 2.5 + i as f32).sin() * 45.0;
             draw_circle(&mut ring,
                 cx + a.cos() * r, cy + a.sin() * r,
-                10.0, hue(i as f32 / 16.0 + t * 0.05), 20);
+                10.0, hue(i as f32 / 16.0 + t * 0.05));
         }
 
         // Logo 贴图

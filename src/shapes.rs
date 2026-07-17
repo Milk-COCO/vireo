@@ -5,6 +5,7 @@ use std::f32::consts::{PI, FRAC_PI_2};
 use crate::color::Color;
 use crate::color::colors::WHITE;
 use crate::context::DrawBatch;
+use crate::gpu::Vertex;
 
 /// 纹理绘制选项，链式 setter。
 pub struct TextureOptions {
@@ -66,32 +67,16 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
     batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制圆形（用三角形逼近）
-/// 填充圆。`segments` 越大越圆滑。
-pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color, segments: u32) {
-    if r == 0.0 || color.a == 0.0 {
-        return;
-    }
-
-    let segments = segments.max(3);
+/// 填充圆（shader SDF，完美边缘）。
+pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
+    if r == 0.0 || color.a == 0.0 { return; }
     let base = batch.vertices.len() as u32;
-
-    // 圆心
-    batch.push_vertex(cx, cy, color);
-
-    for i in 0..segments {
-        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let x = cx + r * angle.cos();
-        let y = cy + r * angle.sin();
-        batch.push_vertex(x, y, color);
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(cx + dx * r, cy + dy * r, 0.0, 0.0, color);
+        v.circle = [cx, cy, r, r];
+        batch.vertices.push(v);
     }
-
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        batch.indices.push(base);
-        batch.indices.push(base + 1 + i);
-        batch.indices.push(base + 1 + next);
-    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 绘制线段
@@ -130,38 +115,18 @@ pub fn draw_line(
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// 绘制椭圆
+/// 填充椭圆（shader SDF）。
 pub fn draw_ellipse(
-    batch: &mut DrawBatch,
-    cx: f32,
-    cy: f32,
-    rx: f32,
-    ry: f32,
-    color: Color,
-    segments: u32,
+    batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, color: Color,
 ) {
-    if rx == 0.0 || ry == 0.0 || color.a == 0.0 {
-        return;
-    }
-
-    let segments = segments.max(3);
+    if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
     let base = batch.vertices.len() as u32;
-
-    batch.push_vertex(cx, cy, color);
-
-    for i in 0..segments {
-        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let x = cx + rx * angle.cos();
-        let y = cy + ry * angle.sin();
-        batch.push_vertex(x, y, color);
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(cx + dx * rx, cy + dy * ry, 0.0, 0.0, color);
+        v.circle = [cx, cy, rx, ry];
+        batch.vertices.push(v);
     }
-
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        batch.indices.push(base);
-        batch.indices.push(base + 1 + i);
-        batch.indices.push(base + 1 + next);
-    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 绘制圆角矩形
@@ -306,57 +271,28 @@ pub fn draw_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, 
 
 /// 描边圆环
 pub fn draw_circle_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, thickness: f32, color: Color, segments: u32) {
-    if r == 0.0 || thickness == 0.0 || color.a == 0.0 {
-        return;
+    if r == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    let n = segments.max(8) as usize;
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+        pts.push((cx + r * a.cos(), cy + r * a.sin()));
     }
-    let segments = segments.max(3);
-    let inner_r = (r - thickness).max(0.0);
-    let base = batch.vertices.len() as u32;
-
-    for i in 0..segments {
-        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let cos = angle.cos();
-        let sin = angle.sin();
-        batch.push_vertex(cx + inner_r * cos, cy + inner_r * sin, color);
-        batch.push_vertex(cx + r * cos, cy + r * sin, color);
-    }
-
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        let o0 = base + i * 2;
-        let i0 = o0 + 1;
-        let o1 = base + next * 2;
-        let i1 = o1 + 1;
-        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
-    }
+    pts.push(pts[0]);
+    draw_line_chain(batch, &pts, thickness, color);
 }
 
 /// 描边椭圆环
 pub fn draw_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, thickness: f32, color: Color, segments: u32) {
-    if rx == 0.0 || ry == 0.0 || thickness == 0.0 || color.a == 0.0 {
-        return;
+    if rx == 0.0 || ry == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    let n = (segments as usize).max(16);
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+        pts.push((cx + rx * a.cos(), cy + ry * a.sin()));
     }
-    let segments = segments.max(3);
-    let inner_rx = (rx - thickness).max(0.0);
-    let inner_ry = (ry - thickness).max(0.0);
-    let base = batch.vertices.len() as u32;
-
-    for i in 0..segments {
-        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let cos = angle.cos();
-        let sin = angle.sin();
-        batch.push_vertex(cx + inner_rx * cos, cy + inner_ry * sin, color);
-        batch.push_vertex(cx + rx * cos, cy + ry * sin, color);
-    }
-
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        let o0 = base + i * 2;
-        let i0 = o0 + 1;
-        let o1 = base + next * 2;
-        let i1 = o1 + 1;
-        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
-    }
+    pts.push(pts[0]);
+    draw_line_chain(batch, &pts, thickness, color);
 }
 
 /// 描边圆角矩形
@@ -600,26 +536,25 @@ mod tests {
     #[test]
     fn circle_produces_faces() {
         let mut batch = test_batch();
-        draw_circle(&mut batch, 100.0, 100.0, 50.0, RED, 16);
-        // 1 center + 16 perimeter = 17 vertices, 16 * 3 = 48 indices
-        assert_eq!(batch.vertices.len(), 17);
-        assert_eq!(batch.indices.len(), 48);
+        draw_circle(&mut batch, 100.0, 100.0, 50.0, RED);
+        // 包围 quad: 4 vertices, 6 indices
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
     fn circle_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_circle(&mut batch, 0.0, 0.0, 0.0, RED, 32);
+        draw_circle(&mut batch, 0.0, 0.0, 0.0, RED);
         assert!(batch.vertices.is_empty());
     }
 
     #[test]
     fn circle_min_segments() {
         let mut batch = test_batch();
-        draw_circle(&mut batch, 0.0, 0.0, 10.0, RED, 1);
-        // segments clamped to 3
-        assert_eq!(batch.vertices.len(), 4); // 1 center + 3
-        assert_eq!(batch.indices.len(), 9);
+        draw_circle(&mut batch, 0.0, 0.0, 10.0, RED);
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
@@ -647,16 +582,16 @@ mod tests {
     #[test]
     fn ellipse_produces_faces() {
         let mut batch = test_batch();
-        draw_ellipse(&mut batch, 0.0, 0.0, 30.0, 20.0, BLUE, 12);
-        assert_eq!(batch.vertices.len(), 13); // 1 + 12
-        assert_eq!(batch.indices.len(), 36);
+        draw_ellipse(&mut batch, 0.0, 0.0, 30.0, 20.0, BLUE);
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
     }
 
     #[test]
     fn ellipse_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_ellipse(&mut batch, 0.0, 0.0, 0.0, 10.0, BLUE, 12);
-        draw_ellipse(&mut batch, 0.0, 0.0, 10.0, 0.0, BLUE, 12);
+        draw_ellipse(&mut batch, 0.0, 0.0, 0.0, 10.0, BLUE);
+        draw_ellipse(&mut batch, 0.0, 0.0, 10.0, 0.0, BLUE);
         assert!(batch.vertices.is_empty());
     }
 
@@ -721,10 +656,10 @@ mod tests {
     fn multiple_shapes_in_one_batch() {
         let mut batch = test_batch();
         draw_rectangle(&mut batch, 0.0, 0.0, 10.0, 10.0, RED);
-        draw_circle(&mut batch, 100.0, 100.0, 5.0, BLUE, 8);
+        draw_circle(&mut batch, 100.0, 100.0, 5.0, BLUE);
         draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, GREEN);
 
-        assert_eq!(batch.vertices.len(), 4 + 9 + 3);
-        assert_eq!(batch.indices.len(), 6 + 24 + 3);
+        assert_eq!(batch.vertices.len(), 4 + 4 + 3);
+        assert_eq!(batch.indices.len(), 6 + 6 + 3);
     }
 }

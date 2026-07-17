@@ -20,7 +20,7 @@ fn main() {
 
         // Batch 3: 绿色圆圈 + 文字
         let mut batch3 = DrawBatch::new();
-        draw_circle(&mut batch3, 40.0, 180.0, 20.0, GREEN, 32);
+        draw_circle(&mut batch3, 40.0, 180.0, 20.0, GREEN);
         draw_text(&mut batch3.texts, "Batch 3: 绿色圆圈",
             TextOptions::default().x(20.0).y(210.0).font_size(14.0).color(WHITE));
 

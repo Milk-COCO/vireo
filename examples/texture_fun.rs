@@ -28,7 +28,7 @@ fn main() {
         for j in 0..6 {
             let a = j as f32 / 6.0;
             draw_circle(&mut glow, cx, cy + float, glow_r * (1.0 - a * 0.5),
-                Color::new(1.0, 0.9, 0.5, 0.08 - a * 0.01), 48);
+                Color::new(1.0, 0.9, 0.5, 0.08 - a * 0.01));
         }
 
         // Batch 2: 四张部分围绕中心旋转 + 一起上下浮动
