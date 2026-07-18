@@ -15,18 +15,19 @@ pub struct GpuContext {
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     pub polygon_bind_group_layout: wgpu::BindGroupLayout,
+    pub transform_bind_group_layout: wgpu::BindGroupLayout,
     pub default_sampler: wgpu::Sampler,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub white_bind_group: Arc<wgpu::BindGroup>,
     pub polygon_dummy_bind_group: wgpu::BindGroup,
+    pub transform_dummy_bind_group: wgpu::BindGroup,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
     pipelines: RefCell<HashMap<u32, wgpu::RenderPipeline>>,
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
-    pipeline_layout: wgpu::PipelineLayout,
 }
 
 impl GpuContext {
@@ -194,6 +195,38 @@ impl GpuContext {
             }],
         });
 
+        // Transform bind group layout（group 3，storage buffer of mat3x3）
+        let transform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("transform bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        // Dummy transform storage buffer（一个 mat3x3，48 字节）
+        let transform_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("transform dummy buffer"),
+            size: 48, // 一个 mat3x3（3 列 × vec4 padded）
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let transform_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("transform dummy bind group"),
+            layout: &transform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: transform_dummy_buf.as_entire_binding(),
+            }],
+        });
+
         let shader_src = include_str!("shader.wgsl");
         // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
         let shader_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -217,15 +250,18 @@ impl GpuContext {
             source: wgpu::ShaderSource::Wgsl(shader_geo_src.into()),
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vireo pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bind_group_layout), Some(&texture_bind_group_layout), Some(&polygon_bind_group_layout)],
-            immediate_size: 0,
-        });
-
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vireo pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&texture_bind_group_layout),
+                    Some(&polygon_bind_group_layout),
+                    Some(&transform_bind_group_layout),
+                ],
+                immediate_size: 0,
+            })),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -264,18 +300,19 @@ impl GpuContext {
             camera_bind_group_layout,
             texture_bind_group_layout,
             polygon_bind_group_layout,
+            transform_bind_group_layout,
             default_sampler,
             white_texture,
             white_texture_view,
             white_bind_group,
             polygon_dummy_bind_group,
+            transform_dummy_bind_group,
             surface_format,
             text_ctx,
             pipelines: RefCell::new(pipelines),
             shader,
             shader_ssaa,
             shader_geo,
-            pipeline_layout,
         }
     }
 
@@ -294,9 +331,19 @@ impl GpuContext {
         } else {
             &self.shader
         };
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vireo pipeline layout"),
+            bind_group_layouts: &[
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.polygon_bind_group_layout),
+                Some(&self.transform_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
         let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vireo pipeline"),
-            layout: Some(&self.pipeline_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module,
                 entry_point: Some("vs_main"),
@@ -365,7 +412,9 @@ impl GpuContext {
     }
 }
 
-/// 2D 顶点
+/// 2D 顶点（68 字节）。
+///
+/// 变换矩阵不再存储于顶点，而是通过 `transform_index` 索引 `transforms` storage buffer。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -385,14 +434,6 @@ pub struct Vertex {
     pub sdf_type: u32,
     /// SDF 柔边宽度（逻辑像素）
     pub sdf_feather: f32,
-    /// 2D 仿射变换矩阵（3x3 列主序），在顶点着色器中应用。
-    /// col0 = (sx*cosθ, sy*sinθ, 0)
-    /// col1 = (-sx*sinθ, sy*cosθ, 0)
-    /// col2 = (tx, ty, 1)
-    /// 恒等矩阵表示不进行变换。
-    pub transform_col0: [f32; 3],
-    pub transform_col1: [f32; 3],
-    pub transform_col2: [f32; 3],
     /// SDF 额外参数，含义由 sdf_type 决定：
     /// 2 rect/rounded_rect: (corner_radius, 0)
     /// 3 line: (half_thickness, 0)
@@ -400,6 +441,9 @@ pub struct Vertex {
     /// 5 arc: (start_angle, end_angle)
     /// 其余 type 未使用。
     pub sdf_extra: [f32; 2],
+    /// 变换矩阵索引，指向 `transforms` storage buffer（group 3）。
+    /// 0 = 恒等矩阵（默认）。
+    pub transform_index: u32,
 }
 
 impl Vertex {
@@ -407,10 +451,8 @@ impl Vertex {
         Self {
             position: [x, y], uv: [0.0; 2], color: [color.r, color.g, color.b, color.a],
             sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
-            transform_col0: [1.0, 0.0, 0.0],
-            transform_col1: [0.0, 1.0, 0.0],
-            transform_col2: [0.0, 0.0, 1.0],
             sdf_extra: [0.0; 2],
+            transform_index: 0,
         }
     }
 
@@ -418,22 +460,19 @@ impl Vertex {
         Self {
             position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a],
             sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
-            transform_col0: [1.0, 0.0, 0.0],
-            transform_col1: [0.0, 1.0, 0.0],
-            transform_col2: [0.0, 0.0, 1.0],
             sdf_extra: [0.0; 2],
+            transform_index: 0,
         }
     }
 
-    /// 设置变换矩阵列（构建器模式）。
-    pub fn with_transform(mut self, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> Self {
-        self.transform_col0 = c0; self.transform_col1 = c1; self.transform_col2 = c2;
+    /// 设置 transform 索引（构建器模式）。
+    pub fn with_transform_index(mut self, idx: u32) -> Self {
+        self.transform_index = idx;
         self
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         const S2: wgpu::BufferAddress = std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress;
-        const S3: wgpu::BufferAddress = std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress;
         const S4: wgpu::BufferAddress = std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress;
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -445,10 +484,8 @@ impl Vertex {
                 wgpu::VertexAttribute { offset: S2 * 2 + S4, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2, format: wgpu::VertexFormat::Uint32, shader_location: 4 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 4, format: wgpu::VertexFormat::Float32, shader_location: 5 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8, format: wgpu::VertexFormat::Float32x3, shader_location: 6 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3, format: wgpu::VertexFormat::Float32x3, shader_location: 7 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3 * 2, format: wgpu::VertexFormat::Float32x3, shader_location: 8 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3 * 3, format: wgpu::VertexFormat::Float32x2, shader_location: 9 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8, format: wgpu::VertexFormat::Float32x2, shader_location: 6 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S2, format: wgpu::VertexFormat::Uint32, shader_location: 7 },
             ],
         }
     }

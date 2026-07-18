@@ -1,6 +1,7 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use wgpu::util::DeviceExt;
 
@@ -45,6 +46,7 @@ pub struct Renderer {
     ssaa: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
 }
 
 impl Renderer {
@@ -92,6 +94,7 @@ impl Renderer {
             ssaa: aa.is_ssaa(),
             msaa_tex: RefCell::new(None),
             polygon_edge_buf: RefCell::new(None),
+            transform_buf: RefCell::new(None),
         }
     }
 
@@ -203,6 +206,16 @@ impl Renderer {
         let mut vertex_count: u32 = 0;
         let mut ndx_accum: u32 = 0;
 
+        // ---- 合并所有 batch 的 transform_table ----
+        // 每个 batch 的 local index → 全局 index 偏移
+        let mut global_transforms: Vec<f32> = Vec::new();
+        let mut batch_transform_bases: Vec<u32> = Vec::new();
+        for batch in batches {
+            let base = (global_transforms.len() / 12) as u32;
+            batch_transform_bases.push(base);
+            global_transforms.extend_from_slice(&batch.transform_table);
+        }
+
         // 计算多边形边的全局偏移量（每条边 4 个 f32 = 1 个 vec4）
         let mut polygon_edges_global: Vec<f32> = Vec::new();
         let mut batch_poly_base: Vec<u32> = Vec::new();
@@ -218,13 +231,25 @@ impl Renderer {
 
         for (bi, batch) in batches.iter().enumerate() {
             let shape = if !batch.vertices.is_empty() {
+                let transform_base = batch_transform_bases[bi];
+                let poly_base = batch_poly_base[bi] as f32;
+                let needs_clone = !batch.polygon_edges.is_empty() || transform_base > 0;
+
                 let mut vdata_owned: Vec<Vertex>;
-                let vdata: &[u8] = if !batch.polygon_edges.is_empty() {
+                let vdata: &[u8] = if needs_clone {
                     vdata_owned = batch.vertices.clone();
-                    let base = batch_poly_base[bi] as f32;
-                    for v in &mut vdata_owned {
-                        if v.sdf_type == 6 || v.sdf_type == 7 {
-                            v.sdf_params[0] += base;
+                    // 应用 transform 全局偏移
+                    if transform_base > 0 {
+                        for v in &mut vdata_owned {
+                            v.transform_index += transform_base;
+                        }
+                    }
+                    // 应用 polygon edge 全局偏移
+                    if !batch.polygon_edges.is_empty() {
+                        for v in &mut vdata_owned {
+                            if v.sdf_type == 6 || v.sdf_type == 7 {
+                                v.sdf_params[0] += poly_base;
+                            }
                         }
                     }
                     bytemuck::cast_slice(&vdata_owned)
@@ -306,6 +331,28 @@ impl Renderer {
             None
         };
 
+        // ---- 上传 transform 数据到 storage buffer ----
+        let transform_bind_group: Option<wgpu::BindGroup> = if !global_transforms.is_empty() {
+            let size = (global_transforms.len() * 4) as u64;
+            self.ensure_transform_buffer(size);
+            {
+                let buf = self.transform_buf.borrow();
+                let buf_ref = buf.as_ref().unwrap();
+                self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&global_transforms));
+            }
+            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("transform bind group"),
+                layout: &self.gpu.transform_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.transform_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
+                }],
+            });
+            Some(bg)
+        } else {
+            None
+        };
+
         // ---- 准备所有文本 ----
         // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
         self.gpu.text_ctx.borrow_mut().ensure_sample_count(&self.gpu.device, self.sample_count);
@@ -350,6 +397,7 @@ impl Renderer {
                     pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage, self.ssaa, shape.geometry));
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(2, polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group), &[]);
+                    pass.set_bind_group(3, transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group), &[]);
                     pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
                     pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
                     for seg in &shape.segments {
@@ -442,6 +490,27 @@ impl Renderer {
             *self.polygon_edge_buf.borrow_mut() = Some((buf, new_cap));
         }
     }
+
+    fn ensure_transform_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let needs_create = {
+            let buf = self.transform_buf.borrow();
+            buf.is_none() || buf.as_ref().unwrap().1 < size
+        };
+        if needs_create {
+            let new_cap = match &*self.transform_buf.borrow() {
+                None => size.next_power_of_two().max(48),
+                Some(_) => (self.transform_buf.borrow().as_ref().unwrap().1 * 2).max(size),
+            };
+            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("transform buffer"),
+                size: new_cap,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            *self.transform_buf.borrow_mut() = Some((buf, new_cap));
+        }
+    }
 }
 
 use crate::text::TextEntryList;
@@ -478,6 +547,17 @@ impl Transform {
         let ty = self.y - self.px * c - self.py * d;
         ([a, c, 0.0], [b, d, 0.0], [tx, ty, 1.0])
     }
+}
+
+/// 6 个 f32 bit pattern 的简单 hash（batch 内去重用）。
+fn transform_key(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u64 {
+    let bits = [
+        c0[0].to_bits() as u64, c0[1].to_bits() as u64,
+        c1[0].to_bits() as u64, c1[1].to_bits() as u64,
+        c2[0].to_bits() as u64, c2[1].to_bits() as u64,
+    ];
+    bits[0] ^ bits[1].rotate_left(13) ^ bits[2].rotate_left(27) ^ bits[3].rotate_left(41)
+        ^ bits[4].rotate_left(53) ^ bits[5].rotate_left(7)
 }
 
 /// 纹理坐标子区域，控制形状内部 UV 映射范围。
@@ -530,6 +610,10 @@ pub struct DrawBatch {
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
+    /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
+    pub(crate) transform_table: Vec<f32>,
+    /// hash → local index 映射（batch 内去重）。
+    transform_map: HashMap<u64, u32>,
 }
 
 impl DrawBatch {
@@ -544,6 +628,8 @@ impl DrawBatch {
             sdf_feather: None,
             uv: UvRect::default(),
             polygon_edges: Vec::new(),
+            transform_table: Vec::new(),
+            transform_map: HashMap::new(),
         }
     }
 
@@ -557,6 +643,8 @@ impl DrawBatch {
         self.sdf_feather = Some(0.0);
         self.uv = UvRect::default();
         self.polygon_edges.clear();
+        self.transform_table.clear();
+        self.transform_map.clear();
     }
 
     /// 设置平移（屏幕坐标）。
@@ -618,31 +706,51 @@ impl DrawBatch {
         }
     }
 
-    /// 添加单个顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    /// 将矩阵注册到 transform_table 并返回 local index（batch 内去重）。
+    pub(crate) fn register_transform(&mut self, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u32 {
+        // 6 个有意义的 f32 构成 key：col0.xy, col1.xy, col2.xy
+        // col0.z=0, col1.z=0, col2.z=1 恒不变
+        let key = transform_key(c0, c1, c2);
+        let next_idx = (self.transform_table.len() / 12) as u32;
+        *self.transform_map.entry(key).or_insert_with(|| {
+            // mat3x3 在 storage buffer 中每列 vec4-padded（16 字节对齐）
+            self.transform_table.extend_from_slice(&[
+                c0[0], c0[1], 0.0, 0.0,  // col0 (a, c, 0, _pad)
+                c1[0], c1[1], 0.0, 0.0,  // col1 (b, d, 0, _pad)
+                c2[0], c2[1], 1.0, 0.0,  // col2 (tx, ty, 1, _pad)
+            ]);
+            next_idx
+        })
+    }
+
+    /// 添加单个顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
         let (c0, c1, c2) = self.current_matrix();
+        let idx = self.register_transform(c0, c1, c2);
         let mut v = Vertex::new(x, y, color);
-        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
+        v.transform_index = idx;
         self.vertices.push(v);
     }
 
-    /// 添加 SDF 顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    /// 添加 SDF 顶点（自动应用当前 transform，索引查表）。
     /// 坐标和 SDF 参数应处于同一局部空间。
     pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
         let (c0, c1, c2) = self.current_matrix();
+        let idx = self.register_transform(c0, c1, c2);
         let mut v = Vertex::new_uv(x, y, u, v, color);
         v.sdf_params = params;
         v.sdf_type = ty;
         v.sdf_feather = feather;
-        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
+        v.transform_index = idx;
         self.vertices.push(v);
     }
 
-    /// 添加带 UV 的顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    /// 添加带 UV 的顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
         let (c0, c1, c2) = self.current_matrix();
+        let idx = self.register_transform(c0, c1, c2);
         let mut v = Vertex::new_uv(x, y, u, v, color);
-        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
+        v.transform_index = idx;
         self.vertices.push(v);
     }
 
@@ -658,6 +766,8 @@ impl DrawBatch {
             sdf_feather: self.sdf_feather,
             uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
+            transform_table: self.transform_table.clone(),
+            transform_map: self.transform_map.clone(),
         }
     }
 
