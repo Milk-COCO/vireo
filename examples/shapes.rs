@@ -16,7 +16,7 @@ fn main() {
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
         let mut batch = DrawBatch::new();
-        batch.sdf_feather = 2.0;
+        batch.sdf_feather = Some(1.0);
 
         // ====== 填充形状 ======
         draw_rectangle(&mut batch, 20.0, 20.0, 100.0, 80.0, RED);

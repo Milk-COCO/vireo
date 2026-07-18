@@ -42,6 +42,7 @@ pub struct Renderer {
     dpi_scale: f32,
     sample_count: u32,
     alpha_to_coverage: bool,
+    ssaa: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
 }
@@ -88,6 +89,7 @@ impl Renderer {
             dpi_scale,
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
+            ssaa: aa.is_ssaa(),
             msaa_tex: RefCell::new(None),
             polygon_edge_buf: RefCell::new(None),
         }
@@ -97,6 +99,7 @@ impl Renderer {
     pub fn update_aa(&mut self, aa: crate::window::AntiAliasing) {
         self.sample_count = aa.sample_count();
         self.alpha_to_coverage = aa.alpha_to_coverage();
+        self.ssaa = aa.is_ssaa();
         *self.msaa_tex.borrow_mut() = None;
     }
 
@@ -188,6 +191,7 @@ impl Renderer {
         struct ShapeInfo {
             base_vertex: i32,
             segments: Vec<ShapeSegment>,
+            geometry: bool,
         }
 
         struct BatchInfo {
@@ -245,20 +249,30 @@ impl Renderer {
 
                 // 构建 texture segments（相对于 batch 的偏移量转为全局偏移量）
                 let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
-                    // 没有 segment：整批用 batch.texture（或 white）
                     let bg = batch.texture.clone().unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone());
                     vec![ShapeSegment { ndx_start: ndx_accum, ndx_count: batch.indices.len() as u32, bind_group: bg }]
                 } else {
-                    batch.texture_segments.iter().map(|s| ShapeSegment {
+                    let mut v: Vec<ShapeSegment> = batch.texture_segments.iter().map(|s| ShapeSegment {
                         ndx_start: ndx_accum + s.ndx_start,
                         ndx_count: s.ndx_count,
                         bind_group: s.bind_group.clone(),
-                    }).collect()
+                    }).collect();
+                    // 补 trailing segment：最后一段之后的新顶点用当前 batch.texture
+                    let last_end = v.last().map(|s| s.ndx_start + s.ndx_count).unwrap_or(ndx_accum);
+                    let total_end = ndx_accum + batch.indices.len() as u32;
+                    if last_end < total_end {
+                        let bg = batch.texture.clone().unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone());
+                        v.push(ShapeSegment { ndx_start: last_end, ndx_count: total_end - last_end, bind_group: bg });
+                    }
+                    v
                 };
 
+                // 若 batch 中任意顶点标记了 SDF 类型，强制走 SDF shader
+                let needs_sdf = batch.vertices.iter().any(|v| v.sdf_type > 0);
                 let info = ShapeInfo {
                     base_vertex: vertex_count as i32,
                     segments: segs,
+                    geometry: !needs_sdf && batch.sdf_feather.is_none(),
                 };
                 vertex_count += batch.vertices.len() as u32;
                 ndx_accum += batch.indices.len() as u32;
@@ -333,7 +347,7 @@ impl Renderer {
             for info in &batch_infos {
                 // 先画本 batch 的形状（重新设置 pipeline——glyphon 的 render_range 会改状态）
                 if let Some(ref shape) = info.shape {
-                    pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage));
+                    pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage, self.ssaa, shape.geometry));
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(2, polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group), &[]);
                     pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
@@ -466,6 +480,29 @@ impl Transform {
     }
 }
 
+/// 纹理坐标子区域，控制形状内部 UV 映射范围。
+#[derive(Clone, Copy, Debug)]
+pub struct UvRect {
+    pub u0: f32, pub v0: f32,
+    pub u1: f32, pub v1: f32,
+}
+
+impl Default for UvRect {
+    fn default() -> Self { Self { u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0 } }
+}
+
+impl UvRect {
+    /// 四角 UV：(左上, 右上, 右下, 左下)，对应包围盒四元组 (-1,-1)/(1,-1)/(1,1)/(-1,1)。
+    pub fn corners(&self) -> [(f32, f32); 4] {
+        [
+            (self.u0, self.v0),
+            (self.u1, self.v0),
+            (self.u1, self.v1),
+            (self.u0, self.v1),
+        ]
+    }
+}
+
 /// 批量绘制单元 —— 容纳一组形状顶点、文本条目和可选纹理。
 ///
 /// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
@@ -484,8 +521,12 @@ pub struct DrawBatch {
     pub(crate) texture: Option<wgpu::BindGroup>,
     texture_segments: Vec<TextureSegment>,
     transform: Option<Transform>,
-    /// SDF 柔边宽度（物理像素，0.0 = 关闭）。窗口 draw 时自动除以 dpi_scale。
-    pub sdf_feather: f32,
+    /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
+    ///
+    /// 注意：SDF 图形不受 MSAA 影响。
+    pub sdf_feather: Option<f32>,
+    /// 纹理坐标子区域，后续形状的 UV 在此范围内映射。
+    pub uv: UvRect,
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
@@ -500,7 +541,8 @@ impl DrawBatch {
             texture: None,
             texture_segments: Vec::new(),
             transform: None,
-            sdf_feather: 0.0,
+            sdf_feather: None,
+            uv: UvRect::default(),
             polygon_edges: Vec::new(),
         }
     }
@@ -512,7 +554,8 @@ impl DrawBatch {
         self.texture = None;
         self.texture_segments.clear();
         self.transform = None;
-        self.sdf_feather = 0.0;
+        self.sdf_feather = Some(0.0);
+        self.uv = UvRect::default();
         self.polygon_edges.clear();
     }
 
@@ -613,6 +656,7 @@ impl DrawBatch {
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             sdf_feather: self.sdf_feather,
+            uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
         }
     }
@@ -620,12 +664,26 @@ impl DrawBatch {
     /// 直接设置 bind group（高级用法，如离屏画布贴回窗口）。
     pub fn set_bind_group(&mut self, bg: wgpu::BindGroup) { self.texture = Some(bg); }
 
-    /// 绑定纹理到整个 batch（draw_texture 内部也使用此方法记录当前纹理）。
+    /// 设置 UV 子区域，后续形状的纹理坐标在此范围内映射。
+    pub fn set_uv(&mut self, u0: f32, v0: f32, u1: f32, v1: f32) {
+        self.uv = UvRect { u0, v0, u1, v1 };
+    }
+
+    /// 恢复 UV 为全纹理范围 (0,0)-(1,1)。
+    pub fn clear_uv(&mut self) {
+        self.uv = UvRect::default();
+    }
+
+    /// 绑定纹理，后续形状自动使用。同一 batch 多次调用即切换纹理。
     pub fn set_texture(&mut self, texture: &crate::texture::Texture) {
+        // 把当前纹理覆盖的索引范围记入 segment，然后切到新纹理
+        if let Some(ref bg) = self.texture {
+            self.add_texture_segment(bg.clone());
+        }
         self.texture = Some(texture.bind_group.clone());
     }
 
-    /// 记录纹理段（由 draw_texture 调用）：自上次段以来的所有新顶点归入此 bind group。
+    /// 记录纹理段：自上次段以来的所有新顶点归入此 bind group。
     pub(crate) fn add_texture_segment(&mut self, bg: wgpu::BindGroup) {
         let start = self.texture_segments.last().map_or(0, |s| s.ndx_start + s.ndx_count);
         let end = self.indices.len() as u32;
@@ -652,5 +710,4 @@ impl DrawBatch {
     pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
     pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
-    pub fn texture(&mut self, tex: &impl crate::shapes::TextureSource, opts: crate::shapes::TextureOptions) { crate::shapes::draw_texture(self, tex, opts); }
 }

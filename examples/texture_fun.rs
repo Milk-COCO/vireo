@@ -33,7 +33,7 @@ fn main() {
 
         // Batch 2: 四张部分围绕中心旋转 + 一起上下浮动
         let mut batch = DrawBatch::new();
-        // texture set via draw_texture
+        // texture set via set_texture
 
         for i in 0..4 {
             let a = angle + i as f32 * std::f32::consts::FRAC_PI_2;
@@ -47,13 +47,15 @@ fn main() {
                 2 => (0.0, 0.5),
                 _ => (0.5, 0.5),
             };
-            draw_texture(&mut batch, &logo_bg,
-                TextureOptions::default().rect(x, y, 80.0, 80.0).uv(u0, v0, u0 + 0.5, v0 + 0.5));
+            batch.set_texture(&logo_bg);
+            batch.set_uv(u0, v0, u0 + 0.5, v0 + 0.5);
+            draw_rectangle(&mut batch, x, y, 80.0, 80.0, WHITE);
+            batch.clear_uv();
         }
 
         // 中间原图
-        draw_texture(&mut batch, &logo,
-            TextureOptions::default().rect(cx - 50.0, cy + float - 50.0, 100.0, 100.0));
+        batch.set_texture(&logo);
+        draw_rectangle(&mut batch, cx - 50.0, cy + float - 50.0, 100.0, 100.0, WHITE);
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&glow, &batch]);
 

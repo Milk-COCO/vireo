@@ -23,10 +23,9 @@ fn main() {
             Some(i) => {
                 let t = app.texture(i).unwrap();
                 let s = 0.2; // logo 是 1000x1000，缩小到可看
-                draw_texture(&mut batch, t,
-                    TextureOptions::default().rect(20.0, 80.0, t.width as f32 * s, t.height as f32 * s));
-                draw_texture(&mut batch, t,
-                    TextureOptions::default().rect(250.0, 200.0, t.width as f32 * s * 2.0, t.height as f32 * s * 2.0));
+                batch.set_texture(t);
+                draw_rectangle(&mut batch, 20.0, 80.0, t.width as f32 * s, t.height as f32 * s, WHITE);
+                draw_rectangle(&mut batch, 250.0, 200.0, t.width as f32 * s * 2.0, t.height as f32 * s * 2.0, WHITE);
 
                 draw_text(
                     &mut batch.texts,

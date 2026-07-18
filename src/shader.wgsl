@@ -8,6 +8,7 @@ struct VertexInput {
     @location(6) transform_col0: vec3<f32>,
     @location(7) transform_col1: vec3<f32>,
     @location(8) transform_col2: vec3<f32>,
+    @location(9) sdf_extra: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -18,6 +19,7 @@ struct VertexOutput {
     @location(3) @interpolate(linear, sample) local_pos: vec2<f32>,
     @location(4) @interpolate(flat) sdf_type: u32,
     @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
 };
 
 struct Camera {
@@ -42,6 +44,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.local_pos = in.position;
     out.sdf_type = in.sdf_type;
     out.sdf_feather = in.sdf_feather;
+    out.sdf_extra = in.sdf_extra;
     return out;
 }
 
@@ -56,19 +59,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             if feather > 0.0 { let k = feather / max(in.sdf_params.z, in.sdf_params.w); out_color.a *= 1.0 - smoothstep(1.0 - k, 1.0, d); }
             else { if d > 1.0 { out_color.a = 0.0; } }
         } else if in.sdf_type == 2u {
-            let hw = in.sdf_params.z; let hh = in.sdf_params.w; let r = in.uv.x;
+            let hw = in.sdf_params.z; let hh = in.sdf_params.w; let r = in.sdf_extra.x;
             let d = length(max(abs(in.local_pos - in.sdf_params.xy) - vec2(hw - r, hh - r), vec2(0.0))) - r;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         } else if in.sdf_type == 3u {
             let a = in.sdf_params.xy; let b = in.sdf_params.zw;
             let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
-            let d = length(in.local_pos - (a + t * ab)) - in.uv.x;
+            let d = length(in.local_pos - (a + t * ab)) - in.sdf_extra.x;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         } else if in.sdf_type == 4u {
             // triangle
-            let a = in.sdf_params.xy; let b = in.sdf_params.zw; let c = in.uv;
+            let a = in.sdf_params.xy; let b = in.sdf_params.zw; let c = in.sdf_extra;
             let n_ab = normalize(vec2(-(b.y - a.y), b.x - a.x));
             let n_bc = normalize(vec2(-(c.y - b.y), c.x - b.x));
             let n_ca = normalize(vec2(-(a.y - c.y), a.x - c.x));
@@ -110,17 +113,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         } else {
-            // arc (ty==5): sdf_params=(cx,cy,r,0), uv=(start_angle, end_angle)
+            // arc (ty==5): sdf_params=(cx,cy,r,0), sdf_extra=(start_angle, end_angle)
+            // 扇区 = 圆 ∩ 两个半平面。半平面交集（max）只能表示 ≤ 180°。
+            // > 180° 时用补扇区（ea→sa）取反：d = max(d_circle, -补扇区)
             let center = in.sdf_params.xy; let r = in.sdf_params.z;
             let to_p = in.local_pos - center;
             let d_circle = length(to_p) - r;
-            let sa = in.uv.x; let ea = in.uv.y;
-            // radial edge normals (pointing inward)
+            let sa = in.sdf_extra.x; let ea = in.sdf_extra.y;
+            let raw_span = ea - sa;
+            let ccw_span = select(raw_span, raw_span + 6.283185307, raw_span < 0.0);
             let n_start = vec2(sin(sa), -cos(sa));
             let n_end = vec2(-sin(ea), cos(ea));
             let d_start = dot(to_p, n_start);
             let d_end = dot(to_p, n_end);
-            let d = max(d_circle, max(d_start, d_end));
+            let cn_start = vec2(sin(ea), -cos(ea));
+            let cn_end = vec2(-sin(sa), cos(sa));
+            let d_edge = select(
+                -max(dot(to_p, cn_start), dot(to_p, cn_end)),
+                max(d_start, d_end),
+                ccw_span <= 3.14159265,
+            );
+            let d = max(d_circle, d_edge);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
         }

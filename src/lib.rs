@@ -47,10 +47,6 @@ pub mod prelude {
     pub use crate::text::TextEntryList;
     pub use crate::text::TextOptions;
     pub use crate::text::draw_text;
-    pub use crate::shapes::TextureOptions;
-    pub use crate::shapes::TextureSource;
-    pub use crate::shapes::draw_texture;
-
     // 输入系统
     pub use crate::input::ElementState;
     pub use crate::input::Key;

@@ -22,10 +22,9 @@ fn main() {
 
         // 贴到窗口
         let mut win_batch = DrawBatch::new();
-        draw_texture(&mut win_batch, &canvas.texture,
-            TextureOptions::default().rect(50.0, 50.0, 256.0, 256.0));
-        draw_texture(&mut win_batch, &canvas.texture,
-            TextureOptions::default().rect(350.0, 200.0, 256.0, 256.0));
+        win_batch.set_texture(&canvas.texture);
+        draw_rectangle(&mut win_batch, 50.0, 50.0, 256.0, 256.0, WHITE);
+        draw_rectangle(&mut win_batch, 350.0, 200.0, 256.0, 256.0, WHITE);
         win.draw(Some(BLACK), &[&win_batch]);
 
         true

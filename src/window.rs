@@ -27,16 +27,29 @@ use winit::window::Cursor;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AntiAliasing {
     None,
+    /// 多重采样：per-pixel 着色，硬件解析采样点覆盖。
     Msaa { samples: u32, alpha_to_coverage: bool },
+    /// 超采样：per-sample 着色（`@interpolate(linear, sample)`），每个采样点独立计算 SDF。
+    Ssaa { samples: u32, alpha_to_coverage: bool },
 }
 
 impl AntiAliasing {
     pub fn sample_count(&self) -> u32 {
-        match self { AntiAliasing::None => 1, AntiAliasing::Msaa { samples, .. } => *samples }
+        match self {
+            AntiAliasing::None => 1,
+            AntiAliasing::Msaa { samples, .. } | AntiAliasing::Ssaa { samples, .. } => *samples,
+        }
     }
 
     pub fn alpha_to_coverage(&self) -> bool {
-        match self { AntiAliasing::None => false, AntiAliasing::Msaa { alpha_to_coverage, .. } => *alpha_to_coverage }
+        match self {
+            AntiAliasing::None => false,
+            AntiAliasing::Msaa { alpha_to_coverage, .. } | AntiAliasing::Ssaa { alpha_to_coverage, .. } => *alpha_to_coverage,
+        }
+    }
+
+    pub fn is_ssaa(&self) -> bool {
+        matches!(self, AntiAliasing::Ssaa { .. })
     }
 }
 

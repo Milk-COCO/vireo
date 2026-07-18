@@ -49,8 +49,8 @@ fn main() {
         let mut logo_batch = DrawBatch::new();
         if let Some(logo) = logo_idx.and_then(|i| app.texture(i)) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
-            draw_texture(&mut logo_batch, &logo,
-                TextureOptions::default().rect(cx - s / 2.0, cy - s / 2.0, s, s));
+            logo_batch.set_texture(&logo);
+            draw_rectangle(&mut logo_batch, cx - s / 2.0, cy - s / 2.0, s, s, WHITE);
         }
 
         // 文字

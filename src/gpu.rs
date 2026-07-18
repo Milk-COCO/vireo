@@ -23,7 +23,9 @@ pub struct GpuContext {
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
     pipelines: RefCell<HashMap<u32, wgpu::RenderPipeline>>,
-    shader: wgpu::ShaderModule,
+    shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
+    shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
+    shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
     pipeline_layout: wgpu::PipelineLayout,
 }
 
@@ -192,9 +194,27 @@ impl GpuContext {
             }],
         });
 
+        let shader_src = include_str!("shader.wgsl");
+        // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
+        let shader_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo shader (SSAA)"),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+        // MSAA：去掉 `, sample` — 每像素执行一次片段着色器
+        let msaa_src: String = shader_src.replace(
+            "@interpolate(linear, sample)",
+            "@interpolate(linear)",
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            label: Some("vireo shader (MSAA)"),
+            source: wgpu::ShaderSource::Wgsl(msaa_src.into()),
+        });
+
+        // 几何光栅化 shader：无 SDF 分支，无 per-sample 插值
+        let shader_geo_src = include_str!("shader_geo.wgsl");
+        let shader_geo = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo shader (geometry)"),
+            source: wgpu::ShaderSource::Wgsl(shader_geo_src.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -253,28 +273,38 @@ impl GpuContext {
             text_ctx,
             pipelines: RefCell::new(pipelines),
             shader,
+            shader_ssaa,
+            shader_geo,
             pipeline_layout,
         }
     }
 
-    /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）
-    pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool) -> wgpu::RenderPipeline {
-        let key = sample_count | ((alpha_to_coverage as u32) << 16);
+    /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）。
+    /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 ssaa 参数。
+    pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool, ssaa: bool, geometry: bool) -> wgpu::RenderPipeline {
+        let key = sample_count | ((alpha_to_coverage as u32) << 16) | ((ssaa as u32) << 17) | ((geometry as u32) << 18);
         let mut pipes = self.pipelines.borrow_mut();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
+        let module = if geometry {
+            &self.shader_geo
+        } else if ssaa {
+            &self.shader_ssaa
+        } else {
+            &self.shader
+        };
         let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vireo pipeline"),
             layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &self.shader,
+                module,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(Vertex::desc())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &self.shader,
+                module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.surface_format,
@@ -363,6 +393,13 @@ pub struct Vertex {
     pub transform_col0: [f32; 3],
     pub transform_col1: [f32; 3],
     pub transform_col2: [f32; 3],
+    /// SDF 额外参数，含义由 sdf_type 决定：
+    /// 2 rect/rounded_rect: (corner_radius, 0)
+    /// 3 line: (half_thickness, 0)
+    /// 4 triangle: (x3, y3)
+    /// 5 arc: (start_angle, end_angle)
+    /// 其余 type 未使用。
+    pub sdf_extra: [f32; 2],
 }
 
 impl Vertex {
@@ -373,6 +410,7 @@ impl Vertex {
             transform_col0: [1.0, 0.0, 0.0],
             transform_col1: [0.0, 1.0, 0.0],
             transform_col2: [0.0, 0.0, 1.0],
+            sdf_extra: [0.0; 2],
         }
     }
 
@@ -383,6 +421,7 @@ impl Vertex {
             transform_col0: [1.0, 0.0, 0.0],
             transform_col1: [0.0, 1.0, 0.0],
             transform_col2: [0.0, 0.0, 1.0],
+            sdf_extra: [0.0; 2],
         }
     }
 
@@ -409,6 +448,7 @@ impl Vertex {
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8, format: wgpu::VertexFormat::Float32x3, shader_location: 6 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3, format: wgpu::VertexFormat::Float32x3, shader_location: 7 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3 * 2, format: wgpu::VertexFormat::Float32x3, shader_location: 8 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3 * 3, format: wgpu::VertexFormat::Float32x2, shader_location: 9 },
             ],
         }
     }
