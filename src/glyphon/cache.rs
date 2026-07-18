@@ -1,4 +1,4 @@
-use crate::{GlyphToRender, Params};
+use super::{GlyphToRender, Params};
 use std::{
     borrow::Cow,
     mem,

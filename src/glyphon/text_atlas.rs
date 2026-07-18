@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     text_render::GlyphonCacheKey, Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus,
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, State, SwashCache,
 };

@@ -1,12 +1,12 @@
 //! 文本渲染：glyphon + cosmic-text，使用系统字体。
 
-use glyphon::{
+use crate::glyphon::{
     Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, Style, Weight};
-pub use glyphon::ColorMode;
-pub use glyphon::Attrs;
+pub use crate::glyphon::ColorMode;
+pub use crate::glyphon::Attrs;
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
 use crate::color::Color;
@@ -233,7 +233,7 @@ impl TextEntryList {
 
         text_ctx.viewport.update(
             &gpu.queue,
-            glyphon::Resolution {
+            crate::glyphon::Resolution {
                 width: physical_width,
                 height: physical_height,
             },
@@ -266,7 +266,7 @@ impl TextEntryList {
             .enumerate()
             .map(|(i, buf)| {
                 let entry = &self.entries[i];
-                let color = glyphon::Color::rgba(
+                let color = crate::glyphon::Color::rgba(
                     (entry.options.color.r * 255.0) as u8,
                     (entry.options.color.g * 255.0) as u8,
                     (entry.options.color.b * 255.0) as u8,

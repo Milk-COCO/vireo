@@ -1,4 +1,4 @@
-use crate::Color;
+use super::Color;
 use cosmic_text::SubpixelBin;
 
 pub type CustomGlyphId = u16;

@@ -16,6 +16,7 @@
 
 pub mod color;
 pub mod context;
+pub mod glyphon;
 pub mod gpu;
 pub mod input;
 pub mod offscreen;

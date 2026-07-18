@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glyphon::ColorMode;
+use crate::glyphon::ColorMode;
 use crate::text::TextContext;
 
 /// 共享 GPU 资源 —— 多个窗口/离屏纹理共用同一套 device/queue/pipeline
@@ -372,7 +372,7 @@ impl GpuContext {
 
     /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。
     pub fn measure_text(&self, text: &str, options: &crate::text::TextOptions) -> (f32, f32) {
-        use glyphon::{Attrs, Buffer, Metrics, Shaping};
+        use crate::glyphon::{Attrs, Buffer, Metrics, Shaping};
 
         let mut text_ctx = self.text_ctx.borrow_mut();
         let line_height = options.font_size * 1.2;
