@@ -6,6 +6,7 @@ struct VertexInput {
     @location(3) color: u32,
     @location(4) content_type_with_srgb: u32,
     @location(5) depth: f32,
+    @location(6) @interpolate(flat) transform_index: u32,
 }
 
 struct VertexOutput {
@@ -31,6 +32,9 @@ var atlas_sampler: sampler;
 
 @group(1) @binding(0)
 var<uniform> params: Params;
+
+@group(3) @binding(0)
+var<storage> transforms: array<mat3x3<f32>>;
 
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
@@ -61,8 +65,11 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
 
     var vert_output: VertexOutput;
 
+    let transform = transforms[in_vert.transform_index];
+    let world_pos = transform * vec3<f32>(vec2<f32>(pos), 1.0);
+
     vert_output.position = vec4<f32>(
-        2.0 * vec2<f32>(pos) / vec2<f32>(params.screen_resolution) - 1.0,
+        2.0 * world_pos.xy / vec2<f32>(params.screen_resolution) - 1.0,
         in_vert.depth,
         1.0,
     );

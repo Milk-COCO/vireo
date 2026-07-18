@@ -7,9 +7,9 @@ use super::{
 use cosmic_text::{Color, SubpixelBin};
 use std::slice;
 use wgpu::{
-    Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d, MultisampleState,
-    Origin3d, Queue, RenderPass, RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo,
-    TextureAspect, COPY_BUFFER_ALIGNMENT,
+    BindGroup, Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d,
+    MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, TextureAspect, COPY_BUFFER_ALIGNMENT,
 };
 
 /// A text renderer that uses cached glyphs to render text into an existing render pass.
@@ -208,6 +208,7 @@ impl TextRenderer {
                         color,
                         metadata: glyph.metadata,
                         cache_key,
+                        transform_index: text_area.transform_index,
                     },
                     bounds,
                     |_system, rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
@@ -279,6 +280,7 @@ impl TextRenderer {
                             metadata: glyph.metadata,
                             cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
                             scale_factor: text_area.scale,
+                            transform_index: text_area.transform_index,
                         },
                         bounds,
                         |system, _rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
@@ -371,8 +373,9 @@ impl TextRenderer {
         atlas: &TextAtlas,
         viewport: &Viewport,
         pass: &mut RenderPass<'_>,
+        transform_bind_group: &BindGroup,
     ) -> Result<(), RenderError> {
-        self.render_range(atlas, viewport, pass, 0, self.glyph_vertices.len() as u32)
+        self.render_range(atlas, viewport, pass, transform_bind_group, 0, self.glyph_vertices.len() as u32)
     }
 
     /// Renders a sub-range of prepared glyph vertices. Use after multiple `prepare()` calls
@@ -382,6 +385,7 @@ impl TextRenderer {
         atlas: &TextAtlas,
         viewport: &Viewport,
         pass: &mut RenderPass<'_>,
+        transform_bind_group: &BindGroup,
         vertex_start: u32,
         vertex_count: u32,
     ) -> Result<(), RenderError> {
@@ -393,6 +397,7 @@ impl TextRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
+        pass.set_bind_group(3, transform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(byte_offset..));
         pass.draw(0..4, 0..vertex_count);
 
@@ -461,6 +466,7 @@ struct GlyphMetadata {
     color: Color,
     metadata: usize,
     cache_key: GlyphonCacheKey,
+    transform_index: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -664,5 +670,6 @@ where
             } as u16,
         ],
         depth,
+        transform_index: metadata.transform_index,
     }))
 }

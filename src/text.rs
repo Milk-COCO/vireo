@@ -42,12 +42,13 @@ impl TextContext {
         queue: &Queue,
         texture_format: TextureFormat,
         color_mode: ColorMode,
+        transform_bgl: &wgpu::BindGroupLayout,
     ) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_system_fonts();
 
         let swash_cache = SwashCache::new();
-        let cache = Cache::new(device);
+        let cache = Cache::new(device, transform_bgl);
         let mut text_atlas =
             TextAtlas::with_color_mode(device, queue, &cache, texture_format, color_mode);
         let text_renderer = TextRenderer::new(
@@ -184,6 +185,8 @@ impl TextOptions {
 pub struct TextEntry {
     pub text: String,
     pub options: TextOptions,
+    /// Batch-local transform index (logical space). 0 = identity.
+    pub(crate) transform_index: u32,
 }
 
 /// 文本条目列表，存储一组待渲染的文本。
@@ -208,22 +211,38 @@ impl TextEntryList {
         Self { entries: other.entries.clone() }
     }
 
-    /// 添加文本条目（用户 API）
+    /// 添加文本条目（默认 transform_index = 0，恒等变换）。
     pub fn push(&mut self, text: &str, options: TextOptions) {
         self.entries.push(TextEntry {
             text: text.to_string(),
             options,
+            transform_index: 0,
+        });
+    }
+
+    /// 添加文本条目并指定 transform index。
+    pub(crate) fn push_indexed(&mut self, text: &str, options: TextOptions, transform_index: u32) {
+        self.entries.push(TextEntry {
+            text: text.to_string(),
+            options,
+            transform_index,
         });
     }
 
     /// 准备文本条目（调用 glyphon prepare），返回 (vertex_start, vertex_count)，
     /// 用于后续 render_range() 分段绘制。多 batch 时逐个调用，最后用返回的范围渲染。
+    ///
+    /// `transform_table`：batch 的本地变换矩阵表（12 f32 / mat3x3）。
+    /// `global_transforms`：全局矩阵表（物理空间），新增矩阵追加到此。
+    /// `scale`：逻辑→物理像素缩放因子。
     pub fn prepare_texts(
         &self,
         gpu: &GpuContext,
         physical_width: u32,
         physical_height: u32,
         scale: f32,
+        transform_table: &[f32],
+        global_transforms: &mut Vec<f32>,
     ) -> (u32, u32) {
         if self.entries.is_empty() {
             return (0, 0);
@@ -276,6 +295,33 @@ impl TextEntryList {
                     Some((l, t, r, b)) => TextBounds { left: l, top: t, right: r, bottom: b },
                     None => TextBounds::default(),
                 };
+                // 逻辑空间 → 物理空间：平移分量乘 scale
+                let phys_idx = {
+                    let base = entry.transform_index as usize * 12;
+                    if base + 12 <= transform_table.len() {
+                        let t = &transform_table[base..base + 12];
+                        // 实际检查是否为恒等矩阵
+                        let is_identity = t[0] == 1.0 && t[1] == 0.0
+                            && t[4] == 0.0 && t[5] == 1.0
+                            && t[8] == 0.0 && t[9] == 0.0;
+                        if is_identity {
+                            0
+                        } else {
+                            let idx = (global_transforms.len() / 12) as u32;
+                            // col0: (a, c, 0, _pad) — 不变
+                            // col1: (b, d, 0, _pad) — 不变
+                            // col2: (tx*s, ty*s, 1, _pad) — 平移 × scale
+                            global_transforms.extend_from_slice(&[
+                                t[0], t[1], 0.0, 0.0,
+                                t[4], t[5], 0.0, 0.0,
+                                t[8] * scale, t[9] * scale, 1.0, 0.0,
+                            ]);
+                            idx
+                        }
+                    } else {
+                        0
+                    }
+                };
                 TextArea {
                     buffer: buf,
                     left: entry.options.x * scale,
@@ -284,6 +330,7 @@ impl TextEntryList {
                     bounds,
                     default_color: color,
                     custom_glyphs: &[],
+                    transform_index: phys_idx,
                 }
             })
             .collect();
@@ -319,7 +366,8 @@ impl TextEntryList {
         (vertex_start, vertex_count)
     }
 
-    /// prepare + render 所有文本条目到 render pass（单 batch 便利方法）
+    /// prepare + render 所有文本条目到 render pass（单 batch 便利方法）。
+    /// 不使用 transform（所有文字用恒等矩阵）。
     pub fn draw(
         &self,
         gpu: &GpuContext,
@@ -331,12 +379,14 @@ impl TextEntryList {
         if self.entries.is_empty() {
             return;
         }
-        let _ = self.prepare_texts(gpu, physical_width, physical_height, scale);
+        let mut global_transforms = Vec::new();
+        let _ = self.prepare_texts(gpu, physical_width, physical_height, scale, &[], &mut global_transforms);
         let text_ctx = gpu.text_ctx.borrow();
         text_ctx.text_renderer.render(
             &text_ctx.text_atlas,
             &text_ctx.viewport,
             render_pass,
+            &gpu.transform_dummy_bind_group,
         ).expect("glyphon render failed");
     }
 }

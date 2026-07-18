@@ -43,8 +43,8 @@ struct Inner {
 }
 
 impl Cache {
-    /// Creates a new `Cache` with the given `device`.
-    pub fn new(device: &Device) -> Self {
+    /// Creates a new `Cache` with the given `device` and transform bind group layout.
+    pub fn new(device: &Device, transform_bgl: &BindGroupLayout) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("glyphon sampler"),
             min_filter: FilterMode::Nearest,
@@ -93,6 +93,11 @@ impl Cache {
                     format: VertexFormat::Float32,
                     offset: mem::size_of::<u32>() as u64 * 6,
                     shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Uint32,
+                    offset: mem::size_of::<u32>() as u64 * 7,
+                    shader_location: 6,
                 },
             ],
         };
@@ -144,7 +149,12 @@ impl Cache {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            bind_group_layouts: &[Some(&atlas_layout), Some(&uniforms_layout)],
+            bind_group_layouts: &[
+                Some(&atlas_layout),   // group 0: color/mask atlas + sampler
+                Some(&uniforms_layout),// group 1: screen resolution
+                None,                  // group 2: unused (geometry uses polygon edges)
+                Some(transform_bgl),   // group 3: transforms (shared with geometry)
+            ],
             ..Default::default()
         });
 

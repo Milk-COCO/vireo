@@ -64,6 +64,7 @@ pub(crate) struct GlyphToRender {
     color: u32,
     content_type_with_srgb: [u16; 2],
     depth: f32,
+    transform_index: u32,
 }
 
 /// The screen resolution to use when rendering text.
@@ -126,6 +127,9 @@ pub struct TextArea<'a> {
     pub default_color: Color,
     /// Additional custom glyphs to render.
     pub custom_glyphs: &'a [CustomGlyph],
+    /// Index into the `transforms` storage buffer (group 3).
+    /// 0 = identity (default).
+    pub transform_index: u32,
 }
 
 pub(crate) struct State<'a> {

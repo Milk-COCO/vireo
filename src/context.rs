@@ -331,6 +331,28 @@ impl Renderer {
             None
         };
 
+        // ---- 准备所有文本（在 transform 合并之后，可能追加物理变换矩阵） ----
+        // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
+        self.gpu.text_ctx.borrow_mut().ensure_sample_count(&self.gpu.device, self.sample_count);
+        // Clear 颜色代表新帧开始，此时清空旧的 glyph 数据；Load 是增量叠加，保留。
+        if clear_color.is_some() {
+            let mut text_ctx = self.gpu.text_ctx.borrow_mut();
+            text_ctx.text_renderer.clear();
+        }
+        for (i, batch) in batches.iter().enumerate() {
+            if !batch.texts.entries.is_empty() {
+                let (start, count) = batch.texts.prepare_texts(
+                    &self.gpu,
+                    self.physical_width,
+                    self.physical_height,
+                    self.scale,
+                    &batch.transform_table,
+                    &mut global_transforms,
+                );
+                batch_infos[i].text = Some((start, count));
+            }
+        }
+
         // ---- 上传 transform 数据到 storage buffer ----
         let transform_bind_group: Option<wgpu::BindGroup> = if !global_transforms.is_empty() {
             let size = (global_transforms.len() * 4) as u64;
@@ -352,21 +374,6 @@ impl Renderer {
         } else {
             None
         };
-
-        // ---- 准备所有文本 ----
-        // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
-        self.gpu.text_ctx.borrow_mut().ensure_sample_count(&self.gpu.device, self.sample_count);
-        // Clear 颜色代表新帧开始，此时清空旧的 glyph 数据；Load 是增量叠加，保留。
-        if clear_color.is_some() {
-            let mut text_ctx = self.gpu.text_ctx.borrow_mut();
-            text_ctx.text_renderer.clear();
-        }
-        for (i, batch) in batches.iter().enumerate() {
-            if !batch.texts.entries.is_empty() {
-                let (start, count) = batch.texts.prepare_texts(&self.gpu, self.physical_width, self.physical_height, self.scale);
-                batch_infos[i].text = Some((start, count));
-            }
-        }
 
         // ---- 单 pass：按 batch 顺序穿插 shapes → texts ----
         let has_any_content = batch_infos.iter().any(|b| b.shape.is_some() || b.text.is_some());
@@ -416,6 +423,7 @@ impl Renderer {
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
                         &mut pass,
+                        transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group),
                         start,
                         count,
                     );
@@ -513,7 +521,7 @@ impl Renderer {
     }
 }
 
-use crate::text::TextEntryList;
+use crate::text::{TextEntryList, TextOptions};
 
 /// 形状变换。内部使用，通过 `set_position` / `set_rotation` / `set_scale` / `set_pivot` 设置。
 #[derive(Clone, Copy)]
@@ -820,4 +828,11 @@ impl DrawBatch {
     pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
     pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
+
+    /// 添加文字，自动捕获当前 transform。
+    pub fn text(&mut self, text: &str, options: TextOptions) {
+        let (c0, c1, c2) = self.current_matrix();
+        let idx = self.register_transform(c0, c1, c2);
+        self.texts.push_indexed(text, options, idx);
+    }
 }

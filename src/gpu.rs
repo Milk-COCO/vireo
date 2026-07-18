@@ -288,7 +288,7 @@ impl GpuContext {
             cache: None,
         });
 
-        let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode));
+        let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode, &transform_bind_group_layout));
 
         let mut pipelines = HashMap::new();
         pipelines.insert(1, render_pipeline.clone());
