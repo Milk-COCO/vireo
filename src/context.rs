@@ -523,37 +523,35 @@ impl Renderer {
 
 use crate::text::{TextEntryList, TextOptions};
 
-/// 形状变换。内部使用，通过 `set_position` / `set_rotation` / `set_scale` / `set_pivot` 设置。
+/// 形状变换。内部使用，直接存储 3x3 仿射变换矩阵 + pivot。
 #[derive(Clone, Copy)]
 struct Transform {
+    /// 线性部分：[a b; c d] = [sx*cos  -sx*sin; sy*sin  sy*cos]
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    /// 世界坐标位置（局部坐标系原点）
     x: f32,
     y: f32,
+    /// 局部空间旋转/缩放中心
     px: f32,
     py: f32,
-    rotation: f32,
-    sx: f32,
-    sy: f32,
 }
 
 impl Default for Transform {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, px: 0.0, py: 0.0, rotation: 0.0, sx: 1.0, sy: 1.0 }
+        Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, x: 0.0, y: 0.0, px: 0.0, py: 0.0 }
     }
 }
 
 impl Transform {
-    /// 构建 3x3 仿射变换矩阵的 3 个列（WGSL 列主序）。
-    /// 变换顺序：T(pos) * S(sx,sy) * R(θ) * T(-pivot)
+    /// 返回 3x3 仿射变换矩阵的 3 个列（WGSL 列主序）。
+    /// 变换顺序：T(x,y) * [a b; c d] * T(-pivot)，即 pivot → 线性 → 平移。
     fn to_cols(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
-        let cos = self.rotation.cos();
-        let sin = self.rotation.sin();
-        let a = self.sx * cos;
-        let b = -self.sx * sin;
-        let c = self.sy * sin;
-        let d = self.sy * cos;
-        let tx = self.x - self.px * a - self.py * b;
-        let ty = self.y - self.px * c - self.py * d;
-        ([a, c, 0.0], [b, d, 0.0], [tx, ty, 1.0])
+        let tx = self.x - self.px * self.a - self.py * self.b;
+        let ty = self.y - self.px * self.c - self.py * self.d;
+        ([self.a, self.c, 0.0], [self.b, self.d, 0.0], [tx, ty, 1.0])
     }
 }
 
@@ -663,11 +661,22 @@ impl DrawBatch {
         self.transform = Some(t);
     }
 
-    /// 设置旋转弧度（顺时针）。默认绕 (0,0)，用 `set_pivot` 指定旋转中心。
-    pub fn set_rotation(&mut self, rad: f32) {
+    /// 设置旋转弧度（顺时针）。保留当前 scale，默认绕 (0,0)，用 `set_pivot` 指定旋转中心。
+    pub fn set_rad(&mut self, rad: f32) {
         let mut t = self.transform.unwrap_or_default();
-        t.rotation = rad;
+        let old_sx = (t.a * t.a + t.b * t.b).sqrt();
+        let old_sy = (t.c * t.c + t.d * t.d).sqrt();
+        let (c, s) = (rad.cos(), rad.sin());
+        t.a = old_sx * c;
+        t.b = -old_sx * s;
+        t.c = old_sy * s;
+        t.d = old_sy * c;
         self.transform = Some(t);
+    }
+
+    /// 设置旋转角度（度，顺时针）。等价于 `set_rad(deg.to_radians())`。
+    pub fn set_deg(&mut self, deg: f32) {
+        self.set_rad(deg.to_radians());
     }
 
     /// 设置旋转中心（形状局部坐标）。
@@ -678,17 +687,24 @@ impl DrawBatch {
         self.transform = Some(t);
     }
 
-    /// 设置缩放（1.0 = 原始大小）。
+    /// 设置缩放（1.0 = 原始大小）。保留当前旋转角度。
     pub fn set_scale(&mut self, sx: f32, sy: f32) {
         let mut t = self.transform.unwrap_or_default();
-        t.sx = sx;
-        t.sy = sy;
+        let old_sx = (t.a * t.a + t.b * t.b).sqrt();
+        let old_sy = (t.c * t.c + t.d * t.d).sqrt();
+        if old_sx > 0.0 { let k = sx / old_sx; t.a *= k; t.b *= k; }
+        if old_sy > 0.0 { let k = sy / old_sy; t.c *= k; t.d *= k; }
         self.transform = Some(t);
     }
 
-    /// 一次性设置完整变换。
+    /// 一次性设置完整变换（从分解参数构建矩阵）。
     pub fn set_transform(&mut self, x: f32, y: f32, px: f32, py: f32, rotation: f32, sx: f32, sy: f32) {
-        self.transform = Some(Transform { x, y, px, py, rotation, sx, sy });
+        let (c, s) = (rotation.cos(), rotation.sin());
+        self.transform = Some(Transform {
+            a: sx * c, b: -sx * s,
+            c: sy * s, d: sy * c,
+            x, y, px, py,
+        });
     }
 
     /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。

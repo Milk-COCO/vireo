@@ -38,7 +38,7 @@ fn main() {
         let mut b2 = DrawBatch::new();
         b2.set_position(120.0, 180.0);
         b2.set_pivot(50.0, 10.0);
-        b2.set_rotation(0.35);
+        b2.set_rad(0.35);
         // 半透明背景框
         draw_rectangle(&mut b2, 0.0, 0.0, 100.0, 20.0, Color::new(0.15, 0.5, 0.3, 0.2));
         b2.text("rotate 20°", TextOptions::default().x(5.0).y(2.0).font_size(14.0).color(yl));
