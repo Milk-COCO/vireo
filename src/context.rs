@@ -450,6 +450,22 @@ impl Default for Transform {
     }
 }
 
+impl Transform {
+    /// 构建 3x3 仿射变换矩阵的 3 个列（WGSL 列主序）。
+    /// 变换顺序：T(pos) * S(sx,sy) * R(θ) * T(-pivot)
+    fn to_cols(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let cos = self.rotation.cos();
+        let sin = self.rotation.sin();
+        let a = self.sx * cos;
+        let b = -self.sx * sin;
+        let c = self.sy * sin;
+        let d = self.sy * cos;
+        let tx = self.x - self.px * a - self.py * b;
+        let ty = self.y - self.px * c - self.py * d;
+        ([a, c, 0.0], [b, d, 0.0], [tx, ty, 1.0])
+    }
+}
+
 /// 批量绘制单元 —— 容纳一组形状顶点、文本条目和可选纹理。
 ///
 /// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
@@ -551,41 +567,40 @@ impl DrawBatch {
         self.transform = None;
     }
 
-    /// 添加单个顶点（自动应用当前 transform）。
-    pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
-        let (tx, ty) = self.transform_vertex(x, y);
-        self.vertices.push(Vertex::new(tx, ty, color));
+    /// 获取当前变换矩阵列（无 transform 时返回恒等矩阵）。
+    pub(crate) fn current_matrix(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        match self.transform {
+            Some(t) => t.to_cols(),
+            None => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        }
     }
 
-    /// 添加 SDF 顶点（自动应用当前 transform）。
-    pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
-        let (vx, vy) = self.transform_vertex(x, y);
-        let mut v = Vertex::new_uv(vx, vy, u, v, color);
-        v.sdf_params = params;
-        v.sdf_type = ty;
-        v.sdf_feather = feather;
+    /// 添加单个顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
+        let (c0, c1, c2) = self.current_matrix();
+        let mut v = Vertex::new(x, y, color);
+        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
         self.vertices.push(v);
     }
 
-    /// 添加带 UV 的顶点（自动应用当前 transform）。
-    pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
-        let (tx, ty) = self.transform_vertex(x, y);
-        self.vertices.push(Vertex::new_uv(tx, ty, u, v, color));
+    /// 添加 SDF 顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    /// 坐标和 SDF 参数应处于同一局部空间。
+    pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
+        let (c0, c1, c2) = self.current_matrix();
+        let mut v = Vertex::new_uv(x, y, u, v, color);
+        v.sdf_params = params;
+        v.sdf_type = ty;
+        v.sdf_feather = feather;
+        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
+        self.vertices.push(v);
     }
 
-    /// 应用当前变换到顶点：绕 pivot 旋转 → 缩放 → 平移
-    fn transform_vertex(&self, vx: f32, vy: f32) -> (f32, f32) {
-        let t = match self.transform {
-            Some(t) => t,
-            None => return (vx, vy),
-        };
-        let cos = t.rotation.cos();
-        let sin = t.rotation.sin();
-        let dx = vx - t.px;
-        let dy = vy - t.py;
-        let rx = dx * cos - dy * sin;
-        let ry = dx * sin + dy * cos;
-        (t.x + rx * t.sx, t.y + ry * t.sy)
+    /// 添加带 UV 的顶点（自动应用当前 transform，在 GPU 端执行矩阵变换）。
+    pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
+        let (c0, c1, c2) = self.current_matrix();
+        let mut v = Vertex::new_uv(x, y, u, v, color);
+        v.transform_col0 = c0; v.transform_col1 = c1; v.transform_col2 = c2;
+        self.vertices.push(v);
     }
 
     /// 克隆 batch（vertices、indices、texts 完全复制，rasterizer 清空）

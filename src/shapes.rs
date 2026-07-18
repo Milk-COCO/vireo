@@ -63,9 +63,11 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
 pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
     if r == 0.0 || color.a == 0.0 { return; }
     let f = batch.sdf_feather;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        let mut v = Vertex::new_uv(cx + dx * r, cy + dy * r, 0.0, 0.0, color);
+        let mut v = Vertex::new_uv(cx + dx * r, cy + dy * r, 0.0, 0.0, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [cx, cy, r, r];
         v.uv = [f, 0.0];
         v.sdf_type = 1; v.sdf_feather = batch.sdf_feather;
@@ -88,9 +90,11 @@ pub fn draw_line(
     let min_y = y1.min(y2) - pad;
     let max_x = x1.max(x2) + pad;
     let max_y = y1.max(y2) + pad;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
-        let mut v = Vertex::new_uv(*cx, *cy, h, 0.0, color);
+        let mut v = Vertex::new_uv(*cx, *cy, h, 0.0, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [x1, y1, x2, y2];
         v.sdf_type = 3; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
@@ -104,9 +108,11 @@ pub fn draw_ellipse(
 ) {
     if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
     let f = batch.sdf_feather;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        let mut v = Vertex::new_uv(cx + dx * rx, cy + dy * ry, 0.0, 0.0, color);
+        let mut v = Vertex::new_uv(cx + dx * rx, cy + dy * ry, 0.0, 0.0, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [cx, cy, rx, ry];
         v.uv = [f, 0.0];
         v.sdf_type = 1; v.sdf_feather = batch.sdf_feather;
@@ -127,9 +133,11 @@ pub fn draw_rounded_rect(
     let hw = w * 0.5;
     let hh = h * 0.5;
     let f = batch.sdf_feather;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        let mut v = Vertex::new_uv(cx + dx * (hw + f), cy + dy * (hh + f), r, f, color);
+        let mut v = Vertex::new_uv(cx + dx * (hw + f), cy + dy * (hh + f), r, f, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [cx, cy, hw, hh];
         v.sdf_type = 2; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
@@ -147,9 +155,11 @@ pub fn draw_triangle(
     let min_y = y1.min(y2).min(y3) - f;
     let max_x = x1.max(x2).max(x3) + f;
     let max_y = y1.max(y2).max(y3) + f;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
-        let mut v = Vertex::new_uv(*cx, *cy, x3, y3, color);
+        let mut v = Vertex::new_uv(*cx, *cy, x3, y3, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [x1, y1, x2, y2];
         v.sdf_type = 4; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
@@ -198,13 +208,14 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
     let count_f = edge_count as f32;
 
     // 包围 quad + feather 余量
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let mut v = Vertex::new_uv(
             if *dx < 0.0 { min_x - f } else { max_x + f },
             if *dy < 0.0 { min_y - f } else { max_y + f },
             start_f, count_f, color,
-        );
+        ).with_transform(c0, c1, c2);
         v.sdf_params = [start_f, count_f, 0.0, 0.0];
         v.sdf_type = 6; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);
@@ -220,9 +231,11 @@ pub fn draw_arc(
     if r == 0.0 || color.a == 0.0 { return; }
     let f = batch.sdf_feather;
     let ext = r + f;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        let mut v = Vertex::new_uv(cx + dx * ext, cy + dy * ext, start_angle, end_angle, color);
+        let mut v = Vertex::new_uv(cx + dx * ext, cy + dy * ext, start_angle, end_angle, color)
+            .with_transform(c0, c1, c2);
         v.sdf_params = [cx, cy, r, 0.0];
         v.sdf_type = 5; v.sdf_feather = f;
         batch.vertices.push(v);
@@ -355,6 +368,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
 
     // 包围 quad（加 feather + thickness 余量）
     let pad = h + f;
+    let (c0, c1, c2) = batch.current_matrix();
     let base = batch.vertices.len() as u32;
     let start_f = start_idx as f32;
     let count_f = actual_seg_count as f32;
@@ -363,7 +377,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
             if *dx < 0.0 { min_x - pad } else { max_x + pad },
             if *dy < 0.0 { min_y - pad } else { max_y + pad },
             start_f, count_f, color,
-        );
+        ).with_transform(c0, c1, c2);
         v.sdf_params = [start_f, count_f, h, 0.0];
         v.sdf_type = 7; v.sdf_feather = batch.sdf_feather;
         batch.vertices.push(v);

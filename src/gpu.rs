@@ -355,19 +355,46 @@ pub struct Vertex {
     pub sdf_type: u32,
     /// SDF 柔边宽度（逻辑像素）
     pub sdf_feather: f32,
+    /// 2D 仿射变换矩阵（3x3 列主序），在顶点着色器中应用。
+    /// col0 = (sx*cosθ, sy*sinθ, 0)
+    /// col1 = (-sx*sinθ, sy*cosθ, 0)
+    /// col2 = (tx, ty, 1)
+    /// 恒等矩阵表示不进行变换。
+    pub transform_col0: [f32; 3],
+    pub transform_col1: [f32; 3],
+    pub transform_col2: [f32; 3],
 }
 
 impl Vertex {
     pub fn new(x: f32, y: f32, color: crate::color::Color) -> Self {
-        Self { position: [x, y], uv: [0.0; 2], color: [color.r, color.g, color.b, color.a], sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0 }
+        Self {
+            position: [x, y], uv: [0.0; 2], color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            transform_col0: [1.0, 0.0, 0.0],
+            transform_col1: [0.0, 1.0, 0.0],
+            transform_col2: [0.0, 0.0, 1.0],
+        }
     }
 
     pub fn new_uv(x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) -> Self {
-        Self { position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a], sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0 }
+        Self {
+            position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            transform_col0: [1.0, 0.0, 0.0],
+            transform_col1: [0.0, 1.0, 0.0],
+            transform_col2: [0.0, 0.0, 1.0],
+        }
+    }
+
+    /// 设置变换矩阵列（构建器模式）。
+    pub fn with_transform(mut self, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> Self {
+        self.transform_col0 = c0; self.transform_col1 = c1; self.transform_col2 = c2;
+        self
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         const S2: wgpu::BufferAddress = std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress;
+        const S3: wgpu::BufferAddress = std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress;
         const S4: wgpu::BufferAddress = std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress;
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -379,6 +406,9 @@ impl Vertex {
                 wgpu::VertexAttribute { offset: S2 * 2 + S4, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2, format: wgpu::VertexFormat::Uint32, shader_location: 4 },
                 wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 4, format: wgpu::VertexFormat::Float32, shader_location: 5 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8, format: wgpu::VertexFormat::Float32x3, shader_location: 6 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3, format: wgpu::VertexFormat::Float32x3, shader_location: 7 },
+                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S3 * 2, format: wgpu::VertexFormat::Float32x3, shader_location: 8 },
             ],
         }
     }

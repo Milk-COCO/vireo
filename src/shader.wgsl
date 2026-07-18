@@ -5,6 +5,9 @@ struct VertexInput {
     @location(3) sdf_params: vec4<f32>,
     @location(4) @interpolate(flat) sdf_type: u32,
     @location(5) sdf_feather: f32,
+    @location(6) transform_col0: vec3<f32>,
+    @location(7) transform_col1: vec3<f32>,
+    @location(8) transform_col2: vec3<f32>,
 };
 
 struct VertexOutput {
@@ -30,7 +33,9 @@ struct Camera {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = camera.projection * vec4<f32>(in.position, 0.0, 1.0);
+    let transform = mat3x3<f32>(in.transform_col0, in.transform_col1, in.transform_col2);
+    let world_pos = transform * vec3<f32>(in.position, 1.0);
+    out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
     out.uv = in.uv;
     out.color = in.color;
     out.sdf_params = in.sdf_params;
