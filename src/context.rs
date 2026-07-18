@@ -219,7 +219,7 @@ impl Renderer {
                     vdata_owned = batch.vertices.clone();
                     let base = batch_poly_base[bi] as f32;
                     for v in &mut vdata_owned {
-                        if v.sdf_type == 6 {
+                        if v.sdf_type == 6 || v.sdf_type == 7 {
                             v.sdf_params[0] += base;
                         }
                     }

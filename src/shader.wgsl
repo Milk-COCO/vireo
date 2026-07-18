@@ -89,6 +89,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d = select(d_max, -d_min, inside);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else { if d > 0.0 { out_color.a = 0.0; } }
+        } else if in.sdf_type == 7u {
+            // line_chain: sdf_params=(start_idx_f32, count_f32, half_thickness, 0)
+            let start = u32(in.sdf_params.x); let count = u32(in.sdf_params.y);
+            let h = in.sdf_params.z;
+            var d = 1e10;
+            for (var i = start; i < start + count; i++) {
+                let seg = polygon_edges[i]; // (x1,y1,x2,y2)
+                let a = seg.xy; let b = seg.zw;
+                let ab = b - a;
+                let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
+                d = min(d, length(in.local_pos - (a + t * ab)));
+            }
+            d -= h;
+            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
+            else { if d > 0.0 { out_color.a = 0.0; } }
         } else {
             // arc (ty==5): sdf_params=(cx,cy,r,0), uv=(start_angle, end_angle)
             let center = in.sdf_params.xy; let r = in.sdf_params.z;

@@ -174,7 +174,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
     }
 
     // 计算边的内法线，追加到 batch 的 polygon_edges
-    let start_idx = batch.polygon_edges.len() as u32;
+    let start_idx = (batch.polygon_edges.len() / 4) as u32; // vec4 索引
     let mut edge_count: u32 = 0;
     for i in 0..n {
         let j = (i + 1) % n;
@@ -232,14 +232,18 @@ pub fn draw_arc(
 
 /// 描边矩形
 pub fn draw_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 {
-        return;
-    }
-    let t = thickness;
-    draw_rectangle(batch, x, y, w, t, color);           // top
-    draw_rectangle(batch, x, y + h - t, w, t, color);   // bottom
-    draw_rectangle(batch, x, y, t, h, color);           // left
-    draw_rectangle(batch, x + w - t, y, t, h, color);   // right
+    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    let half = thickness * 0.5;
+    let x2 = x + w;
+    let y2 = y + h;
+    // 中心线闭合矩形，line_chain SDF 自动处理线段转 thick line
+    draw_line_chain(batch, &[
+        (x + half, y + half),
+        (x2 - half, y + half),
+        (x2 - half, y2 - half),
+        (x + half, y2 - half),
+        (x + half, y + half),
+    ], thickness, color);
 }
 
 /// 描边圆环
@@ -268,7 +272,7 @@ pub fn draw_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry
     draw_line_chain(batch, &pts, thickness, color);
 }
 
-/// 描边圆角矩形
+/// 描边圆角矩形（line_chain SDF 沿中心线采样）。
 pub fn draw_rounded_rect_outline(
     batch: &mut DrawBatch,
     x: f32, y: f32, w: f32, h: f32,
@@ -276,151 +280,95 @@ pub fn draw_rounded_rect_outline(
     color: Color,
     corner_segments: u32,
 ) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 {
-        return;
-    }
+    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     if r == 0.0 {
         draw_rect_outline(batch, x, y, w, h, thickness, color);
         return;
     }
+
+    let half = thickness * 0.5;
+    let cr = (r - half).max(0.0); // 中心线圆角半径
     let cs = corner_segments.max(2);
-    let inner_r = (r - thickness).max(0.0);
 
-    // Outer perimeter (clockwise, from 12 o'clock)
-    let mut outer: Vec<(f32, f32)> = Vec::new();
-    // Top-left corner
-    let (cx, cy) = (x + r, y + r);
-    for i in 0..=cs {
-        let angle = PI + (i as f32 / cs as f32) * FRAC_PI_2;
-        outer.push((cx + r * angle.cos(), cy + r * angle.sin()));
+    let mut pts: Vec<(f32, f32)> = Vec::new();
+    // TL(π→3π/2), TR(3π/2→2π), BR(0→π/2), BL(π/2→π)
+    let two_pi = 2.0 * PI;
+    let corners: [(f32, f32, f32, f32); 4] = [
+        (x + r,     y + r,     PI,        PI * 1.5),
+        (x + w - r, y + r,     PI * 1.5,  two_pi),
+        (x + w - r, y + h - r, 0.0,       FRAC_PI_2),
+        (x + r,     y + h - r, FRAC_PI_2, PI),
+    ];
+    for (cx, cy, sa, ea) in corners {
+        if cr > 0.0 {
+            for i in 0..=cs {
+                let a = sa + (i as f32 / cs as f32) * (ea - sa);
+                pts.push((cx + cr * a.cos(), cy + cr * a.sin()));
+            }
+        } else {
+            pts.push((cx, cy));
+        }
     }
-    // Top-right corner
-    let (cx, cy) = (x + w - r, y + r);
-    for i in 0..=cs {
-        let angle = PI * 1.5 + (i as f32 / cs as f32) * FRAC_PI_2;
-        outer.push((cx + r * angle.cos(), cy + r * angle.sin()));
-    }
-    // Bottom-right corner
-    let (cx, cy) = (x + w - r, y + h - r);
-    for i in 0..=cs {
-        let angle = 0.0 + (i as f32 / cs as f32) * FRAC_PI_2;
-        outer.push((cx + r * angle.cos(), cy + r * angle.sin()));
-    }
-    // Bottom-left corner
-    let (cx, cy) = (x + r, y + h - r);
-    for i in 0..=cs {
-        let angle = FRAC_PI_2 + (i as f32 / cs as f32) * FRAC_PI_2;
-        outer.push((cx + r * angle.cos(), cy + r * angle.sin()));
-    }
-
-    // Inner perimeter (clockwise, same order and direction as outer)
-    let mut inner: Vec<(f32, f32)> = Vec::new();
-    // Top-left
-    let (cx, cy) = (x + r, y + r);
-    for i in 0..=cs {
-        let angle = PI + (i as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Top-right
-    let (cx, cy) = (x + w - r, y + r);
-    for i in 0..=cs {
-        let angle = PI * 1.5 + (i as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Bottom-right
-    let (cx, cy) = (x + w - r, y + h - r);
-    for i in 0..=cs {
-        let angle = 0.0 + (i as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-    // Bottom-left
-    let (cx, cy) = (x + r, y + h - r);
-    for i in 0..=cs {
-        let angle = FRAC_PI_2 + (i as f32 / cs as f32) * FRAC_PI_2;
-        inner.push((cx + inner_r * angle.cos(), cy + inner_r * angle.sin()));
-    }
-
-    // Total N vertices per ring, total 2N vertices
-    let total = outer.len();
-    let base = batch.vertices.len() as u32;
-    for i in 0..total {
-        batch.push_vertex(outer[i].0, outer[i].1, color);
-    }
-    for i in 0..total {
-        batch.push_vertex(inner[i].0, inner[i].1, color);
-    }
-    for i in 0..total {
-        let j = (i + 1) % total;
-        let o0 = base + i as u32;
-        let i0 = base + total as u32 + i as u32;
-        let o1 = base + j as u32;
-        let i1 = base + total as u32 + j as u32;
-        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
-    }
+    pts.push(pts[0]);
+    draw_line_chain(batch, &pts, thickness, color);
 }
 
-/// 连续折线（首尾不自动闭合）。每条 segment 用三角形四边形连接。
+/// 连续折线（shader SDF，segment 数据通过 storage buffer 传递）。
+/// 首尾坐标相近时自动闭合。
 pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Color) {
-    if points.len() < 2 || thickness == 0.0 || color.a == 0.0 {
-        return;
-    }
+    if points.len() < 2 || thickness == 0.0 || color.a == 0.0 { return; }
+
     let n = points.len();
     let closed = n > 2
         && (points[0].0 - points[n - 1].0).abs() < 0.001
         && (points[0].1 - points[n - 1].1).abs() < 0.001;
-    // 闭合时首尾重复，顶点数减一
     let vcount = if closed { n - 1 } else { n };
     if vcount < 2 { return; }
+    let seg_count = if closed { vcount } else { vcount - 1 };
 
     let h = thickness * 0.5;
+    let f = batch.sdf_feather;
 
-    // 每条线段的方向和法线
-    let mut norms: Vec<(f32, f32)> = Vec::new();
-    for i in 0..vcount {
-        let j = (i + 1) % n; // 闭合时最后一根线段回到 point[0]
-        let dx = points[j].0 - points[i].0;
-        let dy = points[j].1 - points[i].1;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 0.001 {
-            norms.push((0.0, 1.0));
-        } else {
-            norms.push((-dy / len, dx / len));
-        }
+    // 包围盒
+    let mut min_x = f32::MAX; let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN; let mut max_y = f32::MIN;
+    for (px, py) in points {
+        min_x = min_x.min(*px); min_y = min_y.min(*py);
+        max_x = max_x.max(*px); max_y = max_y.max(*py);
     }
 
+    // 追加 segment 数据 (x1,y1,x2,y2) 到 storage buffer
+    let start_idx = (batch.polygon_edges.len() / 4) as u32; // vec4 索引
+    for i in 0..seg_count {
+        let j = if i + 1 < n { i + 1 } else { 0 };
+        let (x1, y1) = points[i];
+        let (x2, y2) = points[j];
+        if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 { continue; }
+        batch.polygon_edges.push(x1);
+        batch.polygon_edges.push(y1);
+        batch.polygon_edges.push(x2);
+        batch.polygon_edges.push(y2);
+    }
+    let actual_seg_count = (batch.polygon_edges.len() / 4) as u32 - start_idx;
+    if actual_seg_count == 0 { return; }
+
+    // 包围 quad（加 feather + thickness 余量）
+    let pad = h + f;
     let base = batch.vertices.len() as u32;
-
-    // 每个顶点生成偏移顶点对（外侧 + 内侧），使用 miter join
-    for i in 0..vcount {
-        let n_prev = norms[(i + vcount - 1) % vcount];
-        let n_next = norms[i];
-        let dot = n_prev.0 * n_next.0 + n_prev.1 * n_next.1;
-
-        // miter offset = (n0 + n1) * h / (1 + dot)
-        let denom = (1.0 + dot).max(0.05);
-        let ox = (n_prev.0 + n_next.0) * h / denom;
-        let oy = (n_prev.1 + n_next.1) * h / denom;
-
-        batch.push_vertex(points[i].0 + ox, points[i].1 + oy, color);
-        batch.push_vertex(points[i].0 - ox, points[i].1 - oy, color);
+    let start_f = start_idx as f32;
+    let count_f = actual_seg_count as f32;
+    for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut v = Vertex::new_uv(
+            if *dx < 0.0 { min_x - pad } else { max_x + pad },
+            if *dy < 0.0 { min_y - pad } else { max_y + pad },
+            start_f, count_f, color,
+        );
+        v.sdf_params = [start_f, count_f, h, 0.0];
+        v.sdf_type = 7; v.sdf_feather = batch.sdf_feather;
+        batch.vertices.push(v);
     }
-
-    // 三角形条带（闭合时最后一根回到 vertex 0）
-    for i in 0..vcount - 1 {
-        let o0 = base + (i * 2) as u32;
-        let i0 = o0 + 1;
-        let o1 = base + ((i + 1) * 2) as u32;
-        let i1 = o1 + 1;
-        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
-    }
-    if closed {
-        let o0 = base + ((vcount - 1) * 2) as u32;
-        let i0 = o0 + 1;
-        let o1 = base;
-        let i1 = base + 1;
-        batch.indices.extend_from_slice(&[o0, i0, o1, i0, i1, o1]);
-    }
+    batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// 描边三角形
