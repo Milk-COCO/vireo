@@ -348,8 +348,10 @@ pub struct Vertex {
     /// 3 line: (x1,y1,x2,y2); uv.x=half_thickness
     /// 4 triangle: (x1,y1,x2,y2); uv=(x3,y3)
     /// 5 arc: (cx,cy,r,0); uv=(start_angle, end_angle)
+    /// 6 polygon: (start_idx_f32, count_f32, 0, 0); 边数据在 storage buffer（每边 vec4: nx,ny,offset,0）
+    /// 7 line_chain: (start_idx_f32, count_f32, half_thickness, 0); segment 数据在 storage buffer（每段 vec4: x1,y1,x2,y2）
     pub sdf_params: [f32; 4],
-    /// 0=none, 1=circle, 2=rect, 3=line, 4=triangle, 5=arc
+    /// 0=none, 1=circle, 2=rect, 3=line, 4=triangle, 5=arc, 6=polygon, 7=line_chain
     pub sdf_type: u32,
     /// SDF 柔边宽度（逻辑像素）
     pub sdf_feather: f32,
