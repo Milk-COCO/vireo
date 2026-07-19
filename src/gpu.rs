@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use wgpu::util::DeviceExt;
+
 use crate::glyphon::ColorMode;
 use crate::text::TextContext;
 
@@ -211,12 +213,16 @@ impl GpuContext {
                 }],
             });
 
-        // Dummy transform storage buffer（一个 mat3x3，48 字节）
-        let transform_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        // Dummy transform storage buffer（单位矩阵 mat3x3，48 字节）
+        let identity: [f32; 12] = [
+            1.0, 0.0, 0.0, 0.0, // col0: (a, c, 0, pad)
+            0.0, 1.0, 0.0, 0.0, // col1: (b, d, 0, pad)
+            0.0, 0.0, 1.0, 0.0, // col2: (tx, ty, 1, pad)
+        ];
+        let transform_dummy_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("transform dummy buffer"),
-            size: 48, // 一个 mat3x3（3 列 × vec4 padded）
+            contents: bytemuck::cast_slice(&identity),
             usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
         });
         let transform_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("transform dummy bind group"),

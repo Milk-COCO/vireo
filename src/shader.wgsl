@@ -51,37 +51,48 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(tex, tex_sampler, in.uv);
     var out_color = tex_color * in.color;
-    if in.sdf_type > 0u {
-        let feather = in.sdf_feather / camera.dpi_scale;
-        if in.sdf_type == 1u {
-            let d = length((in.local_pos - in.sdf_params.xy) / vec2(in.sdf_params.z, in.sdf_params.w));
+
+    if in.sdf_type == 0u { return out_color; }
+
+    let feather = in.sdf_feather / camera.dpi_scale;
+    var d: f32;
+
+    switch in.sdf_type {
+        case 1u: {
+            // circle/ellipse: sdf_params=(cx,cy,rx,ry)
+            d = length((in.local_pos - in.sdf_params.xy) / vec2(in.sdf_params.z, in.sdf_params.w));
             if feather > 0.0 { let k = feather / max(in.sdf_params.z, in.sdf_params.w); out_color.a *= 1.0 - smoothstep(1.0 - k, 1.0, d); }
-            else { if d > 1.0 { out_color.a = 0.0; } }
-        } else if in.sdf_type == 2u {
+            else { if d > 1.0 { discard; } }
+        }
+        case 2u: {
+            // rect/rounded_rect: sdf_params=(cx,cy,hw,hh), sdf_extra=(r,0)
             let hw = in.sdf_params.z; let hh = in.sdf_params.w; let r = in.sdf_extra.x;
-            let d = length(max(abs(in.local_pos - in.sdf_params.xy) - vec2(hw - r, hh - r), vec2(0.0))) - r;
+            d = length(max(abs(in.local_pos - in.sdf_params.xy) - vec2(hw - r, hh - r), vec2(0.0))) - r;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
-        } else if in.sdf_type == 3u {
+            else { if d > 0.0 { discard; } }
+        }
+        case 3u: {
+            // line: sdf_params=(x1,y1,x2,y2), sdf_extra=(half_thickness,0)
             let a = in.sdf_params.xy; let b = in.sdf_params.zw;
             let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
-            let d = length(in.local_pos - (a + t * ab)) - in.sdf_extra.x;
+            d = length(in.local_pos - (a + t * ab)) - in.sdf_extra.x;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
-        } else if in.sdf_type == 4u {
-            // triangle
+            else { if d > 0.0 { discard; } }
+        }
+        case 4u: {
+            // triangle: sdf_params=(x1,y1,x2,y2), sdf_extra=(x3,y3)
             let a = in.sdf_params.xy; let b = in.sdf_params.zw; let c = in.sdf_extra;
             let n_ab = normalize(vec2(-(b.y - a.y), b.x - a.x));
             let n_bc = normalize(vec2(-(c.y - b.y), c.x - b.x));
             let n_ca = normalize(vec2(-(a.y - c.y), a.x - c.x));
             let d_ab = dot(in.local_pos - a, n_ab); let d_bc = dot(in.local_pos - b, n_bc); let d_ca = dot(in.local_pos - c, n_ca);
             let inside = d_ab > -0.0001 && d_bc > -0.0001 && d_ca > -0.0001;
-            let d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);
+            d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
-        } else if in.sdf_type == 6u {
+            else { if d > 0.0 { discard; } }
+        }
+        case 6u: {
             // polygon: sdf_params=(start_idx_f32, count_f32, 0, 0)
-            // 每条边存 vec4(nx, ny, dot(vi, n), 0)
             let start = u32(in.sdf_params.x); let count = u32(in.sdf_params.y);
             var d_max = -1e10;
             var d_min = 1e10;
@@ -93,14 +104,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 d_max = max(d_max, -sd);
                 d_min = min(d_min, sd);
             }
-            let d = select(d_max, -d_min, inside);
+            d = select(d_max, -d_min, inside);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
-        } else if in.sdf_type == 7u {
+            else { if d > 0.0 { discard; } }
+        }
+        case 7u: {
             // line_chain: sdf_params=(start_idx_f32, count_f32, half_thickness, 0)
             let start = u32(in.sdf_params.x); let count = u32(in.sdf_params.y);
             let h = in.sdf_params.z;
-            var d = 1e10;
+            d = 1e10;
             for (var i = start; i < start + count; i++) {
                 let seg = polygon_edges[i]; // (x1,y1,x2,y2)
                 let a = seg.xy; let b = seg.zw;
@@ -110,11 +122,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             d -= h;
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
-        } else {
+            else { if d > 0.0 { discard; } }
+        }
+        default: {
             // arc (ty==5): sdf_params=(cx,cy,r,0), sdf_extra=(start_angle, end_angle)
-            // 扇区 = 圆 ∩ 两个半平面。半平面交集（max）只能表示 ≤ 180°。
-            // > 180° 时用补扇区（ea→sa）取反：d = max(d_circle, -补扇区)
             let center = in.sdf_params.xy; let r = in.sdf_params.z;
             let to_p = in.local_pos - center;
             let d_circle = length(to_p) - r;
@@ -132,9 +143,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 max(d_start, d_end),
                 ccw_span <= 3.14159265,
             );
-            let d = max(d_circle, d_edge);
+            d = max(d_circle, d_edge);
             if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { out_color.a = 0.0; } }
+            else { if d > 0.0 { discard; } }
         }
     }
     return out_color;

@@ -43,7 +43,7 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
     match batch.sdf_feather {
         None => {
             if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let x2 = x + w; let y2 = y + h;
             let uv = batch.uv;
@@ -62,7 +62,7 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
     match batch.sdf_feather {
         None => {
             let n = ((r * std::f32::consts::TAU) as u32).clamp(32, 256);
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let bounds = (cx - r, cy - r, cx + r, cy + r);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
@@ -80,7 +80,8 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
             }
         }
         Some(f) => {
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            batch.note_sdf();
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bounds = (cx - r, cy - r, cx + r, cy + r);
             let uv = &batch.uv;
@@ -111,12 +112,13 @@ pub fn draw_line(
             draw_line_chain(batch, &[(x1, y1), (x2, y2)], thickness, color);
         }
         Some(f) => {
+            batch.note_sdf();
             let pad = h + f;
             let min_x = x1.min(x2) - pad;
             let min_y = y1.min(y2) - pad;
             let max_x = x1.max(x2) + pad;
             let max_y = y1.max(y2) + pad;
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bx0 = x1.min(x2) - h; let by0 = y1.min(y2) - h;
             let bx1 = x1.max(x2) + h; let by1 = y1.max(y2) + h;
@@ -144,7 +146,7 @@ pub fn draw_ellipse(
     match batch.sdf_feather {
         None => {
             let n = ((rx.max(ry) * std::f32::consts::TAU) as u32).clamp(32, 256);
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let bounds = (cx - rx, cy - ry, cx + rx, cy + ry);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
@@ -162,7 +164,8 @@ pub fn draw_ellipse(
             }
         }
         Some(f) => {
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            batch.note_sdf();
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bounds = (cx - rx, cy - ry, cx + rx, cy + ry);
             let uv = &batch.uv;
@@ -192,7 +195,7 @@ pub fn draw_rounded_rect(
             draw_rectangle(batch, x, y, w, h, color);
         }
         None => {
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let cs = ((r * std::f32::consts::FRAC_PI_2) as u32).clamp(8, 64);
             let bounds = (x, y, x + w, y + h);
             let uv = &batch.uv;
@@ -203,10 +206,14 @@ pub fn draw_rounded_rect(
 
             if x2 > xr && y2 > yr {
                 let base = batch.vertices.len() as u32;
-                batch.vertices.push(Vertex::new_uv(xr, yr, shape_uv(uv, xr, yr, bounds).0, shape_uv(uv, xr, yr, bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(x2, yr, shape_uv(uv, x2, yr, bounds).0, shape_uv(uv, x2, yr, bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(x2, y2, shape_uv(uv, x2, y2, bounds).0, shape_uv(uv, x2, y2, bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(xr, y2, shape_uv(uv, xr, y2, bounds).0, shape_uv(uv, xr, y2, bounds).1, color).with_transform_index(idx));
+                let (u0, v0) = shape_uv(uv, xr, yr, bounds);
+                let (u1, v1) = shape_uv(uv, x2, yr, bounds);
+                let (u2, v2) = shape_uv(uv, x2, y2, bounds);
+                let (u3, v3) = shape_uv(uv, xr, y2, bounds);
+                batch.vertices.push(Vertex::new_uv(xr, yr, u0, v0, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(x2, yr, u1, v1, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(x2, y2, u2, v2, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(xr, y2, u3, v3, color).with_transform_index(idx));
                 batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
 
@@ -219,10 +226,14 @@ pub fn draw_rounded_rect(
                 if ew <= 0.0 || eh <= 0.0 { continue; }
                 let base = batch.vertices.len() as u32;
                 let ex2 = ex + ew; let ey2 = ey + eh;
-                batch.vertices.push(Vertex::new_uv(ex,  ey,  shape_uv(uv, ex,  ey,  bounds).0, shape_uv(uv, ex,  ey,  bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex2, ey,  shape_uv(uv, ex2, ey,  bounds).0, shape_uv(uv, ex2, ey,  bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex2, ey2, shape_uv(uv, ex2, ey2, bounds).0, shape_uv(uv, ex2, ey2, bounds).1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex,  ey2, shape_uv(uv, ex,  ey2, bounds).0, shape_uv(uv, ex,  ey2, bounds).1, color).with_transform_index(idx));
+                let (u0, v0) = shape_uv(uv, ex, ey, bounds);
+                let (u1, v1) = shape_uv(uv, ex2, ey, bounds);
+                let (u2, v2) = shape_uv(uv, ex2, ey2, bounds);
+                let (u3, v3) = shape_uv(uv, ex, ey2, bounds);
+                batch.vertices.push(Vertex::new_uv(ex, ey, u0, v0, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(ex2, ey, u1, v1, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(ex2, ey2, u2, v2, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv(ex, ey2, u3, v3, color).with_transform_index(idx));
                 batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
 
@@ -251,11 +262,12 @@ pub fn draw_rounded_rect(
             }
         }
         Some(f) => {
+            batch.note_sdf();
             let cx = x + w * 0.5;
             let cy = y + h * 0.5;
             let hw = w * 0.5;
             let hh = h * 0.5;
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bounds = (x, y, x + w, y + h);
             let uv = &batch.uv;
@@ -279,7 +291,7 @@ pub fn draw_triangle(
     batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, color: Color,
 ) {
     if color.a == 0.0 { return; }
-    let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+    let idx = batch.current_transform_index();
     match batch.sdf_feather {
         None => {
             let base = batch.vertices.len() as u32;
@@ -294,6 +306,7 @@ pub fn draw_triangle(
             batch.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
         Some(f) => {
+            batch.note_sdf();
             let min_x = x1.min(x2).min(x3) - f;
             let min_y = y1.min(y2).min(y3) - f;
             let max_x = x1.max(x2).max(x3) + f;
@@ -323,7 +336,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
     let n = points.len();
     match batch.sdf_feather {
         None => {
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let mut min_x = f32::MAX; let mut min_y = f32::MAX;
             let mut max_x = f32::MIN; let mut max_y = f32::MIN;
@@ -342,6 +355,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
             }
         }
         Some(f) => {
+            batch.note_sdf();
             let mut min_x = f32::MAX; let mut min_y = f32::MAX;
             let mut max_x = f32::MIN; let mut max_y = f32::MIN;
             for (px, py) in points {
@@ -370,7 +384,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
 
             let start_f = start_idx as f32;
             let count_f = edge_count as f32;
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bounds = (min_x, min_y, max_x, max_y);
             let uv = &batch.uv;
@@ -400,7 +414,7 @@ pub fn draw_arc(
     match batch.sdf_feather {
         None => {
             let n = ((r * span) as u32).clamp(16, 256);
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let bounds = (cx - r, cy - r, cx + r, cy + r);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
@@ -418,8 +432,9 @@ pub fn draw_arc(
             }
         }
         Some(f) => {
+            batch.note_sdf();
             let ext = r + f;
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let bounds = (cx - r, cy - r, cx + r, cy + r);
             let uv = &batch.uv;
@@ -537,7 +552,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
 
     match batch.sdf_feather {
         None => {
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let join_n = ((h * 4.0) as u32).clamp(4, 16);
             let uv = &batch.uv;
 
@@ -614,6 +629,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
             }
         }
         Some(f) => {
+            batch.note_sdf();
             let mut min_x = f32::MAX; let mut min_y = f32::MAX;
             let mut max_x = f32::MIN; let mut max_y = f32::MIN;
             for (px, py) in points {
@@ -636,7 +652,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
             if actual_seg_count == 0 { return; }
 
             let pad = h + f;
-            let (c0, c1, c2) = batch.current_matrix(); let idx = batch.register_transform(c0, c1, c2);
+            let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let start_f = start_idx as f32;
             let count_f = actual_seg_count as f32;

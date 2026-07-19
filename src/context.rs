@@ -1,7 +1,7 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use wgpu::util::DeviceExt;
 
@@ -32,6 +32,7 @@ impl RenderTarget {
 /// 内部维护 GPU buffer，支持在多 batch 间以偏移量追加写入。
 pub struct Renderer {
     gpu: std::sync::Arc<GpuContext>,
+    camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     vertex_buf: RefCell<Option<wgpu::Buffer>>,
     vertex_cap: RefCell<u64>,
@@ -46,7 +47,14 @@ pub struct Renderer {
     ssaa: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    polygon_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
     transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    transform_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
+    /// 帧间复用的 CPU 暂存，避免每帧大块分配
+    scratch_vdata: RefCell<Vec<u8>>,
+    scratch_idata: RefCell<Vec<u8>>,
+    scratch_transforms: RefCell<Vec<f32>>,
+    scratch_poly_edges: RefCell<Vec<f32>>,
 }
 
 impl Renderer {
@@ -80,6 +88,7 @@ impl Renderer {
         });
         Self {
             gpu,
+            camera_buf,
             camera_bind_group,
             vertex_buf: RefCell::new(None),
             vertex_cap: RefCell::new(0),
@@ -94,7 +103,13 @@ impl Renderer {
             ssaa: aa.is_ssaa(),
             msaa_tex: RefCell::new(None),
             polygon_edge_buf: RefCell::new(None),
+            polygon_bind_group_cache: RefCell::new(None),
             transform_buf: RefCell::new(None),
+            transform_bind_group_cache: RefCell::new(None),
+            scratch_vdata: RefCell::new(Vec::new()),
+            scratch_idata: RefCell::new(Vec::new()),
+            scratch_transforms: RefCell::new(Vec::new()),
+            scratch_poly_edges: RefCell::new(Vec::new()),
         }
     }
 
@@ -134,19 +149,7 @@ impl Renderer {
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
         camera_raw[64..68].copy_from_slice(&self.dpi_scale.to_le_bytes());
-        let camera_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera bind group"),
-            layout: &self.gpu.camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("camera buffer"),
-                    contents: &camera_raw,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                }).as_entire_binding(),
-            }],
-        });
-        self.camera_bind_group = camera_bg;
+        self.gpu.queue.write_buffer(&self.camera_buf, 0, &camera_raw);
         self.physical_width = physical_width;
         self.physical_height = physical_height;
         self.scale = scale;
@@ -202,14 +205,14 @@ impl Renderer {
             text: Option<(u32, u32)>, // (vertex_start, vertex_count)
         }
 
-        let mut batch_infos: Vec<BatchInfo> = Vec::new();
+        let mut batch_infos: Vec<BatchInfo> = Vec::with_capacity(batches.len());
         let mut vertex_count: u32 = 0;
         let mut ndx_accum: u32 = 0;
 
-        // ---- 合并所有 batch 的 transform_table ----
-        // 每个 batch 的 local index → 全局 index 偏移
-        let mut global_transforms: Vec<f32> = Vec::new();
-        let mut batch_transform_bases: Vec<u32> = Vec::new();
+        // ---- 合并所有 batch 的 transform_table（复用 scratch）----
+        let mut global_transforms = self.scratch_transforms.borrow_mut();
+        global_transforms.clear();
+        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(batches.len());
         for batch in batches {
             let base = (global_transforms.len() / 12) as u32;
             batch_transform_bases.push(base);
@@ -217,8 +220,9 @@ impl Renderer {
         }
 
         // 计算多边形边的全局偏移量（每条边 4 个 f32 = 1 个 vec4）
-        let mut polygon_edges_global: Vec<f32> = Vec::new();
-        let mut batch_poly_base: Vec<u32> = Vec::new();
+        let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
+        polygon_edges_global.clear();
+        let mut batch_poly_base: Vec<u32> = Vec::with_capacity(batches.len());
         {
             let mut offset: u32 = 0;
             for batch in batches {
@@ -229,48 +233,49 @@ impl Renderer {
             }
         }
 
+        // ---- 预计算总顶点/索引大小，复用 CPU 暂存 ----
+        let total_vcount: u32 = batches.iter().map(|b| b.vertices.len() as u32).sum();
+        let total_icount: u32 = batches.iter().map(|b| b.indices.len() as u32).sum();
+        let total_vbytes = total_vcount as u64 * std::mem::size_of::<Vertex>() as u64;
+        let total_ibytes = total_icount as u64 * 4;
+        self.ensure_vertex_buffer(total_vbytes);
+        self.ensure_index_buffer(total_ibytes);
+        let mut combined_vdata = self.scratch_vdata.borrow_mut();
+        let mut combined_idata = self.scratch_idata.borrow_mut();
+        combined_vdata.clear();
+        combined_idata.clear();
+        if combined_vdata.capacity() < total_vbytes as usize {
+            combined_vdata.reserve(total_vbytes as usize);
+        }
+        if combined_idata.capacity() < total_ibytes as usize {
+            combined_idata.reserve(total_ibytes as usize);
+        }
+
         for (bi, batch) in batches.iter().enumerate() {
             let shape = if !batch.vertices.is_empty() {
                 let transform_base = batch_transform_bases[bi];
                 let poly_base = batch_poly_base[bi] as f32;
-                let needs_clone = !batch.polygon_edges.is_empty() || transform_base > 0;
+                let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
 
-                let mut vdata_owned: Vec<Vertex>;
-                let vdata: &[u8] = if needs_clone {
-                    vdata_owned = batch.vertices.clone();
-                    // 应用 transform 全局偏移
+                let v_start = combined_vdata.len();
+                combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
+                if needs_patch {
+                    let verts: &mut [Vertex] =
+                        bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
                     if transform_base > 0 {
-                        for v in &mut vdata_owned {
+                        for v in verts.iter_mut() {
                             v.transform_index += transform_base;
                         }
                     }
-                    // 应用 polygon edge 全局偏移
                     if !batch.polygon_edges.is_empty() {
-                        for v in &mut vdata_owned {
+                        for v in verts.iter_mut() {
                             if v.sdf_type == 6 || v.sdf_type == 7 {
                                 v.sdf_params[0] += poly_base;
                             }
                         }
                     }
-                    bytemuck::cast_slice(&vdata_owned)
-                } else {
-                    bytemuck::cast_slice(&batch.vertices)
-                };
-                let idata: &[u8] = bytemuck::cast_slice(&batch.indices);
-
-                let total_vbytes = (vertex_count as usize * std::mem::size_of::<Vertex>()) as u64 + vdata.len() as u64;
-                self.ensure_vertex_buffer(total_vbytes);
-                {
-                    let vbuf = self.vertex_buf.borrow();
-                    self.gpu.queue.write_buffer(vbuf.as_ref().unwrap(), vertex_count as u64 * std::mem::size_of::<Vertex>() as u64, vdata);
                 }
-
-                let total_ibytes = ndx_accum as u64 * 4 + idata.len() as u64;
-                self.ensure_index_buffer(total_ibytes);
-                {
-                    let ibuf = self.index_buf.borrow();
-                    self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), ndx_accum as u64 * 4, idata);
-                }
+                combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
 
                 // 构建 texture segments（相对于 batch 的偏移量转为全局偏移量）
                 let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
@@ -292,12 +297,11 @@ impl Renderer {
                     v
                 };
 
-                // 若 batch 中任意顶点标记了 SDF 类型，强制走 SDF shader
-                let needs_sdf = batch.vertices.iter().any(|v| v.sdf_type > 0);
+                // has_sdf 在 push 时维护，避免每帧 O(V) 扫描
                 let info = ShapeInfo {
                     base_vertex: vertex_count as i32,
                     segments: segs,
-                    geometry: !needs_sdf && batch.sdf_feather.is_none(),
+                    geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                 };
                 vertex_count += batch.vertices.len() as u32;
                 ndx_accum += batch.indices.len() as u32;
@@ -309,6 +313,16 @@ impl Renderer {
             batch_infos.push(BatchInfo { shape, text: None });
         }
 
+        // ---- 合并上传：顶点+索引各一次 write_buffer ----
+        if !combined_vdata.is_empty() {
+            let vbuf = self.vertex_buf.borrow();
+            self.gpu.queue.write_buffer(vbuf.as_ref().unwrap(), 0, &combined_vdata);
+        }
+        if !combined_idata.is_empty() {
+            let ibuf = self.index_buf.borrow();
+            self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), 0, &combined_idata);
+        }
+
         // ---- 上传多边形边数据到 storage buffer ----
         let polygon_bind_group: Option<wgpu::BindGroup> = if !polygon_edges_global.is_empty() {
             let size = (polygon_edges_global.len() * 4) as u64;
@@ -318,15 +332,20 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&polygon_edges_global));
             }
-            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("polygon bind group"),
-                layout: &self.gpu.polygon_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.polygon_edge_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
-                }],
-            });
-            Some(bg)
+            // 复用缓存的 bind group，仅当 buffer 重建时重新创建
+            let mut cache = self.polygon_bind_group_cache.borrow_mut();
+            if cache.is_none() {
+                let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("polygon bind group"),
+                    layout: &self.gpu.polygon_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.polygon_edge_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
+                    }],
+                });
+                *cache = Some(bg);
+            }
+            cache.clone()
         } else {
             None
         };
@@ -362,15 +381,20 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&global_transforms));
             }
-            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("transform bind group"),
-                layout: &self.gpu.transform_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.transform_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
-                }],
-            });
-            Some(bg)
+            // 复用缓存的 bind group，仅当 buffer 重建时重新创建
+            let mut cache = self.transform_bind_group_cache.borrow_mut();
+            if cache.is_none() {
+                let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("transform bind group"),
+                    layout: &self.gpu.transform_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.transform_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
+                    }],
+                });
+                *cache = Some(bg);
+            }
+            cache.clone()
         } else {
             None
         };
@@ -496,6 +520,7 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             *self.polygon_edge_buf.borrow_mut() = Some((buf, new_cap));
+            *self.polygon_bind_group_cache.borrow_mut() = None;
         }
     }
 
@@ -517,6 +542,7 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             *self.transform_buf.borrow_mut() = Some((buf, new_cap));
+            *self.transform_bind_group_cache.borrow_mut() = None;
         }
     }
 }
@@ -555,15 +581,17 @@ impl Transform {
     }
 }
 
-/// 6 个 f32 bit pattern 的简单 hash（batch 内去重用）。
+/// 6 个 f32 bit pattern 的 hash（batch 内去重用）。
+/// 使用乘法混合降低对称碰撞（旧 XOR 旋转在对称矩阵上较易冲突）。
 fn transform_key(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u64 {
-    let bits = [
-        c0[0].to_bits() as u64, c0[1].to_bits() as u64,
-        c1[0].to_bits() as u64, c1[1].to_bits() as u64,
-        c2[0].to_bits() as u64, c2[1].to_bits() as u64,
-    ];
-    bits[0] ^ bits[1].rotate_left(13) ^ bits[2].rotate_left(27) ^ bits[3].rotate_left(41)
-        ^ bits[4].rotate_left(53) ^ bits[5].rotate_left(7)
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h = c0[0].to_bits() as u64;
+    h = h.wrapping_mul(K).wrapping_add(c0[1].to_bits() as u64);
+    h = h.wrapping_mul(K).wrapping_add(c1[0].to_bits() as u64);
+    h = h.wrapping_mul(K).wrapping_add(c1[1].to_bits() as u64);
+    h = h.wrapping_mul(K).wrapping_add(c2[0].to_bits() as u64);
+    h = h.wrapping_mul(K).wrapping_add(c2[1].to_bits() as u64);
+    h ^ (h >> 32)
 }
 
 /// 纹理坐标子区域，控制形状内部 UV 映射范围。
@@ -619,23 +647,29 @@ pub struct DrawBatch {
     /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
     pub(crate) transform_table: Vec<f32>,
     /// hash → local index 映射（batch 内去重）。
-    transform_map: HashMap<u64, u32>,
+    transform_map: FxHashMap<u64, u32>,
+    /// 是否含 SDF 顶点（避免 draw 时全表扫描）。
+    pub(crate) has_sdf: bool,
+    /// 当前 transform 的已注册 index 缓存；transform 变更时失效。
+    cached_transform_index: Option<u32>,
 }
 
 impl DrawBatch {
     pub fn new() -> Self {
         Self {
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            vertices: Vec::with_capacity(64),
+            indices: Vec::with_capacity(96),
             texts: TextEntryList::new(),
             texture: None,
-            texture_segments: Vec::new(),
+            texture_segments: Vec::with_capacity(2),
             transform: None,
             sdf_feather: None,
             uv: UvRect::default(),
-            polygon_edges: Vec::new(),
-            transform_table: Vec::new(),
-            transform_map: HashMap::new(),
+            polygon_edges: Vec::with_capacity(16),
+            transform_table: Vec::with_capacity(48),
+            transform_map: FxHashMap::default(),
+            has_sdf: false,
+            cached_transform_index: None,
         }
     }
 
@@ -651,6 +685,13 @@ impl DrawBatch {
         self.polygon_edges.clear();
         self.transform_table.clear();
         self.transform_map.clear();
+        self.has_sdf = false;
+        self.cached_transform_index = None;
+    }
+
+    #[inline]
+    fn invalidate_transform_cache(&mut self) {
+        self.cached_transform_index = None;
     }
 
     /// 设置平移（屏幕坐标）。
@@ -659,6 +700,7 @@ impl DrawBatch {
         t.x = x;
         t.y = y;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 设置旋转弧度（顺时针）。保留当前 scale，默认绕 (0,0)，用 `set_pivot` 指定旋转中心。
@@ -672,6 +714,7 @@ impl DrawBatch {
         t.c = old_sy * s;
         t.d = old_sy * c;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 设置旋转角度（度，顺时针）。等价于 `set_rad(deg.to_radians())`。
@@ -685,6 +728,7 @@ impl DrawBatch {
         t.px = px;
         t.py = py;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 设置缩放（1.0 = 原始大小）。保留当前旋转角度。
@@ -695,6 +739,7 @@ impl DrawBatch {
         if old_sx > 0.0 { let k = sx / old_sx; t.a *= k; t.b *= k; }
         if old_sy > 0.0 { let k = sy / old_sy; t.c *= k; t.d *= k; }
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 一次性设置完整变换（从分解参数构建矩阵）。
@@ -705,12 +750,14 @@ impl DrawBatch {
             c: sy * s, d: sy * c,
             x, y, px, py,
         });
+        self.invalidate_transform_cache();
     }
 
     /// 直接设置原始 3x3 仿射矩阵（6 个有效分量），pivot 归零。
     /// 矩阵列主序：`[a b tx; c d ty; 0 0 1]`。
     pub fn set_matrix(&mut self, a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) {
         self.transform = Some(Transform { a, b, c, d, x: tx, y: ty, px: 0.0, py: 0.0 });
+        self.invalidate_transform_cache();
     }
 
     /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。
@@ -726,6 +773,7 @@ impl DrawBatch {
     /// 清除变换，后续形状以原始坐标绘制。
     pub fn clear_transform(&mut self) {
         self.transform = None;
+        self.invalidate_transform_cache();
     }
 
     /// 叠加平移（世界空间），在当前变换基础上移动 (dx, dy)。
@@ -734,6 +782,7 @@ impl DrawBatch {
         t.x += dx;
         t.y += dy;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 叠加旋转（弧度，顺时针）。在当前变换基础上右乘 R(delta)，即绕局部原点旋转。
@@ -750,6 +799,7 @@ impl DrawBatch {
         t.c = c2;
         t.d = d;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 叠加旋转（度，顺时针）。等价于 `rotate_rad(deg.to_radians())`。
@@ -766,6 +816,7 @@ impl DrawBatch {
         t.c *= sx;
         t.d *= sy;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 叠加任意仿射矩阵（局部空间右乘），pivot 归零。
@@ -788,6 +839,7 @@ impl DrawBatch {
         t.px = 0.0;
         t.py = 0.0;
         self.transform = Some(t);
+        self.invalidate_transform_cache();
     }
 
     /// 获取当前变换矩阵列（无 transform 时返回恒等矩阵）。
@@ -804,7 +856,7 @@ impl DrawBatch {
         // col0.z=0, col1.z=0, col2.z=1 恒不变
         let key = transform_key(c0, c1, c2);
         let next_idx = (self.transform_table.len() / 12) as u32;
-        *self.transform_map.entry(key).or_insert_with(|| {
+        let idx = *self.transform_map.entry(key).or_insert_with(|| {
             // mat3x3 在 storage buffer 中每列 vec4-padded（16 字节对齐）
             self.transform_table.extend_from_slice(&[
                 c0[0], c0[1], 0.0, 0.0,  // col0 (a, c, 0, _pad)
@@ -812,13 +864,31 @@ impl DrawBatch {
                 c2[0], c2[1], 1.0, 0.0,  // col2 (tx, ty, 1, _pad)
             ]);
             next_idx
-        })
+        });
+        self.cached_transform_index = Some(idx);
+        idx
+    }
+
+    /// 当前 transform 的 local index（同一形状的多顶点应共用一次调用）。
+    /// 连续绘制且 transform 未变时命中缓存，跳过 hash。
+    pub(crate) fn current_transform_index(&mut self) -> u32 {
+        if let Some(idx) = self.cached_transform_index {
+            return idx;
+        }
+        let (c0, c1, c2) = self.current_matrix();
+        let idx = self.register_transform(c0, c1, c2);
+        self.cached_transform_index = Some(idx);
+        idx
+    }
+
+    /// 标记 batch 含 SDF 顶点（走 SDF pipeline）。
+    pub(crate) fn note_sdf(&mut self) {
+        self.has_sdf = true;
     }
 
     /// 添加单个顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
-        let (c0, c1, c2) = self.current_matrix();
-        let idx = self.register_transform(c0, c1, c2);
+        let idx = self.current_transform_index();
         let mut v = Vertex::new(x, y, color);
         v.transform_index = idx;
         self.vertices.push(v);
@@ -827,20 +897,19 @@ impl DrawBatch {
     /// 添加 SDF 顶点（自动应用当前 transform，索引查表）。
     /// 坐标和 SDF 参数应处于同一局部空间。
     pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
-        let (c0, c1, c2) = self.current_matrix();
-        let idx = self.register_transform(c0, c1, c2);
+        let idx = self.current_transform_index();
         let mut v = Vertex::new_uv(x, y, u, v, color);
         v.sdf_params = params;
         v.sdf_type = ty;
         v.sdf_feather = feather;
         v.transform_index = idx;
+        self.has_sdf = true;
         self.vertices.push(v);
     }
 
     /// 添加带 UV 的顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
-        let (c0, c1, c2) = self.current_matrix();
-        let idx = self.register_transform(c0, c1, c2);
+        let idx = self.current_transform_index();
         let mut v = Vertex::new_uv(x, y, u, v, color);
         v.transform_index = idx;
         self.vertices.push(v);
@@ -860,6 +929,8 @@ impl DrawBatch {
             polygon_edges: self.polygon_edges.clone(),
             transform_table: self.transform_table.clone(),
             transform_map: self.transform_map.clone(),
+            has_sdf: self.has_sdf,
+            cached_transform_index: self.cached_transform_index,
         }
     }
 
@@ -915,8 +986,88 @@ impl DrawBatch {
 
     /// 添加文字，自动捕获当前 transform。
     pub fn text(&mut self, text: &str, options: TextOptions) {
-        let (c0, c1, c2) = self.current_matrix();
-        let idx = self.register_transform(c0, c1, c2);
+        let idx = self.current_transform_index();
         self.texts.push_indexed(text, options, idx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::colors::*;
+    use crate::shapes::{draw_circle, draw_polygon, draw_rectangle};
+
+    #[test]
+    fn has_sdf_flag_set_on_sdf_shapes() {
+        let mut b = DrawBatch::new();
+        b.sdf_feather = Some(1.0);
+        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, RED);
+        assert!(b.has_sdf);
+        b.clear();
+        assert!(!b.has_sdf);
+        b.sdf_feather = None;
+        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, RED);
+        assert!(!b.has_sdf);
+    }
+
+    #[test]
+    fn transform_index_stable_across_same_transform() {
+        let mut b = DrawBatch::new();
+        b.sdf_feather = Some(1.0);
+        b.set_position(10.0, 20.0);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, RED);
+        draw_circle(&mut b, 0.0, 0.0, 3.0, BLUE);
+        let idxs: Vec<u32> = b.vertices.iter().map(|v| v.transform_index).collect();
+        assert!(idxs.iter().all(|&i| i == idxs[0]));
+        assert_eq!(b.transform_table.len() / 12, 1);
+    }
+
+    #[test]
+    fn transform_cache_invalidates_on_set_position() {
+        let mut b = DrawBatch::new();
+        b.sdf_feather = Some(1.0);
+        b.set_position(0.0, 0.0);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, RED);
+        b.set_position(100.0, 0.0);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, BLUE);
+        let i0 = b.vertices[0].transform_index;
+        let i1 = b.vertices[4].transform_index;
+        assert_ne!(i0, i1);
+        assert_eq!(b.transform_table.len() / 12, 2);
+    }
+
+    #[test]
+    fn multi_batch_poly_base_patch_values() {
+        // 模拟 Renderer 多 batch poly 偏移：第二 batch 的 type6 start 应加上第一 batch 边数
+        let mut b0 = DrawBatch::new();
+        b0.sdf_feather = Some(1.0);
+        let pts = [(0., 0.), (10., 0.), (5., 8.)];
+        draw_polygon(&mut b0, &pts, RED);
+        let edges0 = b0.polygon_edges.len() / 4;
+
+        let mut b1 = DrawBatch::new();
+        b1.sdf_feather = Some(1.0);
+        draw_polygon(&mut b1, &pts, BLUE);
+        let start_local = b1.vertices[0].sdf_params[0];
+        assert_eq!(start_local, 0.0);
+
+        let poly_base = edges0 as f32;
+        let mut patched = b1.vertices.clone();
+        for v in &mut patched {
+            if v.sdf_type == 6 || v.sdf_type == 7 {
+                v.sdf_params[0] += poly_base;
+            }
+        }
+        assert_eq!(patched[0].sdf_params[0], poly_base);
+    }
+
+    #[test]
+    fn transform_key_distinguishes_similar_matrices() {
+        let k1 = transform_key([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        let k2 = transform_key([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 1.0]);
+        let k3 = transform_key([2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]);
+        assert_ne!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_ne!(k2, k3);
     }
 }
