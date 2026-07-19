@@ -209,33 +209,26 @@ impl Renderer {
         let mut vertex_count: u32 = 0;
         let mut ndx_accum: u32 = 0;
 
-        // ---- 合并所有 batch 的 transform_table（复用 scratch）----
+        // ---- 单次扫描：合并 transform/poly + 统计顶点数（复用 scratch）----
         let mut global_transforms = self.scratch_transforms.borrow_mut();
         global_transforms.clear();
-        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(batches.len());
-        for batch in batches {
-            let base = (global_transforms.len() / 12) as u32;
-            batch_transform_bases.push(base);
-            global_transforms.extend_from_slice(&batch.transform_table);
-        }
-
-        // 计算多边形边的全局偏移量（每条边 4 个 f32 = 1 个 vec4）
         let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
         polygon_edges_global.clear();
+        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(batches.len());
         let mut batch_poly_base: Vec<u32> = Vec::with_capacity(batches.len());
-        {
-            let mut offset: u32 = 0;
-            for batch in batches {
-                batch_poly_base.push(offset);
-                let count = batch.polygon_edges.len() as u32 / 4;
-                offset += count;
-                polygon_edges_global.extend_from_slice(&batch.polygon_edges);
-            }
+        let mut total_vcount: u32 = 0;
+        let mut total_icount: u32 = 0;
+        let mut poly_offset: u32 = 0;
+        for batch in batches {
+            batch_transform_bases.push((global_transforms.len() / 12) as u32);
+            global_transforms.extend_from_slice(&batch.transform_table);
+            batch_poly_base.push(poly_offset);
+            poly_offset += batch.polygon_edges.len() as u32 / 4;
+            polygon_edges_global.extend_from_slice(&batch.polygon_edges);
+            total_vcount += batch.vertices.len() as u32;
+            total_icount += batch.indices.len() as u32;
         }
 
-        // ---- 预计算总顶点/索引大小，复用 CPU 暂存 ----
-        let total_vcount: u32 = batches.iter().map(|b| b.vertices.len() as u32).sum();
-        let total_icount: u32 = batches.iter().map(|b| b.indices.len() as u32).sum();
         let total_vbytes = total_vcount as u64 * std::mem::size_of::<Vertex>() as u64;
         let total_ibytes = total_icount as u64 * 4;
         self.ensure_vertex_buffer(total_vbytes);
@@ -260,18 +253,15 @@ impl Renderer {
                 let v_start = combined_vdata.len();
                 combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
                 if needs_patch {
+                    let has_poly = !batch.polygon_edges.is_empty();
                     let verts: &mut [Vertex] =
                         bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
-                    if transform_base > 0 {
-                        for v in verts.iter_mut() {
+                    for v in verts.iter_mut() {
+                        if transform_base > 0 {
                             v.transform_index += transform_base;
                         }
-                    }
-                    if !batch.polygon_edges.is_empty() {
-                        for v in verts.iter_mut() {
-                            if v.sdf_type == 6 || v.sdf_type == 7 {
-                                v.sdf_params[0] += poly_base;
-                            }
+                        if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
+                            v.sdf_params[0] += poly_base;
                         }
                     }
                 }
@@ -421,16 +411,30 @@ impl Renderer {
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
             let text_ctx = self.gpu.text_ctx.borrow();
+            let poly_bg = polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group);
+            let xform_bg = transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group);
+            // glyphon render_range 会改 pass 状态；文本后或 geometry 切换时需重绑
+            let mut shapes_bound = false;
+            let mut last_geometry: Option<bool> = None;
 
             for info in &batch_infos {
-                // 先画本 batch 的形状（重新设置 pipeline——glyphon 的 render_range 会改状态）
                 if let Some(ref shape) = info.shape {
-                    pass.set_pipeline(&self.gpu.ensure_pipeline(self.sample_count, self.alpha_to_coverage, self.ssaa, shape.geometry));
-                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    pass.set_bind_group(2, polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group), &[]);
-                    pass.set_bind_group(3, transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group), &[]);
-                    pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
-                    pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
+                    let need_rebind = !shapes_bound || last_geometry != Some(shape.geometry);
+                    if need_rebind {
+                        pass.set_pipeline(&self.gpu.ensure_pipeline(
+                            self.sample_count,
+                            self.alpha_to_coverage,
+                            self.ssaa,
+                            shape.geometry,
+                        ));
+                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        pass.set_bind_group(2, poly_bg, &[]);
+                        pass.set_bind_group(3, xform_bg, &[]);
+                        pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
+                        pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
+                        shapes_bound = true;
+                        last_geometry = Some(shape.geometry);
+                    }
                     for seg in &shape.segments {
                         pass.set_bind_group(1, &seg.bind_group, &[]);
                         pass.draw_indexed(
@@ -441,16 +445,18 @@ impl Renderer {
                     }
                 }
 
-                // 再画本 batch 的文本（glyphon 有自己的 pipeline/bind groups）
                 if let Some((start, count)) = info.text {
                     let _ = text_ctx.text_renderer.render_range(
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
                         &mut pass,
-                        transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group),
+                        xform_bg,
                         start,
                         count,
                     );
+                    // 文字管线污染 pass，下一 shape 必须重绑
+                    shapes_bound = false;
+                    last_geometry = None;
                 }
             }
         }
@@ -460,90 +466,64 @@ impl Renderer {
 
     fn ensure_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let needs_create = {
-            let buf = self.vertex_buf.borrow();
-            buf.is_none() || *self.vertex_cap.borrow() < size
-        };
-        if needs_create {
-            let new_cap = match &*self.vertex_buf.borrow() {
-                None => size.next_power_of_two(),
-                Some(_) => (*self.vertex_cap.borrow() * 2).max(size),
-            };
-            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("vertex buffer"),
-                size: new_cap,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            *self.vertex_buf.borrow_mut() = Some(buf);
-            *self.vertex_cap.borrow_mut() = new_cap;
-        }
+        let mut cap = self.vertex_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vertex buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.vertex_buf.borrow_mut() = Some(buf);
+        *cap = new_cap;
     }
 
     fn ensure_index_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let needs_create = {
-            let buf = self.index_buf.borrow();
-            buf.is_none() || *self.index_cap.borrow() < size
-        };
-        if needs_create {
-            let new_cap = match &*self.index_buf.borrow() {
-                None => size.next_power_of_two(),
-                Some(_) => (*self.index_cap.borrow() * 2).max(size),
-            };
-            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("index buffer"),
-                size: new_cap,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            *self.index_buf.borrow_mut() = Some(buf);
-            *self.index_cap.borrow_mut() = new_cap;
-        }
+        let mut cap = self.index_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("index buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.index_buf.borrow_mut() = Some(buf);
+        *cap = new_cap;
     }
 
     fn ensure_polygon_edge_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let needs_create = {
-            let buf = self.polygon_edge_buf.borrow();
-            buf.is_none() || buf.as_ref().unwrap().1 < size
-        };
-        if needs_create {
-            let new_cap = match &*self.polygon_edge_buf.borrow() {
-                None => size.next_power_of_two().max(64),
-                Some(_) => (self.polygon_edge_buf.borrow().as_ref().unwrap().1 * 2).max(size),
-            };
-            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("polygon edge buffer"),
-                size: new_cap,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            *self.polygon_edge_buf.borrow_mut() = Some((buf, new_cap));
-            *self.polygon_bind_group_cache.borrow_mut() = None;
-        }
+        let mut slot = self.polygon_edge_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two().max(64) } else { (cur * 2).max(size) };
+        let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("polygon edge buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *slot = Some((buf, new_cap));
+        *self.polygon_bind_group_cache.borrow_mut() = None;
     }
 
     fn ensure_transform_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let needs_create = {
-            let buf = self.transform_buf.borrow();
-            buf.is_none() || buf.as_ref().unwrap().1 < size
-        };
-        if needs_create {
-            let new_cap = match &*self.transform_buf.borrow() {
-                None => size.next_power_of_two().max(48),
-                Some(_) => (self.transform_buf.borrow().as_ref().unwrap().1 * 2).max(size),
-            };
-            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("transform buffer"),
-                size: new_cap,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            *self.transform_buf.borrow_mut() = Some((buf, new_cap));
-            *self.transform_bind_group_cache.borrow_mut() = None;
-        }
+        let mut slot = self.transform_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two().max(48) } else { (cur * 2).max(size) };
+        let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("transform buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *slot = Some((buf, new_cap));
+        *self.transform_bind_group_cache.borrow_mut() = None;
     }
 }
 
@@ -889,30 +869,25 @@ impl DrawBatch {
     /// 添加单个顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
         let idx = self.current_transform_index();
-        let mut v = Vertex::new(x, y, color);
-        v.transform_index = idx;
-        self.vertices.push(v);
+        self.vertices.push(Vertex::new_uv_xform(x, y, 0.0, 0.0, color, idx));
     }
 
     /// 添加 SDF 顶点（自动应用当前 transform，索引查表）。
     /// 坐标和 SDF 参数应处于同一局部空间。
     pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
         let idx = self.current_transform_index();
-        let mut v = Vertex::new_uv(x, y, u, v, color);
-        v.sdf_params = params;
-        v.sdf_type = ty;
-        v.sdf_feather = feather;
-        v.transform_index = idx;
+        let mut vert = Vertex::new_uv_xform(x, y, u, v, color, idx);
+        vert.sdf_params = params;
+        vert.sdf_type = ty;
+        vert.sdf_feather = feather;
         self.has_sdf = true;
-        self.vertices.push(v);
+        self.vertices.push(vert);
     }
 
     /// 添加带 UV 的顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
         let idx = self.current_transform_index();
-        let mut v = Vertex::new_uv(x, y, u, v, color);
-        v.transform_index = idx;
-        self.vertices.push(v);
+        self.vertices.push(Vertex::new_uv_xform(x, y, u, v, color, idx));
     }
 
     /// 克隆 batch（vertices、indices、texts 完全复制，rasterizer 清空）
@@ -1069,5 +1044,35 @@ mod tests {
         assert_ne!(k1, k2);
         assert_ne!(k1, k3);
         assert_ne!(k2, k3);
+    }
+
+    #[test]
+    fn clear_preserves_vertex_capacity() {
+        let mut b = DrawBatch::new();
+        b.sdf_feather = Some(1.0);
+        for i in 0..32 {
+            b.set_position(i as f32, 0.0);
+            draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, RED);
+        }
+        let cap_v = b.vertices.capacity();
+        let cap_i = b.indices.capacity();
+        b.clear();
+        assert!(b.vertices.capacity() >= cap_v);
+        assert!(b.indices.capacity() >= cap_i);
+        assert!(b.vertices.is_empty());
+        assert!(!b.has_sdf);
+    }
+
+    #[test]
+    fn translate_and_draw_share_cached_index() {
+        let mut b = DrawBatch::new();
+        b.sdf_feather = Some(1.0);
+        b.set_position(1.0, 2.0);
+        let i0 = b.current_transform_index();
+        let i1 = b.current_transform_index();
+        assert_eq!(i0, i1);
+        b.translate(3.0, 4.0);
+        let i2 = b.current_transform_index();
+        assert_ne!(i0, i2);
     }
 }

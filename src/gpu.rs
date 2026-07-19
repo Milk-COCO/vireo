@@ -1,9 +1,9 @@
 //! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
 
 use crate::glyphon::ColorMode;
@@ -26,7 +26,7 @@ pub struct GpuContext {
     pub transform_dummy_bind_group: wgpu::BindGroup,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
-    pipelines: RefCell<HashMap<u32, wgpu::RenderPipeline>>,
+    pipelines: RefCell<FxHashMap<u32, wgpu::RenderPipeline>>,
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
@@ -296,7 +296,7 @@ impl GpuContext {
 
         let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode, &transform_bind_group_layout));
 
-        let mut pipelines = HashMap::new();
+        let mut pipelines = FxHashMap::default();
         pipelines.insert(1, render_pipeline.clone());
 
         Self {
@@ -468,6 +468,20 @@ impl Vertex {
             sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
             sdf_extra: [0.0; 2],
             transform_index: 0,
+        }
+    }
+
+    /// 带 transform 索引的 UV 顶点（热路径，避免二次赋值）。
+    #[inline]
+    pub fn new_uv_xform(
+        x: f32, y: f32, u: f32, v: f32,
+        color: crate::color::Color, transform_index: u32,
+    ) -> Self {
+        Self {
+            position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            sdf_extra: [0.0; 2],
+            transform_index,
         }
     }
 

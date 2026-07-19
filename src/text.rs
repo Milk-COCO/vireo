@@ -199,7 +199,7 @@ pub struct TextEntryList {
 
 impl TextEntryList {
     pub fn new() -> Self {
-        Self { entries: vec![] }
+        Self { entries: Vec::with_capacity(8) }
     }
 
     pub fn clear(&mut self) {
@@ -258,7 +258,8 @@ impl TextEntryList {
             },
         );
 
-        let mut buffers: Vec<Buffer> = vec![];
+        let n = self.entries.len();
+        let mut buffers: Vec<Buffer> = Vec::with_capacity(n);
 
         for entry in &self.entries {
             let line_height = entry.options.font_size * 1.2;
@@ -280,60 +281,53 @@ impl TextEntryList {
             buffers.push(buffer);
         }
 
-        let areas: Vec<TextArea> = buffers
-            .iter()
-            .enumerate()
-            .map(|(i, buf)| {
-                let entry = &self.entries[i];
-                let color = crate::glyphon::Color::rgba(
-                    (entry.options.color.r * 255.0) as u8,
-                    (entry.options.color.g * 255.0) as u8,
-                    (entry.options.color.b * 255.0) as u8,
-                    (entry.options.color.a * 255.0) as u8,
-                );
-                let bounds = match entry.options.clip {
-                    Some((l, t, r, b)) => TextBounds { left: l, top: t, right: r, bottom: b },
-                    None => TextBounds::default(),
-                };
-                // 逻辑空间 → 物理空间：平移分量乘 scale
-                let phys_idx = {
-                    let base = entry.transform_index as usize * 12;
-                    if base + 12 <= transform_table.len() {
-                        let t = &transform_table[base..base + 12];
-                        // 实际检查是否为恒等矩阵
-                        let is_identity = t[0] == 1.0 && t[1] == 0.0
-                            && t[4] == 0.0 && t[5] == 1.0
-                            && t[8] == 0.0 && t[9] == 0.0;
-                        if is_identity {
-                            0
-                        } else {
-                            let idx = (global_transforms.len() / 12) as u32;
-                            // col0: (a, c, 0, _pad) — 不变
-                            // col1: (b, d, 0, _pad) — 不变
-                            // col2: (tx*s, ty*s, 1, _pad) — 平移 × scale
-                            global_transforms.extend_from_slice(&[
-                                t[0], t[1], 0.0, 0.0,
-                                t[4], t[5], 0.0, 0.0,
-                                t[8] * scale, t[9] * scale, 1.0, 0.0,
-                            ]);
-                            idx
-                        }
-                    } else {
+        let mut areas: Vec<TextArea> = Vec::with_capacity(n);
+        for (i, buf) in buffers.iter().enumerate() {
+            let entry = &self.entries[i];
+            let color = crate::glyphon::Color::rgba(
+                (entry.options.color.r * 255.0) as u8,
+                (entry.options.color.g * 255.0) as u8,
+                (entry.options.color.b * 255.0) as u8,
+                (entry.options.color.a * 255.0) as u8,
+            );
+            let bounds = match entry.options.clip {
+                Some((l, t, r, b)) => TextBounds { left: l, top: t, right: r, bottom: b },
+                None => TextBounds::default(),
+            };
+            // 逻辑空间 → 物理空间：平移分量乘 scale
+            let phys_idx = {
+                let base = entry.transform_index as usize * 12;
+                if base + 12 <= transform_table.len() {
+                    let t = &transform_table[base..base + 12];
+                    let is_identity = t[0] == 1.0 && t[1] == 0.0
+                        && t[4] == 0.0 && t[5] == 1.0
+                        && t[8] == 0.0 && t[9] == 0.0;
+                    if is_identity {
                         0
+                    } else {
+                        let idx = (global_transforms.len() / 12) as u32;
+                        global_transforms.extend_from_slice(&[
+                            t[0], t[1], 0.0, 0.0,
+                            t[4], t[5], 0.0, 0.0,
+                            t[8] * scale, t[9] * scale, 1.0, 0.0,
+                        ]);
+                        idx
                     }
-                };
-                TextArea {
-                    buffer: buf,
-                    left: entry.options.x * scale,
-                    top: entry.options.y * scale,
-                    scale,
-                    bounds,
-                    default_color: color,
-                    custom_glyphs: &[],
-                    transform_index: phys_idx,
+                } else {
+                    0
                 }
-            })
-            .collect();
+            };
+            areas.push(TextArea {
+                buffer: buf,
+                left: entry.options.x * scale,
+                top: entry.options.y * scale,
+                scale,
+                bounds,
+                default_color: color,
+                custom_glyphs: &[],
+                transform_index: phys_idx,
+            });
+        }
 
         let vertex_start;
         let vertex_count;

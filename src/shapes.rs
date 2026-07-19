@@ -48,7 +48,7 @@ pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, col
             let x2 = x + w; let y2 = y + h;
             let uv = batch.uv;
             for (px, py, u, v) in &[(x, y, uv.u0, uv.v0), (x2, y, uv.u1, uv.v0), (x2, y2, uv.u1, uv.v1), (x, y2, uv.u0, uv.v1)] {
-                batch.vertices.push(Vertex::new_uv(*px, *py, *u, *v, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(*px, *py, *u, *v, color, idx));
             }
             batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -63,17 +63,19 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
         None => {
             let n = ((r * std::f32::consts::TAU) as u32).clamp(32, 256);
             let idx = batch.current_transform_index();
+            batch.vertices.reserve(n as usize + 2);
+            batch.indices.reserve(n as usize * 3);
             let bounds = (cx - r, cy - r, cx + r, cy + r);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
             let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv(cx, cy, cu, cv, color).with_transform_index(idx));
+            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
             for i in 0..=n {
                 let a = (i as f32 / n as f32) * std::f32::consts::TAU;
                 let px = cx + r * a.cos();
                 let py = cy + r * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                batch.vertices.push(Vertex::new_uv(px, py, u, v, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
             for i in 0..n {
                 batch.indices.extend_from_slice(&[base, base + 1 + i, base + 1 + i + 1]);
@@ -88,8 +90,7 @@ pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let px = cx + dx * r; let py = cy + dy * r;
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [cx, cy, r, r];
                 vx.sdf_type = 1; vx.sdf_feather = f;
                 batch.vertices.push(vx);
@@ -126,8 +127,7 @@ pub fn draw_line(
             let uv = &batch.uv;
             for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
                 let (u, v) = shape_uv(uv, *cx, *cy, bounds);
-                let mut vx = Vertex::new_uv(*cx, *cy, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(*cx, *cy, u, v, color, idx);
                 vx.sdf_params = [x1, y1, x2, y2];
                 vx.sdf_extra = [h, 0.0];
                 vx.sdf_type = 3; vx.sdf_feather = f;
@@ -147,17 +147,19 @@ pub fn draw_ellipse(
         None => {
             let n = ((rx.max(ry) * std::f32::consts::TAU) as u32).clamp(32, 256);
             let idx = batch.current_transform_index();
+            batch.vertices.reserve(n as usize + 2);
+            batch.indices.reserve(n as usize * 3);
             let bounds = (cx - rx, cy - ry, cx + rx, cy + ry);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
             let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv(cx, cy, cu, cv, color).with_transform_index(idx));
+            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
             for i in 0..=n {
                 let a = (i as f32 / n as f32) * std::f32::consts::TAU;
                 let px = cx + rx * a.cos();
                 let py = cy + ry * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                batch.vertices.push(Vertex::new_uv(px, py, u, v, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
             for i in 0..n {
                 batch.indices.extend_from_slice(&[base, base + 1 + i, base + 1 + i + 1]);
@@ -172,8 +174,7 @@ pub fn draw_ellipse(
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let px = cx + dx * rx; let py = cy + dy * ry;
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [cx, cy, rx, ry];
                 vx.sdf_type = 1; vx.sdf_feather = f;
                 batch.vertices.push(vx);
@@ -197,6 +198,10 @@ pub fn draw_rounded_rect(
         None => {
             let idx = batch.current_transform_index();
             let cs = ((r * std::f32::consts::FRAC_PI_2) as u32).clamp(8, 64);
+            // 中心四边形 + 4 边矩形 + 4 角扇区 (1+cs+1 顶点/角)
+            let est_v = 4 + 4 * 4 + 4 * (cs as usize + 2);
+            batch.vertices.reserve(est_v);
+            batch.indices.reserve(est_v * 3);
             let bounds = (x, y, x + w, y + h);
             let uv = &batch.uv;
             let xr = x + r;
@@ -210,10 +215,10 @@ pub fn draw_rounded_rect(
                 let (u1, v1) = shape_uv(uv, x2, yr, bounds);
                 let (u2, v2) = shape_uv(uv, x2, y2, bounds);
                 let (u3, v3) = shape_uv(uv, xr, y2, bounds);
-                batch.vertices.push(Vertex::new_uv(xr, yr, u0, v0, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(x2, yr, u1, v1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(x2, y2, u2, v2, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(xr, y2, u3, v3, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(xr, yr, u0, v0, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(x2, yr, u1, v1, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(x2, y2, u2, v2, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(xr, y2, u3, v3, color, idx));
                 batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
 
@@ -230,10 +235,10 @@ pub fn draw_rounded_rect(
                 let (u1, v1) = shape_uv(uv, ex2, ey, bounds);
                 let (u2, v2) = shape_uv(uv, ex2, ey2, bounds);
                 let (u3, v3) = shape_uv(uv, ex, ey2, bounds);
-                batch.vertices.push(Vertex::new_uv(ex, ey, u0, v0, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex2, ey, u1, v1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex2, ey2, u2, v2, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(ex, ey2, u3, v3, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(ex, ey, u0, v0, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(ex2, ey, u1, v1, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(ex2, ey2, u2, v2, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(ex, ey2, u3, v3, color, idx));
                 batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
 
@@ -248,13 +253,13 @@ pub fn draw_rounded_rect(
             ] {
                 let base = batch.vertices.len() as u32;
                 let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-                batch.vertices.push(Vertex::new_uv(cx, cy, cu, cv, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
                 for i in 0..=cs {
                     let a = sa + (i as f32 / cs as f32) * (ea - sa);
                     let px = cx + r * a.cos();
                     let py = cy + r * a.sin();
                     let (u, v) = shape_uv(uv, px, py, bounds);
-                    batch.vertices.push(Vertex::new_uv(px, py, u, v, color).with_transform_index(idx));
+                    batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
                 }
                 for i in 0..cs {
                     batch.indices.extend_from_slice(&[base, base + 1 + i, base + 1 + i + 1]);
@@ -274,8 +279,7 @@ pub fn draw_rounded_rect(
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let px = cx + dx * (hw + f); let py = cy + dy * (hh + f);
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [cx, cy, hw, hh];
                 vx.sdf_extra = [r, 0.0];
                 vx.sdf_type = 2; vx.sdf_feather = f;
@@ -300,9 +304,9 @@ pub fn draw_triangle(
             let (u1, v1) = shape_uv(uv, x1, y1, bounds);
             let (u2, v2) = shape_uv(uv, x2, y2, bounds);
             let (u3, v3) = shape_uv(uv, x3, y3, bounds);
-            batch.vertices.push(Vertex::new_uv(x1, y1, u1, v1, color).with_transform_index(idx));
-            batch.vertices.push(Vertex::new_uv(x2, y2, u2, v2, color).with_transform_index(idx));
-            batch.vertices.push(Vertex::new_uv(x3, y3, u3, v3, color).with_transform_index(idx));
+            batch.vertices.push(Vertex::new_uv_xform(x1, y1, u1, v1, color, idx));
+            batch.vertices.push(Vertex::new_uv_xform(x2, y2, u2, v2, color, idx));
+            batch.vertices.push(Vertex::new_uv_xform(x3, y3, u3, v3, color, idx));
             batch.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
         Some(f) => {
@@ -316,8 +320,7 @@ pub fn draw_triangle(
             let uv = &batch.uv;
             for (cx, cy) in &[(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)] {
                 let (u, v) = shape_uv(uv, *cx, *cy, bounds);
-                let mut vx = Vertex::new_uv(*cx, *cy, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(*cx, *cy, u, v, color, idx);
                 vx.sdf_params = [x1, y1, x2, y2];
                 vx.sdf_extra = [x3, y3];
                 vx.sdf_type = 4; vx.sdf_feather = f;
@@ -348,7 +351,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
             let uv = &batch.uv;
             for (px, py) in points {
                 let (u, v) = shape_uv(uv, *px, *py, bounds);
-                batch.vertices.push(Vertex::new_uv(*px, *py, u, v, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(*px, *py, u, v, color, idx));
             }
             for i in 1..(n as u32 - 1) {
                 batch.indices.extend_from_slice(&[base, base + i, base + i + 1]);
@@ -392,8 +395,7 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) 
                 let px = if *dx < 0.0 { min_x - f } else { max_x + f };
                 let py = if *dy < 0.0 { min_y - f } else { max_y + f };
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [start_f, count_f, 0.0, 0.0];
                 vx.sdf_type = 6; vx.sdf_feather = f;
                 batch.vertices.push(vx);
@@ -419,13 +421,13 @@ pub fn draw_arc(
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
             let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv(cx, cy, cu, cv, color).with_transform_index(idx));
+            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
             for i in 0..=n {
                 let a = start_angle + (i as f32 / n as f32) * (end_angle - start_angle);
                 let px = cx + r * a.cos();
                 let py = cy + r * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                batch.vertices.push(Vertex::new_uv(px, py, u, v, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
             for i in 0..n {
                 batch.indices.extend_from_slice(&[base, base + 1 + i, base + 1 + i + 1]);
@@ -441,8 +443,7 @@ pub fn draw_arc(
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let px = cx + dx * ext; let py = cy + dy * ext;
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [cx, cy, r, 0.0];
                 vx.sdf_extra = [start_angle, end_angle];
                 vx.sdf_type = 5; vx.sdf_feather = f;
@@ -513,7 +514,8 @@ pub fn draw_rounded_rect_outline(
     let cr = (r - half).max(0.0);
     let cs = corner_segments.max(2);
 
-    let mut pts: Vec<(f32, f32)> = Vec::new();
+    let cs_usize = cs as usize;
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(4 * (cs_usize + 1) + 1);
     let two_pi = 2.0 * PI;
     let corners: [(f32, f32, f32, f32); 4] = [
         (x + r,     y + r,     PI,        PI * 1.5),
@@ -584,10 +586,10 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
                 let u1 = shape_uv(uv, p1.0, p1.1, bounds);
                 let u2 = shape_uv(uv, p2.0, p2.1, bounds);
                 let u3 = shape_uv(uv, p3.0, p3.1, bounds);
-                batch.vertices.push(Vertex::new_uv(p0.0, p0.1, u0.0, u0.1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(p1.0, p1.1, u1.0, u1.1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(p2.0, p2.1, u2.0, u2.1, color).with_transform_index(idx));
-                batch.vertices.push(Vertex::new_uv(p3.0, p3.1, u3.0, u3.1, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(p0.0, p0.1, u0.0, u0.1, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(p1.0, p1.1, u1.0, u1.1, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(p2.0, p2.1, u2.0, u2.1, color, idx));
+                batch.vertices.push(Vertex::new_uv_xform(p3.0, p3.1, u3.0, u3.1, color, idx));
                 batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
 
@@ -612,7 +614,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
                 };
                 let base = batch.vertices.len() as u32;
                 let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-                batch.vertices.push(Vertex::new_uv(cx, cy, cu, cv, color).with_transform_index(idx));
+                batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
                 let span = ea - sa;
                 let abs_span = span.abs();
                 let m = ((join_n as f32 * abs_span / std::f32::consts::TAU) as u32).max(2);
@@ -621,7 +623,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
                     let px = cx + h * a.cos();
                     let py = cy + h * a.sin();
                     let (u, v) = shape_uv(uv, px, py, bounds);
-                    batch.vertices.push(Vertex::new_uv(px, py, u, v, color).with_transform_index(idx));
+                    batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
                 }
                 for k in 0..m {
                     batch.indices.extend_from_slice(&[base, base + 1 + k, base + 1 + k + 1]);
@@ -662,8 +664,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
                 let px = if *dx < 0.0 { min_x - pad } else { max_x + pad };
                 let py = if *dy < 0.0 { min_y - pad } else { max_y + pad };
                 let (u, v) = shape_uv(uv, px, py, bounds);
-                let mut vx = Vertex::new_uv(px, py, u, v, color)
-                    .with_transform_index(idx);
+                let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
                 vx.sdf_params = [start_f, count_f, h, 0.0];
                 vx.sdf_type = 7; vx.sdf_feather = f;
                 batch.vertices.push(vx);
@@ -688,7 +689,8 @@ pub fn draw_polygon_outline(batch: &mut DrawBatch, points: &[(f32, f32)], thickn
     if points.len() < 3 {
         return;
     }
-    let mut closed: Vec<(f32, f32)> = points.to_vec();
+    let mut closed: Vec<(f32, f32)> = Vec::with_capacity(points.len() + 1);
+    closed.extend_from_slice(points);
     closed.push(points[0]);
     draw_line_chain(batch, &closed, thickness, color);
 }
@@ -711,7 +713,9 @@ pub fn draw_arc_outline(
     let ex = cx + r * end_angle.cos();
     let ey = cy + r * end_angle.sin();
 
-    let mut points = vec![(cx, cy), (sx, sy)];
+    let mut points: Vec<(f32, f32)> = Vec::with_capacity(segments as usize + 3);
+    points.push((cx, cy));
+    points.push((sx, sy));
     for i in 1..segments {
         let t = i as f32 / segments as f32;
         let angle = start_angle + t * (end_angle - start_angle);
