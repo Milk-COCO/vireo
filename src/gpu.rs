@@ -416,6 +416,50 @@ impl GpuContext {
     pub fn load_font(&self, data: &[u8]) {
         self.text_ctx.borrow_mut().font_system.db_mut().load_font_data(data.to_vec());
     }
+
+    /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
+    /// - `Some(d)`：超过 d 未使用则过期
+    /// - `None`：永不按时间自动回收
+    pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
+        self.text_ctx.borrow_mut().set_shape_cache_ttl(ttl);
+    }
+
+    /// 当前 shape 缓存 TTL（`None` = 不自动按时间回收）。
+    pub fn shape_cache_ttl(&self) -> Option<std::time::Duration> {
+        self.text_ctx.borrow().shape_cache_ttl()
+    }
+
+    /// 设置 shape 缓存最大条数。
+    /// - `Some(n)`：最多 n 条不同文案键，满则 LRU
+    /// - `None`：不限制条数
+    pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
+        self.text_ctx.borrow_mut().set_shape_cache_max_entries(max);
+    }
+
+    /// 当前 shape 缓存最大条数（`None` = 不限制）。
+    pub fn shape_cache_max_entries(&self) -> Option<usize> {
+        self.text_ctx.borrow().shape_cache_max_entries()
+    }
+
+    /// 立即清空文字 shape 缓存。
+    pub fn clear_shape_cache(&self) {
+        self.text_ctx.borrow_mut().clear_shape_cache();
+    }
+
+    /// 当前 shape 缓存条目数。
+    pub fn shape_cache_len(&self) -> usize {
+        self.text_ctx.borrow().shape_cache_len()
+    }
+
+    /// shape 缓存命中统计。
+    pub fn shape_cache_stats(&self) -> crate::text::ShapeCacheStats {
+        self.text_ctx.borrow().shape_cache_stats()
+    }
+
+    /// 重置 shape 缓存命中统计。
+    pub fn reset_shape_cache_stats(&self) {
+        self.text_ctx.borrow_mut().reset_shape_cache_stats();
+    }
 }
 
 /// 2D 顶点（68 字节）。

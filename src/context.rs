@@ -347,6 +347,7 @@ impl Renderer {
         if clear_color.is_some() {
             let mut text_ctx = self.gpu.text_ctx.borrow_mut();
             text_ctx.text_renderer.clear();
+            text_ctx.advance_frame();
         }
         for (i, batch) in batches.iter().enumerate() {
             if !batch.texts.entries.is_empty() {

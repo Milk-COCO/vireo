@@ -7,10 +7,11 @@ const SCENES: &[(&str, fn(&mut DrawBatch))] = &[
     ("1: SDF feather shapes x2000", scene_sdf_shapes),
     ("2: Geometry shapes x500", scene_geo_shapes),
     ("3: Mixed SDF+Geo x1000", scene_mixed),
-    ("4: Text entries x200", scene_text),
+    ("4: Text dynamic x200", scene_text_dynamic),
     ("5: Unique transforms x1000", scene_transforms),
     ("6: Polygons x200", scene_polygons),
-    ("7: Full load x3000", scene_full),
+    ("7: Full load (dyn text)", scene_full),
+    ("8: Text static x200", scene_text_static),
 ];
 
 fn main() {
@@ -37,6 +38,7 @@ fn main() {
         else if win.key_down(KeyCode::Digit5) { Some(4) }
         else if win.key_down(KeyCode::Digit6) { Some(5) }
         else if win.key_down(KeyCode::Digit7) { Some(6) }
+        else if win.key_down(KeyCode::Digit8) { Some(7) }
         else { None };
 
         if let Some(s) = next {
@@ -92,7 +94,7 @@ fn main() {
         // 场景切换提示
         draw_text(
             &mut batch.texts,
-            "Press 1-7 to switch scene",
+            "Press 1-8 to switch scene",
             TextOptions::default()
                 .x(12.0).y(670.0)
                 .font_size(12.0)
@@ -165,8 +167,8 @@ fn scene_mixed(b: &mut DrawBatch) {
     }
 }
 
-/// 文本条目 ×200
-fn scene_text(b: &mut DrawBatch) {
+/// 文本 ×200：每帧 format 新字符串（shape 缓存几乎全 miss）
+fn scene_text_dynamic(b: &mut DrawBatch) {
     for i in 0..200 {
         let x = (i % 20) as f32 * 44.0 + 5.0;
         let y = (i / 20) as f32 * 28.0 + 5.0;
@@ -182,6 +184,25 @@ fn scene_text(b: &mut DrawBatch) {
         draw_text(
             &mut b.texts,
             &msg,
+            TextOptions::default()
+                .x(x).y(y)
+                .font_size(sz)
+                .color(WHITE),
+        );
+    }
+}
+
+/// 文本 ×200：固定字符串（测 shape 缓存命中）
+fn scene_text_static(b: &mut DrawBatch) {
+    const LABELS: &[&str] = &["ABC", "你好", "Test 测试", "Vireo", "wgpu 🎨", "SDF #"];
+    for i in 0..200 {
+        let x = (i % 20) as f32 * 44.0 + 5.0;
+        let y = (i / 20) as f32 * 28.0 + 5.0;
+        let msg = LABELS[i % LABELS.len()];
+        let sz = 12.0 + (i % 5) as f32 * 2.0;
+        draw_text(
+            &mut b.texts,
+            msg,
             TextOptions::default()
                 .x(x).y(y)
                 .font_size(sz)
@@ -225,9 +246,9 @@ fn scene_polygons(b: &mut DrawBatch) {
     }
 }
 
-/// 综合全负载 ×3000
+/// 综合全负载（含动态文字）
 fn scene_full(b: &mut DrawBatch) {
     scene_sdf_shapes(b);
     scene_transforms(b);
-    scene_text(b);
+    scene_text_dynamic(b);
 }
