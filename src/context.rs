@@ -707,6 +707,12 @@ impl DrawBatch {
         });
     }
 
+    /// 直接设置原始 3x3 仿射矩阵（6 个有效分量），pivot 归零。
+    /// 矩阵列主序：`[a b tx; c d ty; 0 0 1]`。
+    pub fn set_matrix(&mut self, a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) {
+        self.transform = Some(Transform { a, b, c, d, x: tx, y: ty, px: 0.0, py: 0.0 });
+    }
+
     /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。
     pub fn orbit_transform(
         &mut self, cx: f32, cy: f32, orbit_radius: f32, orbit_angle: f32,
@@ -720,6 +726,68 @@ impl DrawBatch {
     /// 清除变换，后续形状以原始坐标绘制。
     pub fn clear_transform(&mut self) {
         self.transform = None;
+    }
+
+    /// 叠加平移（世界空间），在当前变换基础上移动 (dx, dy)。
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        t.x += dx;
+        t.y += dy;
+        self.transform = Some(t);
+    }
+
+    /// 叠加旋转（弧度，顺时针）。在当前变换基础上右乘 R(delta)，即绕局部原点旋转。
+    pub fn rotate_rad(&mut self, rad: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        let (c, s) = (rad.cos(), rad.sin());
+        // M' = M * R(delta)，右乘旋转（局部空间）
+        let a = t.a * c + t.b * s;
+        let b = -t.a * s + t.b * c;
+        let c2 = t.c * c + t.d * s;
+        let d = -t.c * s + t.d * c;
+        t.a = a;
+        t.b = b;
+        t.c = c2;
+        t.d = d;
+        self.transform = Some(t);
+    }
+
+    /// 叠加旋转（度，顺时针）。等价于 `rotate_rad(deg.to_radians())`。
+    pub fn rotate_deg(&mut self, deg: f32) {
+        self.rotate_rad(deg.to_radians());
+    }
+
+    /// 叠加缩放（局部空间）。在当前变换基础上右乘 S(sx, sy)。
+    pub fn scale_by(&mut self, sx: f32, sy: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        // M' = M * S(sx, sy)，右乘缩放（局部空间）
+        t.a *= sx;
+        t.b *= sy;
+        t.c *= sx;
+        t.d *= sy;
+        self.transform = Some(t);
+    }
+
+    /// 叠加任意仿射矩阵（局部空间右乘），pivot 归零。
+    /// 矩阵列主序：`[a b tx; c d ty; 0 0 1]`。
+    pub fn apply_matrix(&mut self, a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) {
+        let mut t = self.transform.unwrap_or_default();
+        // M' = M * N，右乘（局部空间）
+        let new_a = t.a * a + t.b * c;
+        let new_b = t.a * b + t.b * d;
+        let new_x = t.a * tx + t.b * ty + t.x;
+        let new_c = t.c * a + t.d * c;
+        let new_d = t.c * b + t.d * d;
+        let new_y = t.c * tx + t.d * ty + t.y;
+        t.a = new_a;
+        t.b = new_b;
+        t.c = new_c;
+        t.d = new_d;
+        t.x = new_x;
+        t.y = new_y;
+        t.px = 0.0;
+        t.py = 0.0;
+        self.transform = Some(t);
     }
 
     /// 获取当前变换矩阵列（无 transform 时返回恒等矩阵）。
