@@ -249,12 +249,22 @@ impl WindowDesc {
     }
 }
 
+/// [`VireoWindow::draw_timed`] 返回的分段耗时（秒）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DrawTimings {
+    /// `get_current_texture`：可能阻塞等 swapchain 空位 / 上一帧 present。
+    pub acquire_secs: f64,
+    /// 编码 + `queue.submit`（不含 present）。
+    pub encode_secs: f64,
+}
+
 /// 窗口实例（胖指针 —— 持有 surface、camera、gpu 引用）
 /// 所有公开 API 坐标系为逻辑像素（用户友好），GPU 内部使用物理像素。
 pub struct VireoWindow {
     pub inner: Arc<winit::window::Window>,
     pub surface: wgpu::Surface<'static>,
-    pub surface_config: wgpu::SurfaceConfiguration,
+    /// surface 配置（含 present_mode）。用 RefCell 以便 `set_present_mode` 在 `&self` 下更新。
+    surface_config: RefCell<wgpu::SurfaceConfiguration>,
     pub gpu: Arc<GpuContext>,
     pub camera_bind_group: wgpu::BindGroup,
     pub mouse_pos: (f32, f32),
@@ -284,19 +294,43 @@ impl VireoWindow {
     /// 登记绘制（不立即 present）。同一帧内多次调用共用同一张 surface texture。
     /// 首次调用时获取 texture，后续调用 Load 叠加。帧结束时由 App 统一 present。
     pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
+        let _ = self.draw_timed(clear_color, batches);
+    }
+
+    /// 与 [`draw`] 相同，并返回分段耗时（秒），用于卡顿诊断。
+    ///
+    /// - `acquire`：`get_current_texture`（可能等 swapchain / 上一帧 present / vsync）
+    /// - `encode`：合并上传 + render pass + `queue.submit`（不含 present）
+    pub fn draw_timed(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+    ) -> DrawTimings {
+        let t0 = std::time::Instant::now();
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
             *ft = match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(st) => Some(st),
-                _ => return,
+                _ => {
+                    return DrawTimings {
+                        acquire_secs: t0.elapsed().as_secs_f64(),
+                        encode_secs: 0.0,
+                    };
+                }
             };
         }
+        let acquire_secs = t0.elapsed().as_secs_f64();
         let view = ft.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
         let target = RenderTarget::from_texture_view(view);
         drop(ft);
 
+        let t1 = std::time::Instant::now();
         let renderer = self.renderer.borrow();
         target.draw(&renderer, clear_color, batches);
+        DrawTimings {
+            acquire_secs,
+            encode_secs: t1.elapsed().as_secs_f64(),
+        }
     }
 
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。在 `App::run` 的 `resumed` 后调用，
@@ -344,8 +378,11 @@ impl VireoWindow {
         if width == 0 || height == 0 {
             return;
         }
-        self.surface_config.width = width;
-        self.surface_config.height = height;
+        {
+            let mut cfg = self.surface_config.borrow_mut();
+            cfg.width = width;
+            cfg.height = height;
+        }
         if self.high_dpi {
             self.logical_width = width;
             self.logical_height = height;
@@ -354,7 +391,7 @@ impl VireoWindow {
             self.logical_width = (width as f64 / sf) as u32;
             self.logical_height = (height as f64 / sf) as u32;
         }
-        let surface_config = self.surface_config.clone();
+        let surface_config = self.surface_config.borrow().clone();
         self.surface.configure(&self.gpu.device, &surface_config);
 
         let scale = if self.high_dpi {
@@ -1003,7 +1040,7 @@ impl App {
                 VireoWindow {
                     inner: window,
                     surface,
-                    surface_config,
+                    surface_config: RefCell::new(surface_config),
                     gpu: gpu.clone(),
                     camera_bind_group: gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("camera bind group"),
@@ -1162,6 +1199,25 @@ impl VireoWindow {
     /// 设置窗口装饰（标题栏边框）
     pub fn set_decorations(&self, decorations: bool) {
         self.inner.set_decorations(decorations);
+    }
+
+    /// 运行时切换 present mode（会 reconfigure surface）。
+    /// 调用前会 present 掉未提交的 surface texture，避免 "must be dropped before configure"。
+    pub fn set_present_mode(&self, mode: wgpu::PresentMode) {
+        if let Some(st) = self.frame_texture.borrow_mut().take() {
+            self.gpu.queue.present(st);
+        }
+        let cfg = {
+            let mut cfg = self.surface_config.borrow_mut();
+            cfg.present_mode = mode;
+            cfg.clone()
+        };
+        self.surface.configure(&self.gpu.device, &cfg);
+    }
+
+    /// 当前 present mode。
+    pub fn present_mode(&self) -> wgpu::PresentMode {
+        self.surface_config.borrow().present_mode
     }
 
     /// 切换抗锯齿（运行时重建 msaa 纹理）。同时预热新 AA 对应的 SDF + geo 管线，

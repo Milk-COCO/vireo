@@ -90,15 +90,16 @@ fn main() {
             );
         }
 
-        let td = Instant::now();
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
-        let draw_ms = td.elapsed().as_secs_f64() * 1000.0;
+        let timings = win.draw_timed(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let acq_ms = timings.acquire_secs * 1000.0;
+        let enc_ms = timings.encode_secs * 1000.0;
 
         eprintln!(
-            "  F{:<2}  frame_time={:7.2}ms  draw={:7.2}ms  fps={:5.1}  focused={}",
+            "  F{:<2}  frame_time={:7.2}ms  acq={:6.2} enc={:6.2}  fps={:5.1}  focused={}",
             app.frame_count,
             app.frame_time * 1000.0,
-            draw_ms,
+            acq_ms,
+            enc_ms,
             app.fps,
             win.focused(),
         );

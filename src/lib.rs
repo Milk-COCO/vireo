@@ -65,6 +65,7 @@ pub mod prelude {
 
     pub use crate::window::AntiAliasing;
     pub use crate::window::App;
+    pub use crate::window::DrawTimings;
     pub use crate::window::Fullscreen;
     pub use crate::window::Icon;
     pub use crate::window::LogicalSize;
