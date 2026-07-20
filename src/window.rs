@@ -56,18 +56,28 @@ impl AntiAliasing {
     }
 }
 
-/// 把 AA 模式的 sample_count clamp 到硬件上限。wgpu 在 sample_count > max 时会 panic。
-pub(crate) fn clamp_aa(aa: AntiAliasing, max_sample_count: u32) -> AntiAliasing {
+/// 把 AA 的 sample_count snap 到 `supported` 中 ≤ 请求的最大项。
+/// 不可用 `min(req, max)`：列表可能是 `[1,4]`（无 2/8），硬截到 8 仍会在 pipeline 创建时 panic。
+pub(crate) fn clamp_aa(aa: AntiAliasing, supported: &[u32]) -> AntiAliasing {
+    let snap = |req: u32| -> u32 {
+        let req = req.max(1);
+        supported
+            .iter()
+            .copied()
+            .filter(|&c| c <= req)
+            .max()
+            .unwrap_or(1)
+    };
     match aa {
         AntiAliasing::None => AntiAliasing::None,
-        AntiAliasing::Msaa { samples, alpha_to_coverage } => {
-            let s = samples.min(max_sample_count.max(1));
-            AntiAliasing::Msaa { samples: s, alpha_to_coverage }
-        }
-        AntiAliasing::Ssaa { samples, alpha_to_coverage } => {
-            let s = samples.min(max_sample_count.max(1));
-            AntiAliasing::Ssaa { samples: s, alpha_to_coverage }
-        }
+        AntiAliasing::Msaa { samples, alpha_to_coverage } => AntiAliasing::Msaa {
+            samples: snap(samples),
+            alpha_to_coverage,
+        },
+        AntiAliasing::Ssaa { samples, alpha_to_coverage } => AntiAliasing::Ssaa {
+            samples: snap(samples),
+            alpha_to_coverage,
+        },
     }
 }
 
@@ -632,8 +642,7 @@ impl App {
     /// 同步预热 AA 对应的 SDF + geo 管线，构造耗时由 `OffscreenCanvas::init_duration()` 暴露。
     pub fn offscreen(&mut self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
         let start = std::time::Instant::now();
-        let max_sc = self.gpu.max_sample_count();
-        let aa = crate::window::clamp_aa(aa, max_sc);
+        let aa = crate::window::clamp_aa(aa, self.gpu.supported_sample_counts());
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
         let ssaa = aa.is_ssaa();
@@ -669,8 +678,7 @@ impl App {
     /// 构造耗时在 `App::run` 创建窗口后由 `VireoWindow::init_duration()` 暴露。
     pub fn window(&mut self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + 'static>) -> WindowIndex {
         let start = std::time::Instant::now();
-        let max_sc = self.gpu.max_sample_count();
-        let aa = crate::window::clamp_aa(desc.anti_aliasing, max_sc);
+        let aa = crate::window::clamp_aa(desc.anti_aliasing, self.gpu.supported_sample_counts());
         desc.anti_aliasing = aa;
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
@@ -1222,20 +1230,20 @@ impl VireoWindow {
 
     /// 切换抗锯齿（运行时重建 msaa 纹理）。同时预热新 AA 对应的 SDF + geo 管线，
     /// 避免切换后首帧的 shader 编译 hitch。
-    /// 若请求的 sample_count 超过硬件上限，会自动 clamp 到 `gpu.max_sample_count()`，
-    /// 避免 wgpu `create_texture` / `create_render_pipeline` panic。
-    /// 若请求的 sample_count 超过硬件上限，会自动 clamp 并 `eprintln!` 警告。
+    /// sample_count 会 snap 到 `gpu.supported_sample_counts()` 中可用值；
+    /// 若与请求不同则 `eprintln!` 警告（避免 wgpu Validation panic）。
     pub fn set_anti_aliasing(&self, aa: AntiAliasing) {
-        let max_sc = self.gpu.max_sample_count();
         let requested_sc = aa.sample_count();
-        let aa = clamp_aa(aa, max_sc);
-        if requested_sc > max_sc {
+        let aa = clamp_aa(aa, self.gpu.supported_sample_counts());
+        let sc = aa.sample_count();
+        if requested_sc != sc && requested_sc > 1 {
             eprintln!(
-                "vireo: AA sample_count {}x > hardware max {}x, clamped to {}x",
-                requested_sc, max_sc, max_sc
+                "vireo: AA sample_count {}x not usable; snapped to {}x (supported {:?})",
+                requested_sc,
+                sc,
+                self.gpu.supported_sample_counts()
             );
         }
-        let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
         let ssaa = aa.is_ssaa();
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);

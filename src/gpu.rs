@@ -47,10 +47,21 @@ impl GpuContext {
         }))
         .unwrap();
 
+        // 无此 feature 时，pipeline 校验只认 WebGPU 保底 sample count（通常 [1, 4]），
+        // 即便 adapter 列表含 8 也会在 create_render_pipeline 时 Validation panic。
+        // 开启后才能真正使用 adapter 报告的 2x/8x 等。
+        let mut required_features = wgpu::Features::empty();
+        if adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
+
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("vireo device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -304,11 +315,21 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         pipelines.insert(1, render_pipeline.clone());
 
-        // 查询 adapter 对 surface_format 支持的 MSAA sample_count 列表
-        let supported_sample_counts = adapter
+        // 查询 adapter 对 surface_format 的 sample_count；若未开
+        // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES，pipeline 只接受 WebGPU 保底 [1, 4]。
+        let mut supported_sample_counts = adapter
             .get_texture_format_features(surface_format)
             .flags
             .supported_sample_counts();
+        if !device
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            supported_sample_counts.retain(|c| *c == 1 || *c == 4);
+            if supported_sample_counts.is_empty() {
+                supported_sample_counts = vec![1];
+            }
+        }
 
         Self {
             device,
@@ -335,16 +356,28 @@ impl GpuContext {
     }
 
     /// 当前设备对 surface_format 支持的 MSAA sample_count 列表（升序）。
-    /// 如 `[1, 2, 4]` 表示支持 1x/2x/4x，不支持 8x/16x。
-    /// 超过最大支持值的 AA 请求会被 clamp 到此列表中最大的支持值。
+    /// 如 `[1, 2, 4, 8]`。仅包含 **create_render_pipeline 实际可用** 的值
+    ///（已考虑 `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`）。
+    /// AA 请求会 snap 到此列表中 ≤ 请求值的最大项。
     pub fn supported_sample_counts(&self) -> &[u32] {
         &self.supported_sample_counts
     }
 
     /// 当前设备支持的 MSAA 最大 sample_count。
-    /// 超过此值的 AA 请求会被 clamp。
     pub fn max_sample_count(&self) -> u32 {
         *self.supported_sample_counts.last().unwrap_or(&1)
+    }
+
+    /// 将请求的 sample_count 收束到 `supported_sample_counts` 中
+    /// ≤ requested 的最大支持值（至少 1）。
+    pub fn clamp_sample_count(&self, requested: u32) -> u32 {
+        let req = requested.max(1);
+        self.supported_sample_counts
+            .iter()
+            .copied()
+            .filter(|&c| c <= req)
+            .max()
+            .unwrap_or(1)
     }
 
     /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）。
