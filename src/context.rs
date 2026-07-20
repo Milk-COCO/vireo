@@ -996,6 +996,9 @@ impl DrawBatch {
     pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
     pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
+    pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, c: crate::color::Color) {
+        crate::shapes::draw_shape(self, shape, c);
+    }
 
     /// 添加文字，自动捕获当前 transform。
     pub fn text(&mut self, text: &str, options: TextOptions) {
