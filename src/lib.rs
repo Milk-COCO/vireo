@@ -47,7 +47,9 @@ pub mod prelude {
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
     pub use crate::text::TextOptions;
+    pub use crate::text::TextPart;
     pub use crate::text::draw_text;
+    pub use crate::text::draw_text_parts;
     // 输入系统
     pub use crate::input::ElementState;
     pub use crate::input::Key;

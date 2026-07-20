@@ -22,6 +22,9 @@ pub use winit::window::WindowLevel;
 
 use winit::window::Cursor;
 
+/// 滑动窗口帧数：约 0.5s@60Hz，平滑 FPS，避免「满 1 秒整段重置」导致 55↔60 乱跳。
+const FPS_SAMPLE_CAP: usize = 30;
+
 /// 窗口描述符（用于配置待创建窗口）
 /// 抗锯齿模式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,10 +485,12 @@ pub struct App {
     textures: Vec<Texture>,
     offscreens: Vec<OffscreenCanvas>,
     pub frame_count: u64,
+    /// 上一帧间隔（秒），瞬时值。
     pub frame_time: f64,
+    /// 滑动窗口平均 FPS（比「每秒整段重置」更稳，少 55↔60 乱跳）。
     pub fps: f64,
-    fps_timer: f64,
-    fps_counter: u64,
+    /// 最近若干帧的间隔，用于平滑 FPS。
+    fps_samples: Vec<f64>,
     last_frame: std::time::Instant,
 }
 
@@ -518,8 +523,7 @@ impl App {
             frame_count: 0,
             frame_time: 0.0,
             fps: 0.0,
-            fps_timer: 0.0,
-            fps_counter: 0,
+            fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
             last_frame: std::time::Instant::now(),
         }
     }
@@ -697,16 +701,20 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
-                self.app.frame_time = now.duration_since(self.app.last_frame).as_secs_f64();
+                // 忽略异常大间隔（切后台/首帧），避免污染滑动平均
+                let dt = now.duration_since(self.app.last_frame).as_secs_f64();
                 self.app.last_frame = now;
                 self.app.frame_count += 1;
-
-                self.app.fps_timer += self.app.frame_time;
-                self.app.fps_counter += 1;
-                if self.app.fps_timer >= 1.0 {
-                    self.app.fps = self.app.fps_counter as f64 / self.app.fps_timer;
-                    self.app.fps_timer = 0.0;
-                    self.app.fps_counter = 0;
+                if dt > 0.0 && dt < 0.5 {
+                    self.app.frame_time = dt;
+                    self.app.fps_samples.push(dt);
+                    if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
+                        self.app.fps_samples.remove(0);
+                    }
+                    let sum: f64 = self.app.fps_samples.iter().sum();
+                    if sum > 0.0 {
+                        self.app.fps = self.app.fps_samples.len() as f64 / sum;
+                    }
                 }
 
                 if (self.on_frame)(&self.app) {
@@ -928,8 +936,7 @@ impl App {
                     frame_count: 0,
                     frame_time: 0.0,
                     fps: 0.0,
-                    fps_timer: 0.0,
-                    fps_counter: 0,
+                    fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
                     last_frame: std::time::Instant::now(),
                 },
                 window_descs,

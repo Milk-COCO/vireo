@@ -965,6 +965,12 @@ impl DrawBatch {
         let idx = self.current_transform_index();
         self.texts.push_indexed(text, options, idx);
     }
+
+    /// HUD 多段文字，自动捕获当前 transform。
+    pub fn text_parts(&mut self, parts: &[crate::text::TextPart<'_>], options: TextOptions) {
+        let idx = self.current_transform_index();
+        self.texts.push_parts_indexed(parts, options, idx);
+    }
 }
 
 #[cfg(test)]

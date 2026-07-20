@@ -47,19 +47,22 @@ struct ShapeKey {
 }
 
 impl ShapeKey {
-    fn from_entry(entry: &TextEntry) -> Self {
-        let max_width_bits = entry
-            .options
+    fn from_text(text: &str, options: &TextOptions) -> Self {
+        let max_width_bits = options
             .max_width
             .map(|w| w.to_bits())
             .unwrap_or(u32::MAX);
         Self {
-            text: entry.text.clone(),
-            font_size_bits: entry.options.font_size.to_bits(),
+            text: text.to_string(),
+            font_size_bits: options.font_size.to_bits(),
             max_width_bits,
-            align: entry.options.align as u8,
-            attrs: entry.options.attrs.clone(),
+            align: options.align as u8,
+            attrs: options.attrs.clone(),
         }
+    }
+
+    fn from_entry(entry: &TextEntry) -> Self {
+        Self::from_text(&entry.text, &entry.options)
     }
 }
 
@@ -73,6 +76,12 @@ struct ShapeCacheSlot {
 pub struct ShapeCacheStats {
     pub hits: u64,
     pub misses: u64,
+    /// 自动 GC 调用次数（TTL 扫描）
+    pub gc_runs: u64,
+    /// 最近一次 GC 耗时（微秒）
+    pub last_gc_us: u64,
+    /// 累计 GC 耗时（微秒）
+    pub total_gc_us: u64,
 }
 
 pub struct TextContext {
@@ -95,6 +104,13 @@ pub struct TextContext {
     shape_ttl: Option<Duration>,
     /// `None` = 不限制缓存条数；`Some(n)` = 最多 n 条，满则 LRU 换槽。
     shape_max_entries: Option<usize>,
+    /// HUD 数字表是否已为当前字号/attrs 预热（不存 slot 下标，避免 LRU 后失效）
+    digit_table_ready: bool,
+    digit_step: f32,
+    digit_metrics_bits: u32,
+    digit_attrs: Option<AttrsOwned>,
+    /// 本帧 prepare 中引用的 slot，禁止淘汰
+    frame_pinned: Vec<u32>,
     stats: ShapeCacheStats,
 }
 
@@ -123,7 +139,12 @@ impl TextContext {
         }
         let now = Instant::now();
         if now.duration_since(self.last_gc) >= SHAPE_GC_INTERVAL {
+            let t0 = Instant::now();
             self.gc_stale_shapes(now);
+            let us = t0.elapsed().as_micros() as u64;
+            self.stats.gc_runs = self.stats.gc_runs.saturating_add(1);
+            self.stats.last_gc_us = us;
+            self.stats.total_gc_us = self.stats.total_gc_us.saturating_add(us);
             self.last_gc = now;
         }
     }
@@ -175,7 +196,20 @@ impl TextContext {
         for slot in slots {
             self.recycle_buffer(slot.buffer);
         }
+        self.digit_table_ready = false;
+        self.digit_step = 0.0;
+        self.frame_pinned.clear();
         self.stats = ShapeCacheStats::default();
+    }
+
+    fn pin_slot(&mut self, slot: u32) {
+        if !self.frame_pinned.contains(&slot) {
+            self.frame_pinned.push(slot);
+        }
+    }
+
+    fn begin_prepare_pins(&mut self) {
+        self.frame_pinned.clear();
     }
 
     fn soft_cap(&self) -> usize {
@@ -243,26 +277,29 @@ impl TextContext {
         }
     }
 
-    /// 在必须腾槽时：优先过期项（若启用 TTL），否则全局最久未用。
+    /// 在必须腾槽时：优先过期项（若启用 TTL），否则全局最久未用。跳过本帧 pin 的槽。
     fn evict_one_slot(&mut self, now: Instant) -> usize {
+        let pinned = |i: usize| self.frame_pinned.iter().any(|&p| p as usize == i);
         if let Some(ttl) = self.shape_ttl {
-            if let Some(i) = self
-                .shape_slots
-                .iter()
-                .position(|s| now.saturating_duration_since(s.last_used) > ttl)
-            {
+            if let Some(i) = self.shape_slots.iter().enumerate().position(|(i, s)| {
+                !pinned(i) && now.saturating_duration_since(s.last_used) > ttl
+            }) {
                 return i;
             }
         }
-        let mut oldest_i = 0usize;
-        let mut oldest_t = self.shape_slots[0].last_used;
-        for (i, slot) in self.shape_slots.iter().enumerate().skip(1) {
-            if slot.last_used < oldest_t {
+        let mut oldest_i = None;
+        let mut oldest_t = Instant::now();
+        for (i, slot) in self.shape_slots.iter().enumerate() {
+            if pinned(i) {
+                continue;
+            }
+            if oldest_i.is_none() || slot.last_used < oldest_t {
                 oldest_t = slot.last_used;
-                oldest_i = i;
+                oldest_i = Some(i);
             }
         }
-        oldest_i
+        // 极端：全部 pin 满，只能牺牲 0（理论上不应发生）
+        oldest_i.unwrap_or(0)
     }
 
     fn replace_slot(&mut self, slot_i: usize, key: ShapeKey, buffer: Buffer, now: Instant) -> u32 {
@@ -278,63 +315,126 @@ impl TextContext {
     }
 
     /// 获取或创建已 shape 的 buffer，返回 slot 下标。
-    fn get_or_shape(&mut self, key: ShapeKey, entry: &TextEntry) -> u32 {
+    fn get_or_shape(&mut self, key: ShapeKey, options: &TextOptions) -> u32 {
         let now = Instant::now();
         if let Some(&idx) = self.shape_map.get(&key) {
             self.shape_slots[idx as usize].last_used = now;
             self.stats.hits += 1;
+            self.pin_slot(idx);
             return idx;
         }
 
         self.stats.misses += 1;
-        let line_height = entry.options.font_size * 1.2;
-        let metrics = Metrics::new(entry.options.font_size, line_height);
+        let line_height = options.font_size * 1.2;
+        let metrics = Metrics::new(options.font_size, line_height);
         let mut buffer = self.take_buffer(metrics);
-        buffer.set_size(entry.options.max_width, None);
+        buffer.set_size(options.max_width, None);
 
-        let attrs = entry
-            .options
+        let attrs = options
             .attrs
             .as_ref()
             .map(|a| a.as_attrs())
             .unwrap_or_else(Attrs::new);
 
         buffer.set_text(
-            &entry.text,
+            &key.text,
             &attrs,
             Shaping::Advanced,
-            Some(entry.options.align.into()),
+            Some(options.align.into()),
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
 
-        // 增长：无硬顶或未满则 push；满硬顶则 LRU/过期换槽
+        // 增长：未满则 push。prepare 进行中禁止 GC/swap_remove（会弄乱已 pin 的下标）。
+        // 淘汰仅 replace 原位，不 swap_remove。
         let under_cap = match self.shape_max_entries {
             None => true,
             Some(cap) => self.shape_slots.len() < cap,
         };
         if under_cap {
-            if self.shape_ttl.is_some() && self.shape_slots.len() >= self.soft_cap() {
-                self.gc_stale_shapes(now);
-            }
-            let still_under = match self.shape_max_entries {
-                None => true,
-                Some(cap) => self.shape_slots.len() < cap,
-            };
-            if still_under {
-                let idx = self.shape_slots.len() as u32;
-                self.shape_slots.push(ShapeCacheSlot {
-                    key: key.clone(),
-                    buffer,
-                    last_used: now,
-                });
-                self.shape_map.insert(key, idx);
-                return idx;
-            }
+            let idx = self.shape_slots.len() as u32;
+            self.shape_slots.push(ShapeCacheSlot {
+                key: key.clone(),
+                buffer,
+                last_used: now,
+            });
+            self.shape_map.insert(key, idx);
+            self.pin_slot(idx);
+            return idx;
         }
 
-        // 仅 hard cap 已满时走到这里
+        // hard cap 已满：原位替换未 pin 的最久槽（不 swap_remove）
         let victim = self.evict_one_slot(now);
-        self.replace_slot(victim, key, buffer, now)
+        let idx = self.replace_slot(victim, key, buffer, now);
+        self.pin_slot(idx);
+        idx
+    }
+
+    fn get_or_shape_text(&mut self, text: &str, options: &TextOptions) -> u32 {
+        // 段 shape 不使用 max_width（横拼由调用方控制）
+        let mut opts = options.clone();
+        opts.max_width = None;
+        opts.align = TextAlign::Left;
+        let key = ShapeKey::from_text(text, &opts);
+        self.get_or_shape(key, &opts)
+    }
+
+    /// 已 shape buffer 首行宽度（逻辑像素）。
+    fn slot_line_width(&mut self, slot: u32) -> f32 {
+        let i = slot as usize;
+        if i >= self.shape_slots.len() {
+            return 0.0;
+        }
+        // 拆借用：先取 layout 宽度
+        let w = {
+            let buf = &mut self.shape_slots[i].buffer;
+            buf.line_layout(&mut self.font_system, 0)
+                .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
+                .unwrap_or(0.0)
+        };
+        w
+    }
+
+    /// 确保 0-9 已 shape 且 digit_step 为 tabular 步进宽（不缓存 slot 下标）。
+    fn ensure_digit_table(&mut self, options: &TextOptions) -> f32 {
+        let bits = options.font_size.to_bits();
+        let attrs = options.attrs.clone();
+        let need = !self.digit_table_ready
+            || self.digit_metrics_bits != bits
+            || self.digit_attrs != attrs;
+        if !need {
+            // 仍 pin 住 0-9，防止本帧后续淘汰
+            let mut opts = options.clone();
+            opts.max_width = None;
+            opts.align = TextAlign::Left;
+            for d in 0..10u8 {
+                let s = ((b'0' + d) as char).to_string();
+                let _ = self.get_or_shape_text(&s, &opts);
+            }
+            return self.digit_step;
+        }
+        let mut opts = options.clone();
+        opts.max_width = None;
+        opts.align = TextAlign::Left;
+        let mut max_w = 0.0f32;
+        for d in 0..10u8 {
+            let s = ((b'0' + d) as char).to_string();
+            let idx = self.get_or_shape_text(&s, &opts);
+            max_w = max_w.max(self.slot_line_width(idx));
+        }
+        self.digit_table_ready = true;
+        self.digit_step = max_w;
+        self.digit_metrics_bits = bits;
+        self.digit_attrs = attrs;
+        max_w
+    }
+
+    fn digit_slot(&mut self, d: u32, options: &TextOptions) -> u32 {
+        debug_assert!(d < 10);
+        let s = ((b'0' + d as u8) as char).to_string();
+        let mut opts = options.clone();
+        opts.max_width = None;
+        opts.align = TextAlign::Left;
+        self.get_or_shape_text(&s, &opts)
     }
 }
 
@@ -375,6 +475,11 @@ impl TextContext {
             last_gc: Instant::now(),
             shape_ttl: Some(DEFAULT_SHAPE_TTL),
             shape_max_entries: Some(DEFAULT_SHAPE_MAX_ENTRIES),
+            digit_table_ready: false,
+            digit_step: 0.0,
+            digit_metrics_bits: 0,
+            digit_attrs: None,
+            frame_pinned: Vec::with_capacity(32),
             stats: ShapeCacheStats::default(),
         }
     }
@@ -494,13 +599,39 @@ impl TextOptions {
     }
 }
 
-/// 文本条目，pushed by draw_text
+/// HUD 文本段（单行 LTR；不保证与整段 `draw_text` 像素级一致）。
+#[derive(Clone, Debug)]
+pub enum TextPart<'a> {
+    /// 任意短文案，走整段 shape 缓存
+    Text(&'a str),
+    /// 仅 `0-9`（及空格）；用预 shape 数字表 tabular 横拼
+    Digits(&'a str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OwnedTextPart {
+    Text(String),
+    Digits(String),
+}
+
+impl OwnedTextPart {
+    fn from_part(p: &TextPart<'_>) -> Self {
+        match p {
+            TextPart::Text(s) => Self::Text((*s).to_string()),
+            TextPart::Digits(s) => Self::Digits((*s).to_string()),
+        }
+    }
+}
+
+/// 文本条目，pushed by draw_text / draw_text_parts
 #[derive(Clone)]
 pub struct TextEntry {
     pub text: String,
     pub options: TextOptions,
     /// Batch-local transform index (logical space). 0 = identity.
     pub(crate) transform_index: u32,
+    /// `Some` = HUD 多段（忽略 `text`）；`None` = 普通整段 `text`
+    pub(crate) parts: Option<Vec<OwnedTextPart>>,
 }
 
 /// 文本条目列表，存储一组待渲染的文本。
@@ -535,6 +666,7 @@ impl TextEntryList {
             text: text.to_string(),
             options,
             transform_index: 0,
+            parts: None,
         });
     }
 
@@ -544,6 +676,27 @@ impl TextEntryList {
             text: text.to_string(),
             options,
             transform_index,
+            parts: None,
+        });
+    }
+
+    /// HUD 多段文字（默认无 transform）。
+    pub fn push_parts(&mut self, parts: &[TextPart<'_>], options: TextOptions) {
+        self.push_parts_indexed(parts, options, 0);
+    }
+
+    pub(crate) fn push_parts_indexed(
+        &mut self,
+        parts: &[TextPart<'_>],
+        options: TextOptions,
+        transform_index: u32,
+    ) {
+        let owned: Vec<OwnedTextPart> = parts.iter().map(OwnedTextPart::from_part).collect();
+        self.entries.push(TextEntry {
+            text: String::new(),
+            options,
+            transform_index,
+            parts: Some(owned),
         });
     }
 
@@ -567,6 +720,7 @@ impl TextEntryList {
         }
 
         let mut text_ctx = gpu.text_ctx.borrow_mut();
+        text_ctx.begin_prepare_pins();
 
         text_ctx.viewport.update(
             &gpu.queue,
@@ -576,18 +730,8 @@ impl TextEntryList {
             },
         );
 
-        let n = self.entries.len();
-        // 阶段 1：resolve shape 缓存 → slot 下标
-        let mut slot_indices: Vec<u32> = Vec::with_capacity(n);
-        for entry in &self.entries {
-            let key = ShapeKey::from_entry(entry);
-            let idx = text_ctx.get_or_shape(key, entry);
-            slot_indices.push(idx);
-        }
-
-        // 阶段 2：构建 TextArea（只读 slots）+ glyphon prepare
-        // 预计算 per-entry 元数据，避免与 buffer 借用交织
         struct AreaMeta {
+            slot: u32,
             left: f32,
             top: f32,
             color: crate::glyphon::Color,
@@ -595,7 +739,48 @@ impl TextEntryList {
             transform_index: u32,
         }
 
-        let mut metas: Vec<AreaMeta> = Vec::with_capacity(n);
+        fn phys_transform_index(
+            transform_index: u32,
+            transform_table: &[f32],
+            global_transforms: &mut Vec<f32>,
+            scale: f32,
+        ) -> u32 {
+            let base = transform_index as usize * 12;
+            if base + 12 <= transform_table.len() {
+                let t = &transform_table[base..base + 12];
+                let is_identity = t[0] == 1.0
+                    && t[1] == 0.0
+                    && t[4] == 0.0
+                    && t[5] == 1.0
+                    && t[8] == 0.0
+                    && t[9] == 0.0;
+                if is_identity {
+                    0
+                } else {
+                    let idx = (global_transforms.len() / 12) as u32;
+                    global_transforms.extend_from_slice(&[
+                        t[0],
+                        t[1],
+                        0.0,
+                        0.0,
+                        t[4],
+                        t[5],
+                        0.0,
+                        0.0,
+                        t[8] * scale,
+                        t[9] * scale,
+                        1.0,
+                        0.0,
+                    ]);
+                    idx
+                }
+            } else {
+                0
+            }
+        }
+
+        let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
+
         for entry in &self.entries {
             let color = crate::glyphon::Color::rgba(
                 (entry.options.color.r * 255.0) as u8,
@@ -612,53 +797,76 @@ impl TextEntryList {
                 },
                 None => TextBounds::default(),
             };
-            let phys_idx = {
-                let base = entry.transform_index as usize * 12;
-                if base + 12 <= transform_table.len() {
-                    let t = &transform_table[base..base + 12];
-                    let is_identity = t[0] == 1.0
-                        && t[1] == 0.0
-                        && t[4] == 0.0
-                        && t[5] == 1.0
-                        && t[8] == 0.0
-                        && t[9] == 0.0;
-                    if is_identity {
-                        0
-                    } else {
-                        let idx = (global_transforms.len() / 12) as u32;
-                        global_transforms.extend_from_slice(&[
-                            t[0],
-                            t[1],
-                            0.0,
-                            0.0,
-                            t[4],
-                            t[5],
-                            0.0,
-                            0.0,
-                            t[8] * scale,
-                            t[9] * scale,
-                            1.0,
-                            0.0,
-                        ]);
-                        idx
+            let phys_idx = phys_transform_index(
+                entry.transform_index,
+                transform_table,
+                global_transforms,
+                scale,
+            );
+            let top = entry.options.y * scale;
+
+            if let Some(ref parts) = entry.parts {
+                // HUD 多段：逻辑 x 横拼，再 * scale
+                let mut cursor_x = entry.options.x;
+                let step = text_ctx.ensure_digit_table(&entry.options);
+                for part in parts {
+                    match part {
+                        OwnedTextPart::Text(s) => {
+                            if s.is_empty() {
+                                continue;
+                            }
+                            let slot = text_ctx.get_or_shape_text(s, &entry.options);
+                            let w = text_ctx.slot_line_width(slot);
+                            metas.push(AreaMeta {
+                                slot,
+                                left: cursor_x * scale,
+                                top,
+                                color,
+                                bounds,
+                                transform_index: phys_idx,
+                            });
+                            cursor_x += w;
+                        }
+                        OwnedTextPart::Digits(s) => {
+                            for ch in s.chars() {
+                                if ch == ' ' {
+                                    cursor_x += step * 0.5;
+                                    continue;
+                                }
+                                if let Some(d) = ch.to_digit(10) {
+                                    let slot = text_ctx.digit_slot(d, &entry.options);
+                                    metas.push(AreaMeta {
+                                        slot,
+                                        left: cursor_x * scale,
+                                        top,
+                                        color,
+                                        bounds,
+                                        transform_index: phys_idx,
+                                    });
+                                    cursor_x += step;
+                                }
+                                // 非 0-9/空格：跳过
+                            }
+                        }
                     }
-                } else {
-                    0
                 }
-            };
-            metas.push(AreaMeta {
-                left: entry.options.x * scale,
-                top: entry.options.y * scale,
-                color,
-                bounds,
-                transform_index: phys_idx,
-            });
+            } else {
+                let key = ShapeKey::from_entry(entry);
+                let slot = text_ctx.get_or_shape(key, &entry.options);
+                metas.push(AreaMeta {
+                    slot,
+                    left: entry.options.x * scale,
+                    top,
+                    color,
+                    bounds,
+                    transform_index: phys_idx,
+                });
+            }
         }
 
         let vertex_start;
         let vertex_count;
         {
-            // 拆字段以便 areas 借用 shape_slots 同时 mut prepare
             let TextContext {
                 ref mut font_system,
                 ref mut swash_cache,
@@ -669,11 +877,17 @@ impl TextEntryList {
                 ..
             } = *text_ctx;
 
-            let mut areas: Vec<TextArea> = Vec::with_capacity(n);
-            for (i, &slot_i) in slot_indices.iter().enumerate() {
-                let meta = &metas[i];
+            let mut areas: Vec<TextArea> = Vec::with_capacity(metas.len());
+            for meta in &metas {
+                let si = meta.slot as usize;
+                debug_assert!(
+                    si < shape_slots.len(),
+                    "shape slot {} out of bounds (len {})",
+                    si,
+                    shape_slots.len()
+                );
                 areas.push(TextArea {
-                    buffer: &shape_slots[slot_i as usize].buffer,
+                    buffer: &shape_slots[si].buffer,
                     left: meta.left,
                     top: meta.top,
                     scale,
@@ -766,55 +980,69 @@ pub fn draw_text(list: &mut TextEntryList, text: &str, options: TextOptions) {
     list.push(text, options);
 }
 
+/// HUD 多段文字：固定前缀 + 数字等。单行 LTR，不保证与整段 `draw_text` 像素级一致。
+///
+/// ```ignore
+/// draw_text_parts(&mut batch.texts, &[
+///     TextPart::Text("分数: "),
+///     TextPart::Digits("123"),
+/// ], TextOptions::default().x(16.0).y(16.0).font_size(20.0));
+/// ```
+pub fn draw_text_parts(
+    list: &mut TextEntryList,
+    parts: &[TextPart<'_>],
+    options: TextOptions,
+) {
+    list.push_parts(parts, options);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::hash::{Hash, Hasher};
     use rustc_hash::FxHasher;
 
+    fn plain_entry(text: &str, options: TextOptions) -> TextEntry {
+        TextEntry {
+            text: text.into(),
+            options,
+            transform_index: 0,
+            parts: None,
+        }
+    }
+
     #[test]
     fn shape_key_ignores_position_and_color() {
-        let e1 = TextEntry {
-            text: "Hello".into(),
-            options: TextOptions::default().x(10.0).y(20.0).color(Color::new(1.0, 0.0, 0.0, 1.0)),
-            transform_index: 0,
-        };
-        let e2 = TextEntry {
-            text: "Hello".into(),
-            options: TextOptions::default().x(99.0).y(0.0).color(Color::new(0.0, 1.0, 0.0, 1.0)),
-            transform_index: 3,
-        };
+        let e1 = plain_entry(
+            "Hello",
+            TextOptions::default()
+                .x(10.0)
+                .y(20.0)
+                .color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
+        let mut e2 = plain_entry(
+            "Hello",
+            TextOptions::default()
+                .x(99.0)
+                .y(0.0)
+                .color(Color::new(0.0, 1.0, 0.0, 1.0)),
+        );
+        e2.transform_index = 3;
         assert_eq!(ShapeKey::from_entry(&e1), ShapeKey::from_entry(&e2));
     }
 
     #[test]
     fn shape_key_differs_on_font_size_and_text() {
-        let base = TextEntry {
-            text: "Hello".into(),
-            options: TextOptions::default().font_size(16.0),
-            transform_index: 0,
-        };
-        let sized = TextEntry {
-            text: "Hello".into(),
-            options: TextOptions::default().font_size(18.0),
-            transform_index: 0,
-        };
-        let other = TextEntry {
-            text: "World".into(),
-            options: TextOptions::default().font_size(16.0),
-            transform_index: 0,
-        };
+        let base = plain_entry("Hello", TextOptions::default().font_size(16.0));
+        let sized = plain_entry("Hello", TextOptions::default().font_size(18.0));
+        let other = plain_entry("World", TextOptions::default().font_size(16.0));
         assert_ne!(ShapeKey::from_entry(&base), ShapeKey::from_entry(&sized));
         assert_ne!(ShapeKey::from_entry(&base), ShapeKey::from_entry(&other));
     }
 
     #[test]
     fn shape_key_hash_stable() {
-        let e = TextEntry {
-            text: "稳定".into(),
-            options: TextOptions::default().font_size(14.0),
-            transform_index: 0,
-        };
+        let e = plain_entry("稳定", TextOptions::default().font_size(14.0));
         let k = ShapeKey::from_entry(&e);
         let mut h1 = FxHasher::default();
         k.hash(&mut h1);
@@ -831,5 +1059,28 @@ mod tests {
     #[test]
     fn default_max_entries_is_4096() {
         assert_eq!(DEFAULT_SHAPE_MAX_ENTRIES, 4096);
+    }
+
+    #[test]
+    fn push_parts_stores_owned_parts() {
+        let mut list = TextEntryList::new();
+        draw_text_parts(
+            &mut list,
+            &[TextPart::Text("分数: "), TextPart::Digits("42")],
+            TextOptions::default().x(10.0).y(20.0),
+        );
+        assert_eq!(list.entries.len(), 1);
+        let e = &list.entries[0];
+        assert!(e.text.is_empty());
+        let parts = e.parts.as_ref().expect("parts");
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            OwnedTextPart::Text(s) => assert_eq!(s, "分数: "),
+            _ => panic!("expected Text"),
+        }
+        match &parts[1] {
+            OwnedTextPart::Digits(s) => assert_eq!(s, "42"),
+            _ => panic!("expected Digits"),
+        }
     }
 }
