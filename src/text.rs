@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use rustc_hash::FxHashMap;
 
 use crate::glyphon::{
-    Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport,
+    Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextArea, TextAtlas,
+    TextBounds, TextRenderer, Viewport,
 };
 pub use crate::glyphon::Attrs;
 pub use crate::glyphon::ColorMode;
@@ -129,6 +129,50 @@ impl TextContext {
             );
             self.sample_count = count;
         }
+    }
+
+    /// 预热文字管线：强制 swash cache / atlas / 上传 lazy 初始化。
+    /// 用单字符 "A" 跑一次 prepare，触发首帧 33ms 的 text shape 成本。
+    /// 调用前 `ensure_sample_count` 必须已跑过。
+    pub fn preheat(&mut self, device: &Device, queue: &Queue, physical_width: u32, physical_height: u32) {
+        // 单字符 "A"：触发 cosmic_text shaping + swash 光栅化 + atlas 上传
+        let mut buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
+        let attrs = Attrs::new();
+        buf.set_text("A", &attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.font_system, true);
+
+        self.viewport.update(
+            queue,
+            crate::glyphon::Resolution {
+                width: physical_width,
+                height: physical_height,
+            },
+        );
+
+        self.text_renderer.clear();
+        let _ = self.text_renderer.prepare(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.viewport,
+            [TextArea {
+                buffer: &buf,
+                left: 0.0,
+                top: 0.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: physical_width as i32,
+                    bottom: physical_height as i32,
+                },
+                default_color: crate::glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+                transform_index: 0,
+            }],
+            &mut self.swash_cache,
+        );
     }
 
     /// 每帧绘制前调用一次（多 batch 共享）。

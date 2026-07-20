@@ -11,18 +11,26 @@ use crate::window::AntiAliasing;
 pub struct OffscreenCanvas {
     pub texture: Texture,
     renderer: Renderer,
+    /// 该离屏画布初始化耗时（秒）：app.offscreen() 内的 AA 管线预热。
+    pub init_duration: f64,
 }
 
 impl OffscreenCanvas {
     pub fn new(gpu: &Arc<GpuContext>, width: u32, height: u32) -> Self {
-        Self::with_aa(gpu, width, height, AntiAliasing::None)
+        Self::with_aa(gpu, width, height, AntiAliasing::None, 0.0)
     }
 
-    pub fn with_aa(gpu: &Arc<GpuContext>, width: u32, height: u32, aa: AntiAliasing) -> Self {
+    /// 构造时由 `App::offscreen()` 传入 AA 预热耗时；外部直接调用时通常传 0。
+    pub fn with_aa(gpu: &Arc<GpuContext>, width: u32, height: u32, aa: AntiAliasing, init_duration: f64) -> Self {
         let texture = Texture::new(&gpu.device, width, height, gpu.surface_format,
             &gpu.texture_bind_group_layout, &gpu.default_sampler);
         let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa, 1.0);
-        Self { texture, renderer }
+        Self { texture, renderer, init_duration }
+    }
+
+    /// 该离屏画布初始化耗时（秒）。
+    pub fn init_duration(&self) -> f64 {
+        self.init_duration
     }
 
     /// 渲染并提交

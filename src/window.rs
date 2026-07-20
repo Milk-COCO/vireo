@@ -56,6 +56,21 @@ impl AntiAliasing {
     }
 }
 
+/// 把 AA 模式的 sample_count clamp 到硬件上限。wgpu 在 sample_count > max 时会 panic。
+pub(crate) fn clamp_aa(aa: AntiAliasing, max_sample_count: u32) -> AntiAliasing {
+    match aa {
+        AntiAliasing::None => AntiAliasing::None,
+        AntiAliasing::Msaa { samples, alpha_to_coverage } => {
+            let s = samples.min(max_sample_count.max(1));
+            AntiAliasing::Msaa { samples: s, alpha_to_coverage }
+        }
+        AntiAliasing::Ssaa { samples, alpha_to_coverage } => {
+            let s = samples.min(max_sample_count.max(1));
+            AntiAliasing::Ssaa { samples: s, alpha_to_coverage }
+        }
+    }
+}
+
 pub struct WindowDesc {
     pub title: String,
     pub width: u32,
@@ -247,6 +262,9 @@ pub struct VireoWindow {
     pub logical_height: u32,
     pub high_dpi: bool,
     pub input: InputState,
+    /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
+    /// 窗口在 App::run 中创建后即可读取，固定不变。
+    pub init_duration: f64,
     renderer: RefCell<crate::context::Renderer>,
     frame_texture: RefCell<Option<wgpu::SurfaceTexture>>,
 }
@@ -268,6 +286,31 @@ impl VireoWindow {
 
         let renderer = self.renderer.borrow();
         target.draw(&renderer, clear_color, batches);
+    }
+
+    /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。在 `App::run` 的 `resumed` 后调用，
+    /// 让首帧的 SDF + geo 管线 PSO 预先生成，避免首帧 hitch。
+    /// 副作用：会提交并 present 一帧（clear 颜色），用户可能看到一帧黑屏。下一帧
+    /// `request_redraw` 触发时 frame_texture 已空，正常 acquire 新 texture。
+    pub fn preheat(&self, clear_color: crate::color::Color) {
+        let mut ft = self.frame_texture.borrow_mut();
+        if ft.is_none() {
+            *ft = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(st) => Some(st),
+                _ => return,
+            };
+        }
+        let view = ft.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let target = crate::context::RenderTarget::from_texture_view(view);
+        drop(ft);
+
+        let renderer = self.renderer.borrow();
+        renderer.preheat(&target, clear_color);
+
+        // 立即 present 释放 surface texture（否则 drop 时 wgpu 报 "must be dropped" 错）
+        if let Some(st) = self.frame_texture.borrow_mut().take() {
+            self.gpu.queue.present(st);
+        }
     }
 
     /// 获取当前鼠标位置（窗口用户坐标系，即 WindowDesc 传入的宽高范围）
@@ -485,10 +528,15 @@ pub struct App {
     textures: Vec<Texture>,
     offscreens: Vec<OffscreenCanvas>,
     pub frame_count: u64,
-    /// 上一帧间隔（秒），瞬时值。
+    /// 上一帧间隔（秒），瞬时值。第一帧为 0（A 语义：没有「上一帧」）。
     pub frame_time: f64,
-    /// 滑动窗口平均 FPS（比「每秒整段重置」更稳，少 55↔60 乱跳）。
+    /// 滑动窗口平均 FPS（比「每秒整段重置」更稳，少 55↔60 乱跳）。第一帧为 0。
     pub fps: f64,
+    /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
+    pub init_duration: f64,
+    /// 各 `app.window()` 调用的 init_duration（秒），按调用顺序入队。
+    /// `App::run` 创建窗口时按序出队传给 `VireoWindow::init_duration`。
+    window_init_durations: Vec<f64>,
     /// 最近若干帧的间隔，用于平滑 FPS。
     fps_samples: Vec<f64>,
     last_frame: std::time::Instant,
@@ -497,6 +545,7 @@ pub struct App {
 impl App {
     /// 创建 App。构造时即初始化 GPU 设备，可在 run() 之前加载纹理等资源。
     pub fn new() -> Self {
+        let init_start = std::time::Instant::now();
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
         );
@@ -510,6 +559,7 @@ impl App {
                 Icon::from_rgba(rgba.into_raw(), w, h).ok()
             })
             .flatten();
+        let init_duration = init_start.elapsed().as_secs_f64();
         Self {
             window_descs: Vec::new(),
             windows: Vec::new(),
@@ -523,15 +573,27 @@ impl App {
             frame_count: 0,
             frame_time: 0.0,
             fps: 0.0,
+            init_duration,
+            window_init_durations: Vec::new(),
             fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
             last_frame: std::time::Instant::now(),
         }
     }
 
     /// 创建离屏画布。与 window() 对称，可在 run() 之前调用。
+    /// 同步预热 AA 对应的 SDF + geo 管线，构造耗时由 `OffscreenCanvas::init_duration()` 暴露。
     pub fn offscreen(&mut self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
+        let start = std::time::Instant::now();
+        let max_sc = self.gpu.max_sample_count();
+        let aa = crate::window::clamp_aa(aa, max_sc);
+        let sc = aa.sample_count();
+        let atc = aa.alpha_to_coverage();
+        let ssaa = aa.is_ssaa();
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
+        let init_duration = start.elapsed().as_secs_f64();
         let idx = self.offscreens.len();
-        let offscreen = OffscreenCanvas::with_aa(&self.gpu, width, height, aa);
+        let offscreen = OffscreenCanvas::with_aa(&self.gpu, width, height, aa, init_duration);
         self.offscreens.push(offscreen);
         OffscreenIndex(idx)
     }
@@ -555,7 +617,20 @@ impl App {
     }
 
     /// 配置一个待创建的窗口。可选 on_close 钩子在窗口被关闭时调用。必须在 run() 之前调用。
-    pub fn window(&mut self, desc: WindowDesc, on_close: Option<impl FnOnce() + 'static>) -> WindowIndex {
+    /// 同步预热窗口 AA 对应的 SDF + geo 管线，并把 AA clamp 到硬件上限（避免 wgpu panic）。
+    /// 构造耗时在 `App::run` 创建窗口后由 `VireoWindow::init_duration()` 暴露。
+    pub fn window(&mut self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + 'static>) -> WindowIndex {
+        let start = std::time::Instant::now();
+        let max_sc = self.gpu.max_sample_count();
+        let aa = crate::window::clamp_aa(desc.anti_aliasing, max_sc);
+        desc.anti_aliasing = aa;
+        let sc = aa.sample_count();
+        let atc = aa.alpha_to_coverage();
+        let ssaa = aa.is_ssaa();
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
+        let init_duration = start.elapsed().as_secs_f64();
+        self.window_init_durations.push(init_duration);
         let idx = self.window_descs.len();
         self.window_descs.push(desc);
         self.close_hooks.push(on_close.map(|f| Box::new(f) as Box<dyn FnOnce()>));
@@ -570,6 +645,9 @@ impl App {
         // 预先取出窗口描述
         let window_descs: Vec<_> = self.window_descs.drain(..).collect();
         let close_hooks: Vec<_> = self.close_hooks.drain(..).collect();
+
+        // 启动期管线预热在 app.window() / app.offscreen() 同步完成，不再在 App::run 入口做。
+        // 理由：用户调用 app.window() 时就完成管线编译，App::run 入口不应再有「运行时预热」。
 
         struct Runner<F: FnMut(&App) -> bool + 'static> {
             on_frame: F,
@@ -656,15 +734,23 @@ impl App {
                     };
                     surface.configure(&gpu.device, &surface_config);
                     self.app.window_ids.push(window.id());
+                    let init_duration = if i < self.app.window_init_durations.len() {
+                        self.app.window_init_durations[i]
+                    } else {
+                        0.0
+                    };
                     self.app.windows.push(Self::build_window(
                         gpu, window, surface, surface_config, desc.width, desc.height,
                         desc.scale_factor_override.is_some(),
                         desc.anti_aliasing,
+                        init_duration,
                     ));
                     self.app.close_hooks.push(self.close_hooks[i].take());
                 }
 
                 for w in &self.app.windows {
+                    // 强制 GPU 端 PSO 编译（DX12 懒编译需要）。
+                    w.preheat(crate::color::Color::new(0.0, 0.0, 0.0, 1.0));
                     w.inner.request_redraw();
                 }
             }
@@ -701,19 +787,24 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
-                // 忽略异常大间隔（切后台/首帧），避免污染滑动平均
-                let dt = now.duration_since(self.app.last_frame).as_secs_f64();
-                self.app.last_frame = now;
                 self.app.frame_count += 1;
-                if dt > 0.0 && dt < 0.5 {
-                    self.app.frame_time = dt;
-                    self.app.fps_samples.push(dt);
-                    if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
-                        self.app.fps_samples.remove(0);
-                    }
-                    let sum: f64 = self.app.fps_samples.iter().sum();
-                    if sum > 0.0 {
-                        self.app.fps = self.app.fps_samples.len() as f64 / sum;
+                // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
+                // dt（含启动延迟）不入滑动平均。第二帧起才计算真实 dt。
+                if self.app.frame_count == 1 {
+                    self.app.last_frame = now;
+                } else {
+                    let dt = now.duration_since(self.app.last_frame).as_secs_f64();
+                    self.app.last_frame = now;
+                    if dt > 0.0 && dt < 0.5 {
+                        self.app.frame_time = dt;
+                        self.app.fps_samples.push(dt);
+                        if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
+                            self.app.fps_samples.remove(0);
+                        }
+                        let sum: f64 = self.app.fps_samples.iter().sum();
+                        if sum > 0.0 {
+                            self.app.fps = self.app.fps_samples.len() as f64 / sum;
+                        }
                     }
                 }
 
@@ -878,6 +969,7 @@ impl App {
                 logical_height: u32,
                 high_dpi: bool,
                 aa: AntiAliasing,
+                init_duration: f64,
         ) -> VireoWindow {
                 let render_scale = if high_dpi { 1.0 } else { window.scale_factor() as f32 };
                 let dpi = window.scale_factor() as f32;
@@ -914,6 +1006,7 @@ impl App {
                     logical_height,
                     high_dpi,
                     input: InputState::default(),
+                    init_duration,
                     renderer: RefCell::new(renderer),
                     frame_texture: RefCell::new(None),
                 }
@@ -936,6 +1029,8 @@ impl App {
                     frame_count: 0,
                     frame_time: 0.0,
                     fps: 0.0,
+                    init_duration: self.init_duration,
+                    window_init_durations: std::mem::take(&mut self.window_init_durations),
                     fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
                     last_frame: std::time::Instant::now(),
                 },
@@ -963,6 +1058,11 @@ impl App {
         self.windows.len()
     }
 
+    /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
+    pub fn init_duration(&self) -> f64 {
+        self.init_duration
+    }
+
     /// 所有存活窗口
     pub fn windows(&self) -> &[VireoWindow] {
         &self.windows
@@ -975,6 +1075,11 @@ impl App {
 }
 
 impl VireoWindow {
+    /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
+    pub fn init_duration(&self) -> f64 {
+        self.init_duration
+    }
+
     /// 获取窗口标题
     pub fn title(&self) -> String {
         self.inner.title()
@@ -1043,8 +1148,26 @@ impl VireoWindow {
         self.inner.set_decorations(decorations);
     }
 
-    /// 切换抗锯齿（运行时重建 msaa 纹理）。
+    /// 切换抗锯齿（运行时重建 msaa 纹理）。同时预热新 AA 对应的 SDF + geo 管线，
+    /// 避免切换后首帧的 shader 编译 hitch。
+    /// 若请求的 sample_count 超过硬件上限，会自动 clamp 到 `gpu.max_sample_count()`，
+    /// 避免 wgpu `create_texture` / `create_render_pipeline` panic。
+    /// 若请求的 sample_count 超过硬件上限，会自动 clamp 并 `eprintln!` 警告。
     pub fn set_anti_aliasing(&self, aa: AntiAliasing) {
+        let max_sc = self.gpu.max_sample_count();
+        let requested_sc = aa.sample_count();
+        let aa = clamp_aa(aa, max_sc);
+        if requested_sc > max_sc {
+            eprintln!(
+                "vireo: AA sample_count {}x > hardware max {}x, clamped to {}x",
+                requested_sc, max_sc, max_sc
+            );
+        }
+        let sc = aa.sample_count();
+        let atc = aa.alpha_to_coverage();
+        let ssaa = aa.is_ssaa();
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
+        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
         self.renderer.borrow_mut().update_aa(aa);
     }
 

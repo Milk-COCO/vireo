@@ -26,6 +26,9 @@ pub struct GpuContext {
     pub transform_dummy_bind_group: wgpu::BindGroup,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
+    /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
+    /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
+    supported_sample_counts: Vec<u32>,
     pipelines: RefCell<FxHashMap<u32, wgpu::RenderPipeline>>,
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
@@ -58,6 +61,7 @@ impl GpuContext {
         Self::build_resources(
             device,
             queue,
+            adapter,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             ColorMode::Accurate,
         )
@@ -66,6 +70,7 @@ impl GpuContext {
     fn build_resources(
         device: wgpu::Device,
         queue: wgpu::Queue,
+        adapter: wgpu::Adapter,
         surface_format: wgpu::TextureFormat,
         color_mode: ColorMode,
     ) -> Self {
@@ -299,6 +304,12 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         pipelines.insert(1, render_pipeline.clone());
 
+        // 查询 adapter 对 surface_format 支持的 MSAA sample_count 列表
+        let supported_sample_counts = adapter
+            .get_texture_format_features(surface_format)
+            .flags
+            .supported_sample_counts();
+
         Self {
             device,
             queue,
@@ -315,11 +326,25 @@ impl GpuContext {
             transform_dummy_bind_group,
             surface_format,
             text_ctx,
+            supported_sample_counts,
             pipelines: RefCell::new(pipelines),
             shader,
             shader_ssaa,
             shader_geo,
         }
+    }
+
+    /// 当前设备对 surface_format 支持的 MSAA sample_count 列表（升序）。
+    /// 如 `[1, 2, 4]` 表示支持 1x/2x/4x，不支持 8x/16x。
+    /// 超过最大支持值的 AA 请求会被 clamp 到此列表中最大的支持值。
+    pub fn supported_sample_counts(&self) -> &[u32] {
+        &self.supported_sample_counts
+    }
+
+    /// 当前设备支持的 MSAA 最大 sample_count。
+    /// 超过此值的 AA 请求会被 clamp。
+    pub fn max_sample_count(&self) -> u32 {
+        *self.supported_sample_counts.last().unwrap_or(&1)
     }
 
     /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）。

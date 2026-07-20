@@ -465,6 +465,43 @@ impl Renderer {
         self.gpu.queue.submit([encoder.finish()]);
     }
 
+    /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。在 `resumed()` 创建窗口后调用。
+    /// 用 SDF + geo 管线各画一个 dummy 三角形，触发 PSO 编译；
+    /// 同时预热文字管线（cosmic_text shape + swash 光栅化 + atlas 上传）。
+    pub fn preheat(&self, target: &RenderTarget, clear_color: crate::color::Color) {
+        // 1. 文字预热：cosmic_text shape + swash 光栅化 + atlas GPU 上传。
+        // 首帧 ~33ms 的 text prepare 在这里完成。
+        self.gpu.text_ctx.borrow_mut().preheat(
+            &self.gpu.device,
+            &self.gpu.queue,
+            self.physical_width,
+            self.physical_height,
+        );
+
+        // 2. PSO 预热：SDF + geo 管线各画一个 dummy 三角形。
+        // Geo 路径（sdf_feather: None）
+        let mut geo_batch = crate::context::DrawBatch::new();
+        geo_batch.sdf_feather = None;
+        geo_batch.vertices.push(crate::gpu::Vertex::new(0.0, 0.0, clear_color));
+        geo_batch.vertices.push(crate::gpu::Vertex::new(1.0, 0.0, clear_color));
+        geo_batch.vertices.push(crate::gpu::Vertex::new(0.0, 1.0, clear_color));
+        geo_batch.indices.push(0);
+        geo_batch.indices.push(1);
+        geo_batch.indices.push(2);
+
+        // SDF 路径（sdf_feather: Some(0.0)）
+        let mut sdf_batch = crate::context::DrawBatch::new();
+        sdf_batch.sdf_feather = Some(0.0);
+        sdf_batch.vertices.push(crate::gpu::Vertex::new(0.0, 0.0, clear_color));
+        sdf_batch.vertices.push(crate::gpu::Vertex::new(1.0, 0.0, clear_color));
+        sdf_batch.vertices.push(crate::gpu::Vertex::new(0.0, 1.0, clear_color));
+        sdf_batch.indices.push(0);
+        sdf_batch.indices.push(1);
+        sdf_batch.indices.push(2);
+
+        self.draw(target, Some(clear_color), &[&geo_batch, &sdf_batch]);
+    }
+
     fn ensure_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
         let mut cap = self.vertex_cap.borrow_mut();
