@@ -39,15 +39,20 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 
 ## Examples
 
-All shapes, text styles, multi-batch, offscreen, textures:
+Feature demos live in series subdirs (one focus each); stress/diagnostics stay at `examples/` root.
 
 ```bash
+cargo run --example hello
+cargo run --example text_hud
 cargo run --example shapes
-cargo run --example text_attrs
-cargo run --example multi_batch
-cargo run --example offscreen
 cargo run --example texture
-cargo run --example texture_fun
+cargo run --example window_controls
+cargo run --example batch_multi
+cargo run --example offscreen
+# stress / diagnostics
+cargo run --example text_shape_cache
+cargo run --example frame_stats
+cargo run --example bench
 ```
 
-Play out the `examples` folder for more!
+See `examples/` (`text/`, `shapes/`, `texture/`, …).

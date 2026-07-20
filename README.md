@@ -31,22 +31,49 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 ## 功能
 
 - 9 种填充形状 + 8 种描边
-- 文本渲染
+- 文本渲染（shape 缓存、HUD 分段、自定义字体）
 - 多窗口 + 离屏渲染
-- 纹理加载（PNG/JPG/BMP，UV 子区域）
-- 窗口控制（全屏、图标、光标、大小、装饰等）
-- 帧统计 + 输入系统（轮询 + 事件订阅）
+- 纹理加载（文件 / 字节 / RGBA，UV 子区域）
+- 窗口控制（全屏、图标、PresentMode、AA 等）
+- 帧统计 + 输入（轮询 + 事件 / 触摸）
 
 ## 示例
 
-所有形状、文本样式、多 batch、离屏、纹理：
+扁平 `examples/*.rs`，文件名即 `cargo run --example` 名。
 
 ```bash
-cargo run --example shapes
+# 入门
+cargo run --example hello
+cargo run --example ez
+
+# 文字
 cargo run --example text_attrs
-cargo run --example multi_batch
-cargo run --example offscreen
+cargo run --example text_hud
+cargo run --example text_measure
+cargo run --example text_transform
+cargo run --example text_font       # load_font / Family::Name
+cargo run --example text_clip       # clip + align
+
+# 形状 / 变换
+cargo run --example shapes
+cargo run --example shapes_lines    # line / line_chain
+cargo run --example shapes_rotate
+cargo run --example transform_stack # translate/rotate/scale_by
+
+# 纹理
 cargo run --example texture
-cargo run --example texture_fun
+cargo run --example texture_rgba    # from_rgba / from_bytes
+cargo run --example texture_region
+
+# 窗口 / 输入
+cargo run --example window_controls
+cargo run --example window_present  # AutoVsync/Fifo/Mailbox/Immediate
+cargo run --example input
+cargo run --example input_touch
+cargo run --example color_palette
+
+# 压力 / 诊断
+cargo run --example text_shape_cache
+cargo run --example frame_stats
+cargo run --example bench
 ```
-还有更多好玩的请查看 `examples` 文件夹！
