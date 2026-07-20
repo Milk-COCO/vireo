@@ -269,6 +269,17 @@ pub struct VireoWindow {
     frame_texture: RefCell<Option<wgpu::SurfaceTexture>>,
 }
 
+/// Drop 时排干 frame_texture 中的 SurfaceTexture 并 present，
+/// 避免 swapchain drop 时 `Arc::into_inner` panic
+/// ("Trying to destroy a SwapchainAcquireSemaphore that is still in use by a SurfaceTexture")。
+impl Drop for VireoWindow {
+    fn drop(&mut self) {
+        if let Some(st) = self.frame_texture.borrow_mut().take() {
+            self.gpu.queue.present(st);
+        }
+    }
+}
+
 impl VireoWindow {
     /// 登记绘制（不立即 present）。同一帧内多次调用共用同一张 surface texture。
     /// 首次调用时获取 texture，后续调用 Load 叠加。帧结束时由 App 统一 present。
@@ -814,6 +825,11 @@ impl App {
                         w.inner.request_redraw();
                     }
                 } else {
+                    // 退出前 present 掉所有未 present 的 surface texture，
+                    // 避免 swapchain drop 时 Arc::into_inner 失败。
+                    for w in &self.app.windows {
+                        w.present();
+                    }
                     event_loop.exit();
                 }
             }
