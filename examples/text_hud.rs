@@ -110,7 +110,7 @@ fn main() {
         // "score = N"：Text("score = ") + Digits(...)
         draw_text_parts(
             &mut batch.texts,
-            &[TextPart::Text("score = "), TextPart::Digits(&score_for_string)],
+            &[TextPart::Static("score = "), TextPart::Digits(&score_for_string)],
             TextOptions::default()
                 .x(24.0)
                 .y(82.0)
@@ -212,7 +212,7 @@ fn main() {
         if matches!(mode, Mode::Both | Mode::PartsOnly) {
             draw_text_parts(
                 &mut batch.texts,
-                &[TextPart::Text("分数: "), TextPart::Digits(&score_for_string)],
+                &[TextPart::Static("分数: "), TextPart::Digits(&score_for_string)],
                 TextOptions::default()
                     .x(right_x)
                     .y(col_y + 70.0)
@@ -253,9 +253,9 @@ fn main() {
         draw_text_parts(
             &mut batch.texts,
             &[
-                TextPart::Text("HP "),
+                TextPart::Static("HP "),
                 TextPart::Digits("87"),
-                TextPart::Text(" / "),
+                TextPart::Static(" / "),
                 TextPart::Digits("100"),
             ],
             TextOptions::default()
@@ -282,11 +282,11 @@ fn main() {
         draw_text_parts(
             &mut batch.texts,
             &[
-                TextPart::Text("cache entries="),
+                TextPart::Static("cache entries="),
                 TextPart::Digits(&n_str),
-                TextPart::Text("  hit~"),
+                TextPart::Static("  hit~"),
                 TextPart::Digits(&hit_str),
-                TextPart::Text("%"),
+                TextPart::Static("%"),
             ],
             TextOptions::default()
                 .x(24.0)
@@ -299,11 +299,11 @@ fn main() {
         draw_text_parts(
             &mut batch.texts,
             &[
-                TextPart::Text("FPS~"),
+                TextPart::Static("FPS~"),
                 TextPart::Digits(&fps_str),
-                TextPart::Text("  frame~"),
+                TextPart::Static("  frame~"),
                 TextPart::Digits(&ft_str),
-                TextPart::Text("ms"),
+                TextPart::Static("ms"),
             ],
             TextOptions::default()
                 .x(320.0)
@@ -325,7 +325,7 @@ fn main() {
                     &mut batch.texts,
                     &[
                         TextPart::Digits(&count.to_string()),
-                        TextPart::Text("|"),
+                        TextPart::Static("|"),
                     ],
                     TextOptions::default()
                         .x(hx)

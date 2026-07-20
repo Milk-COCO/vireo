@@ -1003,10 +1003,22 @@ impl DrawBatch {
         self.texts.push_indexed(text, options, idx);
     }
 
-    /// HUD 多段文字，自动捕获当前 transform。
+    /// HUD 多段（Static / Dynamic / Digits），捕获当前 transform。
     pub fn text_parts(&mut self, parts: &[crate::text::TextPart<'_>], options: TextOptions) {
         let idx = self.current_transform_index();
         self.texts.push_parts_indexed(parts, options, idx);
+    }
+
+    /// HUD 自动切分（[`crate::text::split_hud`]），捕获当前 transform。
+    pub fn text_hud(&mut self, text: &str, options: TextOptions) {
+        let idx = self.current_transform_index();
+        self.texts.push_hud_indexed(text, options, idx);
+    }
+
+    /// 绘制 [`crate::text::HudLine`]，捕获当前 transform。
+    pub fn hud_line(&mut self, line: &crate::text::HudLine, options: TextOptions) {
+        let idx = self.current_transform_index();
+        line.draw_indexed(&mut self.texts, options, idx);
     }
 }
 

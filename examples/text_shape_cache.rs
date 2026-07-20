@@ -181,7 +181,7 @@ fn main() {
         let frame_digits = frame.to_string();
         draw_text_parts(
             &mut hud.texts,
-            &[TextPart::Text("frame "), TextPart::Digits(&frame_digits)],
+            &[TextPart::Static("frame "), TextPart::Digits(&frame_digits)],
             TextOptions::default()
                 .x(16.0)
                 .y(64.0)
@@ -275,7 +275,7 @@ fn main() {
                 // 固定 "R" + 数字位
                 let kd = k.to_string();
                 ob.text_parts(
-                    &[TextPart::Text("R"), TextPart::Digits(&kd)],
+                    &[TextPart::Static("R"), TextPart::Digits(&kd)],
                     TextOptions::default()
                         .font_size(13.0)
                         .color(Color::new(1.0, 0.75, 0.35, 1.0)),
