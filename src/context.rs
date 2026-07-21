@@ -272,23 +272,26 @@ impl Renderer {
         polygon_edges_global.clear();
 
         // 为每棵子树维护自己的 stencil ref 栈
+        // 父 clips_children → Push 写 mask；子 inherit.clipped → Test；clipped=false → 透传
         fn compute_stencil(
             batch: &DrawBatch,
             active_clip: &Option<u32>,
             ref_counter: &mut u32,
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
-            if !batch.vertices.is_empty() {
-                if batch.clips_children {
-                    // Push: test 父级 ref（buffer==parent_ref → Inc → parent_ref+1）
-                    let push_ref = active_clip.unwrap_or(0);
-                    *ref_counter = push_ref + 1;
-                    ref_stack.push(*ref_counter);
-                    (1u32, push_ref) // Push, 用父级 ref
-                } else if let Some(ref_) = active_clip {
-                    (2u32, *ref_) // Test — inside existing clip
+            let has_geom = !batch.vertices.is_empty();
+            let has_draw = has_geom || !batch.texts.entries.is_empty();
+            if batch.clips_children && has_geom {
+                // Push: test 父级 ref（buffer==parent_ref → Inc → parent_ref+1）
+                let push_ref = active_clip.unwrap_or(0);
+                *ref_counter = push_ref + 1;
+                ref_stack.push(*ref_counter);
+                (1u32, push_ref)
+            } else if let Some(ref_) = active_clip {
+                if batch.inherit.clipped && has_draw {
+                    (2u32, *ref_) // Test — 子 opt-in 裁切
                 } else {
-                    (0u32, 0) // None — no clip active
+                    (0u32, 0) // unclipped 或无可画内容
                 }
             } else {
                 (0u32, 0)
@@ -911,57 +914,234 @@ fn mul_affine_cols(
     (r0, r1, r2)
 }
 
-/// 子 batch 从父继承哪些画笔属性（在 [`DrawBatch::push_child`] 时写入子侧）。
+/// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
-/// - `transform`：整棵子树的 `transform_table` / 画笔 transform 左乘父矩阵
-/// - `color` / `sdf_feather` / `uv`：覆盖子节点画笔（已生成顶点颜色不变）
+/// 挂在子上：`child.inherit = …`，再 `parent.push_child(child)`。
+/// 画笔类标志（`transform` / `color` / `sdf_feather` / `uv`）在 **`push_child` 时**写入子侧；
+/// `clipped` 在 **`Renderer::draw` 时**决定是否测祖先 stencil。
 ///
-/// 不含「相对父包围盒左上角」的局部坐标（实现复杂，未做）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// # 字段
+///
+/// | 字段 | 默认（`NONE`） | 效果 |
+/// |------|:--------------:|------|
+/// | `transform` | false | 整棵子树 `transform_table` + 画笔 transform **左乘**父矩阵 |
+/// | `color` | false | 子画笔色 = 父色（**已生成**顶点颜色不变） |
+/// | `sdf_feather` | false | 子 `sdf_feather` = 父值 |
+/// | `uv` | false | 子 `uv` = 父值 |
+/// | `clipped` | **true** | 祖先有 mask 时测 stencil；`false` 可画出裁切区外 |
+///
+/// 不含「相对父包围盒左上角」的局部坐标。
+///
+/// # 与 `clips_children` 的分工
+///
+/// - 父 [`DrawBatch::clips_children`]` = true`：父几何 **写** stencil mask
+/// - 子 `inherit.clipped`：是否 **测** 该 mask（默认 true）
+///
+/// 同一父下可混用 clipped / unclipped 多个子。
+///
+/// # 预设与链式开关
+///
+/// ```
+/// use vireo::prelude::*;
+///
+/// // 预设
+/// let _ = InheritFromParent::NONE;      // 不继承画笔，仍参与裁切
+/// let _ = InheritFromParent::TRANSFORM; // 仅 transform
+/// let _ = InheritFromParent::ALL;       // 画笔全开 + clipped
+///
+/// // 链式：开 / 关 成对
+/// let a = InheritFromParent::NONE.color().sdf_feather();
+/// let b = InheritFromParent::ALL.no_color().unclipped();
+/// let c = InheritFromParent::TRANSFORM.unclipped();
+/// assert!(a.color && a.sdf_feather && a.clipped);
+/// assert!(!b.color && !b.clipped && b.transform);
+/// assert!(c.transform && !c.clipped);
+/// ```
+///
+/// # 基本用法
+///
+/// ```
+/// use vireo::prelude::*;
+///
+/// let mut parent = DrawBatch::new();
+/// parent.sdf_feather = Some(1.0);
+/// parent.set_color(ORANGE);
+/// parent.set_position(100.0, 80.0);
+/// parent.set_deg(15.0);
+/// parent.clips_children = true;
+/// draw_rounded_rect(&mut parent, -40.0, -40.0, 80.0, 80.0, 12.0, Some(GRAY));
+///
+/// // 子：局部坐标；跟父转；测裁切
+/// let mut child = DrawBatch::new();
+/// child.inherit = InheritFromParent::TRANSFORM;
+/// draw_rectangle(&mut child, -10.0, -10.0, 20.0, 20.0, Some(SKYBLUE));
+/// parent.push_child(child);
+///
+/// // 另一子：不测 stencil，可越界
+/// let mut overflow = DrawBatch::new();
+/// overflow.inherit = InheritFromParent::TRANSFORM.unclipped();
+/// draw_circle(&mut overflow, 50.0, 0.0, 12.0, Some(RED));
+/// parent.push_child(overflow);
+/// ```
+///
+/// # 画笔继承时机
+///
+/// `color` / `sdf_feather` / `uv` 在 `push_child` 时才写入子画笔。
+/// 若要在**生成顶点之前**用父色/柔边，请在 `draw_*` 前自行赋值，或先写再画：
+///
+/// ```
+/// use vireo::prelude::*;
+///
+/// let mut parent = DrawBatch::new();
+/// parent.set_color(ORANGE);
+/// parent.sdf_feather = Some(2.0);
+///
+/// let mut child = DrawBatch::new();
+/// child.inherit = InheritFromParent::NONE.color().sdf_feather();
+/// // 需要影响本批顶点时，在 push 前同步：
+/// child.set_color(parent.color);
+/// child.sdf_feather = parent.sdf_feather;
+/// draw_circle(&mut child, 0.0, 0.0, 20.0, None);
+/// parent.push_child(child); // 再写一次画笔无妨
+/// ```
+///
+/// # 另见
+///
+/// 交互示例：`cargo run --example batch_inherit`、`batch_clip`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InheritFromParent {
+    /// 左乘父变换到子树（含已画顶点的 `transform_table`）。
     pub transform: bool,
+    /// 覆盖子画笔 `color`（已 bake 进顶点的颜色不变）。
     pub color: bool,
+    /// 覆盖子 `sdf_feather`。
     pub sdf_feather: bool,
+    /// 覆盖子 `uv`。
     pub uv: bool,
+    /// 父（祖先）有裁切区时：`true` = 测 stencil；`false` = 不测（可越界）。默认 `true`。
+    pub clipped: bool,
+}
+
+impl Default for InheritFromParent {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl InheritFromParent {
+    /// 不继承画笔；仍默认参与父裁切（`clipped = true`）。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// assert!(!InheritFromParent::NONE.transform);
+    /// assert!(InheritFromParent::NONE.clipped);
+    /// ```
     pub const NONE: Self = Self {
         transform: false,
         color: false,
         sdf_feather: false,
         uv: false,
+        clipped: true,
     };
+    /// 画笔全继承 + 参与裁切。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// let i = InheritFromParent::ALL;
+    /// assert!(i.transform && i.color && i.sdf_feather && i.uv && i.clipped);
+    /// ```
     pub const ALL: Self = Self {
         transform: true,
         color: true,
         sdf_feather: true,
         uv: true,
+        clipped: true,
     };
+    /// 仅继承 transform，参与裁切。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// let i = InheritFromParent::TRANSFORM;
+    /// assert!(i.transform && !i.color && i.clipped);
+    /// ```
     pub const TRANSFORM: Self = Self {
         transform: true,
         color: false,
         sdf_feather: false,
         uv: false,
+        clipped: true,
     };
 
+    /// 开启继承父 transform。
     pub const fn transform(mut self) -> Self {
         self.transform = true;
         self
     }
+    /// 关闭继承父 transform。
+    pub const fn no_transform(mut self) -> Self {
+        self.transform = false;
+        self
+    }
+    /// 开启继承父画笔色。
     pub const fn color(mut self) -> Self {
         self.color = true;
         self
     }
+    /// 关闭继承父画笔色。
+    pub const fn no_color(mut self) -> Self {
+        self.color = false;
+        self
+    }
+    /// 开启继承父 `sdf_feather`。
     pub const fn sdf_feather(mut self) -> Self {
         self.sdf_feather = true;
         self
     }
+    /// 关闭继承父 `sdf_feather`。
+    pub const fn no_sdf_feather(mut self) -> Self {
+        self.sdf_feather = false;
+        self
+    }
+    /// 开启继承父 `uv`。
     pub const fn uv(mut self) -> Self {
         self.uv = true;
         self
     }
+    /// 关闭继承父 `uv`。
+    pub const fn no_uv(mut self) -> Self {
+        self.uv = false;
+        self
+    }
+    /// 参与父 stencil 裁切（默认）。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// assert!(InheritFromParent::NONE.unclipped().clipped().clipped);
+    /// ```
+    pub const fn clipped(mut self) -> Self {
+        self.clipped = true;
+        self
+    }
+    /// 不测父 stencil，可画出裁切区外。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// let i = InheritFromParent::ALL.unclipped();
+    /// assert!(!i.clipped && i.transform);
+    /// ```
+    pub const fn unclipped(mut self) -> Self {
+        self.clipped = false;
+        self
+    }
 
+    /// 是否有需在 `push_child` 写入的画笔继承（不含 `clipped`，裁切在 draw 时生效）。
+    ///
+    /// ```
+    /// use vireo::prelude::InheritFromParent;
+    /// assert!(!InheritFromParent::NONE.any());
+    /// assert!(InheritFromParent::NONE.color().any());
+    /// assert!(!InheritFromParent::NONE.unclipped().any()); // 仅改 clipped
+    /// ```
     #[inline]
     pub fn any(self) -> bool {
         self.transform || self.color || self.sdf_feather || self.uv
@@ -1763,5 +1943,32 @@ mod tests {
         let (_, _, t) = m.to_cols();
         assert!((t[0] - 13.0).abs() < 1e-5);
         assert!((t[1] - 24.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn inherit_default_is_clipped() {
+        assert!(InheritFromParent::NONE.clipped);
+        assert!(InheritFromParent::default().clipped);
+        assert!(!InheritFromParent::NONE.unclipped().clipped);
+        assert!(InheritFromParent::TRANSFORM.unclipped().transform);
+        assert!(!InheritFromParent::TRANSFORM.unclipped().clipped);
+    }
+
+    #[test]
+    fn inherit_builder_on_off_pairs() {
+        let a = InheritFromParent::ALL
+            .no_transform()
+            .no_color()
+            .no_sdf_feather()
+            .no_uv()
+            .unclipped();
+        assert!(!a.transform && !a.color && !a.sdf_feather && !a.uv && !a.clipped);
+        let b = InheritFromParent::NONE
+            .transform()
+            .color()
+            .sdf_feather()
+            .uv()
+            .clipped();
+        assert!(b.transform && b.color && b.sdf_feather && b.uv && b.clipped);
     }
 }
