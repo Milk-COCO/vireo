@@ -7,6 +7,21 @@ use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
 use crate::gpu::GpuContext;
+use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
+
+/// 一次 `Renderer::draw` 的扁平事件序列（模块级，扁平方法可引用）。
+///
+/// - `Batch`：常规 batch（自身 shapes + texts）。
+/// - `StencilPop`：父 batch `clips_children` 收尾（op=3 模板，ref=父 Push 后层级）。
+/// - `AreaOp`：Area 掩码单 op（来自 `Area::compile_cover` / `compile_erase` 的展平）。
+///   `is_setup=true` 是 batch 子树前的 cover，渲染时累加 area_depth；
+///   `is_setup=false` 是子树后的 erase，渲染后减回。
+///   走 stencil 管线 op 3（Erase）或 op 4（Cover），无色。
+pub(crate) enum DrawEvent<'a> {
+    Batch(&'a DrawBatch),
+    StencilPop,
+    AreaOp { op: AreaStencilOp, is_setup: bool },
+}
 
 /// 渲染目标，封装用于 render pass 的 `TextureView`。
 ///
@@ -186,26 +201,32 @@ impl Renderer {
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
     ) {
-        // ---- 前序展开子树（含 Pop 事件）----
-        enum DrawEvent<'a> {
-            Batch(&'a DrawBatch),
-            StencilPop,
-        }
+        // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
+        // 可见 = 祖先 stencil ∧ batch 自身有效 Area。
+        // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
+        // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
+        // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
         let mut events: Vec<DrawEvent> = Vec::new();
         let mut uses_stencil = false;
         for b in batches {
-            let mut tmp = Vec::new();
-            b.flatten_with_pop(&mut tmp);
-            for item in tmp {
-                match item {
-                    Some(batch) => {
+            let mut tmp: Vec<DrawEvent> = Vec::new();
+            b.flatten_events(&mut tmp, 0);
+            for ev in tmp {
+                match &ev {
+                    DrawEvent::Batch(batch) => {
                         if batch.clips_children {
                             uses_stencil = true;
                         }
-                        events.push(DrawEvent::Batch(batch));
+                        if batch.effective_area().is_some() {
+                            uses_stencil = true;
+                        }
                     }
-                    None => events.push(DrawEvent::StencilPop),
+                    DrawEvent::AreaOp { .. } => {
+                        uses_stencil = true;
+                    }
+                    _ => {}
                 }
+                events.push(ev);
             }
         }
 
@@ -252,6 +273,9 @@ impl Renderer {
             text: Option<(u32, u32)>,
             stencil_op: u32,
             stencil_ref: u32,
+            /// Area 掩码事件专用：3 = Erase / 4 = Cover（来自 AreaStencilOp::stencil_pipeline_op）。
+            /// `None` 表示普通 batch 或 StencilPop（走 `stencil_op`）。
+            area_op: Option<u32>,
         }
 
         let mut event_infos: Vec<EventInfo> = Vec::new();
@@ -273,23 +297,26 @@ impl Renderer {
 
         // 为每棵子树维护自己的 stencil ref 栈
         // 父 clips_children → Push 写 mask；子 inherit.clipped → Test；clipped=false → 透传
-        fn compute_stencil(
+        // `content_level` = 当前 batch 的 content 应处的 stencil 级别：
+        //   = active_clip + area_depth (area_depth 已含本 batch 自身 Area 之前的累加)
+        // clips_children 时 Push at content_level；子看 content_level+1。
+        fn compute_stencil_at_level(
             batch: &DrawBatch,
-            active_clip: &Option<u32>,
+            content_level: u32,
             ref_counter: &mut u32,
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
             let has_geom = !batch.vertices.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
             if batch.clips_children && has_geom {
-                // Push: test 父级 ref（buffer==parent_ref → Inc → parent_ref+1）
-                let push_ref = active_clip.unwrap_or(0);
+                // Push: test content_level（Area 已在前面 cover，buffer==content_level → Inc → +1）
+                let push_ref = content_level;
                 *ref_counter = push_ref + 1;
                 ref_stack.push(*ref_counter);
                 (1u32, push_ref)
-            } else if let Some(ref_) = active_clip {
+            } else if content_level > 0 {
                 if batch.inherit.clipped && has_draw {
-                    (2u32, *ref_) // Test — 子 opt-in 裁切
+                    (2u32, content_level) // Test — 子 opt-in 裁切，测 content level
                 } else {
                     (0u32, 0) // unclipped 或无可画内容
                 }
@@ -301,12 +328,30 @@ impl Renderer {
         let mut ref_counter: u32 = 0;
         let mut ref_stack: Vec<u32> = Vec::new();
         let mut active_clip: Option<u32> = None;
+        let mut area_depth: u32 = 0;
 
         for event in &events {
             match event {
                 DrawEvent::Batch(batch) => {
-                    let (stencil_op, stencil_ref) = compute_stencil(
-                        batch, &active_clip, &mut ref_counter, &mut ref_stack,
+                    // ancestors_area_depth = 当前仍在生效的祖先 Area 数（不含自身）。
+                    // 自身有 Area → content level = active_clip + ancestors + 1；
+                    // 自身无 Area → content level = active_clip + ancestors。
+                    let has_own_area = batch
+                        .effective_area()
+                        .as_ref()
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    let ancestors_area_depth = area_depth;
+                    if has_own_area {
+                        area_depth += 1;
+                    }
+                    let content_level =
+                        active_clip.unwrap_or(0) + ancestors_area_depth + (has_own_area as u32);
+                    let (stencil_op, stencil_ref) = compute_stencil_at_level(
+                        batch,
+                        content_level,
+                        &mut ref_counter,
+                        &mut ref_stack,
                     );
                     if stencil_op == 1 {
                         active_clip = Some(*ref_stack.last().unwrap_or(&0));
@@ -316,6 +361,7 @@ impl Renderer {
                         text: None,
                         stencil_op,
                         stencil_ref,
+                        area_op: None,
                     });
                 }
                 DrawEvent::StencilPop => {
@@ -332,7 +378,25 @@ impl Renderer {
                         text: None,
                         stencil_op: 3,
                         stencil_ref: popped.unwrap_or(0),
+                        area_op: None,
                     });
+                }
+                DrawEvent::AreaOp { op, is_setup } => {
+                    // Area 单 op：cover (op 4) 在 batch 前，erase (op 3) 在子树后。
+                    // area_depth 含义：当前仍处于祖先 Area 框架内的层数（不含本 batch 自身 Area）。
+                    // setup 在 Batch 事件里 +1；cleanup 在此立即 -1（子树已结束）。
+                    let pipe_op = op.stencil_pipeline_op(); // 3 or 4
+                    let r = op.stencil_ref();
+                    event_infos.push(EventInfo {
+                        shape: None,
+                        text: None,
+                        stencil_op: pipe_op,
+                        stencil_ref: r,
+                        area_op: Some(pipe_op),
+                    });
+                    if !is_setup {
+                        area_depth = area_depth.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -356,20 +420,33 @@ impl Renderer {
                 polygon_edges_global.extend_from_slice(&batch.polygon_edges);
                 total_vcount += batch.vertices.len() as u32;
                 total_icount += batch.indices.len() as u32;
-            } else {
+            } else if let DrawEvent::StencilPop = event {
                 // Pop 事件：添加全屏四边形（2 三角，6 索引）
-                // 使用 (0,0)-(pw,ph) 覆盖整个视口
-                let _v = Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, 0);
-                // 4 vertices + 6 indices
                 pop_screen_verts += 4;
                 pop_screen_idx += 6;
-                // Also push dummy transform/poly entries
                 batch_transform_bases.push(0);
                 batch_poly_base.push(poly_offset);
+            } else if let DrawEvent::AreaOp { op, .. } = event {
+                // Area 事件：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
+                if let Some(geom) = op.geom() {
+                    total_vcount += geom.vertices.len() as u32;
+                    total_icount += geom.indices.len() as u32;
+                    // 单独建一个 transform_table 段（放在 global_transforms 末尾）
+                    batch_transform_bases.push((global_transforms.len() / 12) as u32);
+                    global_transforms.extend_from_slice(&geom.transform_table);
+                    batch_poly_base.push(poly_offset);
+                    poly_offset += geom.polygon_edges.len() as u32 / 4;
+                    polygon_edges_global.extend_from_slice(&geom.polygon_edges);
+                } else {
+                    pop_screen_verts += 4;
+                    pop_screen_idx += 6;
+                    batch_transform_bases.push(0);
+                    batch_poly_base.push(poly_offset);
+                }
             }
         }
 
-        let total_vbytes = (total_vcount + pop_screen_verts) as u64 * std::mem::size_of::<Vertex>() as u64;
+        let total_vbytes = (total_vcount + pop_screen_verts) as u64 * size_of::<Vertex>() as u64;
         let total_ibytes = (total_icount + pop_screen_idx) as u64 * 4;
         self.ensure_vertex_buffer(total_vbytes);
         self.ensure_index_buffer(total_ibytes);
@@ -479,6 +556,77 @@ impl Renderer {
                     v_offset += 4;
                     idx_offset += 6;
                 }
+                DrawEvent::AreaOp { op, .. } => {
+                    // Area 掩码：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
+                    // 走 stencil 管线 op 3/4（无色），由 pass 内 `area_op` 决定管线 key。
+                    let transform_base = batch_transform_bases[ei];
+                    let poly_base = batch_poly_base[ei] as f32;
+                    let si = if let Some(geom) = op.geom() {
+                        let needs_patch = !geom.polygon_edges.is_empty() || transform_base > 0;
+                        let v_start = combined_vdata.len();
+                        combined_vdata.extend_from_slice(bytemuck::cast_slice(&geom.vertices));
+                        if needs_patch {
+                            let has_poly = !geom.polygon_edges.is_empty();
+                            let verts: &mut [Vertex] = bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
+                            for v in verts.iter_mut() {
+                                if transform_base > 0 {
+                                    v.transform_index += transform_base;
+                                }
+                                if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
+                                    v.sdf_params[0] += poly_base;
+                                }
+                            }
+                        }
+                        combined_idata.extend_from_slice(bytemuck::cast_slice(&geom.indices));
+                        let n = geom.indices.len() as u32;
+                        let bg = self.gpu.white_bind_group.as_ref().clone();
+                        let segs = vec![ShapeSegment {
+                            ndx_start: idx_offset,
+                            ndx_count: n,
+                            bind_group: bg,
+                        }];
+                        let info = ShapeInfo {
+                            base_vertex: v_offset as i32,
+                            segments: segs,
+                            geometry: !geom.has_sdf && geom.sdf_feather.is_none(),
+                        };
+                        v_offset += geom.vertices.len() as u32;
+                        idx_offset += n;
+                        info
+                    } else {
+                        // Full：全屏四边形 + 单位矩阵
+                        let id_idx = (global_transforms.len() / 12) as u32;
+                        global_transforms.extend_from_slice(&[
+                            1.0, 0.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0, 0.0,
+                            0.0, 0.0, 1.0, 0.0,
+                        ]);
+                        let verts = [
+                            Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                            Vertex::new_uv_xform(lw, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                            Vertex::new_uv_xform(lw, lh, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                            Vertex::new_uv_xform(0.0, lh, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                        ];
+                        combined_vdata.extend_from_slice(bytemuck::cast_slice(&verts));
+                        let indices = [0u32, 1, 2, 0, 2, 3];
+                        combined_idata.extend_from_slice(bytemuck::cast_slice(&indices));
+                        let bg = self.gpu.white_bind_group.as_ref().clone();
+                        let segs = vec![ShapeSegment {
+                            ndx_start: idx_offset,
+                            ndx_count: 6,
+                            bind_group: bg,
+                        }];
+                        let info = ShapeInfo {
+                            base_vertex: v_offset as i32,
+                            segments: segs,
+                            geometry: true,
+                        };
+                        v_offset += 4;
+                        idx_offset += 6;
+                        info
+                    };
+                    event_infos[ei].shape = Some(si);
+                }
             }
         }
 
@@ -582,11 +730,21 @@ impl Renderer {
             let dv;
             let ds_attachment = if uses_stencil {
                 dv = self.ds_view();
+                // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
+                // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
+                let clear_ds = clear_color.is_some();
                 Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &dv,
-                    depth_ops: None,
+                    depth_ops: Some(wgpu::Operations {
+                        load: if clear_ds {
+                            wgpu::LoadOp::Clear(1.0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Discard,
+                    }),
                     stencil_ops: Some(wgpu::Operations {
-                        load: if clear_color.is_some() {
+                        load: if clear_ds {
                             wgpu::LoadOp::Clear(0)
                         } else {
                             wgpu::LoadOp::Load
@@ -611,18 +769,21 @@ impl Renderer {
 
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
-            let text_ctx = self.gpu.text_ctx.borrow();
+            let mut text_ctx = self.gpu.text_ctx.borrow_mut();
             let poly_bg = polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group);
             let xform_bg = transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group);
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
+            let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
 
             for info in &event_infos {
                 if let Some(ref shape) = info.shape {
+                    // Area 事件：op 3/4 来自 area_op；普通 batch/StencilPop：op 0..3 来自 stencil_op。
+                    let pipe_op = info.area_op.unwrap_or(info.stencil_op);
                     let need_rebind = !shapes_bound
                         || last_geometry != Some(shape.geometry)
-                        || (uses_stencil && info.stencil_op != last_stencil_op);
+                        || (uses_stencil && pipe_op != last_stencil_op);
                     if need_rebind {
                         let pipe = if uses_stencil {
                             self.gpu.ensure_stencil_pipeline(
@@ -630,7 +791,7 @@ impl Renderer {
                                 self.alpha_to_coverage,
                                 self.ssaa,
                                 shape.geometry,
-                                info.stencil_op.min(3),
+                                pipe_op.min(4),
                             )
                         } else {
                             self.gpu.ensure_pipeline(
@@ -652,7 +813,7 @@ impl Renderer {
                         }
                         shapes_bound = true;
                         last_geometry = Some(shape.geometry);
-                        last_stencil_op = info.stencil_op;
+                        last_stencil_op = pipe_op;
                     }
                     if uses_stencil {
                         pass.set_stencil_reference(info.stencil_ref);
@@ -668,22 +829,38 @@ impl Renderer {
                 }
 
                 if let Some((start, count)) = info.text {
-                    if uses_stencil {
-                        // Push 后 mask 已 Inc：文字在父形内测 new_level = ref+1
-                        let text_ref = if info.stencil_op == 1 {
-                            info.stencil_ref + 1
-                        } else {
-                            info.stencil_ref
-                        };
-                        pass.set_stencil_reference(text_ref);
+                    // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
+                    // Area 存在时：当前文本在 Area content level，测 (Test)。
+                    let has_area_at_text = info.area_op.is_some()
+                        || info.stencil_op == 1
+                        || info.stencil_op == 2;
+                    let text_mode = if !uses_stencil {
+                        crate::text::TextStencilMode::None
+                    } else if has_area_at_text {
+                        crate::text::TextStencilMode::Test
+                    } else {
+                        crate::text::TextStencilMode::Pass
+                    };
+                    if last_text_mode != Some(text_mode) {
+                        text_ctx.ensure_text_stencil_mode(&self.gpu.device, text_mode);
+                        last_text_mode = Some(text_mode);
                     }
-                    let _ = text_ctx.text_renderer.render_range(
+                    // Push 后 mask 已 Inc：父文字测 new_level = ref+1
+                    let text_ref = if info.stencil_op == 1 {
+                        info.stencil_ref + 1
+                    } else {
+                        info.stencil_ref
+                    };
+                    // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
+                    // 否则部分后端会把 ref 重置为 0。
+                    let _ = text_ctx.text_renderer.render_range_with_stencil_ref(
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
                         &mut pass,
                         xform_bg,
                         start,
                         count,
+                        if uses_stencil { Some(text_ref) } else { None },
                     );
                     shapes_bound = false;
                     last_geometry = None;
@@ -709,21 +886,21 @@ impl Renderer {
 
         // 2. PSO 预热：SDF + geo 管线各画一个 dummy 三角形。
         // Geo 路径（sdf_feather: None）
-        let mut geo_batch = crate::context::DrawBatch::new();
+        let mut geo_batch = DrawBatch::new();
         geo_batch.sdf_feather = None;
-        geo_batch.vertices.push(crate::gpu::Vertex::new(0.0, 0.0, clear_color));
-        geo_batch.vertices.push(crate::gpu::Vertex::new(1.0, 0.0, clear_color));
-        geo_batch.vertices.push(crate::gpu::Vertex::new(0.0, 1.0, clear_color));
+        geo_batch.vertices.push(Vertex::new(0.0, 0.0, clear_color));
+        geo_batch.vertices.push(Vertex::new(1.0, 0.0, clear_color));
+        geo_batch.vertices.push(Vertex::new(0.0, 1.0, clear_color));
         geo_batch.indices.push(0);
         geo_batch.indices.push(1);
         geo_batch.indices.push(2);
 
         // SDF 路径（sdf_feather: Some(0.0)）
-        let mut sdf_batch = crate::context::DrawBatch::new();
+        let mut sdf_batch = DrawBatch::new();
         sdf_batch.sdf_feather = Some(0.0);
-        sdf_batch.vertices.push(crate::gpu::Vertex::new(0.0, 0.0, clear_color));
-        sdf_batch.vertices.push(crate::gpu::Vertex::new(1.0, 0.0, clear_color));
-        sdf_batch.vertices.push(crate::gpu::Vertex::new(0.0, 1.0, clear_color));
+        sdf_batch.vertices.push(Vertex::new(0.0, 0.0, clear_color));
+        sdf_batch.vertices.push(Vertex::new(1.0, 0.0, clear_color));
+        sdf_batch.vertices.push(Vertex::new(0.0, 1.0, clear_color));
         sdf_batch.indices.push(0);
         sdf_batch.indices.push(1);
         sdf_batch.indices.push(2);
@@ -1230,6 +1407,11 @@ pub struct DrawBatch {
     pub clips_children: bool,
     /// 被 `push_child` 挂到父下时，从父写入本节点（及 transform 时整棵子树）的属性。
     pub inherit: InheritFromParent,
+    /// 本 batch 可见区 include（`None` = Full）。与 `area_exclude` 合成有效 Area。
+    /// 与 `clips_children` 正交：可见 = 祖先 stencil ∧ 有效 Area。
+    pub area_include: Option<Area>,
+    /// 本 batch 可见区 exclude（`None` = Empty）。
+    pub area_exclude: Option<Area>,
 }
 
 impl DrawBatch {
@@ -1252,6 +1434,8 @@ impl DrawBatch {
             children: Vec::new(),
             clips_children: false,
             inherit: InheritFromParent::NONE,
+            area_include: None,
+            area_exclude: None,
         }
     }
 
@@ -1273,6 +1457,28 @@ impl DrawBatch {
         self.children.clear();
         self.clips_children = false;
         self.inherit = InheritFromParent::NONE;
+        self.area_include = None;
+        self.area_exclude = None;
+    }
+
+    /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
+    pub fn to_area(&self) -> Area {
+        if self.vertices.is_empty() || self.indices.is_empty() {
+            return Area::Empty;
+        }
+        Area::geom(AreaGeom {
+            vertices: self.vertices.clone(),
+            indices: self.indices.clone(),
+            transform_table: self.transform_table.clone(),
+            polygon_edges: self.polygon_edges.clone(),
+            has_sdf: self.has_sdf,
+            sdf_feather: self.sdf_feather,
+        })
+    }
+
+    /// 有效可见区：`include.unwrap_or(Full) \ exclude.unwrap_or(Empty)`；皆 None 则 `None`。
+    pub fn effective_area(&self) -> Option<Area> {
+        effective_area(self.area_include.as_ref(), self.area_exclude.as_ref())
     }
 
     /// 追加子 batch。若 `child.inherit` 有标志，先把父属性写入子（transform 作用于整棵子树）。
@@ -1370,9 +1576,9 @@ impl DrawBatch {
             || self.children.iter().any(Self::has_drawable_content)
     }
 
-    /// 前序 DFS：自身 → 各 child → Pop（若 clips_children）。
-    /// 返回的 `Vec` 中元素为 `(batch, is_pop)`，`is_pop=true` 时批次为空，
-    /// 表示需要 emit Stencil Pop（只改 stencil，不画）。
+    /// 旧 API：返回 `Some(batch)` / `None`（Pop）。已由 [`Self::flatten_events`] 取代；
+    /// 仅供 tests 中验证 Push/Pop 顺序使用。
+    #[cfg(test)]
     pub(crate) fn flatten_with_pop<'a>(&'a self, out: &mut Vec<Option<&'a DrawBatch>>) {
         out.push(Some(self));
         let child_start = out.len();
@@ -1380,8 +1586,56 @@ impl DrawBatch {
             child.flatten_with_pop(out);
         }
         if self.clips_children && out.len() > child_start {
-            // 子节点全部结束后，若自身开启了裁切，则弹出
             out.push(None);
+        }
+    }
+
+    /// 扩展版：额外为有 effective Area 的 batch 输出 AreaSetup（子树前）/ AreaCleanup（子树后）。
+    /// 每个 AreaStencilOp 展平为独立 event，复用 shape 路径渲染。
+    /// empty Area 不发 AreaSetup/AreaCleanup。
+    ///
+    /// `level` 是本 batch 的「祖先 stencil level」：
+    ///   - cover 在 `level` 处写，area 内 level → level+1
+    ///   - erase 在 `level+1` 处写，恢复 level
+    ///   - 若自身有 Area，子树看到 level+1（content level）
+    ///   - 若自身有 Area 且 clips_children，Push 在 level+1，子看 level+2
+    pub(crate) fn flatten_events<'a>(
+        &'a self,
+        out: &mut Vec<DrawEvent<'a>>,
+        level: u32,
+    ) {
+        let area = self.effective_area();
+        let has_area = matches!(&area, Some(a) if !a.is_empty());
+        if let Some(a) = &area {
+            if !a.is_empty() {
+                let mut ops = Vec::new();
+                a.compile_cover(level, &mut ops);
+                for op in ops {
+                    out.push(DrawEvent::AreaOp { op, is_setup: true });
+                }
+            }
+        }
+        out.push(DrawEvent::Batch(self));
+        let child_start = out.len();
+        // 子树的 level：若自身有 Area，子 content 在 level+1；否则同 level。
+        let child_level = if has_area { level + 1 } else { level };
+        for child in &self.children {
+            child.flatten_events(out, child_level);
+        }
+        if self.clips_children && out.len() > child_start {
+            out.push(DrawEvent::StencilPop);
+        }
+        if has_area {
+            if let Some(a) = area {
+                if !a.is_empty() {
+                    let mut ops = Vec::new();
+                    // cover 把 level 抬到 level+1；erase 在 level+1 上 Dec 回 level。
+                    a.compile_erase(level + 1, &mut ops);
+                    for op in ops {
+                        out.push(DrawEvent::AreaOp { op, is_setup: false });
+                    }
+                }
+            }
         }
     }
 
@@ -1683,6 +1937,8 @@ impl DrawBatch {
             children: self.children.iter().map(|c| c.clone_batch()).collect(),
             clips_children: self.clips_children,
             inherit: self.inherit,
+            area_include: self.area_include.clone(),
+            area_exclude: self.area_exclude.clone(),
         }
     }
 
@@ -1777,7 +2033,8 @@ impl DrawBatch {
 mod tests {
     use super::*;
     use crate::color::colors::*;
-    use crate::shapes::{draw_circle, draw_polygon, draw_rectangle};
+    use crate::shapes::{draw_circle, draw_polygon, draw_rectangle, draw_rounded_rect};
+    use crate::text::TextOptions;
 
     #[test]
     fn has_sdf_flag_set_on_sdf_shapes() {
@@ -1970,5 +2227,324 @@ mod tests {
             .uv()
             .clipped();
         assert!(b.transform && b.color && b.sdf_feather && b.uv && b.clipped);
+    }
+
+    /// 三层 clips 的 flatten 顺序：root → mid → leaf → Pop → Pop
+    #[test]
+    fn nested_clips_flatten_emits_two_pops() {
+        let mut root = DrawBatch::new();
+        root.clips_children = true;
+        draw_rectangle(&mut root, -10.0, -10.0, 20.0, 20.0, Some(RED));
+
+        let mut mid = DrawBatch::new();
+        mid.clips_children = true;
+        mid.inherit = InheritFromParent::TRANSFORM;
+        draw_circle(&mut mid, 0.0, 0.0, 8.0, Some(GREEN));
+
+        let mut leaf = DrawBatch::new();
+        leaf.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut leaf, -2.0, -2.0, 4.0, 4.0, Some(BLUE));
+
+        mid.push_child(leaf);
+        root.push_child(mid);
+
+        let mut flat: Vec<Option<&DrawBatch>> = Vec::new();
+        root.flatten_with_pop(&mut flat);
+        // root, mid, leaf, pop(mid), pop(root)
+        assert_eq!(flat.len(), 5);
+        assert!(flat[0].is_some());
+        assert!(flat[1].is_some());
+        assert!(flat[2].is_some());
+        assert!(flat[3].is_none());
+        assert!(flat[4].is_none());
+        assert!(flat[0].unwrap().clips_children);
+        assert!(flat[1].unwrap().clips_children);
+        assert!(!flat[2].unwrap().clips_children);
+    }
+
+    /// 嵌套 push 时 ref 语义：root Push(0)→mid Push(1)→leaf Test(2)
+    #[test]
+    fn nested_clips_stencil_ref_sequence() {
+        // 模拟 draw() 内 compute_stencil 的 ref 栈
+        let mut root = DrawBatch::new();
+        root.clips_children = true;
+        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        let mut mid = DrawBatch::new();
+        mid.clips_children = true;
+        mid.inherit = InheritFromParent::TRANSFORM;
+        draw_circle(&mut mid, 0.0, 0.0, 5.0, Some(GREEN));
+        let mut leaf = DrawBatch::new();
+        leaf.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut leaf, 0.0, 0.0, 2.0, 2.0, Some(BLUE));
+        mid.push_child(leaf);
+        root.push_child(mid);
+
+        let mut flat: Vec<Option<&DrawBatch>> = Vec::new();
+        root.flatten_with_pop(&mut flat);
+
+        let mut ref_stack: Vec<u32> = Vec::new();
+        let mut active: Option<u32> = None;
+        let mut ops: Vec<(u32, u32)> = Vec::new(); // (op, ref)
+        for item in &flat {
+            match item {
+                Some(batch) => {
+                    let has_geom = !batch.vertices.is_empty();
+                    let has_draw = has_geom || !batch.texts.entries.is_empty();
+                    let (op, r) = if batch.clips_children && has_geom {
+                        let push_ref = active.unwrap_or(0);
+                        let new_lv = push_ref + 1;
+                        ref_stack.push(new_lv);
+                        active = Some(new_lv);
+                        (1u32, push_ref)
+                    } else if let Some(a) = active {
+                        if batch.inherit.clipped && has_draw {
+                            (2u32, a)
+                        } else {
+                            (0u32, 0)
+                        }
+                    } else {
+                        (0u32, 0)
+                    };
+                    ops.push((op, r));
+                }
+                None => {
+                    let popped = ref_stack.pop().unwrap_or(0);
+                    active = if popped > 1 { Some(popped - 1) } else { None };
+                    ops.push((3u32, popped));
+                }
+            }
+        }
+        assert_eq!(ops, vec![
+            (1, 0), // root Push @0 → level 1
+            (1, 1), // mid Push @1 → level 2
+            (2, 2), // leaf Test @2
+            (3, 2), // pop mid
+            (3, 1), // pop root
+        ]);
+    }
+
+    /// 读 transform 表第 `idx` 个 mat 的 (a,c,b,d,tx,ty)
+    fn mat6(table: &[f32], idx: u32) -> (f32, f32, f32, f32, f32, f32) {
+        let b = idx as usize * 12;
+        assert!(b + 12 <= table.len(), "idx={idx} table_mats={}", table.len() / 12);
+        (
+            table[b],
+            table[b + 1],
+            table[b + 4],
+            table[b + 5],
+            table[b + 8],
+            table[b + 9],
+        )
+    }
+
+    /// 嵌套 Inherit TRANSFORM 后：leaf/mid 的形状与文字共用索引，且表内平移已含祖先
+    #[test]
+    fn nested_text_and_shape_share_composed_transform() {
+        let mut root = DrawBatch::new();
+        root.sdf_feather = Some(1.0);
+        root.set_position(230.0, 270.0);
+        root.clips_children = true;
+        draw_rounded_rect(&mut root, -150.0, -130.0, 300.0, 260.0, 28.0, Some(RED));
+
+        let mut mid = DrawBatch::new();
+        mid.sdf_feather = Some(1.0);
+        mid.set_position(40.0, 0.0);
+        mid.clips_children = true;
+        mid.inherit = InheritFromParent::TRANSFORM;
+        draw_circle(&mut mid, 0.0, 0.0, 90.0, Some(GREEN));
+
+        let mut leaf = DrawBatch::new();
+        leaf.sdf_feather = Some(1.0);
+        leaf.inherit = InheritFromParent::TRANSFORM;
+        draw_circle(&mut leaf, 0.0, 0.0, 18.0, Some(WHITE));
+        leaf.text(
+            "LEAF",
+            TextOptions::default().x(-40.0).y(-14.0).font_size(28.0).color(BLACK),
+        );
+
+        mid.push_child(leaf);
+        mid.text(
+            "MID",
+            TextOptions::default().x(-36.0).y(-34.0).font_size(26.0).color(YELLOW),
+        );
+        root.push_child(mid);
+        root.text(
+            "ROOT",
+            TextOptions::default().x(-50.0).y(-58.0).font_size(26.0).color(SKYBLUE),
+        );
+
+        // --- root ---
+        assert_eq!(root.texts.entries.len(), 1);
+        let rti = root.texts.entries[0].transform_index;
+        let rvi = root.vertices[0].transform_index;
+        assert_eq!(rti, rvi, "root text/shape index");
+        let (_, _, _, _, rtx, rty) = mat6(&root.transform_table, rti);
+        assert!((rtx - 230.0).abs() < 1e-3, "root tx={rtx}");
+        assert!((rty - 270.0).abs() < 1e-3, "root ty={rty}");
+
+        // --- mid（继承后应为 root∘mid_local = (270, 270)）---
+        let mid = &root.children[0];
+        assert_eq!(mid.texts.entries.len(), 1);
+        let mti = mid.texts.entries[0].transform_index;
+        let mvi = mid.vertices[0].transform_index;
+        assert_eq!(mti, mvi, "mid text/shape index");
+        let (_, _, _, _, mtx, mty) = mat6(&mid.transform_table, mti);
+        assert!(
+            (mtx - 270.0).abs() < 1e-3 && (mty - 270.0).abs() < 1e-3,
+            "mid composed tx,ty=({mtx},{mty}) want (270,270)"
+        );
+
+        // --- leaf（继承后应与 mid 同世界原点 (270,270)）---
+        let leaf = &root.children[0].children[0];
+        assert_eq!(leaf.texts.entries.len(), 1);
+        let lti = leaf.texts.entries[0].transform_index;
+        let lvi = leaf.vertices[0].transform_index;
+        assert_eq!(lti, lvi, "leaf text/shape index");
+        let (_, _, _, _, ltx, lty) = mat6(&leaf.transform_table, lti);
+        assert!(
+            (ltx - 270.0).abs() < 1e-3 && (lty - 270.0).abs() < 1e-3,
+            "leaf composed tx,ty=({ltx},{lty}) want (270,270)"
+        );
+
+        // 文字局部坐标：LEAF 在 leaf 原点附近，变换后世界 ≈ (230,256) 仍在 mid 圆内
+        let wx = ltx + leaf.texts.entries[0].options.x;
+        let wy = lty + leaf.texts.entries[0].options.y;
+        let dx = wx - 270.0;
+        let dy = wy - 270.0;
+        let dist = (dx * dx + dy * dy).sqrt();
+        assert!(
+            dist < 90.0,
+            "LEAF text world ({wx},{wy}) dist_from_mid_center={dist} should be inside r=90"
+        );
+    }
+
+    /// 仅文字、无形状的子：inherit 后 transform_table 仍应被左乘
+    #[test]
+    fn inherit_transform_text_only_child_gets_table_entry() {
+        let mut parent = DrawBatch::new();
+        parent.set_position(100.0, 50.0);
+        draw_rectangle(&mut parent, -10.0, -10.0, 20.0, 20.0, Some(RED));
+
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::TRANSFORM;
+        child.text(
+            "hi",
+            TextOptions::default().x(0.0).y(0.0).font_size(16.0).color(WHITE),
+        );
+        // text() 会注册当前 transform（恒等）到 table
+        assert!(!child.transform_table.is_empty());
+        let ti_before = child.texts.entries[0].transform_index;
+        let (_, _, _, _, tx0, ty0) = mat6(&child.transform_table, ti_before);
+        assert!(tx0.abs() < 1e-5 && ty0.abs() < 1e-5);
+
+        parent.push_child(child);
+        let c = &parent.children[0];
+        let ti = c.texts.entries[0].transform_index;
+        let (_, _, _, _, tx, ty) = mat6(&c.transform_table, ti);
+        assert!((tx - 100.0).abs() < 1e-3, "tx={tx}");
+        assert!((ty - 50.0).abs() < 1e-3, "ty={ty}");
+    }
+
+    /// 文字在 draw 形状之前 push：索引仍应与之后形状一致（同画笔）
+    #[test]
+    fn text_before_shape_shares_transform_index() {
+        let mut b = DrawBatch::new();
+        b.set_position(12.0, 34.0);
+        b.text(
+            "A",
+            TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE),
+        );
+        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(RED));
+        assert_eq!(
+            b.texts.entries[0].transform_index,
+            b.vertices[0].transform_index
+        );
+        let (_, _, _, _, tx, ty) = mat6(&b.transform_table, b.texts.entries[0].transform_index);
+        assert!((tx - 12.0).abs() < 1e-4 && (ty - 34.0).abs() < 1e-4);
+    }
+
+    /// 绘制顺序：父 shapes+texts 先于子；父文字会被不透明子盖住
+    #[test]
+    fn draw_order_parent_text_before_children() {
+        let mut root = DrawBatch::new();
+        root.clips_children = true;
+        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        root.text("R", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
+
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut child, 0.0, 0.0, 10.0, 10.0, Some(BLUE));
+        child.text("C", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
+        root.push_child(child);
+
+        let mut flat: Vec<Option<&DrawBatch>> = Vec::new();
+        root.flatten_with_pop(&mut flat);
+        // root(有字) → child(有字) → Pop
+        assert_eq!(flat.len(), 3);
+        assert!(!flat[0].unwrap().texts.entries.is_empty());
+        assert!(!flat[1].unwrap().texts.entries.is_empty());
+        assert!(flat[2].is_none());
+        // 子在父之后 → 同区域会盖住父文字（文档化行为，非 bug）
+        assert!(flat[0].unwrap().clips_children);
+    }
+
+    /// 单 batch 含 area_include → flatten 输出 AreaOp(setup) + Batch + AreaOp(cleanup)
+    #[test]
+    fn area_flatten_include_emits_cover_and_erase() {
+        let mut b = DrawBatch::new();
+        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        // 用一个简单矩形作 include
+        let mut include_batch = DrawBatch::new();
+        draw_rectangle(&mut include_batch, 0.0, 0.0, 100.0, 100.0, Some(WHITE));
+        b.area_include = Some(include_batch.to_area());
+
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0);
+        // 1 cover op + 1 Batch + 1 erase op = 3 events
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
+        assert!(matches!(events[1], DrawEvent::Batch(_)));
+        assert!(matches!(events[2], DrawEvent::AreaOp { is_setup: false, .. }));
+    }
+
+    /// 嵌套 clips_children + Area：AreaOp 套住子树，clips Push/Pop 仍在子树内部
+    #[test]
+    fn area_flatten_with_clips_children() {
+        let mut root = DrawBatch::new();
+        root.clips_children = true;
+        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        // root 加 area_include
+        let mut incl = DrawBatch::new();
+        draw_rectangle(&mut incl, 0.0, 0.0, 100.0, 100.0, Some(RED));
+        root.area_include = Some(incl.to_area());
+
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut child, 0.0, 0.0, 4.0, 4.0, Some(GREEN));
+        root.push_child(child);
+
+        let mut events: Vec<DrawEvent> = Vec::new();
+        root.flatten_events(&mut events, 0);
+        // 1 setup + Batch + child.Batch + StencilPop + 1 cleanup = 5
+        assert_eq!(events.len(), 5);
+        assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
+        assert!(matches!(events[1], DrawEvent::Batch(_)));
+        assert!(matches!(events[2], DrawEvent::Batch(_)));
+        assert!(matches!(events[3], DrawEvent::StencilPop));
+        assert!(matches!(events[4], DrawEvent::AreaOp { is_setup: false, .. }));
+    }
+
+    /// effective Area = Empty → 不发 AreaOp
+    #[test]
+    fn area_flatten_empty_skips_ops() {
+        let mut b = DrawBatch::new();
+        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        // empty 几何 → Area::Empty
+        b.area_include = Some(Area::Empty);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0);
+        // 仅 Batch（无 AreaOp）
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DrawEvent::Batch(_)));
     }
 }

@@ -146,26 +146,41 @@ impl TextRenderer {
         let resolution = viewport.resolution();
 
         for text_area in text_areas {
-            let x_min = text_area.bounds.left.max(0);
-            let y_min = text_area.bounds.top.max(0);
-
-            let bounds = GlyphBounds {
-                x: Bounds {
-                    min: x_min,
-                    max: text_area
-                        .bounds
-                        .right
-                        .min(resolution.width as i32)
-                        .max(x_min),
-                },
-                y: Bounds {
-                    min: y_min,
-                    max: text_area
-                        .bounds
-                        .bottom
-                        .min(resolution.height as i32)
-                        .max(y_min),
-                },
+            // 恒等 transform：顶点坐标即屏幕物理像素，可裁到视口。
+            // 非恒等：VS 才乘 transform（如 batch 父平移），此处仍是局部坐标；
+            // 若再夹到 [0,res]，圆心附近 y<0 的字体会被切掉上半（text_batch_clip）。
+            let bounds = if text_area.transform_index != 0 {
+                GlyphBounds {
+                    x: Bounds {
+                        min: text_area.bounds.left,
+                        max: text_area.bounds.right,
+                    },
+                    y: Bounds {
+                        min: text_area.bounds.top,
+                        max: text_area.bounds.bottom,
+                    },
+                }
+            } else {
+                let x_min = text_area.bounds.left.max(0);
+                let y_min = text_area.bounds.top.max(0);
+                GlyphBounds {
+                    x: Bounds {
+                        min: x_min,
+                        max: text_area
+                            .bounds
+                            .right
+                            .min(resolution.width as i32)
+                            .max(x_min),
+                    },
+                    y: Bounds {
+                        min: y_min,
+                        max: text_area
+                            .bounds
+                            .bottom
+                            .min(resolution.height as i32)
+                            .max(y_min),
+                    },
+                }
             };
 
             for glyph in text_area.custom_glyphs.iter() {
@@ -394,12 +409,37 @@ impl TextRenderer {
         vertex_start: u32,
         vertex_count: u32,
     ) -> Result<(), RenderError> {
+        self.render_range_with_stencil_ref(
+            atlas,
+            viewport,
+            pass,
+            transform_bind_group,
+            vertex_start,
+            vertex_count,
+            None,
+        )
+    }
+
+    /// 同 [`render_range`]，但在 `set_pipeline` 之后设置 stencil reference（避免被重置）。
+    pub fn render_range_with_stencil_ref(
+        &self,
+        atlas: &TextAtlas,
+        viewport: &Viewport,
+        pass: &mut RenderPass<'_>,
+        transform_bind_group: &BindGroup,
+        vertex_start: u32,
+        vertex_count: u32,
+        stencil_ref: Option<u32>,
+    ) -> Result<(), RenderError> {
         if vertex_count == 0 {
             return Ok(());
         }
 
         let byte_offset = vertex_start as u64 * std::mem::size_of::<GlyphToRender>() as u64;
         pass.set_pipeline(&self.pipeline);
+        if let Some(r) = stencil_ref {
+            pass.set_stencil_reference(r);
+        }
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(3, transform_bind_group, &[]);

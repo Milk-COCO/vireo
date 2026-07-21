@@ -445,8 +445,10 @@ impl GpuContext {
         p
     }
 
-    /// 带 Depth24PlusStencil8 的管线（仅 `clips_children` 帧使用）。
-    /// `stencil_op`: 0=Always+Keep 透传, 1=Equal+Inc(Push), 2=Equal+Keep(Test), 3=Equal+Dec(Pop)
+    /// 带 Depth24PlusStencil8 的管线（`clips_children` / Area 帧使用）。
+    /// `stencil_op`:
+    /// 0=Always+Keep 透传(色), 1=Equal+Inc Push(色), 2=Equal+Keep Test(色),
+    /// 3=Equal+Dec Pop/Erase(无色), 4=Equal+Inc Cover(无色，Area)
     pub fn ensure_stencil_pipeline(
         &self,
         sample_count: u32,
@@ -455,8 +457,8 @@ impl GpuContext {
         geometry: bool,
         stencil_op: u32,
     ) -> wgpu::RenderPipeline {
-        let op = stencil_op.min(3);
-        // bit19 = use_stencil=1；bits20-21 = stencil_op
+        let op = stencil_op.min(4);
+        // bit19 = use_stencil=1；bits20-22 = stencil_op
         let key = sample_count
             | ((alpha_to_coverage as u32) << 16)
             | ((ssaa as u32) << 17)
@@ -484,12 +486,11 @@ impl GpuContext {
             ],
             immediate_size: 0,
         });
-        let frag_entry = if op == 3 {
-            "fs_stencil_only"
-        } else {
-            "fs_main"
-        };
-        let color_target = if op == 3 {
+        // op3/4 不写颜色，但仍走 fs_main，以便 SDF discard 裁出正确轮廓
+        //（fs_stencil_only 无 SDF，圆/圆角会落成 AABB）。
+        let no_color = op == 3 || op == 4;
+        let frag_entry = "fs_main";
+        let color_target = if no_color {
             Some(wgpu::ColorTargetState {
                 format: self.surface_format,
                 blend: None,
@@ -505,7 +506,7 @@ impl GpuContext {
 
         let (face, read_mask, write_mask) = match op {
             0 => (wgpu::StencilFaceState::IGNORE, 0u32, 0u32),
-            1 => (
+            1 | 4 => (
                 wgpu::StencilFaceState {
                     compare: wgpu::CompareFunction::Equal,
                     fail_op: wgpu::StencilOperation::Keep,

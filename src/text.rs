@@ -114,10 +114,19 @@ pub struct TextContext {
     stats: ShapeCacheStats,
 }
 
-/// 构建文字管线用的 depth/stencil 状态。
-/// `false` = render pass 无 DS attachment，管线也不带。
-/// `true`  = render pass 有 DS attachment，管线带 Equal+Keep（只测不写）。
-pub(crate) fn stencil_text_ds() -> Option<wgpu::DepthStencilState> {
+/// 文字管线与 render pass DS attachment 的匹配方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextStencilMode {
+    /// pass 无 DS attachment
+    None,
+    /// pass 有 DS，文字不测模板（Always；用于 UI / unclipped）
+    Pass,
+    /// pass 有 DS，Equal+Keep 测模板（裁切区内文字）
+    Test,
+}
+
+/// Equal+Keep：只画在当前 stencil ref 内，不写 stencil。
+pub(crate) fn stencil_text_ds_test() -> Option<wgpu::DepthStencilState> {
     Some(wgpu::DepthStencilState {
         format: wgpu::TextureFormat::Depth24PlusStencil8,
         depth_write_enabled: Some(false),
@@ -142,6 +151,22 @@ pub(crate) fn stencil_text_ds() -> Option<wgpu::DepthStencilState> {
     })
 }
 
+/// Always：有 DS attachment 时透传（不测不写），避免 UI/unclipped 被 Equal(0) 误裁。
+pub(crate) fn stencil_text_ds_pass() -> Option<wgpu::DepthStencilState> {
+    Some(wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth24PlusStencil8,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState {
+            front: wgpu::StencilFaceState::IGNORE,
+            back: wgpu::StencilFaceState::IGNORE,
+            read_mask: 0,
+            write_mask: 0,
+        },
+        bias: wgpu::DepthBiasState::default(),
+    })
+}
+
 impl TextContext {
     /// 确保 TextRenderer 匹配给定 sample_count（默认无 DS；随后由 `ensure_text_ds` 切换）。
     pub fn ensure_sample_count(&mut self, device: &Device, count: u32) {
@@ -159,13 +184,12 @@ impl TextContext {
         }
     }
 
-    /// 按帧选择文字管线 DS：与 render pass 的 depth_stencil_attachment 一致。
-    /// `use_stencil=false` → 无 DS（热路径）；`true` → Equal+Keep 测模板。
-    pub fn ensure_text_ds(&mut self, device: &Device, use_stencil: bool) {
-        let ds = if use_stencil {
-            stencil_text_ds()
-        } else {
-            None
+    /// 设置文字管线 DS 模式（与当前 render pass / 是否测裁切一致）。
+    pub(crate) fn ensure_text_stencil_mode(&mut self, device: &Device, mode: TextStencilMode) {
+        let ds = match mode {
+            TextStencilMode::None => None,
+            TextStencilMode::Pass => stencil_text_ds_pass(),
+            TextStencilMode::Test => stencil_text_ds_test(),
         };
         let pipeline = self.text_atlas.get_or_create_pipeline(
             device,
@@ -178,9 +202,21 @@ impl TextContext {
         self.text_renderer.set_pipeline(pipeline);
     }
 
-    /// 兼容旧名：强制文字管线带 stencil。
+    /// 按帧粗选：无 DS 或默认 Test（细粒度用 [`ensure_text_stencil_mode`]）。
+    pub fn ensure_text_ds(&mut self, device: &Device, use_stencil: bool) {
+        self.ensure_text_stencil_mode(
+            device,
+            if use_stencil {
+                TextStencilMode::Test
+            } else {
+                TextStencilMode::None
+            },
+        );
+    }
+
+    /// 兼容旧名：强制文字管线带 stencil Test。
     pub fn ensure_text_stencil(&mut self, device: &Device) {
-        self.ensure_text_ds(device, true);
+        self.ensure_text_stencil_mode(device, TextStencilMode::Test);
     }
 
     /// 预热文字管线：强制 swash cache / atlas / 上传 lazy 初始化。

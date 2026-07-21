@@ -14,6 +14,7 @@
 //! });
 //! ```
 
+pub mod area;
 pub mod color;
 pub mod context;
 pub mod glyphon;
@@ -27,6 +28,8 @@ pub mod window;
 
 /// 一次导入所有常用类型。
 pub mod prelude {
+    pub use crate::area::Area;
+    pub use crate::area::AreaGeom;
     pub use crate::color::colors::*;
     pub use crate::color::Color;
     pub use crate::color_u8;
