@@ -114,8 +114,36 @@ pub struct TextContext {
     stats: ShapeCacheStats,
 }
 
+/// 构建文字管线用的 depth/stencil 状态。
+/// `false` = render pass 无 DS attachment，管线也不带。
+/// `true`  = render pass 有 DS attachment，管线带 Equal+Keep（只测不写）。
+pub(crate) fn stencil_text_ds() -> Option<wgpu::DepthStencilState> {
+    Some(wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth24PlusStencil8,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState {
+            front: wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Equal,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+            back: wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Equal,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+            read_mask: 0xff,
+            write_mask: 0x00,
+        },
+        bias: wgpu::DepthBiasState::default(),
+    })
+}
+
 impl TextContext {
-    /// 确保 TextRenderer 匹配给定 sample_count
+    /// 确保 TextRenderer 匹配给定 sample_count（默认无 DS；随后由 `ensure_text_ds` 切换）。
     pub fn ensure_sample_count(&mut self, device: &Device, count: u32) {
         if self.sample_count != count {
             self.text_renderer = TextRenderer::new(
@@ -129,6 +157,30 @@ impl TextContext {
             );
             self.sample_count = count;
         }
+    }
+
+    /// 按帧选择文字管线 DS：与 render pass 的 depth_stencil_attachment 一致。
+    /// `use_stencil=false` → 无 DS（热路径）；`true` → Equal+Keep 测模板。
+    pub fn ensure_text_ds(&mut self, device: &Device, use_stencil: bool) {
+        let ds = if use_stencil {
+            stencil_text_ds()
+        } else {
+            None
+        };
+        let pipeline = self.text_atlas.get_or_create_pipeline(
+            device,
+            MultisampleState {
+                count: self.sample_count,
+                ..Default::default()
+            },
+            ds,
+        );
+        self.text_renderer.set_pipeline(pipeline);
+    }
+
+    /// 兼容旧名：强制文字管线带 stencil。
+    pub fn ensure_text_stencil(&mut self, device: &Device) {
+        self.ensure_text_ds(device, true);
     }
 
     /// 预热文字管线：强制 swash cache / atlas / 上传 lazy 初始化。
@@ -857,7 +909,9 @@ impl OwnedTextPart {
 pub struct TextEntry {
     pub text: String,
     pub options: TextOptions,
-    /// Batch-local transform index (logical space). 0 = identity.
+    /// Batch-local transform index（逻辑空间）。
+    /// `draw_text` 默认 0：在全局表中约定为**单位矩阵**（见 `Renderer::draw` 预留槽 0），
+    /// 不是「首个 batch 矩阵」。有 batch transform 时请用 `batch.text()` / `push_indexed`。
     pub(crate) transform_index: u32,
     /// `Some` = HUD 多段（忽略 `text`）；`None` = 普通整段 `text`
     pub(crate) parts: Option<Vec<OwnedTextPart>>,

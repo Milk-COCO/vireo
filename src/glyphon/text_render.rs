@@ -362,6 +362,11 @@ impl TextRenderer {
         self.glyph_vertices.clear();
     }
 
+    /// Vireo 扩展：替换 pipeline（用于匹配 depth/stencil 状态）。
+    pub fn set_pipeline(&mut self, pipeline: RenderPipeline) {
+        self.pipeline = pipeline;
+    }
+
     /// Returns the number of prepared glyph vertices.
     pub fn glyph_vertex_count(&self) -> u32 {
         self.glyph_vertices.len() as u32

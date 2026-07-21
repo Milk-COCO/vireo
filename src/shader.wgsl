@@ -57,27 +57,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let feather = in.sdf_feather / camera.dpi_scale;
     var d: f32;
 
+    // 注意：feather 柔边原先只调 alpha、不 discard。
+    // stencil 对「通过片元测试」的像素都会写，导致圆/圆角等裁成外接 AABB。
+    // 完全透明的片元必须 discard，裁切轮廓才与形状一致。
     switch in.sdf_type {
         case 1u: {
             // circle/ellipse: sdf_params=(cx,cy,rx,ry)
             d = length((in.local_pos - in.sdf_params.xy) / vec2(in.sdf_params.z, in.sdf_params.w));
-            if feather > 0.0 { let k = feather / max(in.sdf_params.z, in.sdf_params.w); out_color.a *= 1.0 - smoothstep(1.0 - k, 1.0, d); }
-            else { if d > 1.0 { discard; } }
+            if d >= 1.0 { discard; }
+            if feather > 0.0 {
+                let k = feather / max(in.sdf_params.z, in.sdf_params.w);
+                out_color.a *= 1.0 - smoothstep(1.0 - k, 1.0, d);
+            }
         }
         case 2u: {
             // rect/rounded_rect: sdf_params=(cx,cy,hw,hh), sdf_extra=(r,0)
             let hw = in.sdf_params.z; let hh = in.sdf_params.w; let r = in.sdf_extra.x;
             d = length(max(abs(in.local_pos - in.sdf_params.xy) - vec2(hw - r, hh - r), vec2(0.0))) - r;
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
         case 3u: {
             // line: sdf_params=(x1,y1,x2,y2), sdf_extra=(half_thickness,0)
             let a = in.sdf_params.xy; let b = in.sdf_params.zw;
             let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
             d = length(in.local_pos - (a + t * ab)) - in.sdf_extra.x;
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
         case 4u: {
             // triangle: sdf_params=(x1,y1,x2,y2), sdf_extra=(x3,y3)
@@ -88,8 +102,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d_ab = dot(in.local_pos - a, n_ab); let d_bc = dot(in.local_pos - b, n_bc); let d_ca = dot(in.local_pos - c, n_ca);
             let inside = d_ab > -0.0001 && d_bc > -0.0001 && d_ca > -0.0001;
             d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
         case 6u: {
             // polygon: sdf_params=(start_idx_f32, count_f32, 0, 0)
@@ -105,8 +123,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 d_min = min(d_min, sd);
             }
             d = select(d_max, -d_min, inside);
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
         case 7u: {
             // line_chain: sdf_params=(start_idx_f32, count_f32, half_thickness, 0)
@@ -121,8 +143,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 d = min(d, length(in.local_pos - (a + t * ab)));
             }
             d -= h;
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
         default: {
             // arc (ty==5): sdf_params=(cx,cy,r,0), sdf_extra=(start_angle, end_angle)
@@ -144,9 +170,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 ccw_span <= 3.14159265,
             );
             d = max(d_circle, d_edge);
-            if feather > 0.0 { out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
-            else { if d > 0.0 { discard; } }
+            if feather > 0.0 {
+                if d >= feather { discard; }
+                out_color.a *= 1.0 - smoothstep(0.0, feather, d);
+            } else if d > 0.0 {
+                discard;
+            }
         }
     }
     return out_color;
+}
+
+@fragment
+fn fs_stencil_only() -> @location(0) vec4<f32> {
+    return vec4(0.0);
 }

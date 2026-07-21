@@ -380,10 +380,14 @@ impl GpuContext {
             .unwrap_or(1)
     }
 
-    /// 获取匹配 sample_count 的 pipeline（按需创建并缓存）。
+    /// 无 DS attachment 的热路径管线（无 `clips_children` 时使用）。
     /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 ssaa 参数。
     pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool, ssaa: bool, geometry: bool) -> wgpu::RenderPipeline {
-        let key = sample_count | ((alpha_to_coverage as u32) << 16) | ((ssaa as u32) << 17) | ((geometry as u32) << 18);
+        // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突
+        let key = sample_count
+            | ((alpha_to_coverage as u32) << 16)
+            | ((ssaa as u32) << 17)
+            | ((geometry as u32) << 18);
         let mut pipes = self.pipelines.borrow_mut();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -424,9 +428,152 @@ impl GpuContext {
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: sample_count, alpha_to_coverage_enabled: alpha_to_coverage, ..Default::default() },
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                alpha_to_coverage_enabled: alpha_to_coverage,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        pipes.insert(key, p.clone());
+        p
+    }
+
+    /// 带 Depth24PlusStencil8 的管线（仅 `clips_children` 帧使用）。
+    /// `stencil_op`: 0=Always+Keep 透传, 1=Equal+Inc(Push), 2=Equal+Keep(Test), 3=Equal+Dec(Pop)
+    pub fn ensure_stencil_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        ssaa: bool,
+        geometry: bool,
+        stencil_op: u32,
+    ) -> wgpu::RenderPipeline {
+        let op = stencil_op.min(3);
+        // bit19 = use_stencil=1；bits20-21 = stencil_op
+        let key = sample_count
+            | ((alpha_to_coverage as u32) << 16)
+            | ((ssaa as u32) << 17)
+            | ((geometry as u32) << 18)
+            | (1u32 << 19)
+            | (op << 20);
+        let mut pipes = self.pipelines.borrow_mut();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
+        }
+        let module = if geometry {
+            &self.shader_geo
+        } else if ssaa {
+            &self.shader_ssaa
+        } else {
+            &self.shader
+        };
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vireo pipeline layout"),
+            bind_group_layouts: &[
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.polygon_bind_group_layout),
+                Some(&self.transform_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+        let frag_entry = if op == 3 {
+            "fs_stencil_only"
+        } else {
+            "fs_main"
+        };
+        let color_target = if op == 3 {
+            Some(wgpu::ColorTargetState {
+                format: self.surface_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            })
+        } else {
+            Some(wgpu::ColorTargetState {
+                format: self.surface_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        };
+
+        let (face, read_mask, write_mask) = match op {
+            0 => (wgpu::StencilFaceState::IGNORE, 0u32, 0u32),
+            1 => (
+                wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::IncrementClamp,
+                },
+                0xff,
+                0xff,
+            ),
+            2 => (
+                wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                0xff,
+                0xff,
+            ),
+            _ => (
+                wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::DecrementClamp,
+                },
+                0xff,
+                0xff,
+            ),
+        };
+        let depth_stencil = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState {
+                front: face,
+                back: face,
+                read_mask,
+                write_mask,
+            },
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vireo stencil pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(Vertex::desc())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(frag_entry),
+                targets: &[color_target],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                alpha_to_coverage_enabled: alpha_to_coverage,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });

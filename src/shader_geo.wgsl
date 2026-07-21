@@ -40,3 +40,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(tex, tex_sampler, in.uv) * in.color;
 }
+
+@fragment
+fn fs_stencil_only() -> @location(0) vec4<f32> {
+    return vec4(0.0);
+}

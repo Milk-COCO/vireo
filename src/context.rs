@@ -46,6 +46,7 @@ pub struct Renderer {
     alpha_to_coverage: bool,
     ssaa: bool,
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    ds_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
     polygon_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
     transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
@@ -102,6 +103,7 @@ impl Renderer {
             alpha_to_coverage: aa.alpha_to_coverage(),
             ssaa: aa.is_ssaa(),
             msaa_tex: RefCell::new(None),
+            ds_tex: RefCell::new(None),
             polygon_edge_buf: RefCell::new(None),
             polygon_bind_group_cache: RefCell::new(None),
             transform_buf: RefCell::new(None),
@@ -142,6 +144,26 @@ impl Renderer {
         Some(mt.as_ref().unwrap().1.clone())
     }
 
+    /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。sample_count 与 color 一致。
+    fn ds_view(&self) -> wgpu::TextureView {
+        let mut dt = self.ds_tex.borrow_mut();
+        let ok = dt.as_ref().map(|(t,_)| t.width() == self.physical_width).unwrap_or(false);
+        if !ok {
+            let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("depth_stencil"),
+                size: wgpu::Extent3d { width: self.physical_width, height: self.physical_height, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            *dt = Some((tex, view));
+        }
+        dt.as_ref().unwrap().1.clone()
+    }
+
     /// 更新相机投影（窗口 resize 时调用）
     pub fn resize(&mut self, logical_width: u32, logical_height: u32, physical_width: u32, physical_height: u32, scale: f32) {
         let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
@@ -154,6 +176,7 @@ impl Renderer {
         self.physical_height = physical_height;
         self.scale = scale;
         *self.msaa_tex.borrow_mut() = None;
+        *self.ds_tex.borrow_mut() = None;
     }
 
     /// 渲染并提交
@@ -163,14 +186,31 @@ impl Renderer {
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
     ) {
-        // 根列表前序展开子树：父 shapes/texts 先于 child
-        let mut flat: Vec<&DrawBatch> = Vec::new();
+        // ---- 前序展开子树（含 Pop 事件）----
+        enum DrawEvent<'a> {
+            Batch(&'a DrawBatch),
+            StencilPop,
+        }
+        let mut events: Vec<DrawEvent> = Vec::new();
+        let mut uses_stencil = false;
         for b in batches {
-            b.walk_preorder(&mut flat);
+            let mut tmp = Vec::new();
+            b.flatten_with_pop(&mut tmp);
+            for item in tmp {
+                match item {
+                    Some(batch) => {
+                        if batch.clips_children {
+                            uses_stencil = true;
+                        }
+                        events.push(DrawEvent::Batch(batch));
+                    }
+                    None => events.push(DrawEvent::StencilPop),
+                }
+            }
         }
 
         let has_content = clear_color.is_some()
-            || flat.iter().any(|b| !b.vertices.is_empty() || !b.texts.entries.is_empty());
+            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             return;
         }
@@ -190,9 +230,11 @@ impl Renderer {
         };
 
         let target_view = &target.view;
+        // 相机为逻辑像素正交；Pop 全屏四边形也用逻辑尺寸
+        let lw = self.physical_width as f32 / self.scale.max(1e-6);
+        let lh = self.physical_height as f32 / self.scale.max(1e-6);
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
-        // 每个 batch 的数据连续排列，记录每个 batch 的 offset
         struct ShapeSegment {
             ndx_start: u32,
             ndx_count: u32,
@@ -205,113 +247,239 @@ impl Renderer {
             geometry: bool,
         }
 
-        struct BatchInfo {
+        struct EventInfo {
             shape: Option<ShapeInfo>,
-            text: Option<(u32, u32)>, // (vertex_start, vertex_count)
+            text: Option<(u32, u32)>,
+            stencil_op: u32,
+            stencil_ref: u32,
         }
 
-        let mut batch_infos: Vec<BatchInfo> = Vec::with_capacity(flat.len());
-        let mut vertex_count: u32 = 0;
-        let mut ndx_accum: u32 = 0;
+        let mut event_infos: Vec<EventInfo> = Vec::new();
+        let vertex_count: u32 = 0;
+        let ndx_accum: u32 = 0;
 
-        // ---- 单次扫描：合并 transform/poly + 统计顶点数（复用 scratch）----
+        // ---- 单次扫描：合并 transform/poly + 统计顶点数 ----
         let mut global_transforms = self.scratch_transforms.borrow_mut();
         global_transforms.clear();
+        // 槽 0 固定为单位矩阵：`draw_text` / glyphon 默认 transform_index=0 表示恒等，
+        // 不能与首个 batch 的矩阵共用下标，否则 UI 文字会跟着第一个 transform 转。
+        global_transforms.extend_from_slice(&[
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+        ]);
         let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
         polygon_edges_global.clear();
-        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(flat.len());
-        let mut batch_poly_base: Vec<u32> = Vec::with_capacity(flat.len());
+
+        // 为每棵子树维护自己的 stencil ref 栈
+        fn compute_stencil(
+            batch: &DrawBatch,
+            active_clip: &Option<u32>,
+            ref_counter: &mut u32,
+            ref_stack: &mut Vec<u32>,
+        ) -> (u32, u32) {
+            if !batch.vertices.is_empty() {
+                if batch.clips_children {
+                    // Push: test 父级 ref（buffer==parent_ref → Inc → parent_ref+1）
+                    let push_ref = active_clip.unwrap_or(0);
+                    *ref_counter = push_ref + 1;
+                    ref_stack.push(*ref_counter);
+                    (1u32, push_ref) // Push, 用父级 ref
+                } else if let Some(ref_) = active_clip {
+                    (2u32, *ref_) // Test — inside existing clip
+                } else {
+                    (0u32, 0) // None — no clip active
+                }
+            } else {
+                (0u32, 0)
+            }
+        }
+
+        let mut ref_counter: u32 = 0;
+        let mut ref_stack: Vec<u32> = Vec::new();
+        let mut active_clip: Option<u32> = None;
+
+        for event in &events {
+            match event {
+                DrawEvent::Batch(batch) => {
+                    let (stencil_op, stencil_ref) = compute_stencil(
+                        batch, &active_clip, &mut ref_counter, &mut ref_stack,
+                    );
+                    if stencil_op == 1 {
+                        active_clip = Some(*ref_stack.last().unwrap_or(&0));
+                    }
+                    event_infos.push(EventInfo {
+                        shape: None,
+                        text: None,
+                        stencil_op,
+                        stencil_ref,
+                    });
+                }
+                DrawEvent::StencilPop => {
+                    let popped = ref_stack.pop();
+                    if let Some(prev) = popped {
+                        if prev > 1 {
+                            active_clip = Some(prev - 1);
+                        } else {
+                            active_clip = None;
+                        }
+                    }
+                    event_infos.push(EventInfo {
+                        shape: None,
+                        text: None,
+                        stencil_op: 3,
+                        stencil_ref: popped.unwrap_or(0),
+                    });
+                }
+            }
+        }
+
+        // 收集 transform/poly 信息
+        let mut batch_transform_bases: Vec<u32> = Vec::new();
+        let mut batch_poly_base: Vec<u32> = Vec::new();
         let mut total_vcount: u32 = 0;
         let mut total_icount: u32 = 0;
         let mut poly_offset: u32 = 0;
-        for batch in &flat {
-            batch_transform_bases.push((global_transforms.len() / 12) as u32);
-            global_transforms.extend_from_slice(&batch.transform_table);
-            batch_poly_base.push(poly_offset);
-            poly_offset += batch.polygon_edges.len() as u32 / 4;
-            polygon_edges_global.extend_from_slice(&batch.polygon_edges);
-            total_vcount += batch.vertices.len() as u32;
-            total_icount += batch.indices.len() as u32;
+        let mut pop_screen_verts: u32 = 0; // 全屏 Pop 顶点数
+        let mut pop_screen_idx: u32 = 0;
+
+        for (ei, event) in events.iter().enumerate() {
+            if let DrawEvent::Batch(batch) = event {
+                let _e = &mut event_infos[ei];
+                batch_transform_bases.push((global_transforms.len() / 12) as u32);
+                global_transforms.extend_from_slice(&batch.transform_table);
+                batch_poly_base.push(poly_offset);
+                poly_offset += batch.polygon_edges.len() as u32 / 4;
+                polygon_edges_global.extend_from_slice(&batch.polygon_edges);
+                total_vcount += batch.vertices.len() as u32;
+                total_icount += batch.indices.len() as u32;
+            } else {
+                // Pop 事件：添加全屏四边形（2 三角，6 索引）
+                // 使用 (0,0)-(pw,ph) 覆盖整个视口
+                let _v = Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, 0);
+                // 4 vertices + 6 indices
+                pop_screen_verts += 4;
+                pop_screen_idx += 6;
+                // Also push dummy transform/poly entries
+                batch_transform_bases.push(0);
+                batch_poly_base.push(poly_offset);
+            }
         }
 
-        let total_vbytes = total_vcount as u64 * std::mem::size_of::<Vertex>() as u64;
-        let total_ibytes = total_icount as u64 * 4;
+        let total_vbytes = (total_vcount + pop_screen_verts) as u64 * std::mem::size_of::<Vertex>() as u64;
+        let total_ibytes = (total_icount + pop_screen_idx) as u64 * 4;
         self.ensure_vertex_buffer(total_vbytes);
         self.ensure_index_buffer(total_ibytes);
         let mut combined_vdata = self.scratch_vdata.borrow_mut();
         let mut combined_idata = self.scratch_idata.borrow_mut();
         combined_vdata.clear();
         combined_idata.clear();
-        if combined_vdata.capacity() < total_vbytes as usize {
-            combined_vdata.reserve(total_vbytes as usize);
+        let cap_v = total_vbytes as usize;
+        let cap_i = total_ibytes as usize;
+        if combined_vdata.capacity() < cap_v {
+            combined_vdata.reserve(cap_v);
         }
-        if combined_idata.capacity() < total_ibytes as usize {
-            combined_idata.reserve(total_ibytes as usize);
+        if combined_idata.capacity() < cap_i {
+            combined_idata.reserve(cap_i);
         }
 
-        for (bi, batch) in flat.iter().enumerate() {
-            let shape = if !batch.vertices.is_empty() {
-                let transform_base = batch_transform_bases[bi];
-                let poly_base = batch_poly_base[bi] as f32;
-                let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
+        // 合并数据 + 为 Pop 事件添加全屏顶点
+        let mut v_offset = vertex_count;
+        let mut idx_offset = ndx_accum;
+        for (ei, event) in events.iter().enumerate() {
+            match event {
+                DrawEvent::Batch(batch) => {
+                    let info_idx = ei;
+                    let shape = if !batch.vertices.is_empty() {
+                        let transform_base = batch_transform_bases[info_idx];
+                        let poly_base = batch_poly_base[info_idx] as f32;
+                        let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
+                        let v_start = combined_vdata.len();
+                        combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
+                        if needs_patch {
+                            let has_poly = !batch.polygon_edges.is_empty();
+                            let verts: &mut [Vertex] = bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
+                            for v in verts.iter_mut() {
+                                if transform_base > 0 {
+                                    v.transform_index += transform_base;
+                                }
+                                if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
+                                    v.sdf_params[0] += poly_base;
+                                }
+                            }
+                        }
+                        combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
 
-                let v_start = combined_vdata.len();
-                combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
-                if needs_patch {
-                    let has_poly = !batch.polygon_edges.is_empty();
-                    let verts: &mut [Vertex] =
-                        bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
-                    for v in verts.iter_mut() {
-                        if transform_base > 0 {
-                            v.transform_index += transform_base;
-                        }
-                        if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
-                            v.sdf_params[0] += poly_base;
-                        }
-                    }
+                        let resolve_bg = |bg: Option<wgpu::BindGroup>| {
+                            bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
+                        };
+                        let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
+                            let bg = resolve_bg(batch.bind_group.clone());
+                            vec![ShapeSegment { ndx_start: idx_offset, ndx_count: batch.indices.len() as u32, bind_group: bg }]
+                        } else {
+                            let mut v: Vec<ShapeSegment> = batch.texture_segments.iter().map(|s| ShapeSegment {
+                                ndx_start: idx_offset + s.ndx_start,
+                                ndx_count: s.ndx_count,
+                                bind_group: resolve_bg(s.bind_group.clone()),
+                            }).collect();
+                            let last_end = v.last().map(|s| s.ndx_start + s.ndx_count).unwrap_or(idx_offset);
+                            let total_end = idx_offset + batch.indices.len() as u32;
+                            if last_end < total_end {
+                                let bg = resolve_bg(batch.bind_group.clone());
+                                v.push(ShapeSegment { ndx_start: last_end, ndx_count: total_end - last_end, bind_group: bg });
+                            }
+                            v
+                        };
+                        let info = ShapeInfo {
+                            base_vertex: v_offset as i32,
+                            segments: segs,
+                            geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
+                        };
+                        v_offset += batch.vertices.len() as u32;
+                        idx_offset += batch.indices.len() as u32;
+                        Some(info)
+                    } else {
+                        None
+                    };
+                    event_infos[ei].shape = shape;
                 }
-                combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
+                DrawEvent::StencilPop => {
+                    // 全屏四边形（逻辑像素）；索引相对 base_vertex；单位矩阵
+                    let id_idx = (global_transforms.len() / 12) as u32;
+                    global_transforms.extend_from_slice(&[
+                        1.0, 0.0, 0.0, 0.0,
+                        0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0,
+                    ]);
+                    let verts = [
+                        Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                        Vertex::new_uv_xform(lw, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                        Vertex::new_uv_xform(lw, lh, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                        Vertex::new_uv_xform(0.0, lh, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
+                    ];
+                    combined_vdata.extend_from_slice(bytemuck::cast_slice(&verts));
+                    let indices = [0u32, 1, 2, 0, 2, 3];
+                    combined_idata.extend_from_slice(bytemuck::cast_slice(&indices));
 
-                // 构建 texture segments（相对于 batch 的偏移量转为全局偏移量）
-                let resolve_bg = |bg: Option<wgpu::BindGroup>| {
-                    bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
-                };
-                let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
-                    let bg = resolve_bg(batch.bind_group.clone());
-                    vec![ShapeSegment { ndx_start: ndx_accum, ndx_count: batch.indices.len() as u32, bind_group: bg }]
-                } else {
-                    let mut v: Vec<ShapeSegment> = batch.texture_segments.iter().map(|s| ShapeSegment {
-                        ndx_start: ndx_accum + s.ndx_start,
-                        ndx_count: s.ndx_count,
-                        bind_group: resolve_bg(s.bind_group.clone()),
-                    }).collect();
-                    // 补 trailing segment：最后一段之后的新顶点用当前 batch.bind_group
-                    let last_end = v.last().map(|s| s.ndx_start + s.ndx_count).unwrap_or(ndx_accum);
-                    let total_end = ndx_accum + batch.indices.len() as u32;
-                    if last_end < total_end {
-                        let bg = resolve_bg(batch.bind_group.clone());
-                        v.push(ShapeSegment { ndx_start: last_end, ndx_count: total_end - last_end, bind_group: bg });
-                    }
-                    v
-                };
-
-                // has_sdf 在 push 时维护，避免每帧 O(V) 扫描
-                let info = ShapeInfo {
-                    base_vertex: vertex_count as i32,
-                    segments: segs,
-                    geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
-                };
-                vertex_count += batch.vertices.len() as u32;
-                ndx_accum += batch.indices.len() as u32;
-                Some(info)
-            } else {
-                None
-            };
-
-            batch_infos.push(BatchInfo { shape, text: None });
+                    let bg = self.gpu.white_bind_group.as_ref().clone();
+                    let segs = vec![ShapeSegment {
+                        ndx_start: idx_offset,
+                        ndx_count: 6,
+                        bind_group: bg,
+                    }];
+                    let si = ShapeInfo {
+                        base_vertex: v_offset as i32,
+                        segments: segs,
+                        geometry: true,
+                    };
+                    event_infos[ei].shape = Some(si);
+                    v_offset += 4;
+                    idx_offset += 6;
+                }
+            }
         }
 
-        // ---- 合并上传：顶点+索引各一次 write_buffer ----
+        // ---- 合并上传 ----
         if !combined_vdata.is_empty() {
             let vbuf = self.vertex_buf.borrow();
             self.gpu.queue.write_buffer(vbuf.as_ref().unwrap(), 0, &combined_vdata);
@@ -321,7 +489,7 @@ impl Renderer {
             self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), 0, &combined_idata);
         }
 
-        // ---- 上传多边形边数据到 storage buffer ----
+        // ---- 上传多边形边数据 ----
         let polygon_bind_group: Option<wgpu::BindGroup> = if !polygon_edges_global.is_empty() {
             let size = (polygon_edges_global.len() * 4) as u64;
             self.ensure_polygon_edge_buffer(size);
@@ -330,7 +498,6 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&polygon_edges_global));
             }
-            // 复用缓存的 bind group，仅当 buffer 重建时重新创建
             let mut cache = self.polygon_bind_group_cache.borrow_mut();
             if cache.is_none() {
                 let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -348,30 +515,34 @@ impl Renderer {
             None
         };
 
-        // ---- 准备所有文本（在 transform 合并之后，可能追加物理变换矩阵） ----
-        // 确保 glyphon TextRenderer 匹配当前 MSAA sample_count
-        self.gpu.text_ctx.borrow_mut().ensure_sample_count(&self.gpu.device, self.sample_count);
-        // Clear 颜色代表新帧开始，此时清空旧的 glyph 数据；Load 是增量叠加，保留。
+        // ---- 准备所有文本（DS 与本帧 attachment 一致）----
+        {
+            let mut tc = self.gpu.text_ctx.borrow_mut();
+            tc.ensure_sample_count(&self.gpu.device, self.sample_count);
+            tc.ensure_text_ds(&self.gpu.device, uses_stencil);
+        }
         if clear_color.is_some() {
             let mut text_ctx = self.gpu.text_ctx.borrow_mut();
             text_ctx.text_renderer.clear();
             text_ctx.advance_frame();
         }
-        for (i, batch) in flat.iter().enumerate() {
-            if !batch.texts.entries.is_empty() {
-                let (start, count) = batch.texts.prepare_texts(
-                    &self.gpu,
-                    self.physical_width,
-                    self.physical_height,
-                    self.scale,
-                    &batch.transform_table,
-                    &mut global_transforms,
-                );
-                batch_infos[i].text = Some((start, count));
+        for (ei, event) in events.iter().enumerate() {
+            if let DrawEvent::Batch(batch) = event {
+                if !batch.texts.entries.is_empty() {
+                    let (start, count) = batch.texts.prepare_texts(
+                        &self.gpu,
+                        self.physical_width,
+                        self.physical_height,
+                        self.scale,
+                        &batch.transform_table,
+                        &mut global_transforms,
+                    );
+                    event_infos[ei].text = Some((start, count));
+                }
             }
         }
 
-        // ---- 上传 transform 数据到 storage buffer ----
+        // ---- 上传 transform 数据 ----
         let transform_bind_group: Option<wgpu::BindGroup> = if !global_transforms.is_empty() {
             let size = (global_transforms.len() * 4) as u64;
             self.ensure_transform_buffer(size);
@@ -380,7 +551,6 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&global_transforms));
             }
-            // 复用缓存的 bind group，仅当 buffer 重建时重新创建
             let mut cache = self.transform_bind_group_cache.borrow_mut();
             if cache.is_none() {
                 let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -398,13 +568,31 @@ impl Renderer {
             None
         };
 
-        // ---- 单 pass：按 batch 顺序穿插 shapes → texts ----
-        let has_any_content = batch_infos.iter().any(|b| b.shape.is_some() || b.text.is_some());
+        // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
+        let has_any_content = event_infos.iter().any(|e| e.shape.is_some() || e.text.is_some());
         if has_any_content {
-            let msaa_view = self.msaa_view(self.gpu.surface_format); // offscreen uses same format via Texture::new
+            let msaa_view = self.msaa_view(self.gpu.surface_format);
             let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) = match &msaa_view {
                 Some(msaa) => (msaa, Some(target_view)),
                 None => (target_view, None),
+            };
+            let dv;
+            let ds_attachment = if uses_stencil {
+                dv = self.ds_view();
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &dv,
+                    depth_ops: None,
+                    stencil_ops: Some(wgpu::Operations {
+                        load: if clear_color.is_some() {
+                            wgpu::LoadOp::Clear(0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                })
+            } else {
+                None
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vireo render pass"),
@@ -414,6 +602,7 @@ impl Renderer {
                     ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
+                depth_stencil_attachment: ds_attachment,
                 ..Default::default()
             });
 
@@ -422,27 +611,48 @@ impl Renderer {
             let text_ctx = self.gpu.text_ctx.borrow();
             let poly_bg = polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group);
             let xform_bg = transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group);
-            // glyphon render_range 会改 pass 状态；文本后或 geometry 切换时需重绑
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
+            let mut last_stencil_op: u32 = u32::MAX;
 
-            for info in &batch_infos {
+            for info in &event_infos {
                 if let Some(ref shape) = info.shape {
-                    let need_rebind = !shapes_bound || last_geometry != Some(shape.geometry);
+                    let need_rebind = !shapes_bound
+                        || last_geometry != Some(shape.geometry)
+                        || (uses_stencil && info.stencil_op != last_stencil_op);
                     if need_rebind {
-                        pass.set_pipeline(&self.gpu.ensure_pipeline(
-                            self.sample_count,
-                            self.alpha_to_coverage,
-                            self.ssaa,
-                            shape.geometry,
-                        ));
+                        let pipe = if uses_stencil {
+                            self.gpu.ensure_stencil_pipeline(
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                shape.geometry,
+                                info.stencil_op.min(3),
+                            )
+                        } else {
+                            self.gpu.ensure_pipeline(
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                shape.geometry,
+                            )
+                        };
+                        pass.set_pipeline(&pipe);
                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                         pass.set_bind_group(2, poly_bg, &[]);
                         pass.set_bind_group(3, xform_bg, &[]);
-                        pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
-                        pass.set_index_buffer(ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
+                        if let Some(vb) = vbuf.as_ref() {
+                            pass.set_vertex_buffer(0, vb.slice(..));
+                        }
+                        if let Some(ib) = ibuf.as_ref() {
+                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        }
                         shapes_bound = true;
                         last_geometry = Some(shape.geometry);
+                        last_stencil_op = info.stencil_op;
+                    }
+                    if uses_stencil {
+                        pass.set_stencil_reference(info.stencil_ref);
                     }
                     for seg in &shape.segments {
                         pass.set_bind_group(1, &seg.bind_group, &[]);
@@ -455,6 +665,15 @@ impl Renderer {
                 }
 
                 if let Some((start, count)) = info.text {
+                    if uses_stencil {
+                        // Push 后 mask 已 Inc：文字在父形内测 new_level = ref+1
+                        let text_ref = if info.stencil_op == 1 {
+                            info.stencil_ref + 1
+                        } else {
+                            info.stencil_ref
+                        };
+                        pass.set_stencil_reference(text_ref);
+                    }
                     let _ = text_ctx.text_renderer.render_range(
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
@@ -463,7 +682,6 @@ impl Renderer {
                         start,
                         count,
                     );
-                    // 文字管线污染 pass，下一 shape 必须重绑
                     shapes_bound = false;
                     last_geometry = None;
                 }
@@ -658,6 +876,96 @@ impl Transform {
         let ty = self.y - self.px * self.c - self.py * self.d;
         ([self.a, self.c, 0.0], [self.b, self.d, 0.0], [tx, ty, 1.0])
     }
+
+    /// 组合：先应用 `child`，再应用 `self`（`M = self * child`，pivot 已烘焙进平移）。
+    pub fn then(&self, child: &Transform) -> Transform {
+        let (p0, p1, p2) = self.to_cols();
+        let (c0, c1, c2) = child.to_cols();
+        let (r0, r1, r2) = mul_affine_cols(p0, p1, p2, c0, c1, c2);
+        Transform::matrix(r0[0], r1[0], r0[1], r1[1], r2[0], r2[1])
+    }
+}
+
+/// `P * C` 的列向量（2D 仿射，第三行视为 0 0 1）。
+fn mul_affine_cols(
+    p0: [f32; 3],
+    p1: [f32; 3],
+    p2: [f32; 3],
+    c0: [f32; 3],
+    c1: [f32; 3],
+    c2: [f32; 3],
+) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let mul = |c: [f32; 3]| -> [f32; 3] {
+        [
+            p0[0] * c[0] + p1[0] * c[1] + p2[0] * c[2],
+            p0[1] * c[0] + p1[1] * c[1] + p2[1] * c[2],
+            0.0,
+        ]
+    };
+    let mut r0 = mul([c0[0], c0[1], 0.0]);
+    let mut r1 = mul([c1[0], c1[1], 0.0]);
+    let mut r2 = mul([c2[0], c2[1], 1.0]);
+    r0[2] = 0.0;
+    r1[2] = 0.0;
+    r2[2] = 1.0;
+    (r0, r1, r2)
+}
+
+/// 子 batch 从父继承哪些画笔属性（在 [`DrawBatch::push_child`] 时写入子侧）。
+///
+/// - `transform`：整棵子树的 `transform_table` / 画笔 transform 左乘父矩阵
+/// - `color` / `sdf_feather` / `uv`：覆盖子节点画笔（已生成顶点颜色不变）
+///
+/// 不含「相对父包围盒左上角」的局部坐标（实现复杂，未做）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InheritFromParent {
+    pub transform: bool,
+    pub color: bool,
+    pub sdf_feather: bool,
+    pub uv: bool,
+}
+
+impl InheritFromParent {
+    pub const NONE: Self = Self {
+        transform: false,
+        color: false,
+        sdf_feather: false,
+        uv: false,
+    };
+    pub const ALL: Self = Self {
+        transform: true,
+        color: true,
+        sdf_feather: true,
+        uv: true,
+    };
+    pub const TRANSFORM: Self = Self {
+        transform: true,
+        color: false,
+        sdf_feather: false,
+        uv: false,
+    };
+
+    pub const fn transform(mut self) -> Self {
+        self.transform = true;
+        self
+    }
+    pub const fn color(mut self) -> Self {
+        self.color = true;
+        self
+    }
+    pub const fn sdf_feather(mut self) -> Self {
+        self.sdf_feather = true;
+        self
+    }
+    pub const fn uv(mut self) -> Self {
+        self.uv = true;
+        self
+    }
+
+    #[inline]
+    pub fn any(self) -> bool {
+        self.transform || self.color || self.sdf_feather || self.uv
+    }
 }
 
 /// 6 个 f32 bit pattern 的 hash（batch 内去重用）。
@@ -737,6 +1045,11 @@ pub struct DrawBatch {
     cached_transform_index: Option<u32>,
     /// 子 batch（绘制顺序：本 batch 的 shapes → texts → 各 child 递归）。
     pub children: Vec<DrawBatch>,
+    /// 若为 `true`，本 batch 的几何将作为子 batch 的裁切区（stencil 裁剪）。
+    /// 默认 `false`（仅顺序层叠，不裁切）。
+    pub clips_children: bool,
+    /// 被 `push_child` 挂到父下时，从父写入本节点（及 transform 时整棵子树）的属性。
+    pub inherit: InheritFromParent,
 }
 
 impl DrawBatch {
@@ -757,6 +1070,8 @@ impl DrawBatch {
             has_sdf: false,
             cached_transform_index: None,
             children: Vec::new(),
+            clips_children: false,
+            inherit: InheritFromParent::NONE,
         }
     }
 
@@ -776,11 +1091,96 @@ impl DrawBatch {
         self.has_sdf = false;
         self.cached_transform_index = None;
         self.children.clear();
+        self.clips_children = false;
+        self.inherit = InheritFromParent::NONE;
     }
 
-    /// 追加子 batch（move 所有权）。绘制时在父 shapes/texts 之后、同层后续 child 之前。
-    pub fn push_child(&mut self, child: DrawBatch) {
+    /// 追加子 batch。若 `child.inherit` 有标志，先把父属性写入子（transform 作用于整棵子树）。
+    pub fn push_child(&mut self, mut child: DrawBatch) {
+        if child.inherit.any() {
+            child.apply_inherit_from(self);
+        }
         self.children.push(child);
+    }
+
+    /// 指定继承标志后追加（覆盖 `child.inherit`）。
+    pub fn push_child_with(&mut self, mut child: DrawBatch, inherit: InheritFromParent) {
+        child.inherit = inherit;
+        self.push_child(child);
+    }
+
+    /// 按 `self.inherit` 从 `parent` 写入本节点（及 transform 时递归子树）。
+    fn apply_inherit_from(&mut self, parent: &DrawBatch) {
+        let flags = self.inherit;
+        if flags.color {
+            self.color = parent.color;
+        }
+        if flags.sdf_feather {
+            self.sdf_feather = parent.sdf_feather;
+        }
+        if flags.uv {
+            self.uv = parent.uv;
+        }
+        if flags.transform {
+            let p = parent.transform.unwrap_or(Transform::IDENTITY);
+            self.left_mul_transform_tree(&p);
+        }
+    }
+
+    /// 整棵子树 transform 左乘 `parent`（已画顶点的 `transform_table` + 画笔 transform）。
+    fn left_mul_transform_tree(&mut self, parent: &Transform) {
+        let (p0, p1, p2) = parent.to_cols();
+        if self.transform_table.is_empty()
+            && (!self.vertices.is_empty() || !self.texts.entries.is_empty())
+        {
+            let _ = self.register_transform(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            );
+        }
+        let n = self.transform_table.len() / 12;
+        for i in 0..n {
+            let base = i * 12;
+            let t = &self.transform_table[base..base + 12];
+            let c0 = [t[0], t[1], 0.0];
+            let c1 = [t[4], t[5], 0.0];
+            let c2 = [t[8], t[9], 1.0];
+            let (r0, r1, r2) = mul_affine_cols(p0, p1, p2, c0, c1, c2);
+            self.transform_table[base] = r0[0];
+            self.transform_table[base + 1] = r0[1];
+            self.transform_table[base + 2] = 0.0;
+            self.transform_table[base + 3] = 0.0;
+            self.transform_table[base + 4] = r1[0];
+            self.transform_table[base + 5] = r1[1];
+            self.transform_table[base + 6] = 0.0;
+            self.transform_table[base + 7] = 0.0;
+            self.transform_table[base + 8] = r2[0];
+            self.transform_table[base + 9] = r2[1];
+            self.transform_table[base + 10] = 1.0;
+            self.transform_table[base + 11] = 0.0;
+        }
+        self.rebuild_transform_map();
+        let local = self.transform.unwrap_or(Transform::IDENTITY);
+        self.transform = Some(parent.then(&local));
+        self.cached_transform_index = None;
+        for child in &mut self.children {
+            child.left_mul_transform_tree(parent);
+        }
+    }
+
+    fn rebuild_transform_map(&mut self) {
+        self.transform_map.clear();
+        let n = self.transform_table.len() / 12;
+        for i in 0..n {
+            let base = i * 12;
+            let t = &self.transform_table[base..base + 12];
+            let c0 = [t[0], t[1], 0.0];
+            let c1 = [t[4], t[5], 0.0];
+            let c2 = [t[8], t[9], 1.0];
+            let key = transform_key(c0, c1, c2);
+            self.transform_map.entry(key).or_insert(i as u32);
+        }
     }
 
     /// 本节点或任意子孙是否含形状/文字。
@@ -790,7 +1190,23 @@ impl DrawBatch {
             || self.children.iter().any(Self::has_drawable_content)
     }
 
-    /// 前序 DFS：自身 → 各 child（供 Renderer 扁平合并）。
+    /// 前序 DFS：自身 → 各 child → Pop（若 clips_children）。
+    /// 返回的 `Vec` 中元素为 `(batch, is_pop)`，`is_pop=true` 时批次为空，
+    /// 表示需要 emit Stencil Pop（只改 stencil，不画）。
+    pub(crate) fn flatten_with_pop<'a>(&'a self, out: &mut Vec<Option<&'a DrawBatch>>) {
+        out.push(Some(self));
+        let child_start = out.len();
+        for child in &self.children {
+            child.flatten_with_pop(out);
+        }
+        if self.clips_children && out.len() > child_start {
+            // 子节点全部结束后，若自身开启了裁切，则弹出
+            out.push(None);
+        }
+    }
+
+    /// 旧版：前序 DFS 扁平面板（无 Pop 事件，树内不含 `clips_children` 时等价）。
+    #[allow(dead_code)]
     pub(crate) fn walk_preorder<'a>(&'a self, out: &mut Vec<&'a DrawBatch>) {
         out.push(self);
         for child in &self.children {
@@ -1085,6 +1501,8 @@ impl DrawBatch {
             has_sdf: self.has_sdf,
             cached_transform_index: self.cached_transform_index,
             children: self.children.iter().map(|c| c.clone_batch()).collect(),
+            clips_children: self.clips_children,
+            inherit: self.inherit,
         }
     }
 
@@ -1302,5 +1720,48 @@ mod tests {
         b.translate(3.0, 4.0);
         let i2 = b.current_transform_index();
         assert_ne!(i0, i2);
+    }
+
+    #[test]
+    fn inherit_transform_left_muls_child_table() {
+        let mut parent = DrawBatch::new();
+        parent.set_position(100.0, 50.0);
+        let mut child = DrawBatch::new();
+        child.sdf_feather = Some(1.0);
+        child.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut child, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        let idx = child.vertices[0].transform_index as usize;
+        let base = idx * 12;
+        // 继承前局部表为恒等
+        assert_eq!(child.transform_table[base], 1.0);
+        assert_eq!(child.transform_table[base + 8], 0.0);
+        parent.push_child(child);
+        let c = &parent.children[0];
+        let t = &c.transform_table[base..base + 12];
+        assert!((t[8] - 100.0).abs() < 1e-4, "tx={}", t[8]);
+        assert!((t[9] - 50.0).abs() < 1e-4, "ty={}", t[9]);
+    }
+
+    #[test]
+    fn inherit_color_and_feather_on_push() {
+        let mut parent = DrawBatch::new();
+        parent.color = GREEN;
+        parent.sdf_feather = Some(2.5);
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::NONE.color().sdf_feather();
+        assert_eq!(child.color, WHITE);
+        parent.push_child(child);
+        assert_eq!(parent.children[0].color, GREEN);
+        assert_eq!(parent.children[0].sdf_feather, Some(2.5));
+    }
+
+    #[test]
+    fn transform_then_composes() {
+        let p = Transform::translation(10.0, 20.0);
+        let c = Transform::translation(3.0, 4.0);
+        let m = p.then(&c);
+        let (_, _, t) = m.to_cols();
+        assert!((t[0] - 13.0).abs() < 1e-5);
+        assert!((t[1] - 24.0).abs() < 1e-5);
     }
 }
