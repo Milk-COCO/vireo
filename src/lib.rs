@@ -6,7 +6,7 @@
 //! let win = app.window(WindowDesc::new("Hello", 400, 300), None::<fn()>);
 //! app.run(move |app| {
 //!     let mut batch = DrawBatch::new();
-//!     draw_rectangle(&mut batch, 10.0, 10.0, 100.0, 80.0, RED);
+//!     draw_rectangle(&mut batch, 10.0, 10.0, 100.0, 80.0, Some(RED));
 //!     draw_text(&mut batch.texts, "Hello!", TextOptions::default()
 //!         .x(20.0).y(20.0).font_size(16.0).color(WHITE));
 //!     app.window_ref(&win).unwrap().draw(Some(BLACK), &[&batch]);
@@ -33,6 +33,8 @@ pub mod prelude {
     pub use crate::context::DrawBatch;
     pub use crate::context::RenderTarget;
     pub use crate::context::Renderer;
+    pub use crate::context::Transform;
+    pub use crate::context::UvRect;
     pub use crate::texture::Texture;
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::Vertex;

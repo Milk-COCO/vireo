@@ -45,14 +45,7 @@ fn main() {
         let mut batch = DrawBatch::new();
         for i in 0..60 {
             let h = 10.0 + (i as f32) * 0.5;
-            draw_rectangle(
-                &mut batch,
-                20.0 + i as f32 * 10.0,
-                250.0 - h,
-                8.0,
-                h,
-                GREEN,
-            );
+            draw_rectangle(&mut batch, 20.0 + i as f32 * 10.0, 250.0 - h, 8.0, h, Some(GREEN));
         }
         if !no_text {
             let info = format!(

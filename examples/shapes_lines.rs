@@ -43,7 +43,7 @@ fn main() {
         let thicknesses = [1.0, 2.0, 4.0, 8.0, 16.0];
         for (i, &th) in thicknesses.iter().enumerate() {
             let y = 70.0 + i as f32 * 36.0;
-            draw_line(&mut batch, 40.0, y, 280.0, y, th, Color::new(0.3, 0.7, 1.0, 1.0));
+            draw_line(&mut batch, 40.0, y, 280.0, y, th, Some(Color::new(0.3, 0.7, 1.0, 1.0)));
             draw_text(
                 &mut batch.texts,
                 &format!("{th:.0}px"),
@@ -65,8 +65,8 @@ fn main() {
         );
 
         // 斜线
-        draw_line(&mut batch, 40.0, 280.0, 280.0, 400.0, 6.0, ORANGE);
-        draw_line(&mut batch, 40.0, 400.0, 280.0, 280.0, 3.0, PINK);
+        draw_line(&mut batch, 40.0, 280.0, 280.0, 400.0, 6.0, Some(ORANGE));
+        draw_line(&mut batch, 40.0, 400.0, 280.0, 280.0, 3.0, Some(PINK));
 
         // 折线：折线路径
         let mut pts = Vec::new();
@@ -75,10 +75,10 @@ fn main() {
             let y = 120.0 + (t * 2.0 + i as f32 * 0.6).sin() * 40.0;
             pts.push((x, y));
         }
-        draw_line_chain(&mut batch, &pts, 4.0, GREEN);
+        draw_line_chain(&mut batch, &pts, 4.0, Some(GREEN));
         draw_text(
             &mut batch.texts,
-            "draw_line_chain (animated)",
+            "draw_line_chain(animated)",
             TextOptions::default()
                 .x(380.0)
                 .y(50.0)
@@ -95,7 +95,7 @@ fn main() {
             (480.0, 360.0),
             (520.0, 280.0),
         ];
-        draw_line_chain(&mut batch, &star, 3.0, PURPLE);
+        draw_line_chain(&mut batch, &star, 3.0, Some(PURPLE));
         draw_text(
             &mut batch.texts,
             "polyline (closed by hand)",
@@ -111,17 +111,9 @@ fn main() {
         let cy = 320.0;
         for i in 0..8 {
             let a = t + i as f32 * TAU / 8.0;
-            draw_line(
-                &mut batch,
-                cx,
-                cy,
-                cx + a.cos() * 90.0,
-                cy + a.sin() * 90.0,
-                2.0 + (i as f32),
-                Color::new(1.0, 0.5 + i as f32 * 0.05, 0.3, 1.0),
-            );
+            draw_line(&mut batch, cx, cy, cx + a.cos() * 90.0, cy + a.sin() * 90.0, 2.0 + (i as f32), Some(Color::new(1.0, 0.5 + i as f32 * 0.05, 0.3, 1.0)));
         }
-        draw_circle(&mut batch, cx, cy, 6.0, WHITE);
+        draw_circle(&mut batch, cx, cy, 6.0, Some(WHITE));
 
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
         true

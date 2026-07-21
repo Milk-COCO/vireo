@@ -163,9 +163,14 @@ impl Renderer {
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
     ) {
-        let has_content = batches.iter().any(|b| {
-            !b.vertices.is_empty() || !b.texts.entries.is_empty() || clear_color.is_some()
-        });
+        // 根列表前序展开子树：父 shapes/texts 先于 child
+        let mut flat: Vec<&DrawBatch> = Vec::new();
+        for b in batches {
+            b.walk_preorder(&mut flat);
+        }
+
+        let has_content = clear_color.is_some()
+            || flat.iter().any(|b| !b.vertices.is_empty() || !b.texts.entries.is_empty());
         if !has_content {
             return;
         }
@@ -205,7 +210,7 @@ impl Renderer {
             text: Option<(u32, u32)>, // (vertex_start, vertex_count)
         }
 
-        let mut batch_infos: Vec<BatchInfo> = Vec::with_capacity(batches.len());
+        let mut batch_infos: Vec<BatchInfo> = Vec::with_capacity(flat.len());
         let mut vertex_count: u32 = 0;
         let mut ndx_accum: u32 = 0;
 
@@ -214,12 +219,12 @@ impl Renderer {
         global_transforms.clear();
         let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
         polygon_edges_global.clear();
-        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(batches.len());
-        let mut batch_poly_base: Vec<u32> = Vec::with_capacity(batches.len());
+        let mut batch_transform_bases: Vec<u32> = Vec::with_capacity(flat.len());
+        let mut batch_poly_base: Vec<u32> = Vec::with_capacity(flat.len());
         let mut total_vcount: u32 = 0;
         let mut total_icount: u32 = 0;
         let mut poly_offset: u32 = 0;
-        for batch in batches {
+        for batch in &flat {
             batch_transform_bases.push((global_transforms.len() / 12) as u32);
             global_transforms.extend_from_slice(&batch.transform_table);
             batch_poly_base.push(poly_offset);
@@ -244,7 +249,7 @@ impl Renderer {
             combined_idata.reserve(total_ibytes as usize);
         }
 
-        for (bi, batch) in batches.iter().enumerate() {
+        for (bi, batch) in flat.iter().enumerate() {
             let shape = if !batch.vertices.is_empty() {
                 let transform_base = batch_transform_bases[bi];
                 let poly_base = batch_poly_base[bi] as f32;
@@ -268,20 +273,23 @@ impl Renderer {
                 combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
 
                 // 构建 texture segments（相对于 batch 的偏移量转为全局偏移量）
+                let resolve_bg = |bg: Option<wgpu::BindGroup>| {
+                    bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
+                };
                 let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
-                    let bg = batch.texture.clone().unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone());
+                    let bg = resolve_bg(batch.bind_group.clone());
                     vec![ShapeSegment { ndx_start: ndx_accum, ndx_count: batch.indices.len() as u32, bind_group: bg }]
                 } else {
                     let mut v: Vec<ShapeSegment> = batch.texture_segments.iter().map(|s| ShapeSegment {
                         ndx_start: ndx_accum + s.ndx_start,
                         ndx_count: s.ndx_count,
-                        bind_group: s.bind_group.clone(),
+                        bind_group: resolve_bg(s.bind_group.clone()),
                     }).collect();
-                    // 补 trailing segment：最后一段之后的新顶点用当前 batch.texture
+                    // 补 trailing segment：最后一段之后的新顶点用当前 batch.bind_group
                     let last_end = v.last().map(|s| s.ndx_start + s.ndx_count).unwrap_or(ndx_accum);
                     let total_end = ndx_accum + batch.indices.len() as u32;
                     if last_end < total_end {
-                        let bg = batch.texture.clone().unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone());
+                        let bg = resolve_bg(batch.bind_group.clone());
                         v.push(ShapeSegment { ndx_start: last_end, ndx_count: total_end - last_end, bind_group: bg });
                     }
                     v
@@ -349,7 +357,7 @@ impl Renderer {
             text_ctx.text_renderer.clear();
             text_ctx.advance_frame();
         }
-        for (i, batch) in batches.iter().enumerate() {
+        for (i, batch) in flat.iter().enumerate() {
             if !batch.texts.entries.is_empty() {
                 let (start, count) = batch.texts.prepare_texts(
                     &self.gpu,
@@ -567,32 +575,85 @@ impl Renderer {
 
 use crate::text::{TextEntryList, TextOptions};
 
-/// 形状变换。内部使用，直接存储 3x3 仿射变换矩阵 + pivot。
-#[derive(Clone, Copy)]
-struct Transform {
-    /// 线性部分：[a b; c d] = [sx*cos  -sx*sin; sy*sin  sy*cos]
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
+/// 形状仿射变换：线性部分 + 平移 + 局部 pivot。
+///
+/// 线性 `[a b; c d]` 常为 `sx*cos, -sx*sin; sy*sin, sy*cos`（由 [`Transform::trs`] 构建）。
+/// 顶点变换顺序：`T(x,y) * [a b; c d] * T(-pivot)`。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+    /// 线性部分：`[a b; c d]`
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
     /// 世界坐标位置（局部坐标系原点）
-    x: f32,
-    y: f32,
+    pub x: f32,
+    pub y: f32,
     /// 局部空间旋转/缩放中心
-    px: f32,
-    py: f32,
+    pub px: f32,
+    pub py: f32,
 }
 
 impl Default for Transform {
     fn default() -> Self {
-        Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, x: 0.0, y: 0.0, px: 0.0, py: 0.0 }
+        Self::IDENTITY
     }
 }
 
 impl Transform {
+    /// 单位变换。
+    pub const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        x: 0.0,
+        y: 0.0,
+        px: 0.0,
+        py: 0.0,
+    };
+
+    /// 仅平移。
+    pub fn translation(x: f32, y: f32) -> Self {
+        Self {
+            x,
+            y,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// 从平移 / pivot / 旋转（弧度，顺时针）/ 缩放构建。
+    pub fn trs(x: f32, y: f32, px: f32, py: f32, rotation: f32, sx: f32, sy: f32) -> Self {
+        let (c, s) = (rotation.cos(), rotation.sin());
+        Self {
+            a: sx * c,
+            b: -sx * s,
+            c: sy * s,
+            d: sy * c,
+            x,
+            y,
+            px,
+            py,
+        }
+    }
+
+    /// 原始 3×3 仿射 6 分量（列主序语义：`[a b tx; c d ty; 0 0 1]`），pivot 归零。
+    pub fn matrix(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> Self {
+        Self {
+            a,
+            b,
+            c,
+            d,
+            x: tx,
+            y: ty,
+            px: 0.0,
+            py: 0.0,
+        }
+    }
+
     /// 返回 3x3 仿射变换矩阵的 3 个列（WGSL 列主序）。
     /// 变换顺序：T(x,y) * [a b; c d] * T(-pivot)，即 pivot → 线性 → 平移。
-    fn to_cols(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    pub(crate) fn to_cols(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let tx = self.x - self.px * self.a - self.py * self.b;
         let ty = self.y - self.px * self.c - self.py * self.d;
         ([self.a, self.c, 0.0], [self.b, self.d, 0.0], [tx, ty, 1.0])
@@ -638,25 +699,29 @@ impl UvRect {
 /// 批量绘制单元 —— 容纳一组形状顶点、文本条目和可选纹理。
 ///
 /// 每帧创建、填充后交给 `VireoWindow::draw()` 或 `OffscreenCanvas::draw()`。
-/// 多个 batch 按提交顺序叠加，后面的覆盖前面的。
+/// 根 batch 列表按顺序叠加；每个 batch 可含 `children`，绘制顺序为
+/// **父 shapes → 父 texts → 子树（递归）**。
 #[derive(Clone)]
 struct TextureSegment {
     ndx_start: u32,
     ndx_count: u32,
-    bind_group: wgpu::BindGroup,
+    /// `None` = 白纹理路径（draw 时解析为 `gpu.white_bind_group`）
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
-    pub(crate) texture: Option<wgpu::BindGroup>,
+    pub(crate) bind_group: Option<wgpu::BindGroup>,
     texture_segments: Vec<TextureSegment>,
     transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     ///
     /// 注意：SDF 图形不受 MSAA 影响。
     pub sdf_feather: Option<f32>,
+    /// 当前画笔颜色；`draw_*(…, None)` 使用此值。
+    pub color: crate::color::Color,
     /// 纹理坐标子区域，后续形状的 UV 在此范围内映射。
     pub uv: UvRect,
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
@@ -670,6 +735,8 @@ pub struct DrawBatch {
     pub(crate) has_sdf: bool,
     /// 当前 transform 的已注册 index 缓存；transform 变更时失效。
     cached_transform_index: Option<u32>,
+    /// 子 batch（绘制顺序：本 batch 的 shapes → texts → 各 child 递归）。
+    pub children: Vec<DrawBatch>,
 }
 
 impl DrawBatch {
@@ -678,16 +745,18 @@ impl DrawBatch {
             vertices: Vec::with_capacity(64),
             indices: Vec::with_capacity(96),
             texts: TextEntryList::new(),
-            texture: None,
+            bind_group: None,
             texture_segments: Vec::with_capacity(2),
             transform: None,
             sdf_feather: None,
+            color: crate::color::colors::WHITE,
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
             transform_table: Vec::with_capacity(48),
             transform_map: FxHashMap::default(),
             has_sdf: false,
             cached_transform_index: None,
+            children: Vec::new(),
         }
     }
 
@@ -695,21 +764,97 @@ impl DrawBatch {
         self.vertices.clear();
         self.indices.clear();
         self.texts.clear();
-        self.texture = None;
+        self.bind_group = None;
         self.texture_segments.clear();
         self.transform = None;
         self.sdf_feather = Some(0.0);
+        self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
         self.polygon_edges.clear();
         self.transform_table.clear();
         self.transform_map.clear();
         self.has_sdf = false;
         self.cached_transform_index = None;
+        self.children.clear();
+    }
+
+    /// 追加子 batch（move 所有权）。绘制时在父 shapes/texts 之后、同层后续 child 之前。
+    pub fn push_child(&mut self, child: DrawBatch) {
+        self.children.push(child);
+    }
+
+    /// 本节点或任意子孙是否含形状/文字。
+    pub fn has_drawable_content(&self) -> bool {
+        !self.vertices.is_empty()
+            || !self.texts.entries.is_empty()
+            || self.children.iter().any(Self::has_drawable_content)
+    }
+
+    /// 前序 DFS：自身 → 各 child（供 Renderer 扁平合并）。
+    pub(crate) fn walk_preorder<'a>(&'a self, out: &mut Vec<&'a DrawBatch>) {
+        out.push(self);
+        for child in &self.children {
+            child.walk_preorder(out);
+        }
+    }
+
+    /// 设置画笔颜色（后续 `draw_*(…, None)` 使用）。
+    pub fn set_color(&mut self, color: crate::color::Color) {
+        self.color = color;
     }
 
     #[inline]
     fn invalidate_transform_cache(&mut self) {
         self.cached_transform_index = None;
+    }
+
+    /// 在临时应用 [`crate::shapes::ShapeOptions`] 后执行 `f`，结束时恢复状态（不写回）。
+    pub(crate) fn with_shape_options<R>(
+        &mut self,
+        opts: crate::shapes::ShapeOptions,
+        f: impl FnOnce(&mut Self, crate::color::Color) -> R,
+    ) -> R {
+        let saved_color = self.color;
+        let saved_feather = self.sdf_feather;
+        let saved_uv = self.uv;
+        let saved_transform = self.transform;
+        let saved_xform_cache = self.cached_transform_index;
+        let saved_bind_group = self.bind_group.clone();
+        let tex_overridden = opts.bind_group.is_some();
+
+        if let Some(c) = opts.color {
+            self.color = c;
+        }
+        // Some(None)=几何, Some(Some(f))=SDF；外层 None=保持
+        if let Some(feather) = opts.sdf_feather {
+            self.sdf_feather = feather;
+        }
+        if let Some(uv) = opts.uv {
+            self.uv = uv;
+        }
+        if let Some(t) = opts.transform {
+            self.set_transform(t);
+        }
+        // Some(None)=白纹理, Some(Some(bg))=绑定；外层 None=保持
+        if let Some(bg) = opts.bind_group {
+            self.add_texture_segment(self.bind_group.clone());
+            self.bind_group = bg;
+        }
+
+        let color = self.color;
+        let result = f(self, color);
+
+        if tex_overridden {
+            // 含 clear（None）：必须封段，否则后续/本段顶点会落到 trailing 用恢复后的贴图
+            self.add_texture_segment(self.bind_group.clone());
+            self.bind_group = saved_bind_group;
+        }
+        self.color = saved_color;
+        self.sdf_feather = saved_feather;
+        self.uv = saved_uv;
+        self.transform = saved_transform;
+        self.cached_transform_index = saved_xform_cache;
+        result
     }
 
     /// 设置平移（屏幕坐标）。
@@ -760,22 +905,16 @@ impl DrawBatch {
         self.invalidate_transform_cache();
     }
 
-    /// 一次性设置完整变换（从分解参数构建矩阵）。
-    pub fn set_transform(&mut self, x: f32, y: f32, px: f32, py: f32, rotation: f32, sx: f32, sy: f32) {
-        let (c, s) = (rotation.cos(), rotation.sin());
-        self.transform = Some(Transform {
-            a: sx * c, b: -sx * s,
-            c: sy * s, d: sy * c,
-            x, y, px, py,
-        });
+    /// 设置完整变换（替换当前笔刷变换）。
+    pub fn set_transform(&mut self, t: Transform) {
+        self.transform = Some(t);
         self.invalidate_transform_cache();
     }
 
     /// 直接设置原始 3x3 仿射矩阵（6 个有效分量），pivot 归零。
     /// 矩阵列主序：`[a b tx; c d ty; 0 0 1]`。
     pub fn set_matrix(&mut self, a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) {
-        self.transform = Some(Transform { a, b, c, d, x: tx, y: ty, px: 0.0, py: 0.0 });
-        self.invalidate_transform_cache();
+        self.set_transform(Transform::matrix(a, b, c, d, tx, ty));
     }
 
     /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。
@@ -785,7 +924,7 @@ impl DrawBatch {
     ) {
         let x = cx + orbit_angle.cos() * orbit_radius;
         let y = cy + orbit_angle.sin() * orbit_radius;
-        self.set_transform(x, y, px, py, self_rotation, sx, sy);
+        self.set_transform(Transform::trs(x, y, px, py, self_rotation, sx, sy));
     }
 
     /// 清除变换，后续形状以原始坐标绘制。
@@ -933,22 +1072,28 @@ impl DrawBatch {
         Self {
             vertices: self.vertices.clone(),
             indices: self.indices.clone(),
-            texture: self.texture.clone(),
+            bind_group: self.bind_group.clone(),
             texture_segments: self.texture_segments.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             sdf_feather: self.sdf_feather,
+            color: self.color,
             uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
             transform_table: self.transform_table.clone(),
             transform_map: self.transform_map.clone(),
             has_sdf: self.has_sdf,
             cached_transform_index: self.cached_transform_index,
+            children: self.children.iter().map(|c| c.clone_batch()).collect(),
         }
     }
 
     /// 直接设置 bind group（高级用法，如离屏画布贴回窗口）。
-    pub fn set_bind_group(&mut self, bg: wgpu::BindGroup) { self.texture = Some(bg); }
+    /// `None` 与 [`set_texture`]`(None)` 相同：后续形状走白纹理。
+    pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
+        self.add_texture_segment(self.bind_group.clone());
+        self.bind_group = bg;
+    }
 
     /// 设置 UV 子区域，后续形状的纹理坐标在此范围内映射。
     pub fn set_uv(&mut self, u0: f32, v0: f32, u1: f32, v1: f32) {
@@ -960,44 +1105,49 @@ impl DrawBatch {
         self.uv = UvRect::default();
     }
 
-    /// 绑定纹理，后续形状自动使用。同一 batch 多次调用即切换纹理。
-    pub fn set_texture(&mut self, texture: &crate::texture::Texture) {
-        // 把当前纹理覆盖的索引范围记入 segment，然后切到新纹理
-        if let Some(ref bg) = self.texture {
-            self.add_texture_segment(bg.clone());
-        }
-        self.texture = Some(texture.bind_group.clone());
+    /// 绑定纹理（`Some`）或清除为白纹理路径（`None`）。
+    /// 同一 batch 多次切换会写入 texture segments。
+    ///
+    /// 内部只存 `BindGroup`（绘制时 group 1 需要的），不持有 `Texture`：
+    /// 生命周期更短、可与 `set_bind_group` 共用同一状态，且不强制 batch 拥有整张贴图。
+    pub fn set_texture(&mut self, texture: Option<&crate::texture::Texture>) {
+        self.add_texture_segment(self.bind_group.clone());
+        self.bind_group = texture.map(|t| t.bind_group.clone());
     }
 
-    /// 记录纹理段：自上次段以来的所有新顶点归入此 bind group。
-    pub(crate) fn add_texture_segment(&mut self, bg: wgpu::BindGroup) {
+    /// 记录纹理段：自上次段以来的新索引归入此 bind group（`None` = 白纹理路径）。
+    pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
         let start = self.texture_segments.last().map_or(0, |s| s.ndx_start + s.ndx_count);
         let end = self.indices.len() as u32;
         if end > start {
-            self.texture_segments.push(TextureSegment { ndx_start: start, ndx_count: end - start, bind_group: bg });
+            self.texture_segments.push(TextureSegment {
+                ndx_start: start,
+                ndx_count: end - start,
+                bind_group: bg,
+            });
         }
     }
 
     // ---- 形状委托（去 draw_ 前缀） ----
 
-    pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: crate::color::Color) { crate::shapes::draw_rectangle(self, x, y, w, h, c); }
-    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: crate::color::Color) { crate::shapes::draw_circle(self, cx, cy, r, c); }
-    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
-    pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: crate::color::Color) { crate::shapes::draw_ellipse(self, cx, cy, rx, ry, c); }
-    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: crate::color::Color) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c); }
-    pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: crate::color::Color) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
-    pub fn polygon(&mut self, pts: &[(f32, f32)], c: crate::color::Color) { crate::shapes::draw_polygon(self, pts, c); }
-    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: crate::color::Color) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c); }
-    pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_rect_outline(self, x, y, w, h, t, c); }
-    pub fn circle_outline(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_circle_outline(self, cx, cy, r, t, c, seg); }
-    pub fn ellipse_outline(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_ellipse_outline(self, cx, cy, rx, ry, t, c, seg); }
-    pub fn rounded_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, c: crate::color::Color, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, x, y, w, h, r, t, c, cs); }
-    pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_line_chain(self, pts, t, c); }
-    pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: crate::color::Color) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
-    pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: crate::color::Color) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
-    pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: crate::color::Color, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
-    pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, c: crate::color::Color) {
-        crate::shapes::draw_shape(self, shape, c);
+    pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rectangle(self, x, y, w, h, c); }
+    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_circle(self, cx, cy, r, c); }
+    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
+    pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Option<crate::color::Color>) { crate::shapes::draw_ellipse(self, cx, cy, rx, ry, c); }
+    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c); }
+    pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: Option<crate::color::Color>) { crate::shapes::draw_polygon(self, pts, c); }
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c); }
+    pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rect_outline(self, x, y, w, h, t, c); }
+    pub fn circle_outline(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_circle_outline(self, cx, cy, r, t, c, seg); }
+    pub fn ellipse_outline(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_ellipse_outline(self, cx, cy, rx, ry, t, c, seg); }
+    pub fn rounded_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, c: Option<crate::color::Color>, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, x, y, w, h, r, t, c, cs); }
+    pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line_chain(self, pts, t, c); }
+    pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
+    pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
+    pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
+    pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOptions) {
+        crate::shapes::draw_shape(self, shape, opts);
     }
 
     /// 添加文字，自动捕获当前 transform。
@@ -1035,12 +1185,12 @@ mod tests {
     fn has_sdf_flag_set_on_sdf_shapes() {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, RED);
+        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(RED));
         assert!(b.has_sdf);
         b.clear();
         assert!(!b.has_sdf);
         b.sdf_feather = None;
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, RED);
+        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(RED));
         assert!(!b.has_sdf);
     }
 
@@ -1049,8 +1199,8 @@ mod tests {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
         b.set_position(10.0, 20.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, RED);
-        draw_circle(&mut b, 0.0, 0.0, 3.0, BLUE);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(RED));
+        draw_circle(&mut b, 0.0, 0.0, 3.0, Some(BLUE));
         let idxs: Vec<u32> = b.vertices.iter().map(|v| v.transform_index).collect();
         assert!(idxs.iter().all(|&i| i == idxs[0]));
         assert_eq!(b.transform_table.len() / 12, 1);
@@ -1061,9 +1211,9 @@ mod tests {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
         b.set_position(0.0, 0.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, RED);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(RED));
         b.set_position(100.0, 0.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, BLUE);
+        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(BLUE));
         let i0 = b.vertices[0].transform_index;
         let i1 = b.vertices[4].transform_index;
         assert_ne!(i0, i1);
@@ -1076,12 +1226,12 @@ mod tests {
         let mut b0 = DrawBatch::new();
         b0.sdf_feather = Some(1.0);
         let pts = [(0., 0.), (10., 0.), (5., 8.)];
-        draw_polygon(&mut b0, &pts, RED);
+        draw_polygon(&mut b0, &pts, Some(RED));
         let edges0 = b0.polygon_edges.len() / 4;
 
         let mut b1 = DrawBatch::new();
         b1.sdf_feather = Some(1.0);
-        draw_polygon(&mut b1, &pts, BLUE);
+        draw_polygon(&mut b1, &pts, Some(BLUE));
         let start_local = b1.vertices[0].sdf_params[0];
         assert_eq!(start_local, 0.0);
 
@@ -1111,7 +1261,7 @@ mod tests {
         b.sdf_feather = Some(1.0);
         for i in 0..32 {
             b.set_position(i as f32, 0.0);
-            draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, RED);
+            draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(RED));
         }
         let cap_v = b.vertices.capacity();
         let cap_i = b.indices.capacity();
@@ -1120,6 +1270,25 @@ mod tests {
         assert!(b.indices.capacity() >= cap_i);
         assert!(b.vertices.is_empty());
         assert!(!b.has_sdf);
+    }
+
+    #[test]
+    fn walk_preorder_parent_before_children() {
+        let mut parent = DrawBatch::new();
+        draw_rectangle(&mut parent, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        let mut c0 = DrawBatch::new();
+        draw_circle(&mut c0, 0.0, 0.0, 3.0, Some(GREEN));
+        let mut c1 = DrawBatch::new();
+        draw_rectangle(&mut c1, 1.0, 1.0, 2.0, 2.0, Some(BLUE));
+        parent.push_child(c0);
+        parent.push_child(c1);
+        let mut flat = Vec::new();
+        parent.walk_preorder(&mut flat);
+        assert_eq!(flat.len(), 3);
+        assert_eq!(flat[0].vertices.len(), 4); // parent rect
+        assert_eq!(flat[1].vertices.len() > 0, true); // child circle
+        assert_eq!(flat[2].vertices.len(), 4); // child rect
+        assert!(parent.has_drawable_content());
     }
 
     #[test]

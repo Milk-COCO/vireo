@@ -40,17 +40,15 @@ fn main() {
         for i in 0..16 {
             let a = t + i as f32 * TAU / 16.0;
             let r = 150.0 + (t * 2.5 + i as f32).sin() * 45.0;
-            draw_circle(&mut ring,
-                cx + a.cos() * r, cy + a.sin() * r,
-                10.0, hue(i as f32 / 16.0 + t * 0.05));
+            draw_circle(&mut ring, cx + a.cos() * r, cy + a.sin() * r, 10.0, Some(hue(i as f32 / 16.0 + t * 0.05)));
         }
 
         // Logo 贴图
         let mut logo_batch = DrawBatch::new();
         if let Some(logo) = logo_idx.and_then(|i| app.texture(i)) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
-            logo_batch.set_texture(&logo);
-            draw_rectangle(&mut logo_batch, cx - s / 2.0, cy - s / 2.0, s, s, WHITE);
+            logo_batch.set_texture(Some(&logo));
+            draw_rectangle(&mut logo_batch, cx - s / 2.0, cy - s / 2.0, s, s, Some(WHITE));
         }
 
         // 文字

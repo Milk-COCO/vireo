@@ -246,15 +246,15 @@ fn main() {
             (x_center, Color::new(0.3, 1.0, 0.3, 0.5)),
             (x_right, Color::new(0.3, 0.3, 1.0, 0.5)),
         ] {
-            draw_line(&mut batch, bx, align_y - 5.0, bx, align_y + 22.0, 1.0, color);
-            draw_line(&mut batch, bx + align_w, align_y - 5.0, bx + align_w, align_y + 22.0, 1.0, color);
+            draw_line(&mut batch, bx, align_y - 5.0, bx, align_y + 22.0, 1.0, Some(color));
+            draw_line(&mut batch, bx + align_w, align_y - 5.0, bx + align_w, align_y + 22.0, 1.0, Some(color));
         }
 
         // 背景参考线（帮助判断文字位置）
-        draw_line(&mut batch, 0.0, 0.0, w, 0.0, 1.0, Color::new(0.3, 0.3, 0.3, 1.0));
-        draw_line(&mut batch, 0.0, 0.0, 0.0, h, 1.0, Color::new(0.3, 0.3, 0.3, 1.0));
-        draw_line(&mut batch, 0.0, h, w, h, 1.0, Color::new(0.3, 0.3, 0.3, 1.0));
-        draw_line(&mut batch, w, 0.0, w, h, 1.0, Color::new(0.3, 0.3, 0.3, 1.0));
+        draw_line(&mut batch, 0.0, 0.0, w, 0.0, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
+        draw_line(&mut batch, 0.0, 0.0, 0.0, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
+        draw_line(&mut batch, 0.0, h, w, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
+        draw_line(&mut batch, w, 0.0, w, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
 
         win.draw(Some(Color::new(0.08, 0.1, 0.14, 1.0)), &[&batch]);
 

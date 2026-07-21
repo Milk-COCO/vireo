@@ -14,23 +14,23 @@ fn main() {
         let tex = app.texture(tex_id).unwrap();
 
         let mut batch = DrawBatch::new();
-        batch.set_texture(tex);
+        batch.set_texture(Some(tex));
         let s = 0.1; // logo 1000x1000，缩小到 100x100
 
         // 画整张纹理
-        draw_rectangle(&mut batch, 20.0, 80.0, tex.width as f32 * s, tex.height as f32 * s, WHITE);
+        draw_rectangle(&mut batch, 20.0, 80.0, tex.width as f32 * s, tex.height as f32 * s, Some(WHITE));
 
         // 左上角 1/2 区域
         let w2 = tex.width / 2;
         let h2 = tex.height / 2;
         let (u0, v0, u1, v1) = tex.uv(0, 0, w2, h2);
         batch.set_uv(u0, v0, u1, v1);
-        draw_rectangle(&mut batch, 180.0, 80.0, w2 as f32 * s, h2 as f32 * s, WHITE);
+        draw_rectangle(&mut batch, 180.0, 80.0, w2 as f32 * s, h2 as f32 * s, Some(WHITE));
 
         // 右下角 1/2 区域
         let (u0, v0, u1, v1) = tex.uv(w2, h2, w2, h2);
         batch.set_uv(u0, v0, u1, v1);
-        draw_rectangle(&mut batch, 280.0, 80.0, w2 as f32 * s, h2 as f32 * s, WHITE);
+        draw_rectangle(&mut batch, 280.0, 80.0, w2 as f32 * s, h2 as f32 * s, Some(WHITE));
 
         // 标签
         draw_text(&mut batch.texts, "Full",

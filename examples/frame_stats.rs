@@ -278,18 +278,11 @@ Init: app {:.0}ms + win {:.0}ms",
             } else {
                 RED
             };
-            draw_rectangle(&mut batch, x, y, bar_width, h, color);
+            draw_rectangle(&mut batch, x, y, bar_width, h, Some(color));
         }
 
         let target_y = graph_y + graph_h - (target_ft / max_ft_display * graph_h as f64) as f32;
-        draw_rectangle(
-            &mut batch,
-            graph_x,
-            target_y,
-            total_w.max(1.0),
-            1.0,
-            Color::new(0.4, 0.6, 0.9, 0.7),
-        );
+        draw_rectangle(&mut batch, graph_x, target_y, total_w.max(1.0), 1.0, Some(Color::new(0.4, 0.6, 0.9, 0.7)));
 
         if show_text {
             draw_text(

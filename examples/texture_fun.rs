@@ -27,8 +27,7 @@ fn main() {
         let glow_r = 100.0 + (angle * 1.5).sin() * 20.0;
         for j in 0..6 {
             let a = j as f32 / 6.0;
-            draw_circle(&mut glow, cx, cy + float, glow_r * (1.0 - a * 0.5),
-                Color::new(1.0, 0.9, 0.5, 0.08 - a * 0.01));
+            draw_circle(&mut glow, cx, cy + float, glow_r * (1.0 - a * 0.5), Some(Color::new(1.0, 0.9, 0.5, 0.08 - a * 0.01)));
         }
 
         // Batch 2: 四张部分围绕中心旋转 + 一起上下浮动
@@ -47,15 +46,15 @@ fn main() {
                 2 => (0.0, 0.5),
                 _ => (0.5, 0.5),
             };
-            batch.set_texture(&logo_bg);
+            batch.set_texture(Some(&logo_bg));
             batch.set_uv(u0, v0, u0 + 0.5, v0 + 0.5);
-            draw_rectangle(&mut batch, x, y, 80.0, 80.0, WHITE);
+            draw_rectangle(&mut batch, x, y, 80.0, 80.0, Some(WHITE));
             batch.clear_uv();
         }
 
         // 中间原图
-        batch.set_texture(&logo);
-        draw_rectangle(&mut batch, cx - 50.0, cy + float - 50.0, 100.0, 100.0, WHITE);
+        batch.set_texture(Some(&logo));
+        draw_rectangle(&mut batch, cx - 50.0, cy + float - 50.0, 100.0, 100.0, Some(WHITE));
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&glow, &batch]);
 

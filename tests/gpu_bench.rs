@@ -54,11 +54,11 @@ fn scene_sdf(b: &mut DrawBatch) {
         b.set_position(x, y);
         b.sdf_feather = Some(1.0);
         match i % 5 {
-            0 => draw_rectangle(b, 0.0, 0.0, 14.0, 14.0, RED),
-            1 => draw_circle(b, 7.0, 7.0, 6.0, GREEN),
-            2 => draw_rounded_rect(b, 0.0, 0.0, 14.0, 14.0, 3.0, BLUE),
-            3 => draw_ellipse(b, 7.0, 7.0, 6.0, 4.0, YELLOW),
-            _ => draw_triangle(b, 0.0, 0.0, 14.0, 0.0, 7.0, 14.0, MAGENTA),
+            0 => draw_rectangle(b, 0.0, 0.0, 14.0, 14.0, Some(RED)),
+            1 => draw_circle(b, 7.0, 7.0, 6.0, Some(GREEN)),
+            2 => draw_rounded_rect(b, 0.0, 0.0, 14.0, 14.0, 3.0, Some(BLUE)),
+            3 => draw_ellipse(b, 7.0, 7.0, 6.0, 4.0, Some(YELLOW)),
+            _ => draw_triangle(b, 0.0, 0.0, 14.0, 0.0, 7.0, 14.0, Some(MAGENTA)),
         }
     }
 }
@@ -70,12 +70,12 @@ fn scene_geo(b: &mut DrawBatch) {
         let y = (i / 25) as f32 * 35.0 + 15.0;
         b.set_position(x, y);
         match i % 4 {
-            0 => draw_circle(b, 14.0, 14.0, 12.0, RED),
-            1 => draw_ellipse(b, 14.0, 14.0, 12.0, 8.0, GREEN),
-            2 => draw_rounded_rect(b, 0.0, 0.0, 28.0, 28.0, 6.0, BLUE),
+            0 => draw_circle(b, 14.0, 14.0, 12.0, Some(RED)),
+            1 => draw_ellipse(b, 14.0, 14.0, 12.0, 8.0, Some(GREEN)),
+            2 => draw_rounded_rect(b, 0.0, 0.0, 28.0, 28.0, 6.0, Some(BLUE)),
             _ => {
                 let pts = [(0.0, 0.0), (28.0, 4.0), (24.0, 28.0), (4.0, 22.0)];
-                draw_polygon(b, &pts, YELLOW);
+                draw_polygon(b, &pts, Some(YELLOW));
             }
         }
     }
@@ -89,7 +89,7 @@ fn scene_transforms(b: &mut DrawBatch) {
         b.set_position(x, y);
         b.set_deg((i as f32) * 7.0);
         b.set_scale(1.0 + (i % 3) as f32 * 0.3, 1.0 + (i % 2) as f32 * 0.2);
-        draw_rounded_rect(b, -6.0, -6.0, 6.0, 6.0, 2.0, WHITE);
+        draw_rounded_rect(b, -6.0, -6.0, 6.0, 6.0, 2.0, Some(WHITE));
         b.clear_transform();
     }
 }
@@ -107,7 +107,7 @@ fn scene_polygons(b: &mut DrawBatch) {
             let angle = std::f32::consts::TAU * j as f32 / sides as f32 - std::f32::consts::FRAC_PI_2;
             pts.push((r * angle.cos(), r * angle.sin()));
         }
-        draw_polygon(b, &pts, Color::new(0.5, 0.4, 0.8, 1.0));
+        draw_polygon(b, &pts, Some(Color::new(0.5, 0.4, 0.8, 1.0)));
     }
 }
 

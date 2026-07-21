@@ -10,9 +10,9 @@ fn draw_off(batch: &mut DrawBatch, sdf: f32) {
     if sdf > 0.0 {
         batch.sdf_feather = Some(sdf);
     }
-    draw_circle(batch, 150.0, 150.0, 90.0, Color::new(0.2, 0.6, 1.0, 1.0));
-    draw_triangle(batch, 150.0, 260.0, 60.0, 70.0, 240.0, 70.0, ORANGE);
-    draw_line(batch, 30.0, 150.0, 270.0, 150.0, 3.0, Color::new(0.4, 0.7, 0.4, 1.0));
+    draw_circle(batch, 150.0, 150.0, 90.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
+    draw_triangle(batch, 150.0, 260.0, 60.0, 70.0, 240.0, 70.0, Some(ORANGE));
+    draw_line(batch, 30.0, 150.0, 270.0, 150.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
 }
 
 fn main() {
@@ -36,9 +36,9 @@ fn main() {
             app.offscreen_ref(&off_sdf),
         ) {
             let mut b = DrawBatch::new();
-            b.set_texture(&c1.texture); draw_rectangle(&mut b, 15.0, 30.0, 300.0, 300.0, WHITE);
-            b.set_texture(&c2.texture); draw_rectangle(&mut b, 350.0, 30.0, 300.0, 300.0, WHITE);
-            b.set_texture(&c3.texture); draw_rectangle(&mut b, 685.0, 30.0, 300.0, 300.0, WHITE);
+            b.set_texture(Some(&c1.texture)); draw_rectangle(&mut b, 15.0, 30.0, 300.0, 300.0, Some(WHITE));
+            b.set_texture(Some(&c2.texture)); draw_rectangle(&mut b, 350.0, 30.0, 300.0, 300.0, Some(WHITE));
+            b.set_texture(Some(&c3.texture)); draw_rectangle(&mut b, 685.0, 30.0, 300.0, 300.0, Some(WHITE));
             draw_text(&mut b.texts, "SSAA x4 + SDF 1px",
                 TextOptions::default().x(75.0).y(345.0).font_size(14.0).color(WHITE));
             draw_text(&mut b.texts, "MSAA x4 (geometry)",

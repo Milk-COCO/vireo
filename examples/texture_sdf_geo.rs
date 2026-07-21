@@ -7,22 +7,22 @@ use std::f32::consts::PI;
 
 fn draw_shapes(batch: &mut DrawBatch) {
     // 第一行：填充形状
-    draw_rectangle(batch, 10.0, 10.0, 90.0, 65.0, WHITE);
-    draw_rounded_rect(batch, 120.0, 10.0, 90.0, 65.0, 14.0, WHITE);
-    draw_triangle(batch, 240.0, 75.0, 280.0, 10.0, 320.0, 75.0, WHITE);
-    draw_circle(batch, 390.0, 42.0, 32.0, WHITE);
-    draw_ellipse(batch, 480.0, 42.0, 45.0, 28.0, WHITE);
-    draw_arc(batch, 580.0, 42.0, 32.0, 0.0, PI * 1.3, WHITE);
-    draw_polygon(batch, &[(680.0, 10.0), (730.0, 10.0), (730.0, 75.0), (680.0, 75.0)], WHITE);
+    draw_rectangle(batch, 10.0, 10.0, 90.0, 65.0, Some(WHITE));
+    draw_rounded_rect(batch, 120.0, 10.0, 90.0, 65.0, 14.0, Some(WHITE));
+    draw_triangle(batch, 240.0, 75.0, 280.0, 10.0, 320.0, 75.0, Some(WHITE));
+    draw_circle(batch, 390.0, 42.0, 32.0, Some(WHITE));
+    draw_ellipse(batch, 480.0, 42.0, 45.0, 28.0, Some(WHITE));
+    draw_arc(batch, 580.0, 42.0, 32.0, 0.0, PI * 1.3, Some(WHITE));
+    draw_polygon(batch, &[(680.0, 10.0), (730.0, 10.0), (730.0, 75.0), (680.0, 75.0)], Some(WHITE));
 
     // 第二行：折线 + 描边
-    draw_line_chain(batch, &[(10.0, 120.0), (80.0, 100.0), (150.0, 110.0)], 5.0, WHITE);
-    draw_line(batch, 190.0, 110.0, 310.0, 110.0, 5.0, WHITE);
-    draw_rect_outline(batch, 350.0, 90.0, 60.0, 45.0, 3.0, WHITE);
-    draw_rounded_rect_outline(batch, 440.0, 90.0, 60.0, 45.0, 10.0, 3.0, WHITE, 8);
-    draw_circle_outline(batch, 560.0, 112.0, 22.0, 3.0, WHITE, 32);
-    draw_arc_outline(batch, 630.0, 112.0, 25.0, 0.0, PI * 1.2, 3.0, WHITE, 24);
-    draw_triangle_outline(batch, 700.0, 135.0, 720.0, 90.0, 740.0, 135.0, 2.5, WHITE);
+    draw_line_chain(batch, &[(10.0, 120.0), (80.0, 100.0), (150.0, 110.0)], 5.0, Some(WHITE));
+    draw_line(batch, 190.0, 110.0, 310.0, 110.0, 5.0, Some(WHITE));
+    draw_rect_outline(batch, 350.0, 90.0, 60.0, 45.0, 3.0, Some(WHITE));
+    draw_rounded_rect_outline(batch, 440.0, 90.0, 60.0, 45.0, 10.0, 3.0, Some(WHITE), 8);
+    draw_circle_outline(batch, 560.0, 112.0, 22.0, 3.0, Some(WHITE), 32);
+    draw_arc_outline(batch, 630.0, 112.0, 25.0, 0.0, PI * 1.2, 3.0, Some(WHITE), 24);
+    draw_triangle_outline(batch, 700.0, 135.0, 720.0, 90.0, 740.0, 135.0, 2.5, Some(WHITE));
 }
 
 fn main() {
@@ -51,7 +51,7 @@ fn main() {
 
                 // ---- 上半：几何模式 ----
                 let mut geo = DrawBatch::new();
-                geo.set_texture(t);
+                geo.set_texture(Some(t));
                 draw_shapes(&mut geo);
                 draw_text(&mut geo.texts, "Geometry (sdf_feather = None)",
                     TextOptions::default().x(10.0).y(155.0).font_size(14.0).color(label));
@@ -59,7 +59,7 @@ fn main() {
                 // ---- 下半：SDF 模式 ----
                 let mut sdf = DrawBatch::new();
                 sdf.set_position(0.0, 175.0);
-                sdf.set_texture(t);
+                sdf.set_texture(Some(t));
                 sdf.sdf_feather = Some(1.0);
                 draw_shapes(&mut sdf);
                 draw_text(&mut sdf.texts, "SDF (sdf_feather = 1.0)",

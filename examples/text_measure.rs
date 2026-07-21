@@ -31,31 +31,31 @@ fn main() {
         let ty = cy - th * 0.5;
 
         // 背景框
-        draw_rectangle(&mut batch, tx, ty, tw, th, Color::new(0.12, 0.12, 0.22, 1.0));
+        draw_rectangle(&mut batch, tx, ty, tw, th, Some(Color::new(0.12, 0.12, 0.22, 1.0)));
 
         // 对角线 X（黄色）
         let yellow = Color::new(1.0, 1.0, 0.0, 0.6);
-        draw_line(&mut batch, tx, ty, tx + tw, ty + th, 1.5, yellow);        // 左上→右下
-        draw_line(&mut batch, tx + tw, ty, tx, ty + th, 1.5, yellow);        // 右上→左下
+        draw_line(&mut batch, tx, ty, tx + tw, ty + th, 1.5, Some(yellow));        // 左上→右下
+        draw_line(&mut batch, tx + tw, ty, tx, ty + th, 1.5, Some(yellow));        // 右上→左下
 
         // 边框
-        draw_line(&mut batch, tx, ty, tx + tw, ty, 1.0, Color::new(0.3, 0.3, 0.5, 1.0)); // top
-        draw_line(&mut batch, tx, ty + th, tx + tw, ty + th, 1.0, Color::new(0.3, 0.3, 0.5, 1.0)); // bottom
-        draw_line(&mut batch, tx, ty, tx, ty + th, 1.0, Color::new(0.3, 0.3, 0.5, 1.0)); // left
-        draw_line(&mut batch, tx + tw, ty, tx + tw, ty + th, 1.0, Color::new(0.3, 0.3, 0.5, 1.0)); // right
+        draw_line(&mut batch, tx, ty, tx + tw, ty, 1.0, Some(Color::new(0.3, 0.3, 0.5, 1.0))); // top
+        draw_line(&mut batch, tx, ty + th, tx + tw, ty + th, 1.0, Some(Color::new(0.3, 0.3, 0.5, 1.0))); // bottom
+        draw_line(&mut batch, tx, ty, tx, ty + th, 1.0, Some(Color::new(0.3, 0.3, 0.5, 1.0))); // left
+        draw_line(&mut batch, tx + tw, ty, tx + tw, ty + th, 1.0, Some(Color::new(0.3, 0.3, 0.5, 1.0))); // right
 
         // 屏幕中心十字
-        draw_line(&mut batch, cx - 20.0, cy, cx + 20.0, cy, 1.0, Color::new(1.0, 0.0, 0.0, 0.5));
-        draw_line(&mut batch, cx, cy - 20.0, cx, cy + 20.0, 1.0, Color::new(1.0, 0.0, 0.0, 0.5));
+        draw_line(&mut batch, cx - 20.0, cy, cx + 20.0, cy, 1.0, Some(Color::new(1.0, 0.0, 0.0, 0.5)));
+        draw_line(&mut batch, cx, cy - 20.0, cx, cy + 20.0, 1.0, Some(Color::new(1.0, 0.0, 0.0, 0.5)));
 
         // 中心点
-        draw_circle(&mut batch, cx, cy, 3.0, RED);
+        draw_circle(&mut batch, cx, cy, 3.0, Some(RED));
 
         // 四角标记
-        draw_circle(&mut batch, tx, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
-        draw_circle(&mut batch, tx + tw, ty, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
-        draw_circle(&mut batch, tx, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
-        draw_circle(&mut batch, tx + tw, ty + th, 2.5, Color::new(0.0, 1.0, 0.0, 0.7));
+        draw_circle(&mut batch, tx, ty, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, tx + tw, ty, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, tx, ty + th, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, tx + tw, ty + th, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
 
         // 文本
         let text_opts = TextOptions::default().font_size(font_size).x(tx).y(ty).color(WHITE);
