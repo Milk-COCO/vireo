@@ -59,7 +59,7 @@ impl Rect {
 ///   `is_setup=true` 是 batch 子树前的 cover，渲染时累加 area_depth；
 ///   `is_setup=false` 是子树后的 erase，渲染后减回。
 ///   走 stencil 管线 op 3（Erase）或 op 4（Cover），无色。
-/// - `ScissorPush(Rect)`：用 scissor 代替 stencil（`clip_rect` + `clips_children`）。
+/// - `ScissorPush(Rect)`：用 scissor 代替 stencil（`scissor` + `clips_children`）。
 /// - `ScissorPop`：恢复前一级 scissor。
 pub(crate) enum DrawEvent<'a> {
     Batch(&'a DrawBatch),
@@ -405,9 +405,9 @@ impl Renderer {
                     }
                     let content_level =
                         active_clip.unwrap_or(0) + ancestors_area_depth + (has_own_area as u32);
-                    // clip_rect 代替 stencil：跳过 stencil 设置，scissor 由 ScissorPush 事件处理
-                    let use_scissor = batch.clip_rect.is_some()
-                        || (batch.clips_children && !has_own_area && batch.auto_clip_rect().is_some());
+                    // scissor 代替 stencil：跳过 stencil 设置，scissor 由 ScissorPush 事件处理
+                    let use_scissor = batch.scissor.is_some()
+                        || (batch.clips_children && !has_own_area && batch.auto_scissor().is_some());
                     let (stencil_op, stencil_ref) = if use_scissor {
                         (0u32, 0u32)
                     } else {
@@ -517,6 +517,10 @@ impl Renderer {
                 // Pop 事件：添加全屏四边形（2 三角，6 索引）
                 pop_screen_verts += 4;
                 pop_screen_idx += 6;
+                batch_transform_bases.push(0);
+                batch_poly_base.push(poly_offset);
+            } else if let DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop = event {
+                // Scissor 事件不需要 transform/poly，但保留索引对齐
                 batch_transform_bases.push(0);
                 batch_poly_base.push(poly_offset);
             } else if let DrawEvent::AreaOp { op, .. } = event {
@@ -1563,7 +1567,7 @@ pub struct DrawBatch {
     pub bounds: Option<Option<Rect>>,
     /// 当 `clips_children=true` 时，用此矩形 scissor 代替 stencil。
     /// 逻辑世界坐标，必须轴对齐。`None` = 走 stencil。
-    pub clip_rect: Option<Rect>,
+    pub scissor: Option<Rect>,
 }
 
 impl DrawBatch {
@@ -1589,7 +1593,7 @@ impl DrawBatch {
             area_include: None,
             area_exclude: None,
             bounds: Some(None),
-            clip_rect: None,
+            scissor: None,
         }
     }
 
@@ -1614,7 +1618,7 @@ impl DrawBatch {
         self.area_include = None;
         self.area_exclude = None;
         self.bounds = Some(None);
-        self.clip_rect = None;
+        self.scissor = None;
     }
 
     /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
@@ -1682,7 +1686,7 @@ impl DrawBatch {
 
     /// 检测 batch 自身是否只含一个轴对齐矩形（4 顶点 + 无旋转 transform）。
     /// 用于 `clips_children` 时自动走 scissor 路径。
-    fn auto_clip_rect(&self) -> Option<Rect> {
+    fn auto_scissor(&self) -> Option<Rect> {
         if self.vertices.len() != 4 || self.indices.len() != 6 {
             return None;
         }
@@ -1873,11 +1877,11 @@ impl DrawBatch {
 
         let area = self.effective_area();
         let has_area = matches!(&area, Some(a) if !a.is_empty());
-        let effective_clip = match self.clip_rect {
+        let effective_clip = match self.scissor {
             Some(r) => Some(r),
             None => {
                 if self.clips_children && !has_area {
-                    self.auto_clip_rect()
+                    self.auto_scissor()
                 } else {
                     None
                 }
@@ -1941,10 +1945,10 @@ impl DrawBatch {
         self.cached_transform_index = None;
     }
 
-    /// 在临时应用 [`crate::shapes::ShapeOptions`] 后执行 `f`，结束时恢复状态（不写回）。
-    pub(crate) fn with_shape_options<R>(
+    /// 在临时应用 [`crate::shapes::ShapeOverride`] 后执行 `f`，结束时恢复状态（不写回）。
+    pub(crate) fn with_override<R>(
         &mut self,
-        opts: crate::shapes::ShapeOptions,
+        opts: crate::shapes::ShapeOverride,
         f: impl FnOnce(&mut Self, crate::color::Color) -> R,
     ) -> R {
         let saved_color = self.color;
@@ -2223,7 +2227,7 @@ impl DrawBatch {
             area_include: self.area_include.clone(),
             area_exclude: self.area_exclude.clone(),
             bounds: self.bounds,
-            clip_rect: self.clip_rect,
+            scissor: self.scissor,
         }
     }
 
@@ -2285,7 +2289,7 @@ impl DrawBatch {
     pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
     pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
-    pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOptions) {
+    pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOverride) {
         crate::shapes::draw_shape(self, shape, opts);
     }
 
@@ -2897,10 +2901,10 @@ mod tests {
     }
 
     #[test]
-    fn clip_rect_emits_scissor_events() {
+    fn scissor_emits_scissor_events() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
-        b.clip_rect = Some(Rect::new(10.0, 10.0, 200.0, 150.0));
+        b.scissor = Some(Rect::new(10.0, 10.0, 200.0, 150.0));
         let mut child = DrawBatch::new();
         draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
         b.push_child(child);
@@ -2914,9 +2918,9 @@ mod tests {
     }
 
     #[test]
-    fn clip_rect_without_clips_children_no_scissor() {
+    fn scissor_without_clips_children_no_scissor() {
         let mut b = DrawBatch::new();
-        b.clip_rect = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
+        b.scissor = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
         b.clips_children = false;
         let mut child = DrawBatch::new();
         draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
@@ -2929,10 +2933,10 @@ mod tests {
     }
 
     #[test]
-    fn clip_rect_does_not_set_uses_stencil() {
+    fn scissor_does_not_set_uses_stencil() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
-        b.clip_rect = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
+        b.scissor = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
         draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(WHITE));
         let mut child = DrawBatch::new();
         draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
@@ -2944,7 +2948,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_clip_rect_detects_single_rect() {
+    fn auto_scissor_detects_single_rect() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
         draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));
@@ -2961,7 +2965,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_clip_rect_ignores_nonrect() {
+    fn auto_scissor_ignores_nonrect() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
         // 三角形（3 顶点），不是矩形
@@ -2976,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_clip_rect_clears_with_draw_rect_then_child() {
+    fn auto_scissor_clears_with_draw_rect_then_child() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
         draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));

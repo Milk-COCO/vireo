@@ -1,9 +1,9 @@
-//! Shape / ShapeOptions / 画笔状态机
+//! Shape / ShapeOverride / 画笔状态机
 //!
 //! 演示：
 //! - `batch.set_color` + `draw_*(…, None)` 用笔刷色
 //! - `draw_*(…, Some(c))` 仅本次覆盖颜色
-//! - `Shape` + `draw_shape` + `ShapeOptions`（色 / SDF / 变换 / 贴图 / UV）
+//! - `Shape` + `draw_shape` + `ShapeOverride`（色 / SDF / 变换 / 贴图 / UV）
 //! - `set_texture(Some|None)` 状态机
 //!
 //! ```bash
@@ -28,7 +28,7 @@ fn main() {
     let mut app = App::new();
     let logo = app.load_texture("logo_quad.png").ok();
     let idx = app.window(
-        WindowDesc::new("ShapeOptions", 900, 520).high_dpi(true),
+        WindowDesc::new("ShapeOverride", 900, 520).high_dpi(true),
         None::<fn()>,
     );
 
@@ -60,7 +60,7 @@ fn main() {
                 h: 60.0,
                 radius: 14.0,
             },
-            ShapeOptions::from_color(Some(PURPLE)),
+            ShapeOverride::from_color(Some(PURPLE)),
         );
         draw_shape(
             &mut batch,
@@ -72,13 +72,13 @@ fn main() {
                 x3: 460.0,
                 y3: 48.0,
             },
-            ShapeOptions::from_color(Some(YELLOW)),
+            ShapeOverride::from_color(Some(YELLOW)),
         );
 
-        // ---- 3) ShapeOptions：SDF / 几何 / 变换（不写回 batch）----
+        // ---- 3) ShapeOverride：SDF / 几何 / 变换（不写回 batch）----
         label(
             &mut batch,
-            "3) ShapeOptions: sdf / geometry / transform (no write-back)",
+            "3) ShapeOverride: sdf / geometry / transform (no write-back)",
             20.0,
             150.0,
         );
@@ -91,7 +91,7 @@ fn main() {
                 cy: 230.0,
                 r: 36.0,
             },
-            ShapeOptions::new().color(GREEN).geometry(),
+            ShapeOverride::new().color(GREEN).geometry(),
         );
         label(&mut batch, "geometry()", 40.0, 280.0);
 
@@ -105,7 +105,7 @@ fn main() {
                 w: 60.0,
                 h: 40.0,
             },
-            ShapeOptions::new()
+            ShapeOverride::new()
                 .color(RED)
                 .sdf(1.5)
                 .transform(Transform::trs(
@@ -127,7 +127,7 @@ fn main() {
         // ---- 4) 贴图状态机 + 仅本次 texture / UV ----
         label(
             &mut batch,
-            "4) set_texture + ShapeOptions::texture / uv / clear",
+            "4) set_texture + ShapeOverride::texture / uv / clear",
             20.0,
             320.0,
         );
@@ -152,7 +152,7 @@ fn main() {
                         w: w,
                         h: h,
                     },
-                    ShapeOptions::new()
+                    ShapeOverride::new()
                         .color(WHITE)
                         .texture(tex)
                         .uv_rect(0.0, 0.0, 0.5, 0.5),
@@ -169,7 +169,7 @@ fn main() {
                         h: 60.0,
                         radius: 12.0,
                     },
-                    ShapeOptions::new().color(PINK).clear_texture(),
+                    ShapeOverride::new().color(PINK).clear_texture(),
                 );
                 label(&mut batch, "clear_texture()", 290.0, 430.0);
 
@@ -195,7 +195,7 @@ fn main() {
                     cy: 400.0,
                     r: 30.0,
                 },
-                ShapeOptions::new().color(GOLD).position(80.0, 400.0),
+                ShapeOverride::new().color(GOLD).position(80.0, 400.0),
             );
         }
 
@@ -210,7 +210,7 @@ fn main() {
                 rx: 40.0,
                 ry: 25.0,
             },
-            ShapeOptions::new().color(LIME).sdf(1.0),
+            ShapeOverride::new().color(LIME).sdf(1.0),
         );
 
         win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);

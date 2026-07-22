@@ -68,7 +68,7 @@ pub enum Shape<'a> {
 /// | `transform` | `None` | `Some(Transform)` 绝对替换 |
 /// | `bind_group` | `None` | `Some(None)` 白纹理 / `Some(Some(bg))` |
 #[derive(Clone, Debug, Default)]
-pub struct ShapeOptions {
+pub struct ShapeOverride {
     /// `Some` = 仅本次颜色；`None` = `batch.color`
     pub color: Option<Color>,
     /// 与 `DrawBatch::sdf_feather` 同形：`None` 保持；`Some(None)` 几何；`Some(Some(f))` SDF
@@ -81,7 +81,7 @@ pub struct ShapeOptions {
     pub bind_group: Option<Option<wgpu::BindGroup>>,
 }
 
-impl ShapeOptions {
+impl ShapeOverride {
     pub fn new() -> Self {
         Self::default()
     }
@@ -248,21 +248,21 @@ impl<'a> Shape<'a> {
     }
 }
 
-/// 通过 [`Shape`] + [`ShapeOptions`] 绘制。覆盖项仅作用于本次，结束后恢复 batch 状态。
-pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOptions) {
-    batch.with_shape_options(opts, |batch, color| {
+/// 通过 [`Shape`] + [`ShapeOverride`] 绘制。覆盖项仅作用于本次，结束后恢复 batch 状态。
+pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
+    batch.with_override(opts, |batch, color| {
         shape.append(batch, color);
     });
 }
 
 /// 填充矩形。`color`: `None` = `batch.color`，`Some` = 仅本次。
 pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Rect { x, y, w, h }, ShapeOptions::from_color(color));
+    draw_shape(batch, &Shape::Rect { x, y, w, h }, ShapeOverride::from_color(color));
 }
 
 /// 填充圆（shader SDF，完美边缘）。
 pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Circle { cx, cy, r }, ShapeOptions::from_color(color));
+    draw_shape(batch, &Shape::Circle { cx, cy, r }, ShapeOverride::from_color(color));
 }
 
 /// 绘制线段（shader SDF）。
@@ -276,7 +276,7 @@ pub fn draw_line(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, thic
             y2,
             thickness,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -285,7 +285,7 @@ pub fn draw_ellipse(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, c
     draw_shape(
         batch,
         &Shape::Ellipse { cx, cy, rx, ry },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -300,7 +300,7 @@ pub fn draw_rounded_rect(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, 
             h,
             radius,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -316,14 +316,14 @@ pub fn draw_triangle(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, 
             x3,
             y3,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
 /// 绘制凸多边形（shader SDF，边数据通过 storage buffer 传递）。
 /// 顶点须按逆时针排列。
 pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Option<Color>) {
-    draw_shape(batch, &Shape::Polygon { points }, ShapeOptions::from_color(color));
+    draw_shape(batch, &Shape::Polygon { points }, ShapeOverride::from_color(color));
 }
 
 /// 绘制弧线/扇形（shader SDF）。
@@ -337,7 +337,7 @@ pub fn draw_arc(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, start_angle: f3
             start: start_angle,
             end: end_angle,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -352,7 +352,7 @@ pub fn draw_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, 
             h,
             thickness,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -367,7 +367,7 @@ pub fn draw_circle_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, thic
             thickness,
             segments,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -383,7 +383,7 @@ pub fn draw_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry
             thickness,
             segments,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -400,7 +400,7 @@ pub fn draw_rounded_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, 
             thickness,
             corner_segments,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -410,7 +410,7 @@ pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: 
     draw_shape(
         batch,
         &Shape::LineChain { points, thickness },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -427,7 +427,7 @@ pub fn draw_triangle_outline(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y
             y3,
             thickness,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -436,7 +436,7 @@ pub fn draw_polygon_outline(batch: &mut DrawBatch, points: &[(f32, f32)], thickn
     draw_shape(
         batch,
         &Shape::PolygonOutline { points, thickness },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -453,7 +453,7 @@ pub fn draw_arc_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, start_a
             thickness,
             segments,
         },
-        ShapeOptions::from_color(color),
+        ShapeOverride::from_color(color),
     );
 }
 
@@ -1207,7 +1207,7 @@ mod tests {
                 cy: 0.0,
                 r: 5.0,
             },
-            ShapeOptions::new()
+            ShapeOverride::new()
                 .color(RED)
                 .sdf(1.0)
                 .position(100.0, 200.0),
@@ -1237,7 +1237,7 @@ mod tests {
                 cy: 60.0,
                 r: 20.0,
             },
-            ShapeOptions::from_color(Some(RED)),
+            ShapeOverride::from_color(Some(RED)),
         );
         assert_eq!(a.vertices.len(), b.vertices.len());
         assert_eq!(a.indices, b.indices);
