@@ -246,9 +246,12 @@ pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride)
             Some(p) => Transform::translation(p.x, p.y),
             None => Transform::IDENTITY,
         };
-        batch.transform = Some(match opts.transform {
-            Some(t) => base.then(&t),
-            None => base,
+        let cur = batch.transform.take();
+        batch.transform = Some(match (cur, opts.transform) {
+            (Some(existing), Some(t)) => existing.then(&base).then(&t),
+            (Some(existing), None) => existing.then(&base),
+            (None, Some(t)) => base.then(&t),
+            (None, None) => base,
         });
         batch.cached_transform_index = None;
     }

@@ -17,7 +17,7 @@ fn main() {
     );
 
     let mut t: f32 = 0.0;
-    let long = "文字会被圆形裁切 — Text clipped by parent circle. 越界部分不可见。";
+    let long = "Text clipped by parent circle.";
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -75,8 +75,7 @@ fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatc
     child.sdf_feather = Some(1.0);
     child.inherit = InheritFromParent::TRANSFORM;
 
-    // 长文：基线在圆心附近，整行字应完整显示在圆内中部
-    let scroll = -100.0 + (t * 50.0) % 220.0;
+    let scroll = -400.0 + (t * 150.0) % 550.0;
     child.text(
         long,
         Pos::new(scroll, -14.0),
