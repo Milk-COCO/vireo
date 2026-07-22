@@ -358,13 +358,10 @@ impl Renderer {
         // ---- 单次扫描：合并 transform/poly + 统计顶点数 ----
         let mut global_transforms = self.scratch_transforms.borrow_mut();
         global_transforms.clear();
-        // 槽 0 固定为单位矩阵：`draw_text` / glyphon 默认 transform_index=0 表示恒等，
-        // 不能与首个 batch 的矩阵共用下标，否则 UI 文字会跟着第一个 transform 转。
-        global_transforms.extend_from_slice(&[
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-        ]);
+        // 全局表槽 0 = 单位阵（与 batch `transform_table` 槽 0 约定一致）。
+        // `draw_text` / glyphon 默认 transform_index=0 表示恒等；batch 表上传时
+        // `transform_base` 会偏移局部 index，故全局槽 0 仍须单独预留，不能被首个 batch 占用。
+        global_transforms.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
         let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
         polygon_edges_global.clear();
 
@@ -1482,6 +1479,29 @@ fn transform_key(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u64 {
     h ^ (h >> 32)
 }
 
+/// 单位矩阵一行（12 f32，mat3x3 列 vec4-padded），用作 `transform_table` 槽 0。
+const IDENTITY_TRANSFORM_ROW: [f32; 12] = [
+    1.0, 0.0, 0.0, 0.0, // col0
+    0.0, 1.0, 0.0, 0.0, // col1
+    0.0, 0.0, 1.0, 0.0, // col2
+];
+
+/// 清空并写入槽 0 = 单位矩阵；`transform_map` 同步登记 index 0。
+///
+/// **约定**：batch 内 `transform_index == 0` 恒表示单位变换（与 `Renderer` 全局表槽 0 一致）。
+/// `draw_text` / glyphon 默认写 0，必须不能被第一个形状的平移占用。
+fn seed_identity_transform_table(table: &mut Vec<f32>, map: &mut FxHashMap<u64, u32>) {
+    table.clear();
+    map.clear();
+    table.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
+    let key = transform_key(
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    );
+    map.insert(key, 0);
+}
+
 /// Bottom-up 计算 batch 整棵子树的 AABB（含子顶点），存入 map 供 culling 使用。
 fn compute_subtree_aabb(
     batch: &DrawBatch,
@@ -1558,8 +1578,13 @@ pub struct DrawBatch {
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
     /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
+    ///
+    /// **槽 0 固定为单位矩阵**（`new`/`clear` 时写入，形状从 1 起占用）：
+    /// - `transform_index == 0` = 恒等（与全局 `Renderer` 表槽 0、`draw_text` 默认 0 一致）
+    /// - 切勿把第一个形状的平移写进槽 0，否则 `draw_text` 会二次平移（右下偏）
+    /// - `push_child` 左乘父矩阵时会改写整表（含槽 0）；继承后槽 0 = 父变换，语义仍正确
     pub(crate) transform_table: Vec<f32>,
-    /// hash → local index 映射（batch 内去重）。
+    /// hash → local index 映射（batch 内去重）。恒等矩阵始终映射到 0。
     transform_map: FxHashMap<u64, u32>,
     /// 是否含 SDF 顶点（避免 draw 时全表扫描）。
     pub(crate) has_sdf: bool,
@@ -1593,6 +1618,9 @@ pub struct DrawBatch {
 
 impl DrawBatch {
     pub fn new() -> Self {
+        let mut transform_table = Vec::with_capacity(48);
+        let mut transform_map = FxHashMap::default();
+        seed_identity_transform_table(&mut transform_table, &mut transform_map);
         Self {
             vertices: Vec::with_capacity(64),
             indices: Vec::with_capacity(96),
@@ -1604,8 +1632,8 @@ impl DrawBatch {
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
-            transform_table: Vec::with_capacity(48),
-            transform_map: FxHashMap::default(),
+            transform_table,
+            transform_map,
             has_sdf: false,
             cached_transform_index: None,
             children: Vec::new(),
@@ -1630,8 +1658,7 @@ impl DrawBatch {
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
         self.polygon_edges.clear();
-        self.transform_table.clear();
-        self.transform_map.clear();
+        seed_identity_transform_table(&mut self.transform_table, &mut self.transform_map);
         self.has_sdf = false;
         self.cached_transform_index = None;
         self.children.clear();
@@ -1785,17 +1812,10 @@ impl DrawBatch {
     }
 
     /// 整棵子树 transform 左乘 `parent`（已画顶点的 `transform_table` + 画笔 transform）。
+    /// 会改写整表含槽 0：继承后槽 0 从单位阵变为父变换（`draw_text` 默认 0 = 局部恒等 → 世界父变换）。
     fn left_mul_transform_tree(&mut self, parent: &Transform) {
         let (p0, p1, p2) = parent.to_cols();
-        if self.transform_table.is_empty()
-            && (!self.vertices.is_empty() || !self.texts.entries.is_empty())
-        {
-            let _ = self.register_transform(
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            );
-        }
+        // 槽 0 在 new/clear 时已是单位阵；无需再因「空表」补恒等。
         let n = self.transform_table.len() / 12;
         for i in 0..n {
             let base = i * 12;
@@ -2169,6 +2189,9 @@ impl DrawBatch {
     }
 
     /// 将矩阵注册到 transform_table 并返回 local index（batch 内去重）。
+    ///
+    /// **index 0 保留给单位矩阵**（见 [`seed_identity_transform_table`]）。
+    /// 恒等变换命中 map 直接返回 0；新矩阵从 1 起分配。
     pub(crate) fn register_transform(&mut self, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u32 {
         // 6 个有意义的 f32 构成 key：col0.xy, col1.xy, col2.xy
         // col0.z=0, col1.z=0, col2.z=1 恒不变
@@ -2177,9 +2200,9 @@ impl DrawBatch {
         let idx = *self.transform_map.entry(key).or_insert_with(|| {
             // mat3x3 在 storage buffer 中每列 vec4-padded（16 字节对齐）
             self.transform_table.extend_from_slice(&[
-                c0[0], c0[1], 0.0, 0.0,  // col0 (a, c, 0, _pad)
-                c1[0], c1[1], 0.0, 0.0,  // col1 (b, d, 0, _pad)
-                c2[0], c2[1], 1.0, 0.0,  // col2 (tx, ty, 1, _pad)
+                c0[0], c0[1], 0.0, 0.0, // col0 (a, c, 0, _pad)
+                c1[0], c1[1], 0.0, 0.0, // col1 (b, d, 0, _pad)
+                c2[0], c2[1], 1.0, 0.0, // col2 (tx, ty, 1, _pad)
             ]);
             next_idx
         });
@@ -2395,7 +2418,8 @@ mod tests {
         draw_circle(&mut b, Pos::new(0.0, 0.0), 3.0, Some(BLUE));
         let idxs: Vec<u32> = b.vertices.iter().map(|v| v.transform_index).collect();
         assert!(idxs.iter().all(|&i| i == idxs[0]));
-        assert_eq!(b.transform_table.len() / 12, 1);
+        // 槽 0 = 单位阵 + 1 个平移
+        assert_eq!(b.transform_table.len() / 12, 2);
     }
 
     #[test]
@@ -2408,7 +2432,35 @@ mod tests {
         let i0 = b.vertices[0].transform_index;
         let i1 = b.vertices[4].transform_index;
         assert_ne!(i0, i1);
+        // 槽 0 = 单位阵 + 2 个不同平移（Pos(0,0) 复用槽 0）
         assert_eq!(b.transform_table.len() / 12, 2);
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+    }
+
+    #[test]
+    fn transform_slot_zero_is_identity_after_shape() {
+        let mut b = DrawBatch::new();
+        draw_rectangle(&mut b, Pos::new(100.0, 200.0), 50.0, 40.0, Some(WHITE));
+        assert!(b.transform_table.len() >= 12);
+        let t0 = &b.transform_table[0..12];
+        assert_eq!(t0[0], 1.0);
+        assert_eq!(t0[5], 1.0);
+        assert_eq!(t0[8], 0.0);
+        assert_eq!(t0[9], 0.0);
+        assert_eq!(b.vertices[0].transform_index, 1);
+        let t1 = &b.transform_table[12..24];
+        assert!((t1[8] - 100.0).abs() < 1e-4);
+        assert!((t1[9] - 200.0).abs() < 1e-4);
+        // draw_text 默认 index 0 → 恒等，不会吃到矩形的平移
+        crate::text::draw_text(
+            &mut b.texts,
+            "hi",
+            Pos::new(106.0, 204.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(WHITE),
+        );
+        assert_eq!(b.texts.entries[0].transform_index(), 0);
     }
 
     #[test]
@@ -2680,16 +2732,16 @@ mod tests {
         root.sdf_feather = Some(1.0);
         root.set_position(230.0, 270.0);
         root.clips_children = true;
-        // 形状 Pos 与 batch 变换一致时，两者共享 transform entry
-        draw_rounded_rect(&mut root, Pos::new(230.0, 270.0), 300.0, 260.0, 28.0, Some(RED));
+        // 形状 Pos 为局部偏移；与 batch 平移组合后共享 transform entry
+        draw_rounded_rect(&mut root, Pos::new(0.0, 0.0), 300.0, 260.0, 28.0, Some(RED));
 
         let mut mid = DrawBatch::new();
         mid.sdf_feather = Some(1.0);
         mid.set_position(40.0, 0.0);
         mid.clips_children = true;
         mid.inherit = InheritFromParent::TRANSFORM;
-        // mid 形状用局部坐标 (40,0)，与 batch 平移一致 → 共享 transform entry
-        draw_circle(&mut mid, Pos::new(40.0, 0.0), 90.0, Some(GREEN));
+        // mid 形状用局部原点，与 batch 平移一致 → 共享 transform entry
+        draw_circle(&mut mid, Pos::new(0.0, 0.0), 90.0, Some(GREEN));
 
         let mut leaf = DrawBatch::new();
         leaf.sdf_feather = Some(1.0);
@@ -2803,8 +2855,8 @@ mod tests {
             TextDef::default().font_size(12.0),
             TextOverride::from_color(WHITE),
         );
-        // 形状 Pos 与 batch 平移一致 → 共享 transform entry
-        draw_rectangle(&mut b, Pos::new(12.0, 34.0), 4.0, 4.0, Some(RED));
+        // 形状 Pos 为局部原点，与 batch 平移组合 → 共享 transform entry
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(RED));
         assert_eq!(
             b.texts.entries[0].transform_index(),
             b.vertices[0].transform_index

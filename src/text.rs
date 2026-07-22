@@ -1251,7 +1251,11 @@ impl TextEntryList {
         }
     }
 
-    /// 添加文本条目（默认 transform_index = 0，恒等变换）。
+    /// 添加文本条目。
+    ///
+    /// **默认 `transform_index = 0`**：约定为 batch / 全局 transform 表的**单位矩阵槽**
+    ///（见 `DrawBatch::transform_table` 文档）。`pos` 为逻辑世界坐标（再 × scale → 物理 left/top）。
+    /// 若需随 batch 画笔变换，用 `DrawBatch::text`（捕获 `current_transform_index`）。
     pub fn push(&mut self, text: &str, pos: Pos, def: TextDef, ov: TextOverride) {
         self.entries.push(TextEntry::Normal {
             text: text.to_string(),
@@ -1822,7 +1826,8 @@ pub struct TextLayout {
     pub atlas_bind_group: wgpu::BindGroup,
 }
 
-/// 往 batch.texts 中添加一条文本渲染指令
+/// 往 `batch.texts` 添加一条文本（`transform_index = 0` = 单位阵，见 `DrawBatch::transform_table`）。
+/// `pos` 为逻辑世界坐标。随 batch 变换请用 `DrawBatch::text`。
 pub fn draw_text(list: &mut TextEntryList, text: &str, pos: Pos, def: TextDef, ov: TextOverride) {
     list.push(text, pos, def, ov);
 }

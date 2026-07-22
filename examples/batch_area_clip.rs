@@ -66,9 +66,10 @@ fn main() {
         let rw = 110.0;
         let rh = 80.0;
         let er = 26.0;
-        let mut p2 = panel_frame(cx2, cy2, cell_w, cell_h, "exclude: 矩形挖掉小圆");
+        let mut p2 = panel_frame(cx2, cy2, cell_w, cell_h, "include: 矩形 \\ 小圆");
+        let rect_geom = make_rect_area(cx2 - rw * 0.5, cy2 - rh * 0.5, rw, rh);
         let excl_geom = make_disk_area(cx2 + 16.0, cy2 - 8.0, er);
-        p2.area_exclude = Some(excl_geom);
+        p2.area_include = Some(rect_geom.difference(excl_geom));
         for i in 0..40 {
             let phase = t * 1.2 + i as f32 * 0.25;
             let x = cx2 - 50.0 + (i % 8) as f32 * 14.0 + phase.sin() * 8.0;
@@ -163,5 +164,12 @@ fn make_disk_area(cx: f32, cy: f32, r: f32) -> Area {
     let mut b = DrawBatch::new();
     b.sdf_feather = Some(1.0);
     draw_circle(&mut b, Pos::new(cx, cy), r, None);
+    b.to_area()
+}
+
+fn make_rect_area(x: f32, y: f32, w: f32, h: f32) -> Area {
+    let mut b = DrawBatch::new();
+    b.sdf_feather = Some(1.0);
+    draw_rectangle(&mut b, Pos::new(x, y), w, h, None);
     b.to_area()
 }
