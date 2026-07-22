@@ -18,7 +18,7 @@ use crate::glyphon::{
 };
 pub use crate::glyphon::Attrs;
 pub use crate::glyphon::ColorMode;
-pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, Style, Weight};
+pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight};
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
 use crate::color::Color;
@@ -510,6 +510,11 @@ impl TextContext {
         self.get_or_shape(key, &opts)
     }
 
+    /// 查 shape cache 但不插入（用于 Dynamic 只读 hit）。
+    fn peek_shape_slot(&self, key: &ShapeKey) -> Option<u32> {
+        self.shape_map.get(key).copied()
+    }
+
     /// 已 shape buffer 首行宽度（逻辑像素）。
     fn slot_line_width(&mut self, slot: u32) -> f32 {
         let i = slot as usize;
@@ -538,6 +543,7 @@ impl TextContext {
             let mut opts = options.clone();
             opts.max_width = None;
             opts.align = TextAlign::Left;
+            Self::add_tnum(&mut opts);
             for ch in HUD_DIGIT_TABLE.chars() {
                 let s = ch.to_string();
                 let _ = self.get_or_shape_text(&s, &opts);
@@ -547,6 +553,7 @@ impl TextContext {
         let mut opts = options.clone();
         opts.max_width = None;
         opts.align = TextAlign::Left;
+        Self::add_tnum(&mut opts);
         let mut max_w = 0.0f32;
         for ch in HUD_DIGIT_TABLE.chars() {
             let s = ch.to_string();
@@ -568,7 +575,15 @@ impl TextContext {
         let mut opts = options.clone();
         opts.max_width = None;
         opts.align = TextAlign::Left;
+        Self::add_tnum(&mut opts);
         self.get_or_shape_text(&s, &opts)
+    }
+
+    /// 在 opts 的 attrs 上加 `tnum` OpenType feature（字体级等宽数字）。
+    /// 仅影响支持 tnum 的字体；不支持的字体会忽略此 feature。
+    fn add_tnum(opts: &mut TextOptions) {
+        let attrs = opts.attrs.get_or_insert_with(|| AttrsOwned::new(&Attrs::new()));
+        attrs.font_features.enable(FeatureTag::new(b"tnum"));
     }
 
     fn glyph_slot_char(&mut self, ch: char, options: &TextOptions) -> u32 {
@@ -757,8 +772,12 @@ fn is_hud_digit_char(ch: char) -> bool {
 
 /// HUD 文本段（单行 LTR；不保证与整段 `draw_text` 像素级一致）。
 ///
-/// **主轴是 Static / Dynamic（内容是否会变）**，不是「是不是数字」。
-/// [`TextPart::Digits`] 只是 **Dynamic 数字串的可选加速**（glyph 表 + tabular）。
+/// 三种类型的差异：
+/// - [`TextPart::Static`]：内容稳定，走整段 shape 缓存，同内容可命中。
+/// - [`TextPart::Dynamic`]：内容会变但仍需整段 shape，适合不能拆成 Digits 的短句。
+/// - [`TextPart::Digits`]：HUD 数字专用加速路径。**强制 `tnum`（等宽数字）**，
+///   每个字宽度 = 0-9 最大宽。代码内自带大字表，无需整段 reshape。
+///   若要比例数字，用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
 #[derive(Clone, Debug)]
 pub enum TextPart<'a> {
     /// 内容稳定（标签、说明）。走整段 shape 缓存，同内容可 hit。
@@ -766,8 +785,9 @@ pub enum TextPart<'a> {
     /// 内容会变的任意文案。仍走整段 shape；字符串一变就 miss。
     /// 适合低频改动的短句，或无法用 Digits 的动态字。
     Dynamic(&'a str),
-    /// **优化路径**：动态 `0-9` + 数学符号表，不整段 reshape。
-    /// 仅当串几乎都是数字/符号时用；否则用 [`TextPart::Dynamic`]。
+    /// 强制 `tnum` 等宽的 HUD 数字/符号。单槽预 shape，不整段 reshape。
+    /// 仅接受 `0-9` + 数学符号（.,+-*/%=:()[]等）；其它字符跳过。
+    /// 需要比例数字时请用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
     Digits(&'a str),
 }
 
@@ -1145,6 +1165,7 @@ impl TextEntryList {
         }
 
         let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
+        let mut dynamic_added = 0usize;
 
         for entry in &self.entries {
             let color = crate::glyphon::Color::rgba(
@@ -1176,12 +1197,56 @@ impl TextEntryList {
                 let step = text_ctx.ensure_digit_table(&entry.options);
                 for part in parts {
                     match part {
-                        // Static / Dynamic：同一 shape 路径；区别在调用约定（内容是否稳定）
-                        OwnedTextPart::Static(s) | OwnedTextPart::Dynamic(s) => {
+                        OwnedTextPart::Static(s) => {
                             if s.is_empty() {
                                 continue;
                             }
                             let slot = text_ctx.get_or_shape_text(s, &entry.options);
+                            let w = text_ctx.slot_line_width(slot);
+                            metas.push(AreaMeta {
+                                slot,
+                                left: cursor_x * scale,
+                                top,
+                                color,
+                                bounds,
+                                transform_index: phys_idx,
+                            });
+                            cursor_x += w;
+                        }
+                        OwnedTextPart::Dynamic(s) => {
+                            if s.is_empty() {
+                                continue;
+                            }
+                            let opts = TextOptions {
+                                max_width: None,
+                                align: TextAlign::Left,
+                                ..entry.options.clone()
+                            };
+                            let key = ShapeKey::from_text(s, &opts);
+                            let slot = match text_ctx.peek_shape_slot(&key) {
+                                Some(si) => {
+                                    text_ctx.pin_slot(si);
+                                    si
+                                }
+                                None => {
+                                    let metrics = Metrics::new(entry.options.font_size, entry.options.font_size * 1.2);
+                                    let mut buffer = text_ctx.take_buffer(metrics);
+                                    let attrs = opts.attrs.as_ref()
+                                        .map(|a| a.as_attrs())
+                                        .unwrap_or_else(Attrs::new);
+                                    buffer.set_size(None, None);
+                                    buffer.set_text(s, &attrs, Shaping::Advanced, None);
+                                    buffer.shape_until_scroll(&mut text_ctx.font_system, false);
+                                    let si = text_ctx.shape_slots.len() as u32;
+                                    text_ctx.shape_slots.push(ShapeCacheSlot {
+                                        key,
+                                        buffer,
+                                        last_used: Instant::now(),
+                                    });
+                                    dynamic_added += 1;
+                                    si
+                                }
+                            };
                             let w = text_ctx.slot_line_width(slot);
                             metas.push(AreaMeta {
                                 slot,
@@ -1290,6 +1355,14 @@ impl TextEntryList {
                 )
                 .expect("glyphon prepare failed");
             vertex_count = text_renderer.glyph_vertex_count() - vertex_start;
+        }
+
+        // 回收 Dynamic 临时 slot（prepare 后 atlas 已缓存 glyph，buffer 不再需要）
+        while dynamic_added > 0 {
+            if let Some(slot) = text_ctx.shape_slots.pop() {
+                text_ctx.buffer_pool.push(slot.buffer);
+                dynamic_added -= 1;
+            }
         }
 
         (vertex_start, vertex_count)

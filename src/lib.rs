@@ -48,6 +48,7 @@ pub mod prelude {
     pub use crate::text::AttrsOwned;
     pub use crate::text::ColorMode;
     pub use crate::text::Family;
+    pub use crate::text::FeatureTag;
     pub use crate::text::Style;
     pub use crate::text::TextAlign;
     pub use crate::text::Weight;
