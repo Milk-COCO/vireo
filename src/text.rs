@@ -8,6 +8,7 @@
 //! - 条数：`set_shape_cache_max_entries(Some(n) | None)`，`None` = 不限制
 //! - 立即清空：`clear_shape_cache`
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
@@ -66,9 +67,15 @@ impl ShapeKey {
     }
 }
 
-struct ShapeCacheSlot {
+pub(crate) struct ShapeCacheSlot {
     key: ShapeKey,
-    buffer: Buffer,
+    buffer: Arc<Buffer>,
+    line_width: f32,
+    /// [`StableText`] 活跃标记。
+    /// - `None`：未被 StableText 使用，可正常淘汰。
+    /// - `Some(arc)`：曾/正被 StableText 使用。`Arc::strong_count > 1` 表示还有活的 StableText；
+    ///   等于 1 表示所有 StableText 均已 drop（死标记），下次扫描会清掉。
+    liveness: Option<Arc<()>>,
     last_used: Instant,
 }
 
@@ -93,7 +100,7 @@ pub struct TextContext {
     pub viewport: Viewport,
     sample_count: u32,
     /// 已 shape 的 Buffer 槽位
-    shape_slots: Vec<ShapeCacheSlot>,
+    pub(crate) shape_slots: Vec<ShapeCacheSlot>,
     /// ShapeKey → slot 下标
     shape_map: FxHashMap<ShapeKey, u32>,
     /// 可复用的空 Buffer
@@ -293,23 +300,40 @@ impl TextContext {
         self.shape_ttl
     }
 
-    /// 设置 shape 缓存最大条数。
-    /// - `Some(n)`：最多 n 条不同 ShapeKey，满则 LRU 换槽
+    /// 设置 shape 缓存最大条数（仅约束**非 held** 槽数；活跃 stable 槽不被该 cap 回收）。
+    /// - `Some(n)`：最多 n 条非 held ShapeKey；满则 LRU 换槽
     /// - `None`：不限制条数（仅 TTL / `clear_shape_cache` 可缩小）
     pub fn set_shape_cache_max_entries(&mut self, max: Option<usize>) {
         self.shape_max_entries = max;
         if let Some(cap) = max {
-            while self.shape_slots.len() > cap {
-                let victim = self.evict_one_slot(Instant::now());
-                self.remove_slot(victim);
+            loop {
+                self.scavenge_dead_liveness();
+                let non_held = self
+                    .shape_slots
+                    .iter()
+                    .filter(|s| s.liveness.is_none())
+                    .count();
+                if non_held <= cap {
+                    break;
+                }
+                match self.evict_one_slot(Instant::now()) {
+                    Some(victim) => self.remove_slot(victim),
+                    None => break, // 全是 held，无法继续 shrink
+                }
             }
         }
     }
 
     fn remove_slot(&mut self, slot_i: usize) {
         let removed = self.shape_slots.swap_remove(slot_i);
+        debug_assert!(
+            removed.liveness.as_ref().map_or(true, |a| Arc::strong_count(a) <= 1),
+            "remove_slot called on actively held slot"
+        );
         self.shape_map.remove(&removed.key);
-        self.recycle_buffer(removed.buffer);
+        if let Ok(inner) = Arc::try_unwrap(removed.buffer) {
+            self.recycle_buffer(inner);
+        }
         if slot_i < self.shape_slots.len() {
             let moved_key = self.shape_slots[slot_i].key.clone();
             self.shape_map.insert(moved_key, slot_i as u32);
@@ -322,12 +346,26 @@ impl TextContext {
     }
 
     /// 立即清空全部 shape 缓存，Buffer 尽量回池。
+    /// 跳过 [`StableText`] 仍在活跃持有的槽，不回收它们的 Buffer。
     pub fn clear_shape_cache(&mut self) {
-        self.shape_map.clear();
-        let slots = std::mem::take(&mut self.shape_slots);
-        for slot in slots {
-            self.recycle_buffer(slot.buffer);
+        self.scavenge_dead_liveness();
+        // 重建：只保留活跃持有的槽（其余回池 + 从 map 移除）
+        let old_slots = std::mem::take(&mut self.shape_slots);
+        let mut new_slots: Vec<ShapeCacheSlot> = Vec::with_capacity(old_slots.len());
+        for slot in old_slots {
+            if slot.liveness.is_some() {
+                // 活跃 held（scavenge 后 liveness.is_some() = 真 held）
+                new_slots.push(slot);
+            } else if let Ok(inner) = Arc::try_unwrap(slot.buffer) {
+                self.recycle_buffer(inner);
+            }
         }
+        // 重建 map 下标（被保留槽的下标在新 vec 中已变）
+        self.shape_map.clear();
+        for (new_i, slot) in new_slots.iter().enumerate() {
+            self.shape_map.insert(slot.key.clone(), new_i as u32);
+        }
+        self.shape_slots = new_slots;
         self.digit_table_ready = false;
         self.digit_step = 0.0;
         self.frame_pinned.clear();
@@ -391,6 +429,7 @@ impl TextContext {
     }
 
     /// 回收「超过 TTL 未使用」的条目。TTL 为真实时间；`shape_ttl == None` 时为空操作。
+    /// 跳过 [`StableText`] 活跃持有的槽。
     fn gc_stale_shapes(&mut self, now: Instant) {
         let Some(ttl) = self.effective_ttl(self.shape_slots.len()) else {
             return;
@@ -398,8 +437,13 @@ impl TextContext {
         if self.shape_slots.is_empty() {
             return;
         }
+        self.scavenge_dead_liveness();
         let mut i = 0usize;
         while i < self.shape_slots.len() {
+            if self.shape_slots[i].liveness.is_some() {
+                i += 1;
+                continue;
+            }
             let age = now.saturating_duration_since(self.shape_slots[i].last_used);
             if age > ttl {
                 self.remove_slot(i);
@@ -409,20 +453,24 @@ impl TextContext {
         }
     }
 
-    /// 在必须腾槽时：优先过期项（若启用 TTL），否则全局最久未用。跳过本帧 pin 的槽。
-    fn evict_one_slot(&mut self, now: Instant) -> usize {
+    /// 在必须腾槽时：优先过期项（若启用 TTL），否则全局最久未用。
+    /// 跳过本帧 pin 的槽与 [`StableText`] 活跃持有的槽。
+    /// 返回 `None` 表示所有可用槽都被持有或 pin —— 调用方应放弃替换。
+    fn evict_one_slot(&mut self, now: Instant) -> Option<usize> {
+        self.scavenge_dead_liveness();
         let pinned = |i: usize| self.frame_pinned.iter().any(|&p| p as usize == i);
+        let held = |i: usize| self.shape_slots[i].liveness.is_some();
         if let Some(ttl) = self.shape_ttl {
             if let Some(i) = self.shape_slots.iter().enumerate().position(|(i, s)| {
-                !pinned(i) && now.saturating_duration_since(s.last_used) > ttl
+                !pinned(i) && !held(i) && now.saturating_duration_since(s.last_used) > ttl
             }) {
-                return i;
+                return Some(i);
             }
         }
         let mut oldest_i = None;
         let mut oldest_t = Instant::now();
         for (i, slot) in self.shape_slots.iter().enumerate() {
-            if pinned(i) {
+            if pinned(i) || held(i) {
                 continue;
             }
             if oldest_i.is_none() || slot.last_used < oldest_t {
@@ -430,16 +478,18 @@ impl TextContext {
                 oldest_i = Some(i);
             }
         }
-        // 极端：全部 pin 满，只能牺牲 0（理论上不应发生）
-        oldest_i.unwrap_or(0)
+        oldest_i
     }
 
-    fn replace_slot(&mut self, slot_i: usize, key: ShapeKey, buffer: Buffer, now: Instant) -> u32 {
+    fn replace_slot_rc(&mut self, slot_i: usize, key: ShapeKey, buffer: Arc<Buffer>, line_width: f32, now: Instant) -> u32 {
         let old_key = self.shape_slots[slot_i].key.clone();
         self.shape_map.remove(&old_key);
         let old_buf = std::mem::replace(&mut self.shape_slots[slot_i].buffer, buffer);
-        self.recycle_buffer(old_buf);
+        if let Ok(inner) = Arc::try_unwrap(old_buf) {
+            self.recycle_buffer(inner);
+        }
         self.shape_slots[slot_i].key = key.clone();
+        self.shape_slots[slot_i].line_width = line_width;
         self.shape_slots[slot_i].last_used = now;
         let idx = slot_i as u32;
         self.shape_map.insert(key, idx);
@@ -476,17 +526,34 @@ impl TextContext {
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
 
+        let line_width = buffer
+            .line_layout(&mut self.font_system, 0)
+            .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
+            .unwrap_or(0.0);
+
         // 增长：未满则 push。prepare 进行中禁止 GC/swap_remove（会弄乱已 pin 的下标）。
         // 淘汰仅 replace 原位，不 swap_remove。
+        let buffer = Arc::new(buffer);
+        // max_entries 只约束非 held 槽（held 槽不受限）
         let under_cap = match self.shape_max_entries {
             None => true,
-            Some(cap) => self.shape_slots.len() < cap,
+            Some(cap) => {
+                self.scavenge_dead_liveness();
+                let non_held = self
+                    .shape_slots
+                    .iter()
+                    .filter(|s| s.liveness.is_none())
+                    .count();
+                non_held < cap
+            }
         };
         if under_cap {
             let idx = self.shape_slots.len() as u32;
             self.shape_slots.push(ShapeCacheSlot {
                 key: key.clone(),
                 buffer,
+                line_width,
+                liveness: None,
                 last_used: now,
             });
             self.shape_map.insert(key, idx);
@@ -494,9 +561,24 @@ impl TextContext {
             return idx;
         }
 
-        // hard cap 已满：原位替换未 pin 的最久槽（不 swap_remove）
-        let victim = self.evict_one_slot(now);
-        let idx = self.replace_slot(victim, key, buffer, now);
+        // 非 held 已满：原位替换最久未用的非 held 槽（不 swap_remove）
+        if let Some(victim) = self.evict_one_slot(now) {
+            let idx = self.replace_slot_rc(victim, key, buffer, line_width, now);
+            self.pin_slot(idx);
+            return idx;
+        }
+
+        // 所有非 held 槽都被 pin（本帧 prepare 中），无法淘汰；
+        // 仍允许 push 新槽（突破 cap），下帧 unpin 后自动回归。
+        let idx = self.shape_slots.len() as u32;
+        self.shape_slots.push(ShapeCacheSlot {
+            key: key.clone(),
+            buffer,
+            line_width,
+            liveness: None,
+            last_used: now,
+        });
+        self.shape_map.insert(key, idx);
         self.pin_slot(idx);
         idx
     }
@@ -510,25 +592,67 @@ impl TextContext {
         self.get_or_shape(key, &opts)
     }
 
+    /// 扫描全槽，清理已死的 liveness 标记（`strong_count == 1` = 所有 StableText 均已 drop）。
+    /// 在 GC/evict/clear/cap-check 前调用。
+    fn scavenge_dead_liveness(&mut self) {
+        for slot in &mut self.shape_slots {
+            if let Some(arc) = &slot.liveness {
+                if Arc::strong_count(arc) <= 1 {
+                    slot.liveness = None;
+                }
+            }
+        }
+    }
+
+    /// 将槽标为 live，返回供 [`StableText`] 持有的 `Arc<()>`。
+    /// 惰性创建 liveness 标记（0→1 幂等）。
+    fn mark_slot_live(&mut self, slot: u32) -> Arc<()> {
+        let s = &mut self.shape_slots[slot as usize];
+        s.liveness
+            .get_or_insert_with(|| Arc::new(()))
+            .clone()
+    }
+
+    /// 当前活跃 held 槽数（有至少一个 [`StableText`] 正在持有）。
+    /// O(n) 扫描（n = shape_slots.len()）。
+    pub fn shape_cache_held_count(&mut self) -> usize {
+        self.scavenge_dead_liveness();
+        self.shape_slots.iter().filter(|s| s.liveness.is_some()).count()
+    }
+
+    /// 从文本创建 [`StableText`]（走统一 cache 通路，与 `draw_text` 共享缓存）。
+    ///
+    /// 支持 `max_width` 与 `align`（见 [`StableText`] 文档）。
+    /// 当 `max_width: None` 时行为同旧版：单行左对齐。
+    ///
+    /// 当非 held 槽已达 `shape_max_entries` 且无法淘汰时，仍会 push 新槽（突破 cap）；
+    /// 此时 `shape_cache_len()` 可能大于 max_entries。
+    pub fn make_stable(&mut self, text: &str, options: &TextOptions) -> StableText {
+        // 直接走统一 get_or_shape（绕过 get_or_shape_text 的强制 None/Left）
+        let mut opts = options.clone();
+        if opts.max_width.is_none() {
+            opts.align = TextAlign::Left; // 无 max_width 时仍强制左对齐（兼容旧版）
+        }
+        let key = ShapeKey::from_text(text, &opts);
+        let slot = self.get_or_shape(key, &opts);
+        let liveness = self.mark_slot_live(slot);
+        let line_width = self.slot_line_width(slot);
+        let buffer = self.shape_slots[slot as usize].buffer.clone();
+        StableText { buffer, line_width, liveness, text: text.to_string() }
+    }
+
     /// 查 shape cache 但不插入（用于 Dynamic 只读 hit）。
     fn peek_shape_slot(&self, key: &ShapeKey) -> Option<u32> {
         self.shape_map.get(key).copied()
     }
 
     /// 已 shape buffer 首行宽度（逻辑像素）。
-    fn slot_line_width(&mut self, slot: u32) -> f32 {
+    fn slot_line_width(&self, slot: u32) -> f32 {
         let i = slot as usize;
         if i >= self.shape_slots.len() {
             return 0.0;
         }
-        // 拆借用：先取 layout 宽度
-        let w = {
-            let buf = &mut self.shape_slots[i].buffer;
-            buf.line_layout(&mut self.font_system, 0)
-                .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
-                .unwrap_or(0.0)
-        };
-        w
+        self.shape_slots[i].line_width
     }
 
     /// 确保 0-9 + 常用数学符号已 shape；digit_step 取 0-9 最大宽（tabular）。
@@ -770,14 +894,78 @@ fn is_hud_digit_char(ch: char) -> bool {
         )
 }
 
+/// 已 shape 的文字句柄，跨帧复用，与 `draw_text` 共享同一 cache。
+///
+/// **线程安全**：`StableText: Send + Sync`（内部仅 `Arc` + 字符串 + `f32`），
+/// 可跨线程传递（但 [`GpuContext`] 本身不是 `Send`，创建与使用应在同一线程）。
+/// ## 生命周期
+/// - **Buffer 内存**：由 `StableText` 内的 `Arc<Buffer>` 保活；`drop` 后回收。
+/// - **cache 槽**：[`GpuContext::make_stable_text`] 把对应槽标为「live」(`liveness: Arc<()>`)，
+///   **直至所有 `StableText` clone 均 drop** 才会变为可淘汰。
+///   同一文案的多次 `make_stable_text` 共享同一 liveness 标记（0→1 创建一次）。
+///   GC/evict/clear 使用 `Arc::strong_count` 探测 liveness 标记是否还活着：
+///   `strong_count > 1` = 仍有 `StableText` 持有；`== 1` = 已死（`slot` 自身唯一持有），可淘汰。
+/// - **`Clone`**：复制 `Arc<Buffer>` 与 `Arc<()>`（liveness 标记），增加 `strong_count`。
+///   所有 clone 共享同一 cache 槽，只有**所有** clone 均 drop 后槽才变为可淘汰。
+///
+/// ## 与 [`TextPart::Static`]/[`TextPart::Dynamic`] 的差异
+/// | 维度 | `Static`/`Dynamic` | `Stable` |
+/// |------|-------------------|----------|
+/// | 缓存条目 | `draw_text` 自动管 | 用户 `make_stable_text` 显式创建 |
+/// | 跨帧复用 | TTL/LRU 可能 evict | **所有 handle 均 drop 前**永不 evict |
+///
+/// ## `max_width` / `align` 支持
+/// - 当 `max_width: None`（默认）：**单行左对齐**，同旧版行为。
+/// - 当 `max_width: Some(w)`：文本在 w 逻辑像素处换行，**`align` 生效**（`Left` / `Center` / `Right`）。
+///
+/// ## 限制
+/// - **不支持 `Digits` 切分**：整段是单 buffer，渲染时不走 `tnum` 加速。
+///   需要等宽数字请用 [`TextPart::Digits`] 或 [`crate::text::HudLine`]。
+///
+/// ## 绘制 API
+/// - [`DrawBatch::text_stable`]：每帧传 `x/y/color`；其余已在 `make_stable_text` 时定型。
+/// - [`TextEntryList::push_stable`]：添加到 `TextEntryList`（与 `text_parts` 配合使用）。
+///
+/// ```ignore
+/// let h = gpu.make_stable_text("Score: {}", TextOptions::default().font_size(20.0));
+/// batch.text_stable(&h, 16.0, 16.0, WHITE);
+/// ```
+#[derive(Clone)]
+pub struct StableText {
+    pub(crate) buffer: Arc<Buffer>,
+    pub(crate) line_width: f32,
+    pub(crate) liveness: Arc<()>,
+    /// 原文案（创建时传入的字符串），用于调试和用户侧去重。
+    pub(crate) text: String,
+}
+
+impl StableText {
+    /// 原文案（`make_stable_text` 时传入的字符串）。
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Debug for StableText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StableText")
+            .field("text", &self.text)
+            .field("line_width", &self.line_width)
+            .field("buffer_strong_count", &Arc::strong_count(&self.buffer))
+            .field("live_handle_count", &Arc::strong_count(&self.liveness))
+            .finish()
+    }
+}
+
 /// HUD 文本段（单行 LTR；不保证与整段 `draw_text` 像素级一致）。
 ///
-/// 三种类型的差异：
+/// 四种类型的差异：
 /// - [`TextPart::Static`]：内容稳定，走整段 shape 缓存，同内容可命中。
 /// - [`TextPart::Dynamic`]：内容会变但仍需整段 shape，适合不能拆成 Digits 的短句。
 /// - [`TextPart::Digits`]：HUD 数字专用加速路径。**强制 `tnum`（等宽数字）**，
 ///   每个字宽度 = 0-9 最大宽。代码内自带大字表，无需整段 reshape。
 ///   若要比例数字，用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
+/// - [`TextPart::Stable`]：预 shape 句柄，不走 cache 查询。详见 [`StableText`]。
 #[derive(Clone, Debug)]
 pub enum TextPart<'a> {
     /// 内容稳定（标签、说明）。走整段 shape 缓存，同内容可 hit。
@@ -789,6 +977,14 @@ pub enum TextPart<'a> {
     /// 仅接受 `0-9` + 数学符号（.,+-*/%=:()[]等）；其它字符跳过。
     /// 需要比例数字时请用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
     Digits(&'a str),
+    /// 预 shape 稳定文本，直接使用 [`StableText`] 的 `Arc<Buffer>`，不走 cache 查询。
+    /// 可在多帧间复用而无需重新 shape。
+    ///
+    /// **与外层 `TextOptions` 的关系**（`draw_text_parts` / `push_parts`）：
+    /// - **生效**：`x`/`y`（行起点；段内用 `StableText.line_width` 横拼）、`color`、`clip`、`transform`
+    /// - **不生效**（已在 `make_stable_text` 时定型）：`font_size`、`attrs`
+    /// - **`max_width`/`align`**：已在 `make_stable_text` 时定型（见 [`StableText`] 文档），段内不重新生效
+    Stable(&'a StableText),
 }
 
 /// 拥有所有权的 HUD 段（`split_hud` / [`HudLine`]）。
@@ -940,6 +1136,8 @@ pub(crate) enum OwnedTextPart {
     Static(String),
     Dynamic(String),
     Digits(String),
+    /// (buffer, cached_line_width)
+    Stable(Arc<Buffer>, f32),
 }
 
 impl OwnedTextPart {
@@ -948,6 +1146,7 @@ impl OwnedTextPart {
             TextPart::Static(s) => Self::Static((*s).to_string()),
             TextPart::Dynamic(s) => Self::Dynamic((*s).to_string()),
             TextPart::Digits(s) => Self::Digits((*s).to_string()),
+            TextPart::Stable(h) => Self::Stable(h.buffer.clone(), h.line_width),
         }
     }
 
@@ -960,7 +1159,7 @@ impl OwnedTextPart {
     }
 }
 
-/// 文本条目，pushed by draw_text / draw_text_parts
+/// 文本条目，pushed by draw_text / draw_text_parts / text_handle
 #[derive(Clone)]
 pub struct TextEntry {
     pub text: String,
@@ -971,6 +1170,8 @@ pub struct TextEntry {
     pub(crate) transform_index: u32,
     /// `Some` = HUD 多段（忽略 `text`）；`None` = 普通整段 `text`
     pub(crate) parts: Option<Vec<OwnedTextPart>>,
+    /// `Some` = StableText 直接绘制（忽略 `text` 和 `parts`）。
+    pub(crate) stable: Option<Arc<Buffer>>,
 }
 
 /// 文本条目列表，存储一组待渲染的文本。
@@ -1006,6 +1207,7 @@ impl TextEntryList {
             options,
             transform_index: 0,
             parts: None,
+            stable: None,
         });
     }
 
@@ -1016,6 +1218,27 @@ impl TextEntryList {
             options,
             transform_index,
             parts: None,
+            stable: None,
+        });
+    }
+
+    /// 使用预 shape 的 [`StableText`] 直接添加条目（跳过 cache 查询）。
+    pub fn push_stable(&mut self, stable: &StableText, options: TextOptions) {
+        self.push_stable_indexed(stable, options, 0);
+    }
+
+    pub(crate) fn push_stable_indexed(
+        &mut self,
+        stable: &StableText,
+        options: TextOptions,
+        transform_index: u32,
+    ) {
+        self.entries.push(TextEntry {
+            text: String::new(),
+            options,
+            transform_index,
+            parts: None,
+            stable: Some(stable.buffer.clone()),
         });
     }
 
@@ -1036,6 +1259,7 @@ impl TextEntryList {
             options,
             transform_index,
             parts: Some(owned),
+            stable: None,
         });
     }
 
@@ -1059,6 +1283,7 @@ impl TextEntryList {
             options,
             transform_index,
             parts: Some(owned),
+            stable: None,
         });
     }
 
@@ -1082,6 +1307,7 @@ impl TextEntryList {
             options,
             transform_index,
             parts: Some(owned),
+            stable: None,
         });
     }
 
@@ -1115,13 +1341,23 @@ impl TextEntryList {
             },
         );
 
+        /// 文本区域元数据（entry 遍历阶段收集，第二次循环消费）。
+        /// `buf` 用 enum 携带 buffer 来源：
+        /// - `Slot(u32)`：cache 槽索引（prepare 期间 `text_ctx` 持锁，不会被 evict）
+        /// - `Stable(Arc<Buffer>)`：StableText 持有，不在 cache 中；
+        ///   由 `metas` 持有 Arc 引用，延寿到第二次循环消费完。
         struct AreaMeta {
-            slot: u32,
+            buf: MetaBuf,
             left: f32,
             top: f32,
             color: crate::glyphon::Color,
             bounds: TextBounds,
             transform_index: u32,
+        }
+
+        enum MetaBuf {
+            Slot(u32),
+            Stable(Arc<Buffer>),
         }
 
         fn phys_transform_index(
@@ -1165,7 +1401,8 @@ impl TextEntryList {
         }
 
         let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
-        let mut dynamic_added = 0usize;
+        // 注：StableText 的 Arc<Buffer> 直接放 metas.buf.Stable 里，延寿到第二次循环消费完。
+        // 不再需要平行 stable_bufs vec + hi 计数器。
 
         for entry in &self.entries {
             let color = crate::glyphon::Color::rgba(
@@ -1191,7 +1428,16 @@ impl TextEntryList {
             );
             let top = entry.options.y * scale;
 
-            if let Some(ref parts) = entry.parts {
+            if let Some(ref arc) = entry.stable {
+                metas.push(AreaMeta {
+                    buf: MetaBuf::Stable(arc.clone()),
+                    left: entry.options.x * scale,
+                    top,
+                    color,
+                    bounds,
+                    transform_index: phys_idx,
+                });
+            } else if let Some(ref parts) = entry.parts {
                 // HUD 多段：逻辑 x 横拼，再 * scale
                 let mut cursor_x = entry.options.x;
                 let step = text_ctx.ensure_digit_table(&entry.options);
@@ -1204,7 +1450,7 @@ impl TextEntryList {
                             let slot = text_ctx.get_or_shape_text(s, &entry.options);
                             let w = text_ctx.slot_line_width(slot);
                             metas.push(AreaMeta {
-                                slot,
+                                buf: MetaBuf::Slot(slot),
                                 left: cursor_x * scale,
                                 top,
                                 color,
@@ -1223,10 +1469,18 @@ impl TextEntryList {
                                 ..entry.options.clone()
                             };
                             let key = ShapeKey::from_text(s, &opts);
-                            let slot = match text_ctx.peek_shape_slot(&key) {
+                            let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
                                 Some(si) => {
                                     text_ctx.pin_slot(si);
-                                    si
+                                    let w = text_ctx.slot_line_width(si);
+                                    (AreaMeta {
+                                        buf: MetaBuf::Slot(si),
+                                        left: cursor_x * scale,
+                                        top,
+                                        color,
+                                        bounds,
+                                        transform_index: phys_idx,
+                                    }, w)
                                 }
                                 None => {
                                     let metrics = Metrics::new(entry.options.font_size, entry.options.font_size * 1.2);
@@ -1237,26 +1491,33 @@ impl TextEntryList {
                                     buffer.set_size(None, None);
                                     buffer.set_text(s, &attrs, Shaping::Advanced, None);
                                     buffer.shape_until_scroll(&mut text_ctx.font_system, false);
-                                    let si = text_ctx.shape_slots.len() as u32;
-                                    text_ctx.shape_slots.push(ShapeCacheSlot {
-                                        key,
-                                        buffer,
-                                        last_used: Instant::now(),
-                                    });
-                                    dynamic_added += 1;
-                                    si
+                                    let lw = buffer
+                                        .line_layout(&mut text_ctx.font_system, 0)
+                                        .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
+                                        .unwrap_or(0.0);
+                                    (AreaMeta {
+                                        buf: MetaBuf::Stable(Arc::new(buffer)),
+                                        left: cursor_x * scale,
+                                        top,
+                                        color,
+                                        bounds,
+                                        transform_index: phys_idx,
+                                    }, lw)
                                 }
                             };
-                            let w = text_ctx.slot_line_width(slot);
+                            metas.push(area_meta);
+                            cursor_x += w;
+                        }
+                        OwnedTextPart::Stable(arc, line_width) => {
                             metas.push(AreaMeta {
-                                slot,
+                                buf: MetaBuf::Stable(arc.clone()),
                                 left: cursor_x * scale,
                                 top,
                                 color,
                                 bounds,
                                 transform_index: phys_idx,
                             });
-                            cursor_x += w;
+                            cursor_x += line_width;
                         }
                         OwnedTextPart::Digits(s) => {
                             for ch in s.chars() {
@@ -1267,7 +1528,7 @@ impl TextEntryList {
                                 if let Some(d) = ch.to_digit(10) {
                                     let slot = text_ctx.digit_slot(d, &entry.options);
                                     metas.push(AreaMeta {
-                                        slot,
+                                        buf: MetaBuf::Slot(slot),
                                         left: cursor_x * scale,
                                         top,
                                         color,
@@ -1280,7 +1541,7 @@ impl TextEntryList {
                                     let slot = text_ctx.glyph_slot_char(ch, &entry.options);
                                     let w = text_ctx.slot_line_width(slot);
                                     metas.push(AreaMeta {
-                                        slot,
+                                        buf: MetaBuf::Slot(slot),
                                         left: cursor_x * scale,
                                         top,
                                         color,
@@ -1298,7 +1559,7 @@ impl TextEntryList {
                 let key = ShapeKey::from_entry(entry);
                 let slot = text_ctx.get_or_shape(key, &entry.options);
                 metas.push(AreaMeta {
-                    slot,
+                    buf: MetaBuf::Slot(slot),
                     left: entry.options.x * scale,
                     top,
                     color,
@@ -1323,15 +1584,20 @@ impl TextEntryList {
 
             let mut areas: Vec<TextArea> = Vec::with_capacity(metas.len());
             for meta in &metas {
-                let si = meta.slot as usize;
-                debug_assert!(
-                    si < shape_slots.len(),
-                    "shape slot {} out of bounds (len {})",
-                    si,
-                    shape_slots.len()
-                );
+                let buf: &Buffer = match &meta.buf {
+                    MetaBuf::Stable(arc) => arc,
+                    MetaBuf::Slot(si) => {
+                        debug_assert!(
+                            (*si as usize) < shape_slots.len(),
+                            "shape slot {} out of bounds (len {})",
+                            si,
+                            shape_slots.len()
+                        );
+                        &*shape_slots[*si as usize].buffer
+                    }
+                };
                 areas.push(TextArea {
-                    buffer: &shape_slots[si].buffer,
+                    buffer: buf,
                     left: meta.left,
                     top: meta.top,
                     scale,
@@ -1355,14 +1621,6 @@ impl TextEntryList {
                 )
                 .expect("glyphon prepare failed");
             vertex_count = text_renderer.glyph_vertex_count() - vertex_start;
-        }
-
-        // 回收 Dynamic 临时 slot（prepare 后 atlas 已缓存 glyph，buffer 不再需要）
-        while dynamic_added > 0 {
-            if let Some(slot) = text_ctx.shape_slots.pop() {
-                text_ctx.buffer_pool.push(slot.buffer);
-                dynamic_added -= 1;
-            }
         }
 
         (vertex_start, vertex_count)
@@ -1515,7 +1773,20 @@ mod tests {
             options,
             transform_index: 0,
             parts: None,
+            stable: None,
         }
+    }
+
+    #[test]
+    fn stable_text_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<StableText>();
+    }
+
+    #[test]
+    fn stable_text_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<StableText>();
     }
 
     #[test]
@@ -1691,5 +1962,124 @@ mod tests {
         let via_fn = split_hud(&format!("score={score} fps={fps:.1}"));
         assert_eq!(via_macro, via_fn);
         assert!(via_macro.iter().any(|p| matches!(p, HudPart::Digits(_))));
+    }
+
+    // ---- StableText cache tests (require GPU) ----
+
+    fn make_test_gpu() -> std::sync::Arc<crate::gpu::GpuContext> {
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
+        std::sync::Arc::new(crate::gpu::GpuContext::new(&instance))
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn make_stable_liveness_drop_clears_held() {
+        let gpu = make_test_gpu();
+        assert_eq!(gpu.shape_cache_held_count(), 0);
+        let h = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.shape_cache_len(), 1);
+        drop(h);
+        // GC scavenge 后 held_count 应归 0
+        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.shape_cache_len(), 1); // 槽仍在，只是不再 held
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn make_stable_cache_hit_shares_liveness() {
+        let gpu = make_test_gpu();
+        let h1 = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        let h2 = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        // 同文案 cache hit → count 仍为 1
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.shape_cache_len(), 1);
+        // 共享 liveness arc
+        assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
+        drop(h1);
+        // 仍有 h2 存活 → count 保持 1
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        drop(h2);
+        // 全 drop → count 归 0
+        assert_eq!(gpu.shape_cache_held_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn clear_shape_cache_preserves_held_slots() {
+        let gpu = make_test_gpu();
+        let h1 = gpu.make_stable_text("keep", &TextOptions::default().font_size(20.0));
+        let h2 = gpu.make_stable_text("drop", &TextOptions::default().font_size(20.0));
+        drop(h2); // "drop" is now dead
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+
+        // 加一个非 held 槽（用 draw_text 路径制造）
+        let mut list = TextEntryList::new();
+        list.push("nothandled", TextOptions::default().font_size(20.0));
+        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new());
+        assert_eq!(gpu.shape_cache_len(), 3);
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+
+        // clear → 只清非 held + 死标记
+        gpu.clear_shape_cache();
+        assert_eq!(gpu.shape_cache_len(), 1);
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        drop(h1);
+        assert_eq!(gpu.shape_cache_held_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn max_entries_does_not_evict_held_slots() {
+        let gpu = make_test_gpu();
+        gpu.set_shape_cache_max_entries(Some(2));
+        // 创建 3 个 handle → 总槽 = 3，超过 cap = 2；但 cap 只约束非 held
+        let _h1 = gpu.make_stable_text("a", &TextOptions::default().font_size(20.0));
+        let _h2 = gpu.make_stable_text("b", &TextOptions::default().font_size(20.0));
+        let _h3 = gpu.make_stable_text("c", &TextOptions::default().font_size(20.0));
+        // 全部被持有，cap 不应触发 evict
+        assert_eq!(gpu.shape_cache_held_count(), 3);
+        assert_eq!(gpu.shape_cache_len(), 3);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn stable_text_clone_shares_arc_and_liveness() {
+        let gpu = make_test_gpu();
+        let h1 = gpu.make_stable_text("clone_test", &TextOptions::default().font_size(20.0));
+        let h2 = h1.clone();
+        assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
+        assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
+        // clone 后 count 仍为 1（共享同一 liveness arc）
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn draw_text_then_make_stable_shares_buffer() {
+        let gpu = make_test_gpu();
+        // draw_text 走 cache
+        let mut list = TextEntryList::new();
+        list.push("shared", TextOptions::default().font_size(20.0));
+        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new());
+        // 此时 cache 已有 "shared"，无 liveness
+        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.shape_cache_len(), 1);
+
+        // make_stable → 命中已有 slot，liveness = Some
+        let h1 = gpu.make_stable_text("shared", &TextOptions::default().font_size(20.0));
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        let h2 = gpu.make_stable_text("shared", &TextOptions::default().font_size(20.0));
+        assert_eq!(gpu.shape_cache_held_count(), 1);
+        // 共享 Arc
+        assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
+        assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
+        drop(h1);
+        drop(h2);
+        // 全 drop → held_count 归 0
+        assert_eq!(gpu.shape_cache_held_count(), 0);
     }
 }

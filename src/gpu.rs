@@ -657,6 +657,13 @@ impl GpuContext {
         self.text_ctx.borrow().shape_cache_len()
     }
 
+    /// 缓存中由 [`StableText`] 活跃持有的条目数。
+    /// 这些槽不会被 TTL/LRU/`clear_shape_cache` 回收。
+    /// O(n) 扫描（n = shape_slots.len()）。
+    pub fn shape_cache_held_count(&self) -> usize {
+        self.text_ctx.borrow_mut().shape_cache_held_count()
+    }
+
     /// shape 缓存命中统计。
     pub fn shape_cache_stats(&self) -> crate::text::ShapeCacheStats {
         self.text_ctx.borrow().shape_cache_stats()
@@ -665,6 +672,25 @@ impl GpuContext {
     /// 重置 shape 缓存命中统计。
     pub fn reset_shape_cache_stats(&self) {
         self.text_ctx.borrow_mut().reset_shape_cache_stats();
+    }
+
+    /// 从文本创建 [`StableText`]（预 shape，跨帧复用）。
+    /// 只要返回的 `StableText` 存活，对应的 Buffer 不会被释放。
+    ///
+    /// **首帧性能提示**：首次 `make_stable_text` 会触发 `harfrust` shape 成本
+    /// （典型 ~5–30ms / 字符串）。建议在加载/初始化阶段预创建常用 handle，
+    /// 或先调 [`GpuContext::preheat_text`] 触发字体/atlas lazy init。
+    pub fn make_stable_text(&self, text: &str, options: &crate::text::TextOptions) -> crate::text::StableText {
+        self.text_ctx.borrow_mut().make_stable(text, options)
+    }
+
+    /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
+    /// 推荐在 `App` 启动后立即调用，避免首帧文字绘制卡顿。
+    /// 调前需 `Renderer` 存在并已 `resize` 至少一次（让 `viewport` 知道物理尺寸）。
+    pub fn preheat_text(&self, device: &wgpu::Device, queue: &wgpu::Queue, physical_width: u32, physical_height: u32) {
+        self.text_ctx
+            .borrow_mut()
+            .preheat(device, queue, physical_width, physical_height);
     }
 }
 

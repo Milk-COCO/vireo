@@ -2295,7 +2295,21 @@ impl DrawBatch {
         self.texts.push_indexed(text, options, idx);
     }
 
-    /// HUD 多段（Static / Dynamic / Digits），捕获当前 transform。
+    /// 使用 [`StableText`] 直接绘制（位置 x/y + 颜色 color；字号等已在创建时定型）。
+    pub fn text_stable(&mut self, stable: &crate::text::StableText, x: f32, y: f32, color: crate::color::Color) {
+        let idx = self.current_transform_index();
+        let opts = TextOptions {
+            x, y, color,
+            clip: None,
+            font_size: 0.0,
+            max_width: None,
+            align: crate::text::TextAlign::Left,
+            attrs: None,
+        };
+        self.texts.push_stable_indexed(stable, opts, idx);
+    }
+
+    /// HUD 多段（Static / Dynamic / Digits / Stable），捕获当前 transform。
     pub fn text_parts(&mut self, parts: &[crate::text::TextPart<'_>], options: TextOptions) {
         let idx = self.current_transform_index();
         self.texts.push_parts_indexed(parts, options, idx);
