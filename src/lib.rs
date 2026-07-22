@@ -35,6 +35,7 @@ pub mod prelude {
     pub use crate::color_u8;
     pub use crate::context::DrawBatch;
     pub use crate::context::InheritFromParent;
+    pub use crate::context::Rect;
     pub use crate::context::RenderTarget;
     pub use crate::context::Renderer;
     pub use crate::context::Transform;

@@ -9,6 +9,48 @@ pub use crate::gpu::Vertex;
 use crate::gpu::GpuContext;
 use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
 
+/// 轴对齐矩形，用于 culling 的包围盒/视口。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub fn left(&self) -> f32 { self.x }
+    pub fn right(&self) -> f32 { self.x + self.w }
+    pub fn top(&self) -> f32 { self.y }
+    pub fn bottom(&self) -> f32 { self.y + self.h }
+
+    pub fn contains(&self, p: [f32; 2]) -> bool {
+        p[0] >= self.x && p[0] <= self.x + self.w
+            && p[1] >= self.y && p[1] <= self.y + self.h
+    }
+
+    pub fn intersects(&self, other: &Rect) -> bool {
+        let l = self.x.max(other.x);
+        let r = (self.x + self.w).min(other.x + other.w);
+        if r < l { return false; }
+        let t = self.y.max(other.y);
+        let b = (self.y + self.h).min(other.y + other.h);
+        b >= t
+    }
+
+    pub fn union(&self, other: &Rect) -> Rect {
+        let l = self.x.min(other.x);
+        let r = (self.x + self.w).max(other.x + other.w);
+        let t = self.y.min(other.y);
+        let b = (self.y + self.h).max(other.y + other.h);
+        Rect::new(l, t, r - l, b - t)
+    }
+}
+
 /// 一次 `Renderer::draw` 的扁平事件序列（模块级，扁平方法可引用）。
 ///
 /// - `Batch`：常规 batch（自身 shapes + texts）。
@@ -66,6 +108,9 @@ pub struct Renderer {
     polygon_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
     transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
     transform_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
+    /// 逻辑视口尺寸（逻辑像素）
+    logical_width: u32,
+    logical_height: u32,
     /// 帧间复用的 CPU 暂存，避免每帧大块分配
     scratch_vdata: RefCell<Vec<u8>>,
     scratch_idata: RefCell<Vec<u8>>,
@@ -127,6 +172,8 @@ impl Renderer {
             scratch_idata: RefCell::new(Vec::new()),
             scratch_transforms: RefCell::new(Vec::new()),
             scratch_poly_edges: RefCell::new(Vec::new()),
+            logical_width,
+            logical_height,
         }
     }
 
@@ -189,6 +236,8 @@ impl Renderer {
         self.gpu.queue.write_buffer(&self.camera_buf, 0, &camera_raw);
         self.physical_width = physical_width;
         self.physical_height = physical_height;
+        self.logical_width = logical_width;
+        self.logical_height = logical_height;
         self.scale = scale;
         *self.msaa_tex.borrow_mut() = None;
         *self.ds_tex.borrow_mut() = None;
@@ -206,11 +255,20 @@ impl Renderer {
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
         // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
         // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
+        let viewport = Rect::new(0.0, 0.0, self.logical_width as f32, self.logical_height as f32);
+
+        // Pass 1: bottom-up 计算子树 AABB（供 culling 用）
+        let mut aabb_map: FxHashMap<usize, Option<Rect>> = FxHashMap::default();
+        for b in batches {
+            compute_subtree_aabb(b, &mut aabb_map);
+        }
+
+        // Pass 2: flatten with culling
         let mut events: Vec<DrawEvent> = Vec::new();
         let mut uses_stencil = false;
         for b in batches {
             let mut tmp: Vec<DrawEvent> = Vec::new();
-            b.flatten_events(&mut tmp, 0);
+            b.flatten_events(&mut tmp, 0, Some(viewport), &aabb_map);
             for ev in tmp {
                 match &ev {
                     DrawEvent::Batch(batch) => {
@@ -1338,6 +1396,27 @@ fn transform_key(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> u64 {
     h ^ (h >> 32)
 }
 
+/// Bottom-up 计算 batch 整棵子树的 AABB（含子顶点），存入 map 供 culling 使用。
+fn compute_subtree_aabb(
+    batch: &DrawBatch,
+    map: &mut FxHashMap<usize, Option<Rect>>,
+) -> Option<Rect> {
+    let key = batch as *const DrawBatch as *const () as usize;
+    let own = batch.compute_own_world_aabb();
+    let mut combined = own;
+    for child in &batch.children {
+        let ca = compute_subtree_aabb(child, map);
+        if let Some(c) = ca {
+            combined = match combined {
+                Some(a) => Some(a.union(&c)),
+                None => Some(c),
+            };
+        }
+    }
+    map.insert(key, combined);
+    combined
+}
+
 /// 纹理坐标子区域，控制形状内部 UV 映射范围。
 #[derive(Clone, Copy, Debug)]
 pub struct UvRect {
@@ -1412,6 +1491,11 @@ pub struct DrawBatch {
     pub area_include: Option<Area>,
     /// 本 batch 可见区 exclude（`None` = Empty）。
     pub area_exclude: Option<Area>,
+    /// 本 batch 子树 AABB 模式：
+    /// - `None`：不裁剪（始终绘制）
+    /// - `Some(None)`：自动，从顶点计算子树 AABB
+    /// - `Some(Some(rect))`：手动，使用指定矩形
+    pub bounds: Option<Option<Rect>>,
 }
 
 impl DrawBatch {
@@ -1436,6 +1520,7 @@ impl DrawBatch {
             inherit: InheritFromParent::NONE,
             area_include: None,
             area_exclude: None,
+            bounds: Some(None),
         }
     }
 
@@ -1459,6 +1544,7 @@ impl DrawBatch {
         self.inherit = InheritFromParent::NONE;
         self.area_include = None;
         self.area_exclude = None;
+        self.bounds = Some(None);
     }
 
     /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
@@ -1479,6 +1565,49 @@ impl DrawBatch {
     /// 有效可见区：`include.unwrap_or(Full) \ exclude.unwrap_or(Empty)`；皆 None 则 `None`。
     pub fn effective_area(&self) -> Option<Area> {
         effective_area(self.area_include.as_ref(), self.area_exclude.as_ref())
+    }
+
+    /// 计算本 batch 自身顶点在**世界（绝对逻辑）空间**的 AABB。
+    /// 不含子节点的顶点。
+    fn compute_own_world_aabb(&self) -> Option<Rect> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for v in &self.vertices {
+            let x = v.position[0];
+            let y = v.position[1];
+            if x < min_x { min_x = x; }
+            if x > max_x { max_x = x; }
+            if y < min_y { min_y = y; }
+            if y > max_y { max_y = y; }
+        }
+        if min_x > max_x {
+            return None;
+        }
+        let (c0, c1, c2) = self.current_matrix();
+        let corners = [
+            [min_x, min_y],
+            [max_x, min_y],
+            [min_x, max_y],
+            [max_x, max_y],
+        ];
+        let mut w_min_x = f32::INFINITY;
+        let mut w_max_x = f32::NEG_INFINITY;
+        let mut w_min_y = f32::INFINITY;
+        let mut w_max_y = f32::NEG_INFINITY;
+        for p in &corners {
+            let wx = c0[0] * p[0] + c1[0] * p[1] + c2[0];
+            let wy = c0[1] * p[0] + c1[1] * p[1] + c2[1];
+            if wx < w_min_x { w_min_x = wx; }
+            if wx > w_max_x { w_max_x = wx; }
+            if wy < w_min_y { w_min_y = wy; }
+            if wy > w_max_y { w_max_y = wy; }
+        }
+        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
     /// 追加子 batch。若 `child.inherit` 有标志，先把父属性写入子（transform 作用于整棵子树）。
@@ -1599,11 +1728,34 @@ impl DrawBatch {
     ///   - erase 在 `level+1` 处写，恢复 level
     ///   - 若自身有 Area，子树看到 level+1（content level）
     ///   - 若自身有 Area 且 clips_children，Push 在 level+1，子看 level+2
+    ///
+    /// `aabb_map` 是 pre-pass 计算的子树 AABB 表（`compute_subtree_aabb`）。
+    ///   bounds 优先 > map 内子树 AABB > 自身顶点
     pub(crate) fn flatten_events<'a>(
         &'a self,
         out: &mut Vec<DrawEvent<'a>>,
         level: u32,
+        viewport: Option<Rect>,
+        aabb_map: &FxHashMap<usize, Option<Rect>>,
     ) {
+        // Culling: 跳过屏外子树
+        if let Some(vp) = viewport {
+            let effective = match self.bounds {
+                None => None,
+                Some(None) => {
+                    let key = self as *const DrawBatch as *const () as usize;
+                    aabb_map.get(&key).copied().flatten()
+                        .or_else(|| self.compute_own_world_aabb())
+                }
+                Some(Some(b)) => Some(b),
+            };
+            if let Some(b) = effective {
+                if !vp.intersects(&b) {
+                    return;
+                }
+            }
+        }
+
         let area = self.effective_area();
         let has_area = matches!(&area, Some(a) if !a.is_empty());
         if let Some(a) = &area {
@@ -1620,7 +1772,7 @@ impl DrawBatch {
         // 子树的 level：若自身有 Area，子 content 在 level+1；否则同 level。
         let child_level = if has_area { level + 1 } else { level };
         for child in &self.children {
-            child.flatten_events(out, child_level);
+            child.flatten_events(out, child_level, viewport, aabb_map);
         }
         if self.clips_children && out.len() > child_start {
             out.push(DrawEvent::StencilPop);
@@ -1939,6 +2091,7 @@ impl DrawBatch {
             inherit: self.inherit,
             area_include: self.area_include.clone(),
             area_exclude: self.area_exclude.clone(),
+            bounds: self.bounds,
         }
     }
 
@@ -2499,7 +2652,7 @@ mod tests {
         b.area_include = Some(include_batch.to_area());
 
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0);
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
         // 1 cover op + 1 Batch + 1 erase op = 3 events
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
@@ -2524,7 +2677,7 @@ mod tests {
         root.push_child(child);
 
         let mut events: Vec<DrawEvent> = Vec::new();
-        root.flatten_events(&mut events, 0);
+        root.flatten_events(&mut events, 0, None, &FxHashMap::default());
         // 1 setup + Batch + child.Batch + StencilPop + 1 cleanup = 5
         assert_eq!(events.len(), 5);
         assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
@@ -2542,9 +2695,58 @@ mod tests {
         // empty 几何 → Area::Empty
         b.area_include = Some(Area::Empty);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0);
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
         // 仅 Batch（无 AreaOp）
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DrawEvent::Batch(_)));
+    }
+
+    // ---- culling tests ----
+
+    #[test]
+    fn bounds_culls_offscreen_subtree() {
+        let mut b = DrawBatch::new();
+        b.bounds = Some(Some(Rect::new(9999.0, 9999.0, 10.0, 10.0)));
+        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn bounds_keeps_onscreen_subtree() {
+        let mut b = DrawBatch::new();
+        b.bounds = Some(Some(Rect::new(100.0, 100.0, 50.0, 50.0)));
+        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DrawEvent::Batch(_)));
+    }
+
+    #[test]
+    fn auto_aabb_culls_offscreen_vertices() {
+        let mut b = DrawBatch::new();
+        // 无 bounds → 自动从顶点算 AABB
+        draw_rectangle(&mut b, 9999.0, 9999.0, 4.0, 4.0, Some(WHITE));
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn empty_container_with_offscreen_children_recurse() {
+        // 空容器无 bounds → 不能剪，自身体现为 event（无顶点）
+        // 子屏外 → 子被剪
+        let mut parent = DrawBatch::new(); // 无顶点
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::TRANSFORM;
+        draw_rectangle(&mut child, 9999.0, 9999.0, 4.0, 4.0, Some(WHITE));
+        parent.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        parent.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        // parent 空容器 → 自身 event（无顶点），子剪掉
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], DrawEvent::Batch(b) if b.vertices.is_empty()));
     }
 }
