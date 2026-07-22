@@ -1485,41 +1485,28 @@ impl TextEntryList {
             if base + 12 > transform_table.len() {
                 return 0;
             }
-            let mut row: [f32; 12] = transform_table[base..base + 12].try_into().unwrap();
-            // 矩阵乘法 M' = M * O（override 作用在 batch 局部空间）
-            let (ov0, ov1, ov2) = override_transform.to_cols();
-            let a2 = ov0[0];
-            let b2 = ov1[0];
-            let c2 = ov0[1];
-            let d2 = ov1[1];
-            let tx2 = ov2[0];
-            let ty2 = ov2[1];
-            let a = row[0];
-            let b = row[1];
-            let c = row[4];
-            let d = row[5];
-            let tx = row[8];
-            let ty = row[9];
-            row[0] = a * a2 + b * c2;
-            row[1] = a * b2 + b * d2;
-            row[4] = c * a2 + d * c2;
-            row[5] = c * b2 + d * d2;
-            row[8] = tx * a2 + ty * c2 + tx2;
-            row[9] = tx * b2 + ty * d2 + ty2;
-
-            let composed_is_identity = row[0] == 1.0
-                && row[1] == 0.0
-                && row[4] == 0.0
-                && row[5] == 1.0
-                && row[8] == 0.0
-                && row[9] == 0.0;
+            let t = &transform_table[base..base + 12];
+            // 表布局：col0=(a,c), col1=(b,d), col2=(tx,ty) — 与 register_transform 一致
+            let m = crate::context::Transform::matrix(
+                t[0], t[4], t[1], t[5], t[8], t[9],
+            );
+            // M' = M * O（override 作用在 batch 局部空间）
+            let composed = m.then(override_transform);
+            let (c0, c1, c2) = composed.to_cols();
+            let composed_is_identity = c0[0] == 1.0
+                && c0[1] == 0.0
+                && c1[0] == 0.0
+                && c1[1] == 1.0
+                && c2[0] == 0.0
+                && c2[1] == 0.0;
             if composed_is_identity {
                 0
             } else {
                 let idx = (global_transforms.len() / 12) as u32;
                 global_transforms.extend_from_slice(&[
-                    row[0], row[1], 0.0, 0.0, row[4], row[5], 0.0, 0.0, row[8] * scale,
-                    row[9] * scale, 1.0, 0.0,
+                    c0[0], c0[1], 0.0, 0.0,
+                    c1[0], c1[1], 0.0, 0.0,
+                    c2[0] * scale, c2[1] * scale, 1.0, 0.0,
                 ]);
                 idx
             }

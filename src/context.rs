@@ -540,9 +540,13 @@ impl Renderer {
                 if let Some(geom) = op.geom() {
                     total_vcount += geom.vertices.len() as u32;
                     total_icount += geom.indices.len() as u32;
-                    // 单独建一个 transform_table 段（放在 global_transforms 末尾）
-                    batch_transform_bases.push((global_transforms.len() / 12) as u32);
-                    global_transforms.extend_from_slice(&geom.transform_table);
+                    // 空表：顶点 index 走全局槽 0（单位阵），不追加、不 patch 偏移。
+                    if geom.transform_table.is_empty() {
+                        batch_transform_bases.push(0);
+                    } else {
+                        batch_transform_bases.push((global_transforms.len() / 12) as u32);
+                        global_transforms.extend_from_slice(&geom.transform_table);
+                    }
                     batch_poly_base.push(poly_offset);
                     poly_offset += geom.polygon_edges.len() as u32 / 4;
                     polygon_edges_global.extend_from_slice(&geom.polygon_edges);
@@ -1654,7 +1658,7 @@ impl DrawBatch {
         self.bind_group = None;
         self.texture_segments.clear();
         self.transform = None;
-        self.sdf_feather = Some(0.0);
+        self.sdf_feather = None; // 与 new() 一致：几何路径
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
         self.polygon_edges.clear();
@@ -1691,74 +1695,95 @@ impl DrawBatch {
         effective_area(self.area_include.as_ref(), self.area_exclude.as_ref())
     }
 
+    /// 从 `transform_table` 取 index 对应列（越界 → 单位阵）。
+    #[inline]
+    fn table_cols_at(table: &[f32], idx: u32) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let base = idx as usize * 12;
+        if base + 12 > table.len() {
+            return ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        }
+        let t = &table[base..base + 12];
+        ([t[0], t[1], 0.0], [t[4], t[5], 0.0], [t[8], t[9], 1.0])
+    }
+
+    /// 顶点局部坐标 × 表内矩阵 → 世界坐标。
+    #[inline]
+    fn world_xy(table: &[f32], idx: u32, lx: f32, ly: f32) -> (f32, f32) {
+        let (c0, c1, c2) = Self::table_cols_at(table, idx);
+        (
+            c0[0] * lx + c1[0] * ly + c2[0],
+            c0[1] * lx + c1[1] * ly + c2[1],
+        )
+    }
+
     /// 计算本 batch 自身顶点在**世界（绝对逻辑）空间**的 AABB。
-    /// 不含子节点的顶点。
+    /// 不含子节点的顶点。按每顶点 `transform_index` 查表，不用画笔 `current_matrix`。
     fn compute_own_world_aabb(&self) -> Option<Rect> {
         if self.vertices.is_empty() {
             return None;
         }
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        for v in &self.vertices {
-            let x = v.position[0];
-            let y = v.position[1];
-            if x < min_x { min_x = x; }
-            if x > max_x { max_x = x; }
-            if y < min_y { min_y = y; }
-            if y > max_y { max_y = y; }
-        }
-        if min_x > max_x {
-            return None;
-        }
-        let (c0, c1, c2) = self.current_matrix();
-        let corners = [
-            [min_x, min_y],
-            [max_x, min_y],
-            [min_x, max_y],
-            [max_x, max_y],
-        ];
         let mut w_min_x = f32::INFINITY;
         let mut w_max_x = f32::NEG_INFINITY;
         let mut w_min_y = f32::INFINITY;
         let mut w_max_y = f32::NEG_INFINITY;
-        for p in &corners {
-            let wx = c0[0] * p[0] + c1[0] * p[1] + c2[0];
-            let wy = c0[1] * p[0] + c1[1] * p[1] + c2[1];
+        for v in &self.vertices {
+            let (wx, wy) = Self::world_xy(
+                &self.transform_table,
+                v.transform_index,
+                v.position[0],
+                v.position[1],
+            );
             if wx < w_min_x { w_min_x = wx; }
             if wx > w_max_x { w_max_x = wx; }
             if wy < w_min_y { w_min_y = wy; }
             if wy > w_max_y { w_max_y = wy; }
+        }
+        if w_min_x > w_max_x {
+            return None;
         }
         Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
     /// 检测 batch 自身是否只含一个轴对齐矩形（4 顶点 + 无旋转 transform）。
     /// 用于 `clips_children` 时自动走 scissor 路径。
+    /// 世界位置来自顶点 `transform_index`（非画笔）。
     fn auto_scissor(&self) -> Option<Rect> {
         if self.vertices.len() != 4 || self.indices.len() != 6 {
             return None;
         }
-        // 检查 transform 无旋转/倾斜（scale 和 translate 不影响 AABB）
-        if let Some(ref t) = self.transform {
-            if t.b.abs() > 1e-6 || t.c.abs() > 1e-6 {
-                return None;
-            }
+        let ti = self.vertices[0].transform_index;
+        if self.vertices.iter().any(|v| v.transform_index != ti) {
+            return None;
         }
-        let (c0, c1, c2) = self.current_matrix();
-        let min_x = self.vertices.iter().map(|v| v.position[0]).reduce(f32::min)?;
-        let max_x = self.vertices.iter().map(|v| v.position[0]).reduce(f32::max)?;
-        let min_y = self.vertices.iter().map(|v| v.position[1]).reduce(f32::min)?;
-        let max_y = self.vertices.iter().map(|v| v.position[1]).reduce(f32::max)?;
-        let corners = [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y]];
+        let (c0, c1, _c2) = Self::table_cols_at(&self.transform_table, ti);
+        // 表内线性部分无旋转/倾斜（b=c1[0], c=c0[1]）
+        if c1[0].abs() > 1e-6 || c0[1].abs() > 1e-6 {
+            return None;
+        }
+        let mut worlds: [(f32, f32); 4] = [(0.0, 0.0); 4];
+        for (i, v) in self.vertices.iter().enumerate() {
+            worlds[i] = Self::world_xy(
+                &self.transform_table,
+                ti,
+                v.position[0],
+                v.position[1],
+            );
+        }
+        let w_min_x = worlds.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let w_max_x = worlds.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let w_min_y = worlds.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let w_max_y = worlds.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        // 四角应对应轴对齐 AABB 的四个角
+        let corners = [
+            (w_min_x, w_min_y),
+            (w_max_x, w_min_y),
+            (w_max_x, w_max_y),
+            (w_min_x, w_max_y),
+        ];
         let mut found = [false; 4];
-        for v in &self.vertices {
-            let wx = c0[0] * v.position[0] + c1[0] * v.position[1] + c2[0];
-            let wy = c0[1] * v.position[0] + c1[1] * v.position[1] + c2[1];
-            let matched = corners.iter().position(|c| {
-                (wx - (c0[0] * c[0] + c1[0] * c[1] + c2[0])).abs() < 1e-4
-                    && (wy - (c0[1] * c[0] + c1[1] * c[1] + c2[1])).abs() < 1e-4
+        for &(wx, wy) in &worlds {
+            let matched = corners.iter().position(|&(cx, cy)| {
+                (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4
             });
             match matched {
                 Some(i) => found[i] = true,
@@ -1768,14 +1793,6 @@ impl DrawBatch {
         if !found.iter().all(|&x| x) {
             return None;
         }
-        // 计算世界空间 AABB
-        let w_corners: Vec<[f32; 2]> = corners.iter().map(|p| {
-            [c0[0] * p[0] + c1[0] * p[1] + c2[0], c0[1] * p[0] + c1[1] * p[1] + c2[1]]
-        }).collect();
-        let w_min_x = w_corners.iter().map(|p| p[0]).reduce(f32::min)?;
-        let w_max_x = w_corners.iter().map(|p| p[0]).reduce(f32::max)?;
-        let w_min_y = w_corners.iter().map(|p| p[1]).reduce(f32::min)?;
-        let w_max_y = w_corners.iter().map(|p| p[1]).reduce(f32::max)?;
         Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
@@ -2513,6 +2530,7 @@ mod tests {
         assert!(b.indices.capacity() >= cap_i);
         assert!(b.vertices.is_empty());
         assert!(!b.has_sdf);
+        assert!(b.sdf_feather.is_none()); // 与 new() 一致
     }
 
     #[test]
@@ -3091,5 +3109,58 @@ mod tests {
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
         assert!(matches!(&events[1], DrawEvent::ScissorPush(_)));
         assert!(matches!(&events[2], DrawEvent::ScissorPop));
+    }
+
+    #[test]
+    fn auto_aabb_culls_offscreen_pos() {
+        // Pos 进表、画笔 restore 后：AABB 仍应按世界位置裁
+        let mut b = DrawBatch::new();
+        draw_rectangle(&mut b, Pos::new(9999.0, 9999.0), 4.0, 4.0, Some(WHITE));
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(
+            &mut events,
+            0,
+            Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            &FxHashMap::default(),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn auto_scissor_uses_pos_world_rect() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        draw_rectangle(&mut b, Pos::new(50.0, 60.0), 100.0, 50.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert_eq!(events.len(), 4);
+        match &events[1] {
+            DrawEvent::ScissorPush(r) => {
+                assert!((r.x - 50.0).abs() < 1e-3, "x={}", r.x);
+                assert!((r.y - 60.0).abs() < 1e-3, "y={}", r.y);
+                assert!((r.w - 100.0).abs() < 1e-3);
+                assert!((r.h - 50.0).abs() < 1e-3);
+            }
+            _ => panic!("expected ScissorPush"),
+        }
+    }
+
+    #[test]
+    fn transform_then_rotation_matches_table_compose() {
+        // 验证 then 与列主序表布局一致（文字 override 依赖此）
+        let m = Transform::translation(10.0, 20.0);
+        let o = Transform::trs(0.0, 0.0, 0.0, 0.0, std::f32::consts::FRAC_PI_2, 1.0, 1.0);
+        let c = m.then(&o);
+        let (c0, c1, c2) = c.to_cols();
+        // 90° 顺时针：a=0,b=-1,c=1,d=0；平移 (10,20)
+        assert!(c0[0].abs() < 1e-5);
+        assert!((c1[0] + 1.0).abs() < 1e-5);
+        assert!((c0[1] - 1.0).abs() < 1e-5);
+        assert!(c1[1].abs() < 1e-5);
+        assert!((c2[0] - 10.0).abs() < 1e-3);
+        assert!((c2[1] - 20.0).abs() < 1e-3);
     }
 }
