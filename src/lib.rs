@@ -35,6 +35,7 @@ pub mod prelude {
     pub use crate::color_u8;
     pub use crate::context::DrawBatch;
     pub use crate::context::InheritFromParent;
+    pub use crate::context::Pos;
     pub use crate::context::Rect;
     pub use crate::context::RenderTarget;
     pub use crate::context::Renderer;
@@ -51,6 +52,8 @@ pub mod prelude {
     pub use crate::text::FeatureTag;
     pub use crate::text::Style;
     pub use crate::text::TextAlign;
+    pub use crate::text::TextDef;
+    pub use crate::text::TextOverride;
     pub use crate::text::Weight;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;

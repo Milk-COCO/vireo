@@ -31,7 +31,7 @@ fn main() {
         let ty = cy - th * 0.5;
 
         // 背景框
-        draw_rectangle(&mut batch, tx, ty, tw, th, Some(Color::new(0.12, 0.12, 0.22, 1.0)));
+        draw_rectangle(&mut batch, Pos::new(tx, ty), tw, th, Some(Color::new(0.12, 0.12, 0.22, 1.0)));
 
         // 对角线 X（黄色）
         let yellow = Color::new(1.0, 1.0, 0.0, 0.6);
@@ -49,13 +49,13 @@ fn main() {
         draw_line(&mut batch, cx, cy - 20.0, cx, cy + 20.0, 1.0, Some(Color::new(1.0, 0.0, 0.0, 0.5)));
 
         // 中心点
-        draw_circle(&mut batch, cx, cy, 3.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(cx, cy), 3.0, Some(RED));
 
         // 四角标记
-        draw_circle(&mut batch, tx, ty, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
-        draw_circle(&mut batch, tx + tw, ty, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
-        draw_circle(&mut batch, tx, ty + th, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
-        draw_circle(&mut batch, tx + tw, ty + th, 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, Pos::new(tx, ty), 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, Pos::new(tx + tw, ty), 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, Pos::new(tx, ty + th), 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
+        draw_circle(&mut batch, Pos::new(tx + tw, ty + th), 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
 
         // 文本
         let text_opts = TextOptions::default().font_size(font_size).x(tx).y(ty).color(WHITE);

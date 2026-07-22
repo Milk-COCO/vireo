@@ -54,12 +54,12 @@ fn main() {
             let y = cy1 - 60.0 + (i / 6) as f32 * 24.0 + phase.cos() * 14.0;
             let hue = (i as f32 / 30.0 + t * 0.05) % 1.0;
             let c = Color::new(0.3 + hue * 0.6, 0.4 + (1.0 - hue) * 0.4, 0.5 + hue * 0.3, 0.95);
-            draw_rounded_rect(&mut p1, x, y, 18.0, 12.0, 3.0, Some(c));
+            draw_rounded_rect(&mut p1, Pos::new(x, y), 18.0, 12.0, 3.0, Some(c));
         }
         // 大圆描边（画在 include 之外）
         let mut ring = DrawBatch::new();
         ring.sdf_feather = Some(1.0);
-        draw_circle(&mut ring, cx1, cy1, r, Some(Color::new(0.9, 0.9, 1.0, 0.7)));
+        draw_circle(&mut ring, Pos::new(cx1, cy1), r, Some(Color::new(0.9, 0.9, 1.0, 0.7)));
         p1.push_child(ring);
 
         // ===== Panel 2: exclude =====
@@ -77,13 +77,13 @@ fn main() {
             let y = cy2 - 40.0 + (i / 8) as f32 * 16.0 + phase.cos() * 6.0;
             let hue = (i as f32 / 40.0 + t * 0.04) % 1.0;
             let c = Color::new(0.5 + hue * 0.4, 0.3 + hue * 0.5, 0.5 + (1.0 - hue) * 0.4, 0.95);
-            draw_circle(&mut p2, x, y, 6.0, Some(c));
+            draw_circle(&mut p2, Pos::new(x, y), 6.0, Some(c));
         }
         // 描边矩形 + 挖空小圆
         let mut ring = DrawBatch::new();
         ring.sdf_feather = Some(1.0);
-        draw_rectangle(&mut ring, cx2 - rw * 0.5, cy2 - rh * 0.5, rw, rh, Some(Color::new(0.9, 0.9, 1.0, 0.5)));
-        draw_circle(&mut ring, cx2 + 16.0, cy2 - 8.0, er, Some(Color::new(0.9, 0.5, 0.5, 0.6)));
+        draw_rectangle(&mut ring, Pos::new(cx2 - rw * 0.5, cy2 - rh * 0.5), rw, rh, Some(Color::new(0.9, 0.9, 1.0, 0.5)));
+        draw_circle(&mut ring, Pos::new(cx2 + 16.0, cy2 - 8.0), er, Some(Color::new(0.9, 0.5, 0.5, 0.6)));
         p2.push_child(ring);
 
         // ===== Panel 3: ∩ =====
@@ -100,13 +100,13 @@ fn main() {
             let y = cy3 - 50.0 + (i / 6) as f32 * 22.0 + phase.cos() * 10.0;
             let hue = (i as f32 / 30.0 + t * 0.06) % 1.0;
             let c = Color::new(0.4 + hue * 0.5, 0.6 + (1.0 - hue) * 0.3, 0.5 + hue * 0.4, 0.95);
-            draw_rounded_rect(&mut p3, x, y, 18.0, 14.0, 3.0, Some(c));
+            draw_rounded_rect(&mut p3, Pos::new(x, y), 18.0, 14.0, 3.0, Some(c));
         }
         // 两圆描边
         let mut ring = DrawBatch::new();
         ring.sdf_feather = Some(1.0);
-        draw_circle(&mut ring, cx3 - off3, cy3, r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
-        draw_circle(&mut ring, cx3 + off3, cy3, r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(&mut ring, Pos::new(cx3 - off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(&mut ring, Pos::new(cx3 + off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         p3.push_child(ring);
 
         // ===== Panel 4: ∪ =====
@@ -123,13 +123,13 @@ fn main() {
             let y = cy4 - 50.0 + (i / 7) as f32 * 20.0 + phase.cos() * 8.0;
             let hue = (i as f32 / 32.0 + t * 0.05) % 1.0;
             let c = Color::new(0.5 + hue * 0.4, 0.4 + hue * 0.4, 0.5 + (1.0 - hue) * 0.5, 0.95);
-            draw_circle(&mut p4, x, y, 7.0, Some(c));
+            draw_circle(&mut p4, Pos::new(x, y), 7.0, Some(c));
         }
         // 描边
         let mut ring = DrawBatch::new();
         ring.sdf_feather = Some(1.0);
-        draw_circle(&mut ring, cx4 - off4, cy4, r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
-        draw_circle(&mut ring, cx4 + off4, cy4, r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(&mut ring, Pos::new(cx4 - off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(&mut ring, Pos::new(cx4 + off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         p4.push_child(ring);
 
         win.draw(
@@ -145,8 +145,7 @@ fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {
     // 外框
     draw_rectangle(
         &mut b,
-        cx - w * 0.5,
-        cy - h * 0.5,
+        Pos::new(cx - w * 0.5, cy - h * 0.5),
         w,
         h,
         Some(Color::new(0.12, 0.14, 0.2, 1.0)),
@@ -167,6 +166,6 @@ fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {
 fn make_disk_area(cx: f32, cy: f32, r: f32) -> Area {
     let mut b = DrawBatch::new();
     b.sdf_feather = Some(1.0);
-    draw_circle(&mut b, cx, cy, r, None);
+    draw_circle(&mut b, Pos::new(cx, cy), r, None);
     b.to_area()
 }

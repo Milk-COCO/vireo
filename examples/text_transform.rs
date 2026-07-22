@@ -23,14 +23,14 @@ fn main() {
 
         // === 1. 无 transform（旧 API） ===
         let mut b0 = DrawBatch::new();
-        draw_rectangle(&mut b0, 10.0, 50.0, 6.0, 24.0, Some(yl));
+        draw_rectangle(&mut b0, Pos::new(10.0, 50.0), 6.0, 24.0, Some(yl));
         draw_text(&mut b0.texts, "old: no transform",
             TextOptions::default().x(22.0).y(50.0).font_size(13.0).color(gray));
 
         // === 2. 平移 ===
         let mut b1 = DrawBatch::new();
         b1.set_position(200.0, 40.0);
-        draw_rectangle(&mut b1, 10.0, 50.0, 6.0, 24.0, Some(yl));
+        draw_rectangle(&mut b1, Pos::new(10.0, 50.0), 6.0, 24.0, Some(yl));
         b1.text("translate (200, 40)", TextOptions::default().x(22.0).y(50.0).font_size(13.0).color(yl));
         b1.text("geometry + text move together", TextOptions::default().x(22.0).y(67.0).font_size(11.0).color(gray));
 
@@ -40,7 +40,7 @@ fn main() {
         b2.set_pivot(50.0, 10.0);
         b2.set_rad(0.35);
         // 半透明背景框
-        draw_rectangle(&mut b2, 0.0, 0.0, 100.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 0.2)));
+        draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 100.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 0.2)));
         b2.text("rotate 20°", TextOptions::default().x(5.0).y(2.0).font_size(14.0).color(yl));
         b2.text("around pivot", TextOptions::default().x(5.0).y(20.0).font_size(11.0).color(gray));
 
@@ -48,7 +48,7 @@ fn main() {
         let mut b3 = DrawBatch::new();
         b3.set_position(380.0, 40.0);
         b3.set_scale(2.0, 1.3);
-        draw_rectangle(&mut b3, 10.0, 50.0, 3.0, 18.0, Some(yl));
+        draw_rectangle(&mut b3, Pos::new(10.0, 50.0), 3.0, 18.0, Some(yl));
         b3.text("scale 2x", TextOptions::default().x(17.0).y(50.0).font_size(14.0).color(yl));
         b3.text("stretched", TextOptions::default().x(17.0).y(67.0).font_size(11.0).color(gray));
 

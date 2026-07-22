@@ -26,7 +26,7 @@ fn main() {
 
         // 裁剪框 + 横向滚动文字
         let clip = (40i32, 60, 360, 120);
-        draw_rect_outline(&mut batch, clip.0 as f32, clip.1 as f32, (clip.2 - clip.0) as f32, (clip.3 - clip.1) as f32, 1.5, Some(Color::new(0.4, 0.5, 0.7, 1.0)));
+        draw_rect_outline(&mut batch, Pos::new(clip.0 as f32, clip.1 as f32), (clip.2 - clip.0) as f32, (clip.3 - clip.1) as f32, 1.5, Some(Color::new(0.4, 0.5, 0.7, 1.0)));
         let scroll_x = 40.0 - (t % 400.0);
         draw_text(
             &mut batch.texts,
@@ -59,7 +59,7 @@ fn main() {
             (TextAlign::End, "End", 320.0),
             (TextAlign::Justified, "Justified (needs wrap width)", 370.0),
         ];
-        draw_rect_outline(&mut batch, box_x, 160.0, box_w, 230.0, 1.0, Some(Color::new(0.3, 0.35, 0.45, 1.0)));
+        draw_rect_outline(&mut batch, Pos::new(box_x, 160.0), box_w, 230.0, 1.0, Some(Color::new(0.3, 0.35, 0.45, 1.0)));
 
         for (align, label, y) in aligns {
             draw_text(

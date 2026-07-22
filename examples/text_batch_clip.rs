@@ -72,8 +72,7 @@ fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatc
 
     draw_circle(
         &mut parent,
-        0.0,
-        0.0,
+        Pos::new(0.0, 0.0),
         120.0,
         Some(Color::new(0.2, 0.24, 0.34, 1.0)),
     );
@@ -106,8 +105,7 @@ fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatc
     let ox = (t * 2.2).sin() * 80.0;
     draw_rounded_rect(
         &mut child,
-        ox - 22.0,
-        55.0,
+        Pos::new(ox - 22.0, 55.0),
         44.0,
         20.0,
         5.0,

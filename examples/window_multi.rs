@@ -33,7 +33,7 @@ fn main() {
         let cx = mouse.0 * w / win_b.logical_width as f32;
         let cy = mouse.1 * h / win_b.logical_height as f32;
         if has_mouse {
-            draw_circle(&mut batch, cx, cy, 20.0, Some(RED));
+            draw_circle(&mut batch, Pos::new(cx, cy), 20.0, Some(RED));
             draw_line(&mut batch, cx, 0.0, cx, h, 1.0, Some(Color::new(0.25, 0.25, 0.35, 0.4)));
             draw_line(&mut batch, 0.0, cy, w, cy, 1.0, Some(Color::new(0.25, 0.25, 0.35, 0.4)));
 
@@ -54,9 +54,9 @@ fn main() {
         // B
         let mut batch = DrawBatch::new();
         if has_mouse {
-            draw_rectangle(&mut batch, mouse.0 - 16.0, mouse.1 - 1.0, 32.0, 2.0, Some(WHITE));
-            draw_rectangle(&mut batch, mouse.0 - 1.0, mouse.1 - 16.0, 2.0, 32.0, Some(WHITE));
-            draw_circle(&mut batch, mouse.0, mouse.1, 8.0, Some(RED));
+            draw_rectangle(&mut batch, Pos::new(mouse.0 - 16.0, mouse.1 - 1.0), 32.0, 2.0, Some(WHITE));
+            draw_rectangle(&mut batch, Pos::new(mouse.0 - 1.0, mouse.1 - 16.0), 2.0, 32.0, Some(WHITE));
+            draw_circle(&mut batch, Pos::new(mouse.0, mouse.1), 8.0, Some(RED));
         }
 
         // 混合中英文示例

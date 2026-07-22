@@ -82,8 +82,7 @@ fn three_level(
 
     draw_circle(
         &mut root,
-        0.0,
-        0.0,
+        Pos::new(0.0, 0.0),
         130.0,
         Some(Color::new(0.18, 0.22, 0.32, 1.0)),
     );
@@ -107,8 +106,7 @@ fn three_level(
 
     draw_rounded_rect(
         &mut mid,
-        -72.0,
-        -72.0,
+        Pos::new(-72.0, -72.0),
         144.0,
         144.0,
         28.0,
@@ -135,8 +133,7 @@ fn three_level(
         let hue = (i as f32 / 12.0 + t * 0.05) % 1.0;
         draw_rounded_rect(
             &mut leaf,
-            x,
-            y,
+            Pos::new(x, y),
             36.0,
             22.0,
             5.0,
@@ -150,8 +147,7 @@ fn three_level(
     }
     draw_circle(
         &mut leaf,
-        0.0,
-        0.0,
+        Pos::new(0.0, 0.0),
         14.0,
         Some(Color::new(1.0, 0.95, 0.85, 1.0)),
     );
@@ -168,8 +164,7 @@ fn three_level(
     let ox = (t * 1.8).sin() * 90.0;
     draw_rounded_rect(
         &mut leaf,
-        ox - 40.0,
-        50.0,
+        Pos::new(ox - 40.0, 50.0),
         80.0,
         18.0,
         4.0,

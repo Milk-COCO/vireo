@@ -67,7 +67,7 @@ fn main() {
         );
 
         batch.set_texture(Some(&check));
-        draw_rectangle(&mut batch, 40.0, 60.0, 160.0, 160.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(40.0, 60.0), 160.0, 160.0, Some(WHITE));
         draw_text(
             &mut batch.texts,
             "from_rgba checker",
@@ -79,7 +79,7 @@ fn main() {
         );
 
         batch.set_texture(Some(&grad));
-        draw_rectangle(&mut batch, 240.0, 60.0, 200.0, 100.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(240.0, 60.0), 200.0, 100.0, Some(WHITE));
         draw_text(
             &mut batch.texts,
             "from_rgba gradient",
@@ -93,7 +93,7 @@ fn main() {
         if let Some(ref tex) = embedded {
             batch.set_texture(Some(tex));
             let s = 0.12;
-            draw_rectangle(&mut batch, 480.0, 60.0, tex.width as f32 * s, tex.height as f32 * s, Some(WHITE));
+            draw_rectangle(&mut batch, Pos::new(480.0, 60.0), tex.width as f32 * s, tex.height as f32 * s, Some(WHITE));
             draw_text(
                 &mut batch.texts,
                 "from_bytes logo.png",

@@ -40,8 +40,7 @@ fn main() {
 
         draw_circle(
             &mut clip_batch,
-            cx_l,
-            cy,
+            Pos::new(cx_l, cy),
             r,
             Some(Color::new(0.98, 0.98, 1.0, 1.0)),
         );
@@ -71,7 +70,7 @@ fn main() {
                 0.5 + hue * 0.3,
                 0.9,
             );
-            draw_rounded_rect(&mut inner, x, y, 48.0, 28.0, 6.0, Some(c));
+            draw_rounded_rect(&mut inner, Pos::new(x, y), 48.0, 28.0, 6.0, Some(c));
         }
         clip_batch.push_child(inner);
 
@@ -81,8 +80,7 @@ fn main() {
 
         draw_circle(
             &mut no_clip_batch,
-            cx_r,
-            cy,
+            Pos::new(cx_r, cy),
             r,
             Some(Color::new(0.98, 0.98, 1.0, 1.0)),
         );
@@ -110,7 +108,7 @@ fn main() {
                 0.4 + hue * 0.4,
                 0.9,
             );
-            draw_rounded_rect(&mut no_inner, x, y, 48.0, 28.0, 6.0, Some(c));
+            draw_rounded_rect(&mut no_inner, Pos::new(x, y), 48.0, 28.0, 6.0, Some(c));
         }
         no_clip_batch.push_child(no_inner);
 

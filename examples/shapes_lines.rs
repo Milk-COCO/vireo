@@ -113,7 +113,7 @@ fn main() {
             let a = t + i as f32 * TAU / 8.0;
             draw_line(&mut batch, cx, cy, cx + a.cos() * 90.0, cy + a.sin() * 90.0, 2.0 + (i as f32), Some(Color::new(1.0, 0.5 + i as f32 * 0.05, 0.3, 1.0)));
         }
-        draw_circle(&mut batch, cx, cy, 6.0, Some(WHITE));
+        draw_circle(&mut batch, Pos::new(cx, cy), 6.0, Some(WHITE));
 
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
         true

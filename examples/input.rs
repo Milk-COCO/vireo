@@ -78,10 +78,10 @@ fn main() {
         let mut batch = DrawBatch::new();
 
         // 面板背景
-        draw_rectangle(&mut batch, 0.0, 0.0, 200.0, 600.0, Some(Color::new(0.1, 0.1, 0.15, 1.0)));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 200.0, 600.0, Some(Color::new(0.1, 0.1, 0.15, 1.0)));
 
         // 方块
-        draw_rectangle(&mut batch, x, y, size, size, Some(color));
+        draw_rectangle(&mut batch, Pos::new(x, y), size, size, Some(color));
 
         // 面板文字
         let info = format!(

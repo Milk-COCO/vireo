@@ -3,34 +3,36 @@
 use std::f32::consts::{PI, FRAC_PI_2};
 
 use crate::color::Color;
-use crate::context::{DrawBatch, Transform, UvRect};
+use crate::context::{DrawBatch, Pos, Transform, UvRect};
 use crate::gpu::Vertex;
 
 /// 可绘制形状（填充 + 描边）。具体光栅化（SDF / 几何）由 [`Shape::append`] 决定。
+/// 位置（WHERE）通过 `draw_shape(batch, pos, shape, opts)` 的 `Pos` 参数传入。
+/// 以下变体只包含几何定义（WHAT），不包含坐标：
+/// - `Rect`/`RoundedRect`/`Circle`/`Ellipse`/`Arc` 以原点为锚点
+/// - `Line`/`Triangle`/`LineChain`/`Polygon` 的点本身就是纯几何，保留坐标
 #[derive(Clone, Debug)]
 pub enum Shape<'a> {
-    Rect { x: f32, y: f32, w: f32, h: f32 },
-    RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32 },
-    Circle { cx: f32, cy: f32, r: f32 },
-    Ellipse { cx: f32, cy: f32, rx: f32, ry: f32 },
+    Rect { pos: Pos, w: f32, h: f32 },
+    RoundedRect { pos: Pos, w: f32, h: f32, radius: f32 },
+    Circle { pos: Pos, r: f32 },
+    Ellipse { pos: Pos, rx: f32, ry: f32 },
     Line { x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32 },
     LineChain { points: &'a [(f32, f32)], thickness: f32 },
     Triangle { x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32 },
     Polygon { points: &'a [(f32, f32)] },
-    Arc { cx: f32, cy: f32, r: f32, start: f32, end: f32 },
-    RectOutline { x: f32, y: f32, w: f32, h: f32, thickness: f32 },
-    CircleOutline { cx: f32, cy: f32, r: f32, thickness: f32, segments: u32 },
+    Arc { pos: Pos, r: f32, start: f32, end: f32 },
+    RectOutline { pos: Pos, w: f32, h: f32, thickness: f32 },
+    CircleOutline { pos: Pos, r: f32, thickness: f32, segments: u32 },
     EllipseOutline {
-        cx: f32,
-        cy: f32,
+        pos: Pos,
         rx: f32,
         ry: f32,
         thickness: f32,
         segments: u32,
     },
     RoundedRectOutline {
-        x: f32,
-        y: f32,
+        pos: Pos,
         w: f32,
         h: f32,
         radius: f32,
@@ -48,14 +50,37 @@ pub enum Shape<'a> {
     },
     PolygonOutline { points: &'a [(f32, f32)], thickness: f32 },
     ArcOutline {
-        cx: f32,
-        cy: f32,
+        pos: Pos,
         r: f32,
         start: f32,
         end: f32,
         thickness: f32,
         segments: u32,
     },
+}
+
+impl<'a> Shape<'a> {
+    /// 有锚点坐标的形状返回 `Some(pos)`；坐标即位置的形状（Line/Triangle/…）返回 `None`。
+    pub fn position(&self) -> Option<Pos> {
+        match *self {
+            Shape::Rect { pos, .. }
+            | Shape::RoundedRect { pos, .. }
+            | Shape::Circle { pos, .. }
+            | Shape::Ellipse { pos, .. }
+            | Shape::Arc { pos, .. }
+            | Shape::RectOutline { pos, .. }
+            | Shape::CircleOutline { pos, .. }
+            | Shape::EllipseOutline { pos, .. }
+            | Shape::RoundedRectOutline { pos, .. }
+            | Shape::ArcOutline { pos, .. } => Some(pos),
+            Shape::Line { .. }
+            | Shape::LineChain { .. }
+            | Shape::Triangle { .. }
+            | Shape::Polygon { .. }
+            | Shape::TriangleOutline { .. }
+            | Shape::PolygonOutline { .. } => None,
+        }
+    }
 }
 
 /// 单次绘制的可选覆盖（外层 `None` = 保持 batch 状态，**不写回**）。
@@ -148,258 +173,193 @@ impl ShapeOverride {
 
 impl<'a> Shape<'a> {
     /// 将形状写入 batch。`color` 为解析后的有效色（已合并状态与覆盖）。
+    /// 位置由 `draw_shape` 根据 `self.position()` 在 batch transform 中设置。
     pub fn append(&self, batch: &mut DrawBatch, color: Color) {
         match *self {
-            Shape::Rect { x, y, w, h } => emit_rectangle(batch, x, y, w, h, color),
-            Shape::RoundedRect { x, y, w, h, radius } => {
-                emit_rounded_rect(batch, x, y, w, h, radius, color)
+            Shape::Rect { w, h, .. } => emit_rectangle(batch, w, h, color),
+            Shape::RoundedRect { w, h, radius, .. } => {
+                emit_rounded_rect(batch, w, h, radius, color)
             }
-            Shape::Circle { cx, cy, r } => emit_circle(batch, cx, cy, r, color),
-            Shape::Ellipse { cx, cy, rx, ry } => emit_ellipse(batch, cx, cy, rx, ry, color),
+            Shape::Circle { r, .. } => emit_circle(batch, r, color),
+            Shape::Ellipse { rx, ry, .. } => emit_ellipse(batch, rx, ry, color),
             Shape::Line {
-                x1,
-                y1,
-                x2,
-                y2,
-                thickness,
+                x1, y1, x2, y2, thickness,
             } => emit_line(batch, x1, y1, x2, y2, thickness, color),
             Shape::LineChain { points, thickness } => {
                 emit_line_chain(batch, points, thickness, color)
             }
             Shape::Triangle {
-                x1,
-                y1,
-                x2,
-                y2,
-                x3,
-                y3,
+                x1, y1, x2, y2, x3, y3,
             } => emit_triangle(batch, x1, y1, x2, y2, x3, y3, color),
             Shape::Polygon { points } => emit_polygon(batch, points, color),
-            Shape::Arc {
-                cx,
-                cy,
-                r,
-                start,
-                end,
-            } => emit_arc(batch, cx, cy, r, start, end, color),
-            Shape::RectOutline {
-                x,
-                y,
-                w,
-                h,
-                thickness,
-            } => emit_rect_outline(batch, x, y, w, h, thickness, color),
-            Shape::CircleOutline {
-                cx,
-                cy,
-                r,
-                thickness,
-                segments,
-            } => emit_circle_outline(batch, cx, cy, r, thickness, color, segments),
-            Shape::EllipseOutline {
-                cx,
-                cy,
-                rx,
-                ry,
-                thickness,
-                segments,
-            } => emit_ellipse_outline(batch, cx, cy, rx, ry, thickness, color, segments),
-            Shape::RoundedRectOutline {
-                x,
-                y,
-                w,
-                h,
-                radius,
-                thickness,
-                corner_segments,
-            } => emit_rounded_rect_outline(
-                batch,
-                x,
-                y,
-                w,
-                h,
-                radius,
-                thickness,
-                color,
-                corner_segments,
-            ),
+            Shape::Arc { r, start, end, .. } => emit_arc(batch, r, start, end, color),
+            Shape::RectOutline { w, h, thickness, .. } => {
+                emit_rect_outline(batch, w, h, thickness, color)
+            }
+            Shape::CircleOutline { r, thickness, segments, .. } => {
+                emit_circle_outline(batch, r, thickness, color, segments)
+            }
+            Shape::EllipseOutline { rx, ry, thickness, segments, .. } => {
+                emit_ellipse_outline(batch, rx, ry, thickness, color, segments)
+            }
+            Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => {
+                emit_rounded_rect_outline(batch, w, h, radius, thickness, color, corner_segments)
+            }
             Shape::TriangleOutline {
-                x1,
-                y1,
-                x2,
-                y2,
-                x3,
-                y3,
-                thickness,
+                x1, y1, x2, y2, x3, y3, thickness,
             } => emit_triangle_outline(batch, x1, y1, x2, y2, x3, y3, thickness, color),
             Shape::PolygonOutline { points, thickness } => {
                 emit_polygon_outline(batch, points, thickness, color)
             }
-            Shape::ArcOutline {
-                cx,
-                cy,
-                r,
-                start,
-                end,
-                thickness,
-                segments,
-            } => emit_arc_outline(batch, cx, cy, r, start, end, thickness, color, segments),
+            Shape::ArcOutline { r, start, end, thickness, segments, .. } => {
+                emit_arc_outline(batch, r, start, end, thickness, color, segments)
+            }
         }
     }
 }
 
-/// 通过 [`Shape`] + [`ShapeOverride`] 绘制。覆盖项仅作用于本次，结束后恢复 batch 状态。
+/// 通过 [`Shape`]（含 `Pos`）+ [`ShapeOverride`] 绘制。
+/// 覆盖项仅作用于本次，结束后恢复 batch 状态。
+/// 有 `position()` 的形状在 batch transform 中设置平移，其余保留 batch 当前变换。
 pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
-    batch.with_override(opts, |batch, color| {
-        shape.append(batch, color);
-    });
+    let saved_color = batch.color;
+    let saved_feather = batch.sdf_feather;
+    let saved_uv = batch.uv;
+    let saved_xform = batch.transform;
+    let saved_xform_cache = batch.cached_transform_index;
+    let saved_bg = batch.bind_group.clone();
+    let tex_overridden = opts.bind_group.is_some();
+
+    if let Some(c) = opts.color {
+        batch.color = c;
+    }
+    if let Some(f) = opts.sdf_feather {
+        batch.sdf_feather = f;
+    }
+    if let Some(uv) = opts.uv {
+        batch.uv = uv;
+    }
+
+    let xform_set = shape.position().is_some() || opts.transform.is_some();
+    if xform_set {
+        let base = match shape.position() {
+            Some(p) => Transform::translation(p.x, p.y),
+            None => Transform::IDENTITY,
+        };
+        batch.transform = Some(match opts.transform {
+            Some(t) => base.then(&t),
+            None => base,
+        });
+        batch.cached_transform_index = None;
+    }
+
+    if let Some(bg) = opts.bind_group {
+        batch.add_texture_segment(batch.bind_group.clone());
+        batch.bind_group = bg;
+    }
+
+    shape.append(batch, batch.color);
+
+    if tex_overridden {
+        batch.add_texture_segment(batch.bind_group.clone());
+        batch.bind_group = saved_bg;
+    }
+    batch.transform = saved_xform;
+    batch.cached_transform_index = saved_xform_cache;
+    batch.uv = saved_uv;
+    batch.sdf_feather = saved_feather;
+    batch.color = saved_color;
 }
 
 /// 填充矩形。`color`: `None` = `batch.color`，`Some` = 仅本次。
-pub fn draw_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Rect { x, y, w, h }, ShapeOverride::from_color(color));
-}
-
-/// 填充圆（shader SDF，完美边缘）。
-pub fn draw_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Circle { cx, cy, r }, ShapeOverride::from_color(color));
-}
-
-/// 绘制线段（shader SDF）。
-pub fn draw_line(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Option<Color>) {
+pub fn draw_rectangle(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, color: Option<Color>) {
     draw_shape(
         batch,
-        &Shape::Line {
-            x1,
-            y1,
-            x2,
-            y2,
-            thickness,
-        },
+        &Shape::Rect { pos, w, h },
         ShapeOverride::from_color(color),
     );
 }
 
+/// 填充圆（shader SDF，完美边缘）。
+pub fn draw_circle(batch: &mut DrawBatch, pos: Pos, r: f32, color: Option<Color>) {
+    draw_shape(batch, &Shape::Circle { pos, r }, ShapeOverride::from_color(color));
+}
+
+/// 绘制线段（shader SDF）。坐标即位置，不走 Pos 解耦。
+pub fn draw_line(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Option<Color>) {
+    draw_shape(batch, &Shape::Line { x1, y1, x2, y2, thickness }, ShapeOverride::from_color(color));
+}
+
 /// 填充椭圆（shader SDF）。
-pub fn draw_ellipse(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, color: Option<Color>) {
+pub fn draw_ellipse(batch: &mut DrawBatch, pos: Pos, rx: f32, ry: f32, color: Option<Color>) {
     draw_shape(
         batch,
-        &Shape::Ellipse { cx, cy, rx, ry },
+        &Shape::Ellipse { pos, rx, ry },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 填充圆角矩形（shader SDF）。
-pub fn draw_rounded_rect(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Option<Color>) {
+pub fn draw_rounded_rect(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, radius: f32, color: Option<Color>) {
     draw_shape(
         batch,
-        &Shape::RoundedRect {
-            x,
-            y,
-            w,
-            h,
-            radius,
-        },
+        &Shape::RoundedRect { pos, w, h, radius },
         ShapeOverride::from_color(color),
     );
 }
 
-/// 绘制三角形（shader SDF）。
+/// 绘制三角形（shader SDF）。坐标即位置，不走 Pos 解耦。
 pub fn draw_triangle(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, color: Option<Color>) {
-    draw_shape(
-        batch,
-        &Shape::Triangle {
-            x1,
-            y1,
-            x2,
-            y2,
-            x3,
-            y3,
-        },
-        ShapeOverride::from_color(color),
-    );
+    draw_shape(batch, &Shape::Triangle { x1, y1, x2, y2, x3, y3 }, ShapeOverride::from_color(color));
 }
 
 /// 绘制凸多边形（shader SDF，边数据通过 storage buffer 传递）。
-/// 顶点须按逆时针排列。
+/// 顶点须按逆时针排列。坐标即位置，不走 Pos 解耦。
 pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Option<Color>) {
     draw_shape(batch, &Shape::Polygon { points }, ShapeOverride::from_color(color));
 }
 
 /// 绘制弧线/扇形（shader SDF）。
-pub fn draw_arc(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, start_angle: f32, end_angle: f32, color: Option<Color>) {
+pub fn draw_arc(batch: &mut DrawBatch, pos: Pos, r: f32, start_angle: f32, end_angle: f32, color: Option<Color>) {
     draw_shape(
         batch,
-        &Shape::Arc {
-            cx,
-            cy,
-            r,
-            start: start_angle,
-            end: end_angle,
-        },
+        &Shape::Arc { pos, r, start: start_angle, end: end_angle },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边矩形
-pub fn draw_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Option<Color>) {
+pub fn draw_rect_outline(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, thickness: f32, color: Option<Color>) {
     draw_shape(
         batch,
-        &Shape::RectOutline {
-            x,
-            y,
-            w,
-            h,
-            thickness,
-        },
+        &Shape::RectOutline { pos, w, h, thickness },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边圆环
-pub fn draw_circle_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_circle_outline(batch: &mut DrawBatch, pos: Pos, r: f32, thickness: f32, color: Option<Color>, segments: u32) {
     draw_shape(
         batch,
-        &Shape::CircleOutline {
-            cx,
-            cy,
-            r,
-            thickness,
-            segments,
-        },
+        &Shape::CircleOutline { pos, r, thickness, segments },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边椭圆环
-pub fn draw_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_ellipse_outline(batch: &mut DrawBatch, pos: Pos, rx: f32, ry: f32, thickness: f32, color: Option<Color>, segments: u32) {
     draw_shape(
         batch,
-        &Shape::EllipseOutline {
-            cx,
-            cy,
-            rx,
-            ry,
-            thickness,
-            segments,
-        },
+        &Shape::EllipseOutline { pos, rx, ry, thickness, segments },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边圆角矩形（line_chain SDF 沿中心线采样）。
-pub fn draw_rounded_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, radius: f32, thickness: f32, color: Option<Color>, corner_segments: u32) {
+pub fn draw_rounded_rect_outline(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, radius: f32, thickness: f32, color: Option<Color>, corner_segments: u32) {
     draw_shape(
         batch,
-        &Shape::RoundedRectOutline {
-            x,
-            y,
-            w,
-            h,
-            radius,
-            thickness,
-            corner_segments,
-        },
+        &Shape::RoundedRectOutline { pos, w, h, radius, thickness, corner_segments },
         ShapeOverride::from_color(color),
     );
 }
@@ -407,52 +367,24 @@ pub fn draw_rounded_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, 
 /// 连续折线（shader SDF，segment 数据通过 storage buffer 传递）。
 /// 首尾坐标相近时自动闭合。
 pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Option<Color>) {
-    draw_shape(
-        batch,
-        &Shape::LineChain { points, thickness },
-        ShapeOverride::from_color(color),
-    );
+    draw_shape(batch, &Shape::LineChain { points, thickness }, ShapeOverride::from_color(color));
 }
 
 /// 描边三角形
 pub fn draw_triangle_outline(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, thickness: f32, color: Option<Color>) {
-    draw_shape(
-        batch,
-        &Shape::TriangleOutline {
-            x1,
-            y1,
-            x2,
-            y2,
-            x3,
-            y3,
-            thickness,
-        },
-        ShapeOverride::from_color(color),
-    );
+    draw_shape(batch, &Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness }, ShapeOverride::from_color(color));
 }
 
 /// 描边多边形
 pub fn draw_polygon_outline(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Option<Color>) {
-    draw_shape(
-        batch,
-        &Shape::PolygonOutline { points, thickness },
-        ShapeOverride::from_color(color),
-    );
+    draw_shape(batch, &Shape::PolygonOutline { points, thickness }, ShapeOverride::from_color(color));
 }
 
 /// 描边扇形（弧线 + 圆心到两端的连线）
-pub fn draw_arc_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, start_angle: f32, end_angle: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_arc_outline(batch: &mut DrawBatch, pos: Pos, r: f32, start_angle: f32, end_angle: f32, thickness: f32, color: Option<Color>, segments: u32) {
     draw_shape(
         batch,
-        &Shape::ArcOutline {
-            cx,
-            cy,
-            r,
-            start: start_angle,
-            end: end_angle,
-            thickness,
-            segments,
-        },
+        &Shape::ArcOutline { pos, r, start: start_angle, end: end_angle, thickness, segments },
         ShapeOverride::from_color(color),
     );
 }
@@ -489,24 +421,23 @@ fn join_arc(prev: (f32, f32), at: (f32, f32), next: (f32, f32)) -> (f32, f32) {
     (sa, sa + span)
 }
 
-fn emit_rectangle(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, color: Color) {
+fn emit_rectangle(batch: &mut DrawBatch, w: f32, h: f32, color: Color) {
     match batch.sdf_feather {
         None => {
             if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
-            let x2 = x + w; let y2 = y + h;
             let uv = batch.uv;
-            for (px, py, u, v) in &[(x, y, uv.u0, uv.v0), (x2, y, uv.u1, uv.v0), (x2, y2, uv.u1, uv.v1), (x, y2, uv.u0, uv.v1)] {
+            for (px, py, u, v) in &[(0.0, 0.0, uv.u0, uv.v0), (w, 0.0, uv.u1, uv.v0), (w, h, uv.u1, uv.v1), (0.0, h, uv.u0, uv.v1)] {
                 batch.vertices.push(Vertex::new_uv_xform(*px, *py, *u, *v, color, idx));
             }
             batch.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        Some(_) => emit_rounded_rect(batch, x, y, w, h, 0.0, color),
+        Some(_) => emit_rounded_rect(batch, w, h, 0.0, color),
     }
 }
 
-fn emit_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
+fn emit_circle(batch: &mut DrawBatch, r: f32, color: Color) {
     if r == 0.0 || color.a == 0.0 { return; }
     match batch.sdf_feather {
         None => {
@@ -514,15 +445,15 @@ fn emit_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
             let idx = batch.current_transform_index();
             batch.vertices.reserve(n as usize + 2);
             batch.indices.reserve(n as usize * 3);
-            let bounds = (cx - r, cy - r, cx + r, cy + r);
+            let bounds = (-r, -r, r, r);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
-            let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
+            let (cu, cv) = shape_uv(uv, 0.0, 0.0, bounds);
+            batch.vertices.push(Vertex::new_uv_xform(0.0, 0.0, cu, cv, color, idx));
             for i in 0..=n {
                 let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-                let px = cx + r * a.cos();
-                let py = cy + r * a.sin();
+                let px = r * a.cos();
+                let py = r * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
@@ -534,13 +465,13 @@ fn emit_circle(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, color: Color) {
             batch.note_sdf();
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
-            let bounds = (cx - r, cy - r, cx + r, cy + r);
+            let bounds = (-r, -r, r, r);
             let uv = &batch.uv;
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                let px = cx + dx * r; let py = cy + dy * r;
+                let px = dx * r; let py = dy * r;
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
-                vx.sdf_params = [cx, cy, r, r];
+                vx.sdf_params = [0.0, 0.0, r, r];
                 vx.sdf_type = 1; vx.sdf_feather = f;
                 batch.vertices.push(vx);
             }
@@ -587,7 +518,7 @@ fn emit_line(
 }
 
 fn emit_ellipse(
-    batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, color: Color,
+    batch: &mut DrawBatch, rx: f32, ry: f32, color: Color,
 ) {
     if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
     match batch.sdf_feather {
@@ -596,15 +527,15 @@ fn emit_ellipse(
             let idx = batch.current_transform_index();
             batch.vertices.reserve(n as usize + 2);
             batch.indices.reserve(n as usize * 3);
-            let bounds = (cx - rx, cy - ry, cx + rx, cy + ry);
+            let bounds = (-rx, -ry, rx, ry);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
-            let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
+            let (cu, cv) = shape_uv(uv, 0.0, 0.0, bounds);
+            batch.vertices.push(Vertex::new_uv_xform(0.0, 0.0, cu, cv, color, idx));
             for i in 0..=n {
                 let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-                let px = cx + rx * a.cos();
-                let py = cy + ry * a.sin();
+                let px = rx * a.cos();
+                let py = ry * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
@@ -616,13 +547,13 @@ fn emit_ellipse(
             batch.note_sdf();
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
-            let bounds = (cx - rx, cy - ry, cx + rx, cy + ry);
+            let bounds = (-rx, -ry, rx, ry);
             let uv = &batch.uv;
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                let px = cx + dx * rx; let py = cy + dy * ry;
+                let px = dx * rx; let py = dy * ry;
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
-                vx.sdf_params = [cx, cy, rx, ry];
+                vx.sdf_params = [0.0, 0.0, rx, ry];
                 vx.sdf_type = 1; vx.sdf_feather = f;
                 batch.vertices.push(vx);
             }
@@ -632,28 +563,27 @@ fn emit_ellipse(
 }
 
 fn emit_rounded_rect(
-    batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32,
+    batch: &mut DrawBatch, w: f32, h: f32,
     radius: f32, color: Color,
 ) {
     if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     match batch.sdf_feather {
         None if r == 0.0 => {
-            emit_rectangle(batch, x, y, w, h, color);
+            emit_rectangle(batch, w, h, color);
         }
         None => {
             let idx = batch.current_transform_index();
             let cs = ((r * std::f32::consts::FRAC_PI_2) as u32).clamp(8, 64);
-            // 中心四边形 + 4 边矩形 + 4 角扇区 (1+cs+1 顶点/角)
             let est_v = 4 + 4 * 4 + 4 * (cs as usize + 2);
             batch.vertices.reserve(est_v);
             batch.indices.reserve(est_v * 3);
-            let bounds = (x, y, x + w, y + h);
+            let bounds = (0.0, 0.0, w, h);
             let uv = &batch.uv;
-            let xr = x + r;
-            let yr = y + r;
-            let x2 = x + w - r;
-            let y2 = y + h - r;
+            let xr = r;
+            let yr = r;
+            let x2 = w - r;
+            let y2 = h - r;
 
             if x2 > xr && y2 > yr {
                 let base = batch.vertices.len() as u32;
@@ -669,9 +599,9 @@ fn emit_rounded_rect(
             }
 
             for &(ex, ey, ew, eh) in &[
-                (xr, y,  w - 2.0 * r, r),
+                (xr, 0.0,  w - 2.0 * r, r),
                 (xr, y2, w - 2.0 * r, r),
-                (x,  yr, r, h - 2.0 * r),
+                (0.0,  yr, r, h - 2.0 * r),
                 (x2, yr, r, h - 2.0 * r),
             ] {
                 if ew <= 0.0 || eh <= 0.0 { continue; }
@@ -714,13 +644,13 @@ fn emit_rounded_rect(
         }
         Some(f) => {
             batch.note_sdf();
-            let cx = x + w * 0.5;
-            let cy = y + h * 0.5;
+            let cx = w * 0.5;
+            let cy = h * 0.5;
             let hw = w * 0.5;
             let hh = h * 0.5;
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
-            let bounds = (x, y, x + w, y + h);
+            let bounds = (0.0, 0.0, w, h);
             let uv = &batch.uv;
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let px = cx + dx * (hw + f); let py = cy + dy * (hh + f);
@@ -849,7 +779,7 @@ fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
 }
 
 fn emit_arc(
-    batch: &mut DrawBatch, cx: f32, cy: f32, r: f32,
+    batch: &mut DrawBatch, r: f32,
     start_angle: f32, end_angle: f32, color: Color,
 ) {
     if r == 0.0 || color.a == 0.0 { return; }
@@ -859,15 +789,15 @@ fn emit_arc(
         None => {
             let n = ((r * span) as u32).clamp(16, 256);
             let idx = batch.current_transform_index();
-            let bounds = (cx - r, cy - r, cx + r, cy + r);
+            let bounds = (-r, -r, r, r);
             let uv = &batch.uv;
             let base = batch.vertices.len() as u32;
-            let (cu, cv) = shape_uv(uv, cx, cy, bounds);
-            batch.vertices.push(Vertex::new_uv_xform(cx, cy, cu, cv, color, idx));
+            let (cu, cv) = shape_uv(uv, 0.0, 0.0, bounds);
+            batch.vertices.push(Vertex::new_uv_xform(0.0, 0.0, cu, cv, color, idx));
             for i in 0..=n {
                 let a = start_angle + (i as f32 / n as f32) * (end_angle - start_angle);
-                let px = cx + r * a.cos();
-                let py = cy + r * a.sin();
+                let px = r * a.cos();
+                let py = r * a.sin();
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 batch.vertices.push(Vertex::new_uv_xform(px, py, u, v, color, idx));
             }
@@ -880,13 +810,13 @@ fn emit_arc(
             let ext = r + f;
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
-            let bounds = (cx - r, cy - r, cx + r, cy + r);
+            let bounds = (-r, -r, r, r);
             let uv = &batch.uv;
             for (dx, dy) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                let px = cx + dx * ext; let py = cy + dy * ext;
+                let px = dx * ext; let py = dy * ext;
                 let (u, v) = shape_uv(uv, px, py, bounds);
                 let mut vx = Vertex::new_uv_xform(px, py, u, v, color, idx);
-                vx.sdf_params = [cx, cy, r, 0.0];
+                vx.sdf_params = [0.0, 0.0, r, 0.0];
                 vx.sdf_extra = [start_angle, end_angle];
                 vx.sdf_type = 5; vx.sdf_feather = f;
                 batch.vertices.push(vx);
@@ -896,39 +826,39 @@ fn emit_arc(
     }
 }
 
-fn emit_rect_outline(batch: &mut DrawBatch, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Color) {
+fn emit_rect_outline(batch: &mut DrawBatch, w: f32, h: f32, thickness: f32, color: Color) {
     if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
     let half = thickness * 0.5;
-    let x2 = x + w;
-    let y2 = y + h;
+    let x2 = w;
+    let y2 = h;
     emit_line_chain(batch, &[
-        (x + half, y + half),
-        (x2 - half, y + half),
+        (half, half),
+        (x2 - half, half),
         (x2 - half, y2 - half),
-        (x + half, y2 - half),
-        (x + half, y + half),
+        (half, y2 - half),
+        (half, half),
     ], thickness, color);
 }
 
-fn emit_circle_outline(batch: &mut DrawBatch, cx: f32, cy: f32, r: f32, thickness: f32, color: Color, segments: u32) {
+fn emit_circle_outline(batch: &mut DrawBatch, r: f32, thickness: f32, color: Color, segments: u32) {
     if r == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
     let n = segments.max(8) as usize;
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
         let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-        pts.push((cx + r * a.cos(), cy + r * a.sin()));
+        pts.push((r * a.cos(), r * a.sin()));
     }
     pts.push(pts[0]);
     emit_line_chain(batch, &pts, thickness, color);
 }
 
-fn emit_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f32, thickness: f32, color: Color, segments: u32) {
+fn emit_ellipse_outline(batch: &mut DrawBatch, rx: f32, ry: f32, thickness: f32, color: Color, segments: u32) {
     if rx == 0.0 || ry == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
     let n = (segments as usize).max(16);
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
         let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-        pts.push((cx + rx * a.cos(), cy + ry * a.sin()));
+        pts.push((rx * a.cos(), ry * a.sin()));
     }
     pts.push(pts[0]);
     emit_line_chain(batch, &pts, thickness, color);
@@ -936,7 +866,7 @@ fn emit_ellipse_outline(batch: &mut DrawBatch, cx: f32, cy: f32, rx: f32, ry: f3
 
 fn emit_rounded_rect_outline(
     batch: &mut DrawBatch,
-    x: f32, y: f32, w: f32, h: f32,
+    w: f32, h: f32,
     radius: f32, thickness: f32,
     color: Color,
     corner_segments: u32,
@@ -944,7 +874,7 @@ fn emit_rounded_rect_outline(
     if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     if r == 0.0 {
-        emit_rect_outline(batch, x, y, w, h, thickness, color);
+        emit_rect_outline(batch, w, h, thickness, color);
         return;
     }
 
@@ -956,10 +886,10 @@ fn emit_rounded_rect_outline(
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(4 * (cs_usize + 1) + 1);
     let two_pi = 2.0 * PI;
     let corners: [(f32, f32, f32, f32); 4] = [
-        (x + r,     y + r,     PI,        PI * 1.5),
-        (x + w - r, y + r,     PI * 1.5,  two_pi),
-        (x + w - r, y + h - r, 0.0,       FRAC_PI_2),
-        (x + r,     y + h - r, FRAC_PI_2, PI),
+        (r,         r,         PI,        PI * 1.5),
+        (w - r,     r,         PI * 1.5,  two_pi),
+        (w - r,     h - r,     0.0,       FRAC_PI_2),
+        (r,         h - r,     FRAC_PI_2, PI),
     ];
     for (cx, cy, sa, ea) in corners {
         if cr > 0.0 {
@@ -1131,7 +1061,7 @@ fn emit_polygon_outline(batch: &mut DrawBatch, points: &[(f32, f32)], thickness:
 
 fn emit_arc_outline(
     batch: &mut DrawBatch,
-    cx: f32, cy: f32, r: f32,
+    r: f32,
     start_angle: f32, end_angle: f32,
     thickness: f32,
     color: Color,
@@ -1141,21 +1071,21 @@ fn emit_arc_outline(
         return;
     }
     let segments = segments.max(2);
-    let sx = cx + r * start_angle.cos();
-    let sy = cy + r * start_angle.sin();
-    let ex = cx + r * end_angle.cos();
-    let ey = cy + r * end_angle.sin();
+    let sx = r * start_angle.cos();
+    let sy = r * start_angle.sin();
+    let ex = r * end_angle.cos();
+    let ey = r * end_angle.sin();
 
     let mut points: Vec<(f32, f32)> = Vec::with_capacity(segments as usize + 3);
-    points.push((cx, cy));
+    points.push((0.0, 0.0));
     points.push((sx, sy));
     for i in 1..segments {
         let t = i as f32 / segments as f32;
         let angle = start_angle + t * (end_angle - start_angle);
-        points.push((cx + r * angle.cos(), cy + r * angle.sin()));
+        points.push((r * angle.cos(), r * angle.sin()));
     }
     points.push((ex, ey));
-    points.push((cx, cy));
+    points.push((0.0, 0.0));
     emit_line_chain(batch, &points, thickness, color);
 }
 
@@ -1171,7 +1101,7 @@ mod tests {
     #[test]
     fn rect_produces_vertices() {
         let mut batch = test_batch();
-        draw_rectangle(&mut batch, 10.0, 20.0, 30.0, 40.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(10.0, 20.0), 30.0, 40.0, Some(WHITE));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1180,7 +1110,7 @@ mod tests {
     fn none_color_uses_batch_color() {
         let mut batch = test_batch();
         batch.set_color(GREEN);
-        draw_rectangle(&mut batch, 0.0, 0.0, 10.0, 10.0, None);
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 10.0, 10.0, None);
         assert_eq!(batch.vertices[0].color, [GREEN.r, GREEN.g, GREEN.b, GREEN.a]);
         assert_eq!(batch.color, GREEN);
     }
@@ -1189,7 +1119,7 @@ mod tests {
     fn some_color_does_not_write_batch_color() {
         let mut batch = test_batch();
         batch.set_color(WHITE);
-        draw_rectangle(&mut batch, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         assert_eq!(batch.vertices[0].color, [RED.r, RED.g, RED.b, RED.a]);
         assert_eq!(batch.color, WHITE);
     }
@@ -1202,22 +1132,17 @@ mod tests {
         batch.set_position(10.0, 20.0);
         draw_shape(
             &mut batch,
-            &Shape::Circle {
-                cx: 0.0,
-                cy: 0.0,
-                r: 5.0,
-            },
+            &Shape::Circle { pos: Pos::new(100.0, 200.0), r: 5.0 },
             ShapeOverride::new()
                 .color(RED)
-                .sdf(1.0)
-                .position(100.0, 200.0),
+                .sdf(1.0),
         );
         assert_eq!(batch.sdf_feather, None);
         assert_eq!(batch.color, WHITE);
         assert_eq!(batch.vertices[0].sdf_type, 1);
         assert_eq!(batch.vertices[0].color, [RED.r, RED.g, RED.b, RED.a]);
         // 覆盖后的 shape 与 batch 后续 draw 应使用不同 transform_index
-        draw_rectangle(&mut batch, 0.0, 0.0, 1.0, 1.0, Some(BLUE));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 1.0, 1.0, Some(BLUE));
         let idx_override = batch.vertices[0].transform_index;
         let idx_restored = batch.vertices.last().unwrap().transform_index;
         assert_ne!(idx_override, idx_restored);
@@ -1227,16 +1152,12 @@ mod tests {
     fn draw_shape_matches_draw_circle_sdf() {
         let mut a = test_batch();
         a.sdf_feather = Some(1.0);
-        draw_circle(&mut a, 50.0, 60.0, 20.0, Some(RED));
+        draw_circle(&mut a, Pos::new(50.0, 60.0), 20.0, Some(RED));
         let mut b = test_batch();
         b.sdf_feather = Some(1.0);
         draw_shape(
             &mut b,
-            &Shape::Circle {
-                cx: 50.0,
-                cy: 60.0,
-                r: 20.0,
-            },
+            &Shape::Circle { pos: Pos::new(50.0, 60.0), r: 20.0 },
             ShapeOverride::from_color(Some(RED)),
         );
         assert_eq!(a.vertices.len(), b.vertices.len());
@@ -1251,8 +1172,8 @@ mod tests {
     #[test]
     fn rect_zero_size_skipped() {
         let mut batch = test_batch();
-        draw_rectangle(&mut batch, 0.0, 0.0, 0.0, 100.0, Some(WHITE));
-        draw_rectangle(&mut batch, 0.0, 0.0, 100.0, 0.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 0.0, 100.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 100.0, 0.0, Some(WHITE));
         assert!(batch.vertices.is_empty());
         assert!(batch.indices.is_empty());
     }
@@ -1260,7 +1181,7 @@ mod tests {
     #[test]
     fn rect_transparent_skipped() {
         let mut batch = test_batch();
-        draw_rectangle(&mut batch, 0.0, 0.0, 100.0, 100.0, Some(Color::new(1.0, 0.0, 0.0, 0.0)));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 100.0, 100.0, Some(Color::new(1.0, 0.0, 0.0, 0.0)));
         assert!(batch.vertices.is_empty());
     }
 
@@ -1268,7 +1189,7 @@ mod tests {
     fn circle_sdf_produces_quad() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
-        draw_circle(&mut batch, 100.0, 100.0, 50.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(100.0, 100.0), 50.0, Some(RED));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1276,7 +1197,7 @@ mod tests {
     #[test]
     fn circle_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_circle(&mut batch, 0.0, 0.0, 0.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(0.0, 0.0), 0.0, Some(RED));
         assert!(batch.vertices.is_empty());
     }
 
@@ -1284,7 +1205,7 @@ mod tests {
     fn circle_sdf_min_segments() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
-        draw_circle(&mut batch, 0.0, 0.0, 10.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(0.0, 0.0), 10.0, Some(RED));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1326,7 +1247,7 @@ mod tests {
     #[test]
     fn ellipse_geometry_produces_fan() {
         let mut batch = test_batch();
-        draw_ellipse(&mut batch, 0.0, 0.0, 30.0, 20.0, Some(BLUE));
+        draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 30.0, 20.0, Some(BLUE));
         assert!(batch.vertices.len() > 4);
         assert!(batch.indices.len() > 6);
         for v in &batch.vertices {
@@ -1338,7 +1259,7 @@ mod tests {
     fn ellipse_sdf_produces_quad() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
-        draw_ellipse(&mut batch, 0.0, 0.0, 30.0, 20.0, Some(BLUE));
+        draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 30.0, 20.0, Some(BLUE));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1346,15 +1267,15 @@ mod tests {
     #[test]
     fn ellipse_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_ellipse(&mut batch, 0.0, 0.0, 0.0, 10.0, Some(BLUE));
-        draw_ellipse(&mut batch, 0.0, 0.0, 10.0, 0.0, Some(BLUE));
+        draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 0.0, 10.0, Some(BLUE));
+        draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 10.0, 0.0, Some(BLUE));
         assert!(batch.vertices.is_empty());
     }
 
     #[test]
     fn rounded_rect_geometry_produces_triangles() {
         let mut batch = test_batch();
-        draw_rounded_rect(&mut batch, 10.0, 10.0, 100.0, 60.0, 10.0, Some(GREEN));
+        draw_rounded_rect(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, 10.0, Some(GREEN));
         assert!(batch.vertices.len() > 4);
         assert!(batch.indices.len() > 6);
         for v in &batch.vertices {
@@ -1366,7 +1287,7 @@ mod tests {
     fn rounded_rect_sdf_produces_quad() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
-        draw_rounded_rect(&mut batch, 10.0, 10.0, 100.0, 60.0, 10.0, Some(GREEN));
+        draw_rounded_rect(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, 10.0, Some(GREEN));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1374,7 +1295,7 @@ mod tests {
     #[test]
     fn rounded_rect_zero_size_skipped() {
         let mut batch = test_batch();
-        draw_rounded_rect(&mut batch, 0.0, 0.0, 0.0, 100.0, 5.0, Some(WHITE));
+        draw_rounded_rect(&mut batch, Pos::new(0.0, 0.0), 0.0, 100.0, 5.0, Some(WHITE));
         assert!(batch.vertices.is_empty());
     }
 
@@ -1430,7 +1351,7 @@ mod tests {
     #[test]
     fn arc_geometry_produces_fan() {
         let mut batch = test_batch();
-        draw_arc(&mut batch, 0.0, 0.0, 50.0, 0.0, std::f32::consts::PI, Some(RED));
+        draw_arc(&mut batch, Pos::new(0.0, 0.0), 50.0, 0.0, std::f32::consts::PI, Some(RED));
         assert!(batch.vertices.len() > 4);
         assert!(batch.indices.len() > 6);
         for v in &batch.vertices {
@@ -1442,7 +1363,7 @@ mod tests {
     fn arc_sdf_produces_quad() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
-        draw_arc(&mut batch, 0.0, 0.0, 50.0, 0.0, std::f32::consts::PI, Some(RED));
+        draw_arc(&mut batch, Pos::new(0.0, 0.0), 50.0, 0.0, std::f32::consts::PI, Some(RED));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
     }
@@ -1450,7 +1371,7 @@ mod tests {
     #[test]
     fn arc_zero_radius_skipped() {
         let mut batch = test_batch();
-        draw_arc(&mut batch, 0.0, 0.0, 0.0, 0.0, 1.0, Some(RED));
+        draw_arc(&mut batch, Pos::new(0.0, 0.0), 0.0, 0.0, 1.0, Some(RED));
         assert!(batch.vertices.is_empty());
     }
 
@@ -1458,8 +1379,8 @@ mod tests {
     fn multiple_shapes_in_one_batch() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
-        draw_rectangle(&mut batch, 0.0, 0.0, 10.0, 10.0, Some(RED));
-        draw_circle(&mut batch, 100.0, 100.0, 5.0, Some(BLUE));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(100.0, 100.0), 5.0, Some(BLUE));
         draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, Some(GREEN));
 
         assert_eq!(batch.vertices.len(), 4 + 4 + 4);
@@ -1469,7 +1390,7 @@ mod tests {
     #[test]
     fn rect_default_mode_is_geometry() {
         let mut batch = test_batch();
-        draw_rectangle(&mut batch, 10.0, 10.0, 100.0, 60.0, Some(GREEN));
+        draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, Some(GREEN));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
         for v in &batch.vertices {
@@ -1481,7 +1402,7 @@ mod tests {
     fn rect_geometry_mode_produces_triangles() {
         let mut batch = test_batch();
         batch.sdf_feather = None;
-        draw_rectangle(&mut batch, 10.0, 20.0, 30.0, 40.0, Some(WHITE));
+        draw_rectangle(&mut batch, Pos::new(10.0, 20.0), 30.0, 40.0, Some(WHITE));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
         for v in &batch.vertices {
@@ -1493,7 +1414,7 @@ mod tests {
     fn circle_geometry_mode_produces_triangle_fan() {
         let mut batch = test_batch();
         batch.sdf_feather = None;
-        draw_circle(&mut batch, 100.0, 100.0, 50.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(100.0, 100.0), 50.0, Some(RED));
         let n = 256u32;
         assert_eq!(batch.vertices.len() as u32, 1 + n + 1);
         assert_eq!(batch.indices.len() as u32, n * 3);

@@ -13,10 +13,10 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
     if sdf > 0.0 {
         batch.sdf_feather = Some(sdf);
     }
-    draw_rounded_rect(batch, 160.0, 10.0, 140.0, 80.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
+    draw_rounded_rect(batch, Pos::new(160.0, 10.0), 140.0, 80.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
     draw_triangle(batch, 80.0, 180.0, 30.0, 130.0, 150.0, 130.0, Some(YELLOW));
     draw_triangle(batch, 170.0, 100.0, 210.0, 160.0, 130.0, 180.0, Some(ORANGE));
-    draw_circle(batch, 260.0, 130.0, 50.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
+    draw_circle(batch, Pos::new(260.0, 130.0), 50.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
     draw_line(batch, 10.0, 110.0, 310.0, 110.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
     draw_line_chain(batch, &[(10.0, 30.0), (80.0, 20.0), (150.0, 50.0)], 3.0, Some(WHITE));
     draw_text(&mut batch.texts, label,

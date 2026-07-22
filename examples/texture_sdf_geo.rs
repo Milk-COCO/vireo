@@ -7,21 +7,21 @@ use std::f32::consts::PI;
 
 fn draw_shapes(batch: &mut DrawBatch) {
     // 第一行：填充形状
-    draw_rectangle(batch, 10.0, 10.0, 90.0, 65.0, Some(WHITE));
-    draw_rounded_rect(batch, 120.0, 10.0, 90.0, 65.0, 14.0, Some(WHITE));
+    draw_rectangle(batch, Pos::new(10.0, 10.0), 90.0, 65.0, Some(WHITE));
+    draw_rounded_rect(batch, Pos::new(120.0, 10.0), 90.0, 65.0, 14.0, Some(WHITE));
     draw_triangle(batch, 240.0, 75.0, 280.0, 10.0, 320.0, 75.0, Some(WHITE));
-    draw_circle(batch, 390.0, 42.0, 32.0, Some(WHITE));
-    draw_ellipse(batch, 480.0, 42.0, 45.0, 28.0, Some(WHITE));
-    draw_arc(batch, 580.0, 42.0, 32.0, 0.0, PI * 1.3, Some(WHITE));
+    draw_circle(batch, Pos::new(390.0, 42.0), 32.0, Some(WHITE));
+    draw_ellipse(batch, Pos::new(480.0, 42.0), 45.0, 28.0, Some(WHITE));
+    draw_arc(batch, Pos::new(580.0, 42.0), 32.0, 0.0, PI * 1.3, Some(WHITE));
     draw_polygon(batch, &[(680.0, 10.0), (730.0, 10.0), (730.0, 75.0), (680.0, 75.0)], Some(WHITE));
 
     // 第二行：折线 + 描边
     draw_line_chain(batch, &[(10.0, 120.0), (80.0, 100.0), (150.0, 110.0)], 5.0, Some(WHITE));
     draw_line(batch, 190.0, 110.0, 310.0, 110.0, 5.0, Some(WHITE));
-    draw_rect_outline(batch, 350.0, 90.0, 60.0, 45.0, 3.0, Some(WHITE));
-    draw_rounded_rect_outline(batch, 440.0, 90.0, 60.0, 45.0, 10.0, 3.0, Some(WHITE), 8);
-    draw_circle_outline(batch, 560.0, 112.0, 22.0, 3.0, Some(WHITE), 32);
-    draw_arc_outline(batch, 630.0, 112.0, 25.0, 0.0, PI * 1.2, 3.0, Some(WHITE), 24);
+    draw_rect_outline(batch, Pos::new(350.0, 90.0), 60.0, 45.0, 3.0, Some(WHITE));
+    draw_rounded_rect_outline(batch, Pos::new(440.0, 90.0), 60.0, 45.0, 10.0, 3.0, Some(WHITE), 8);
+    draw_circle_outline(batch, Pos::new(560.0, 112.0), 22.0, 3.0, Some(WHITE), 32);
+    draw_arc_outline(batch, Pos::new(630.0, 112.0), 25.0, 0.0, PI * 1.2, 3.0, Some(WHITE), 24);
     draw_triangle_outline(batch, 700.0, 135.0, 720.0, 90.0, 740.0, 135.0, 2.5, Some(WHITE));
 }
 

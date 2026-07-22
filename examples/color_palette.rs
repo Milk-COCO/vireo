@@ -32,7 +32,7 @@ fn main() {
         ];
         for (i, c) in swatches.iter().enumerate() {
             let x = 30.0 + i as f32 * 70.0;
-            draw_rounded_rect(&mut batch, x, 60.0, 56.0, 56.0, 8.0, Some(*c));
+            draw_rounded_rect(&mut batch, Pos::new(x, 60.0), 56.0, 56.0, 8.0, Some(*c));
             draw_text(
                 &mut batch.texts,
                 &c.to_hex(),
@@ -58,7 +58,7 @@ fn main() {
         for (i, h) in hexes.iter().enumerate() {
             let c = Color::from_hex(h).unwrap_or(WHITE);
             let x = 30.0 + i as f32 * 70.0;
-            draw_rounded_rect(&mut batch, x, 170.0, 56.0, 56.0, 8.0, Some(c));
+            draw_rounded_rect(&mut batch, Pos::new(x, 170.0), 56.0, 56.0, 8.0, Some(c));
             draw_text(
                 &mut batch.texts,
                 *h,
@@ -86,11 +86,11 @@ fn main() {
         for i in 0..steps {
             let u = i as f32 / (steps - 1) as f32;
             let c = a.lerp(&b, u);
-            draw_rectangle(&mut batch, 30.0 + i as f32 * 18.0, 280.0, 16.0, 40.0, Some(c));
+            draw_rectangle(&mut batch, Pos::new(30.0 + i as f32 * 18.0, 280.0), 16.0, 40.0, Some(c));
         }
         // 动画 alpha
         let pulse = a.with_alpha(0.3 + 0.7 * (0.5 + 0.5 * t.sin()));
-        draw_circle(&mut batch, 560.0, 300.0, 36.0, Some(pulse));
+        draw_circle(&mut batch, Pos::new(560.0, 300.0), 36.0, Some(pulse));
         draw_text(
             &mut batch.texts,
             "lerp  |  with_alpha pulse",

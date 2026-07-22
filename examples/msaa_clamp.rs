@@ -61,8 +61,8 @@ fn main() {
         }
 
         let mut batch = DrawBatch::new();
-        draw_circle(&mut batch, 240.0, 160.0, 80.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
-        draw_rounded_rect(&mut batch, 40.0, 40.0, 120.0, 80.0, 16.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
+        draw_circle(&mut batch, Pos::new(240.0, 160.0), 80.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
+        draw_rounded_rect(&mut batch, Pos::new(40.0, 40.0), 120.0, 80.0, 16.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
         draw_text(
             &mut batch.texts,
             &format!(

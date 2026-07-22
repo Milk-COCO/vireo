@@ -44,9 +44,9 @@ fn main() {
         label(&mut batch, "1) set_color + draw_*(None | Some)", 20.0, 16.0);
 
         batch.set_color(ORANGE);
-        draw_circle(&mut batch, 60.0, 80.0, 28.0, None); // 笔刷橙
-        draw_circle(&mut batch, 130.0, 80.0, 28.0, Some(SKYBLUE)); // 仅本次
-        draw_circle(&mut batch, 200.0, 80.0, 28.0, None); // 仍是橙
+        draw_circle(&mut batch, Pos::new(60.0, 80.0), 28.0, None); // 笔刷橙
+        draw_circle(&mut batch, Pos::new(130.0, 80.0), 28.0, Some(SKYBLUE)); // 仅本次
+        draw_circle(&mut batch, Pos::new(200.0, 80.0), 28.0, None); // 仍是橙
         label(&mut batch, "None / Some(SKYBLUE) / None", 20.0, 118.0);
 
         // ---- 2) Shape enum ----
@@ -54,8 +54,7 @@ fn main() {
         draw_shape(
             &mut batch,
             &Shape::RoundedRect {
-                x: 280.0,
-                y: 48.0,
+                pos: Pos::new(280.0, 48.0),
                 w: 100.0,
                 h: 60.0,
                 radius: 14.0,
@@ -87,8 +86,7 @@ fn main() {
         draw_shape(
             &mut batch,
             &Shape::Circle {
-                cx: 70.0,
-                cy: 230.0,
+                pos: Pos::new(70.0, 230.0),
                 r: 36.0,
             },
             ShapeOverride::new().color(GREEN).geometry(),
@@ -100,8 +98,7 @@ fn main() {
         draw_shape(
             &mut batch,
             &Shape::Rect {
-                x: -30.0,
-                y: -20.0,
+                pos: Pos::new(-30.0, -20.0),
                 w: 60.0,
                 h: 40.0,
             },
@@ -121,7 +118,7 @@ fn main() {
         label(&mut batch, "transform(trs…)", 170.0, 280.0);
 
         // 验证：batch 状态仍是 sdf + 原点
-        draw_rounded_rect(&mut batch, 320.0, 200.0, 70.0, 50.0, 10.0, None);
+        draw_rounded_rect(&mut batch, Pos::new(320.0, 200.0), 70.0, 50.0, 10.0, None);
         label(&mut batch, "batch state after opts", 300.0, 280.0);
 
         // ---- 4) 贴图状态机 + 仅本次 texture / UV ----
@@ -140,15 +137,14 @@ fn main() {
 
                 // 笔刷贴图：后续白色矩形会采样 logo
                 batch.set_texture(Some(tex));
-                draw_rectangle(&mut batch, 30.0, 360.0, w, h, Some(WHITE));
+                draw_rectangle(&mut batch, Pos::new(30.0, 360.0), w, h, Some(WHITE));
                 label(&mut batch, "set_texture(Some)", 30.0, 360.0 + h + 4.0);
 
                 // 仅本次 UV 子区域（不改 batch.uv）
                 draw_shape(
                     &mut batch,
                     &Shape::Rect {
-                        x: 160.0,
-                        y: 360.0,
+                        pos: Pos::new(160.0, 360.0),
                         w: w,
                         h: h,
                     },
@@ -163,8 +159,7 @@ fn main() {
                 draw_shape(
                     &mut batch,
                     &Shape::RoundedRect {
-                        x: 290.0,
-                        y: 360.0,
+                        pos: Pos::new(290.0, 360.0),
                         w: 80.0,
                         h: 60.0,
                         radius: 12.0,
@@ -174,11 +169,11 @@ fn main() {
                 label(&mut batch, "clear_texture()", 290.0, 430.0);
 
                 // batch 仍有贴图
-                draw_rectangle(&mut batch, 400.0, 360.0, w * 0.7, h * 0.7, Some(WHITE));
+                draw_rectangle(&mut batch, Pos::new(400.0, 360.0), w * 0.7, h * 0.7, Some(WHITE));
                 label(&mut batch, "仍 set_texture", 400.0, 360.0 + h * 0.7 + 4.0);
 
                 batch.set_texture(None);
-                draw_rectangle(&mut batch, 520.0, 360.0, 70.0, 50.0, Some(SKYBLUE));
+                draw_rectangle(&mut batch, Pos::new(520.0, 360.0), 70.0, 50.0, Some(SKYBLUE));
                 label(&mut batch, "set_texture(None)", 500.0, 430.0);
             }
         } else {
@@ -191,22 +186,20 @@ fn main() {
             draw_shape(
                 &mut batch,
                 &Shape::Circle {
-                    cx: 80.0,
-                    cy: 400.0,
+                    pos: Pos::new(80.0, 400.0),
                     r: 30.0,
                 },
-                ShapeOverride::new().color(GOLD).position(80.0, 400.0),
+                ShapeOverride::new().color(GOLD),
             );
         }
 
         // ---- 5) batch.rectangle 方法 + 状态色 ----
         label(&mut batch, "5) batch.rectangle / Shape 方法", 620.0, 16.0);
         batch.set_color(Color::new(0.3, 0.7, 1.0, 1.0));
-        batch.rectangle(640.0, 50.0, 90.0, 50.0, None);
+        batch.rectangle(Pos::new(640.0, 50.0), 90.0, 50.0, None);
         batch.shape(
             &Shape::Ellipse {
-                cx: 760.0,
-                cy: 75.0,
+                pos: Pos::new(760.0, 75.0),
                 rx: 40.0,
                 ry: 25.0,
             },

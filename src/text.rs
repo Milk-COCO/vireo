@@ -788,6 +788,74 @@ impl From<TextAlign> for cosmic_text::Align {
     }
 }
 
+/// 文本定义（WHAT）——决定文字"长什么样"，在绘制前定型。
+/// 与位置（`Pos`）、覆盖（`TextOverride`）区分。
+/// `font_size` 为必填，其余可选。
+#[derive(Clone, Debug)]
+pub struct TextDef {
+    pub font_size: f32,
+    pub max_width: Option<f32>,
+    pub align: TextAlign,
+    pub attrs: Option<AttrsOwned>,
+}
+
+impl TextDef {
+    pub fn new(font_size: f32) -> Self {
+        Self {
+            font_size,
+            max_width: None,
+            align: TextAlign::Left,
+            attrs: None,
+        }
+    }
+
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.max_width = Some(w);
+        self
+    }
+
+    pub fn align(mut self, a: TextAlign) -> Self {
+        self.align = a;
+        self
+    }
+
+    pub fn attrs(mut self, a: AttrsOwned) -> Self {
+        self.attrs = Some(a);
+        self
+    }
+}
+
+/// 文本绘制覆盖（OVERRIDE）——覆盖 batch 文本状态机。
+/// 与 `ShapeOverride` 语义对称。`None` = 保持 batch 状态。
+#[derive(Clone, Debug, Default)]
+pub struct TextOverride {
+    /// `Some` = 覆盖 batch.text_color；`None` = 保持
+    pub color: Option<Color>,
+    /// `None` = 保持 batch.text_clip；`Some(None)` = 清除裁剪；`Some(Some(b))` = 设置
+    pub clip: Option<Option<crate::glyphon::TextBounds>>,
+}
+
+impl TextOverride {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn color(mut self, c: Color) -> Self {
+        self.color = Some(c);
+        self
+    }
+
+    pub fn clip(mut self, l: i32, t: i32, r: i32, b: i32) -> Self {
+        self.clip = Some(Some(crate::glyphon::TextBounds { left: l, top: t, right: r, bottom: b }));
+        self
+    }
+
+    pub fn clear_clip(mut self) -> Self {
+        self.clip = Some(None);
+        self
+    }
+}
+
 /// 文本渲染选项
 #[derive(Clone)]
 pub struct TextOptions {

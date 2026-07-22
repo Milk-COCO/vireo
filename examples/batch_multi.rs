@@ -11,7 +11,7 @@ fn main() {
 
         // Batch 1: 红色边框
         let mut batch1 = DrawBatch::new();
-        draw_rect_outline(&mut batch1, 10.0, 10.0, 100.0, 80.0, 2.0, Some(RED));
+        draw_rect_outline(&mut batch1, Pos::new(10.0, 10.0), 100.0, 80.0, 2.0, Some(RED));
 
         // Batch 2: 文字
         let mut batch2 = DrawBatch::new();
@@ -20,7 +20,7 @@ fn main() {
 
         // Batch 3: 绿色圆圈 + 文字
         let mut batch3 = DrawBatch::new();
-        draw_circle(&mut batch3, 40.0, 180.0, 20.0, Some(GREEN));
+        draw_circle(&mut batch3, Pos::new(40.0, 180.0), 20.0, Some(GREEN));
         draw_text(&mut batch3.texts, "Batch 3: 绿色圆圈",
             TextOptions::default().x(20.0).y(210.0).font_size(14.0).color(WHITE));
 

@@ -45,7 +45,7 @@ fn main() {
         // 父 batch 自身内容：画一个贯穿 scissor 的大矩形（应不被裁）
         draw_rectangle(
             &mut scissor_batch,
-            0.0, 0.0, 400.0, 320.0,
+            Pos::new(0.0, 0.0), 400.0, 320.0,
             Some(Color::new(0.15, 0.16, 0.22, 0.3)),
         );
         label(
@@ -67,7 +67,7 @@ fn main() {
 
             // 越界部分应被裁掉
             draw_rounded_rect(
-                &mut child, x, y, 30.0, 22.0, 4.0,
+                &mut child, Pos::new(x, y), 30.0, 22.0, 4.0,
                 Some(Color::new(
                     0.3 + hue * 0.6,
                     0.4 + (1.0 - hue) * 0.4,
@@ -80,7 +80,7 @@ fn main() {
 
         // scissor 外框标注
         draw_rect_outline(
-            &mut ui, 50.0, 50.0, 300.0, 220.0, 1.5,
+            &mut ui, Pos::new(50.0, 50.0), 300.0, 220.0, 1.5,
             Some(Color::new(0.3, 0.7, 1.0, 0.6)),
         );
         label(&mut ui, "scissor (scissor 范围)", 50.0, 36.0);
@@ -91,7 +91,7 @@ fn main() {
 
         draw_rectangle(
             &mut no_clip,
-            500.0, 50.0, 300.0, 220.0,
+            Pos::new(500.0, 50.0), 300.0, 220.0,
             Some(Color::new(0.15, 0.16, 0.22, 0.3)),
         );
         label(&mut no_clip, "无 scissor（子内容越界可见）", 510.0, 290.0);
@@ -106,7 +106,7 @@ fn main() {
             let hue = (i as f32 / n as f32 + t * 0.05 + 0.3) % 1.0;
 
             draw_rounded_rect(
-                &mut child2, x, y, 30.0, 22.0, 4.0,
+                &mut child2, Pos::new(x, y), 30.0, 22.0, 4.0,
                 Some(Color::new(
                     0.5 + hue * 0.3,
                     0.3 + (1.0 - hue) * 0.5,

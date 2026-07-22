@@ -104,8 +104,8 @@ fn main() {
             let r = 28.0 + force.unwrap_or(0.3) as f32 * 24.0;
             let hue = (*id as f32 * 0.17) % 1.0;
             let col = Color::new(0.3 + hue * 0.5, 0.6, 1.0 - hue * 0.4, 0.85);
-            draw_circle(&mut batch, *x, *y, r, Some(col));
-            draw_circle_outline(&mut batch, *x, *y, r, 2.0, Some(WHITE), 32);
+            draw_circle(&mut batch, Pos::new(*x, *y), r, Some(col));
+            draw_circle_outline(&mut batch, Pos::new(*x, *y), r, 2.0, Some(WHITE), 32);
             draw_text(
                 &mut batch.texts,
                 &format!("id={id}"),
@@ -117,7 +117,7 @@ fn main() {
             );
         }
 
-        draw_rectangle(&mut batch, 0.0, 480.0, 800.0, 80.0, Some(Color::new(0.08, 0.09, 0.12, 1.0)));
+        draw_rectangle(&mut batch, Pos::new(0.0, 480.0), 800.0, 80.0, Some(Color::new(0.08, 0.09, 0.12, 1.0)));
         let g = log.borrow();
         let last_s = match &g.last {
             Some(e) => format!(

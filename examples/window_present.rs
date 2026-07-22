@@ -86,7 +86,7 @@ fn main() {
 
         let t = app.frame_count as f32 * 0.05;
         let x = 80.0 + (t.sin() * 0.5 + 0.5) * 400.0;
-        draw_rounded_rect(&mut batch, x, 220.0, 80.0, 60.0, 10.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
+        draw_rounded_rect(&mut batch, Pos::new(x, 220.0), 80.0, 60.0, 10.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
 
         let timings = win.draw_timed(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);
         last_acq_ms = timings.acquire_secs * 1000.0;

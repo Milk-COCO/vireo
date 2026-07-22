@@ -51,6 +51,21 @@ impl Rect {
     }
 }
 
+/// 2D 坐标位置。语义上为"画在哪"（WHERE），与"画什么"（WHAT）、"如何画"（OVERRIDE）区分。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pos {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Pos {
+    pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
+
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 /// 一次 `Renderer::draw` 的扁平事件序列（模块级，扁平方法可引用）。
 ///
 /// - `Batch`：常规 batch（自身 shapes + texts）。
@@ -1528,7 +1543,7 @@ pub struct DrawBatch {
     pub texts: TextEntryList,
     pub(crate) bind_group: Option<wgpu::BindGroup>,
     texture_segments: Vec<TextureSegment>,
-    transform: Option<Transform>,
+    pub(crate) transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     ///
     /// 注意：SDF 图形不受 MSAA 影响。
@@ -1547,7 +1562,7 @@ pub struct DrawBatch {
     /// 是否含 SDF 顶点（避免 draw 时全表扫描）。
     pub(crate) has_sdf: bool,
     /// 当前 transform 的已注册 index 缓存；transform 变更时失效。
-    cached_transform_index: Option<u32>,
+    pub(crate) cached_transform_index: Option<u32>,
     /// 子 batch（绘制顺序：本 batch 的 shapes → texts → 各 child 递归）。
     pub children: Vec<DrawBatch>,
     /// 若为 `true`，本 batch 的几何将作为子 batch 的裁切区（stencil 裁剪）。
@@ -1568,6 +1583,10 @@ pub struct DrawBatch {
     /// 当 `clips_children=true` 时，用此矩形 scissor 代替 stencil。
     /// 逻辑世界坐标，必须轴对齐。`None` = 走 stencil。
     pub scissor: Option<Rect>,
+    /// 文本裁剪默认值。启用后，所有 `text()`/`text_stable()` 中字元超出此区域的部分
+    /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
+    /// 可通过 `TextOverride.clip` 单条覆盖。
+    pub text_clip: Option<crate::glyphon::TextBounds>,
 }
 
 impl DrawBatch {
@@ -1594,6 +1613,7 @@ impl DrawBatch {
             area_exclude: None,
             bounds: Some(None),
             scissor: None,
+            text_clip: None,
         }
     }
 
@@ -1619,6 +1639,7 @@ impl DrawBatch {
         self.area_exclude = None;
         self.bounds = Some(None);
         self.scissor = None;
+        self.text_clip = None;
     }
 
     /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
@@ -1946,6 +1967,7 @@ impl DrawBatch {
     }
 
     /// 在临时应用 [`crate::shapes::ShapeOverride`] 后执行 `f`，结束时恢复状态（不写回）。
+    #[allow(dead_code)]
     pub(crate) fn with_override<R>(
         &mut self,
         opts: crate::shapes::ShapeOverride,
@@ -2228,6 +2250,7 @@ impl DrawBatch {
             area_exclude: self.area_exclude.clone(),
             bounds: self.bounds,
             scissor: self.scissor,
+            text_clip: self.text_clip,
         }
     }
 
@@ -2273,22 +2296,22 @@ impl DrawBatch {
 
     // ---- 形状委托（去 draw_ 前缀） ----
 
-    pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rectangle(self, x, y, w, h, c); }
-    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_circle(self, cx, cy, r, c); }
+    pub fn rectangle(&mut self, pos: Pos, w: f32, h: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rectangle(self, pos, w, h, c); }
+    pub fn circle(&mut self, pos: Pos, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_circle(self, pos, r, c); }
     pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
-    pub fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Option<crate::color::Color>) { crate::shapes::draw_ellipse(self, cx, cy, rx, ry, c); }
-    pub fn rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rounded_rect(self, x, y, w, h, r, c); }
+    pub fn ellipse(&mut self, pos: Pos, rx: f32, ry: f32, c: Option<crate::color::Color>) { crate::shapes::draw_ellipse(self, pos, rx, ry, c); }
+    pub fn rounded_rect(&mut self, pos: Pos, w: f32, h: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rounded_rect(self, pos, w, h, r, c); }
     pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: Option<crate::color::Color>) { crate::shapes::draw_polygon(self, pts, c); }
-    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) { crate::shapes::draw_arc(self, cx, cy, r, sa, ea, c); }
-    pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rect_outline(self, x, y, w, h, t, c); }
-    pub fn circle_outline(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_circle_outline(self, cx, cy, r, t, c, seg); }
-    pub fn ellipse_outline(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_ellipse_outline(self, cx, cy, rx, ry, t, c, seg); }
-    pub fn rounded_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, c: Option<crate::color::Color>, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, x, y, w, h, r, t, c, cs); }
+    pub fn arc(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) { crate::shapes::draw_arc(self, pos, r, sa, ea, c); }
+    pub fn rect_outline(&mut self, pos: Pos, w: f32, h: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rect_outline(self, pos, w, h, t, c); }
+    pub fn circle_outline(&mut self, pos: Pos, r: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_circle_outline(self, pos, r, t, c, seg); }
+    pub fn ellipse_outline(&mut self, pos: Pos, rx: f32, ry: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_ellipse_outline(self, pos, rx, ry, t, c, seg); }
+    pub fn rounded_rect_outline(&mut self, pos: Pos, w: f32, h: f32, r: f32, t: f32, c: Option<crate::color::Color>, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, pos, w, h, r, t, c, cs); }
     pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line_chain(self, pts, t, c); }
     pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
-    pub fn arc_outline(&mut self, cx: f32, cy: f32, r: f32, sa: f32, ea: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_arc_outline(self, cx, cy, r, sa, ea, t, c, seg); }
+    pub fn arc_outline(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_arc_outline(self, pos, r, sa, ea, t, c, seg); }
     pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOverride) {
         crate::shapes::draw_shape(self, shape, opts);
     }
@@ -2343,12 +2366,12 @@ mod tests {
     fn has_sdf_flag_set_on_sdf_shapes() {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         assert!(b.has_sdf);
         b.clear();
         assert!(!b.has_sdf);
         b.sdf_feather = None;
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         assert!(!b.has_sdf);
     }
 
@@ -2357,8 +2380,8 @@ mod tests {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
         b.set_position(10.0, 20.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(RED));
-        draw_circle(&mut b, 0.0, 0.0, 3.0, Some(BLUE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
+        draw_circle(&mut b, Pos::new(0.0, 0.0), 3.0, Some(BLUE));
         let idxs: Vec<u32> = b.vertices.iter().map(|v| v.transform_index).collect();
         assert!(idxs.iter().all(|&i| i == idxs[0]));
         assert_eq!(b.transform_table.len() / 12, 1);
@@ -2368,10 +2391,9 @@ mod tests {
     fn transform_cache_invalidates_on_set_position() {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        b.set_position(0.0, 0.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(RED));
-        b.set_position(100.0, 0.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(BLUE));
+        // 不同 Pos 应产生不同 transform entry
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
+        draw_rectangle(&mut b, Pos::new(100.0, 0.0), 5.0, 5.0, Some(BLUE));
         let i0 = b.vertices[0].transform_index;
         let i1 = b.vertices[4].transform_index;
         assert_ne!(i0, i1);
@@ -2419,7 +2441,7 @@ mod tests {
         b.sdf_feather = Some(1.0);
         for i in 0..32 {
             b.set_position(i as f32, 0.0);
-            draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(RED));
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(RED));
         }
         let cap_v = b.vertices.capacity();
         let cap_i = b.indices.capacity();
@@ -2433,11 +2455,11 @@ mod tests {
     #[test]
     fn walk_preorder_parent_before_children() {
         let mut parent = DrawBatch::new();
-        draw_rectangle(&mut parent, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut parent, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         let mut c0 = DrawBatch::new();
-        draw_circle(&mut c0, 0.0, 0.0, 3.0, Some(GREEN));
+        draw_circle(&mut c0, Pos::new(0.0, 0.0), 3.0, Some(GREEN));
         let mut c1 = DrawBatch::new();
-        draw_rectangle(&mut c1, 1.0, 1.0, 2.0, 2.0, Some(BLUE));
+        draw_rectangle(&mut c1, Pos::new(1.0, 1.0), 2.0, 2.0, Some(BLUE));
         parent.push_child(c0);
         parent.push_child(c1);
         let mut flat = Vec::new();
@@ -2469,7 +2491,7 @@ mod tests {
         let mut child = DrawBatch::new();
         child.sdf_feather = Some(1.0);
         child.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut child, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         let idx = child.vertices[0].transform_index as usize;
         let base = idx * 12;
         // 继承前局部表为恒等
@@ -2537,16 +2559,16 @@ mod tests {
     fn nested_clips_flatten_emits_two_pops() {
         let mut root = DrawBatch::new();
         root.clips_children = true;
-        draw_rectangle(&mut root, -10.0, -10.0, 20.0, 20.0, Some(RED));
+        draw_rectangle(&mut root, Pos::new(-10.0, -10.0), 20.0, 20.0, Some(RED));
 
         let mut mid = DrawBatch::new();
         mid.clips_children = true;
         mid.inherit = InheritFromParent::TRANSFORM;
-        draw_circle(&mut mid, 0.0, 0.0, 8.0, Some(GREEN));
+        draw_circle(&mut mid, Pos::new(0.0, 0.0), 8.0, Some(GREEN));
 
         let mut leaf = DrawBatch::new();
         leaf.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut leaf, -2.0, -2.0, 4.0, 4.0, Some(BLUE));
+        draw_rectangle(&mut leaf, Pos::new(-2.0, -2.0), 4.0, 4.0, Some(BLUE));
 
         mid.push_child(leaf);
         root.push_child(mid);
@@ -2571,14 +2593,14 @@ mod tests {
         // 模拟 draw() 内 compute_stencil 的 ref 栈
         let mut root = DrawBatch::new();
         root.clips_children = true;
-        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut root, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         let mut mid = DrawBatch::new();
         mid.clips_children = true;
         mid.inherit = InheritFromParent::TRANSFORM;
-        draw_circle(&mut mid, 0.0, 0.0, 5.0, Some(GREEN));
+        draw_circle(&mut mid, Pos::new(0.0, 0.0), 5.0, Some(GREEN));
         let mut leaf = DrawBatch::new();
         leaf.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut leaf, 0.0, 0.0, 2.0, 2.0, Some(BLUE));
+        draw_rectangle(&mut leaf, Pos::new(0.0, 0.0), 2.0, 2.0, Some(BLUE));
         mid.push_child(leaf);
         root.push_child(mid);
 
@@ -2647,19 +2669,22 @@ mod tests {
         root.sdf_feather = Some(1.0);
         root.set_position(230.0, 270.0);
         root.clips_children = true;
-        draw_rounded_rect(&mut root, -150.0, -130.0, 300.0, 260.0, 28.0, Some(RED));
+        // 形状 Pos 与 batch 变换一致时，两者共享 transform entry
+        draw_rounded_rect(&mut root, Pos::new(230.0, 270.0), 300.0, 260.0, 28.0, Some(RED));
 
         let mut mid = DrawBatch::new();
         mid.sdf_feather = Some(1.0);
         mid.set_position(40.0, 0.0);
         mid.clips_children = true;
         mid.inherit = InheritFromParent::TRANSFORM;
-        draw_circle(&mut mid, 0.0, 0.0, 90.0, Some(GREEN));
+        // mid 形状用局部坐标 (40,0)，与 batch 平移一致 → 共享 transform entry
+        draw_circle(&mut mid, Pos::new(40.0, 0.0), 90.0, Some(GREEN));
 
         let mut leaf = DrawBatch::new();
         leaf.sdf_feather = Some(1.0);
         leaf.inherit = InheritFromParent::TRANSFORM;
-        draw_circle(&mut leaf, 0.0, 0.0, 18.0, Some(WHITE));
+        // leaf 无独立平移，形状用局部原点与 batch 一致
+        draw_circle(&mut leaf, Pos::new(0.0, 0.0), 18.0, Some(WHITE));
         leaf.text(
             "LEAF",
             TextOptions::default().x(-40.0).y(-14.0).font_size(28.0).color(BLACK),
@@ -2726,7 +2751,7 @@ mod tests {
     fn inherit_transform_text_only_child_gets_table_entry() {
         let mut parent = DrawBatch::new();
         parent.set_position(100.0, 50.0);
-        draw_rectangle(&mut parent, -10.0, -10.0, 20.0, 20.0, Some(RED));
+        draw_rectangle(&mut parent, Pos::new(-10.0, -10.0), 20.0, 20.0, Some(RED));
 
         let mut child = DrawBatch::new();
         child.inherit = InheritFromParent::TRANSFORM;
@@ -2757,7 +2782,8 @@ mod tests {
             "A",
             TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE),
         );
-        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(RED));
+        // 形状 Pos 与 batch 平移一致 → 共享 transform entry
+        draw_rectangle(&mut b, Pos::new(12.0, 34.0), 4.0, 4.0, Some(RED));
         assert_eq!(
             b.texts.entries[0].transform_index,
             b.vertices[0].transform_index
@@ -2771,12 +2797,12 @@ mod tests {
     fn draw_order_parent_text_before_children() {
         let mut root = DrawBatch::new();
         root.clips_children = true;
-        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut root, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         root.text("R", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
 
         let mut child = DrawBatch::new();
         child.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut child, 0.0, 0.0, 10.0, 10.0, Some(BLUE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 10.0, 10.0, Some(BLUE));
         child.text("C", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
         root.push_child(child);
 
@@ -2795,10 +2821,10 @@ mod tests {
     #[test]
     fn area_flatten_include_emits_cover_and_erase() {
         let mut b = DrawBatch::new();
-        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         // 用一个简单矩形作 include
         let mut include_batch = DrawBatch::new();
-        draw_rectangle(&mut include_batch, 0.0, 0.0, 100.0, 100.0, Some(WHITE));
+        draw_rectangle(&mut include_batch, Pos::new(0.0, 0.0), 100.0, 100.0, Some(WHITE));
         b.area_include = Some(include_batch.to_area());
 
         let mut events: Vec<DrawEvent> = Vec::new();
@@ -2815,15 +2841,15 @@ mod tests {
     fn area_flatten_with_clips_children() {
         let mut root = DrawBatch::new();
         root.clips_children = true;
-        draw_rectangle(&mut root, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut root, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         // root 加 area_include
         let mut incl = DrawBatch::new();
-        draw_rectangle(&mut incl, 0.0, 0.0, 100.0, 100.0, Some(RED));
+        draw_rectangle(&mut incl, Pos::new(0.0, 0.0), 100.0, 100.0, Some(RED));
         root.area_include = Some(incl.to_area());
 
         let mut child = DrawBatch::new();
         child.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut child, 0.0, 0.0, 4.0, 4.0, Some(GREEN));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 4.0, 4.0, Some(GREEN));
         root.push_child(child);
 
         let mut events: Vec<DrawEvent> = Vec::new();
@@ -2841,7 +2867,7 @@ mod tests {
     #[test]
     fn area_flatten_empty_skips_ops() {
         let mut b = DrawBatch::new();
-        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         // empty 几何 → Area::Empty
         b.area_include = Some(Area::Empty);
         let mut events: Vec<DrawEvent> = Vec::new();
@@ -2857,7 +2883,7 @@ mod tests {
     fn bounds_culls_offscreen_subtree() {
         let mut b = DrawBatch::new();
         b.bounds = Some(Some(Rect::new(9999.0, 9999.0, 10.0, 10.0)));
-        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
         assert!(events.is_empty());
@@ -2867,7 +2893,7 @@ mod tests {
     fn bounds_keeps_onscreen_subtree() {
         let mut b = DrawBatch::new();
         b.bounds = Some(Some(Rect::new(100.0, 100.0, 50.0, 50.0)));
-        draw_rectangle(&mut b, 0.0, 0.0, 4.0, 4.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
         assert_eq!(events.len(), 1);
@@ -2878,7 +2904,8 @@ mod tests {
     fn auto_aabb_culls_offscreen_vertices() {
         let mut b = DrawBatch::new();
         // 无 bounds → 自动从顶点算 AABB
-        draw_rectangle(&mut b, 9999.0, 9999.0, 4.0, 4.0, Some(WHITE));
+        b.set_position(9999.0, 9999.0);
+        draw_rectangle(&mut b, Pos::ZERO, 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
         assert!(events.is_empty());
@@ -2891,7 +2918,8 @@ mod tests {
         let mut parent = DrawBatch::new(); // 无顶点
         let mut child = DrawBatch::new();
         child.inherit = InheritFromParent::TRANSFORM;
-        draw_rectangle(&mut child, 9999.0, 9999.0, 4.0, 4.0, Some(WHITE));
+        child.set_position(9999.0, 9999.0);
+        draw_rectangle(&mut child, Pos::ZERO, 4.0, 4.0, Some(WHITE));
         parent.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         parent.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
@@ -2906,7 +2934,7 @@ mod tests {
         b.clips_children = true;
         b.scissor = Some(Rect::new(10.0, 10.0, 200.0, 150.0));
         let mut child = DrawBatch::new();
-        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
@@ -2923,7 +2951,7 @@ mod tests {
         b.scissor = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
         b.clips_children = false;
         let mut child = DrawBatch::new();
-        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
@@ -2937,9 +2965,9 @@ mod tests {
         let mut b = DrawBatch::new();
         b.clips_children = true;
         b.scissor = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(WHITE));
         let mut child = DrawBatch::new();
-        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
@@ -2951,9 +2979,9 @@ mod tests {
     fn auto_scissor_detects_single_rect() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
-        draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut child = DrawBatch::new();
-        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
@@ -2971,7 +2999,7 @@ mod tests {
         // 三角形（3 顶点），不是矩形
         crate::shapes::draw_triangle(&mut b, 0.0, 0.0, 100.0, 0.0, 0.0, 50.0, Some(WHITE));
         let mut child = DrawBatch::new();
-        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
@@ -2983,7 +3011,7 @@ mod tests {
     fn auto_scissor_clears_with_draw_rect_then_child() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
-        draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
         assert_eq!(events.len(), 3);

@@ -45,7 +45,7 @@ fn wobble_blocks(batch: &mut DrawBatch, t: f32, phase0: f32, use_brush: bool) {
                 0.92,
             ))
         };
-        draw_rounded_rect(batch, lx, ly, 32.0, 20.0, 5.0, fill);
+        draw_rounded_rect(batch, Pos::new(lx, ly), 32.0, 20.0, 5.0, fill);
     }
 }
 
@@ -95,8 +95,7 @@ fn main() {
             parent.clips_children = true;
             draw_rounded_rect(
                 &mut parent,
-                -68.0,
-                -68.0,
+                Pos::new(-68.0, -68.0),
                 136.0,
                 136.0,
                 20.0,
@@ -125,8 +124,7 @@ fn main() {
             parent.clips_children = true;
             draw_rounded_rect(
                 &mut parent,
-                -68.0,
-                -68.0,
+                Pos::new(-68.0, -68.0),
                 136.0,
                 136.0,
                 20.0,
@@ -154,8 +152,7 @@ fn main() {
             parent.clips_children = true;
             draw_rounded_rect(
                 &mut parent,
-                -68.0,
-                -68.0,
+                Pos::new(-68.0, -68.0),
                 136.0,
                 136.0,
                 20.0,
@@ -172,7 +169,7 @@ fn main() {
                 let phase = t * 2.0 + i as f32 * 0.7;
                 let x = -50.0 + (i as f32) * 18.0 + phase.sin() * 40.0;
                 let y = -20.0 + phase.cos() * 50.0;
-                draw_rounded_rect(&mut a, x, y, 28.0, 18.0, 4.0, None);
+                draw_rounded_rect(&mut a, Pos::new(x, y), 28.0, 18.0, 4.0, None);
             }
             parent.push_child(a);
 
@@ -186,7 +183,7 @@ fn main() {
                 let phase = t * 2.0 + i as f32 * 0.7 + 1.5;
                 let x = -50.0 + (i as f32) * 18.0 + phase.sin() * 48.0;
                 let y = 10.0 + phase.cos() * 55.0;
-                draw_rounded_rect(&mut b, x, y, 28.0, 18.0, 4.0, None);
+                draw_rounded_rect(&mut b, Pos::new(x, y), 28.0, 18.0, 4.0, None);
             }
             parent.push_child(b);
 
@@ -205,8 +202,7 @@ fn main() {
             parent.clips_children = true;
             draw_rounded_rect(
                 &mut parent,
-                -68.0,
-                -68.0,
+                Pos::new(-68.0, -68.0),
                 136.0,
                 136.0,
                 20.0,
@@ -222,7 +218,7 @@ fn main() {
                 let phase = t * 1.8 + i as f32;
                 let x = -45.0 + phase.sin() * 50.0;
                 let y = -30.0 + i as f32 * 14.0 + phase.cos() * 20.0;
-                draw_rounded_rect(&mut a, x, y, 30.0, 16.0, 4.0, None);
+                draw_rounded_rect(&mut a, Pos::new(x, y), 30.0, 16.0, 4.0, None);
             }
             parent.push_child(a);
 
@@ -236,7 +232,7 @@ fn main() {
                 let phase = t * 1.8 + i as f32 + 2.0;
                 let x = -20.0 + phase.cos() * 55.0;
                 let y = -40.0 + i as f32 * 16.0 + phase.sin() * 25.0;
-                draw_rounded_rect(&mut b, x, y, 30.0, 16.0, 4.0, None);
+                draw_rounded_rect(&mut b, Pos::new(x, y), 30.0, 16.0, 4.0, None);
             }
             parent.push_child(b);
 

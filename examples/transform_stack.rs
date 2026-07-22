@@ -33,8 +33,8 @@ fn main() {
         batch.set_position(150.0, 220.0);
         batch.set_rad(t);
         batch.set_pivot(0.0, 0.0);
-        draw_rectangle(&mut batch, -40.0, -12.0, 80.0, 24.0, Some(RED));
-        draw_circle(&mut batch, 40.0, 0.0, 8.0, Some(YELLOW));
+        draw_rectangle(&mut batch, Pos::new(-40.0, -12.0), 80.0, 24.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(40.0, 0.0), 8.0, Some(YELLOW));
         batch.clear_transform();
         draw_text(
             &mut batch.texts,
@@ -51,14 +51,14 @@ fn main() {
         batch.set_position(450.0, 280.0);
         // 大臂
         batch.rotate_rad(t * 0.7);
-        draw_rectangle(&mut batch, 0.0, -10.0, 100.0, 20.0, Some(GREEN));
-        draw_circle(&mut batch, 0.0, 0.0, 12.0, Some(Color::new(0.2, 0.8, 0.4, 1.0)));
+        draw_rectangle(&mut batch, Pos::new(0.0, -10.0), 100.0, 20.0, Some(GREEN));
+        draw_circle(&mut batch, Pos::new(0.0, 0.0), 12.0, Some(Color::new(0.2, 0.8, 0.4, 1.0)));
         // 小臂：在大臂末端局部空间继续叠加
         batch.translate(100.0, 0.0);
         batch.rotate_rad(t * 1.4);
         batch.scale_by(0.85 + 0.15 * t.sin(), 1.0);
-        draw_rectangle(&mut batch, 0.0, -8.0, 70.0, 16.0, Some(Color::new(0.3, 0.9, 0.7, 1.0)));
-        draw_circle(&mut batch, 70.0, 0.0, 10.0, Some(Color::new(0.2, 0.9, 0.95, 1.0)));
+        draw_rectangle(&mut batch, Pos::new(0.0, -8.0), 70.0, 16.0, Some(Color::new(0.3, 0.9, 0.7, 1.0)));
+        draw_circle(&mut batch, Pos::new(70.0, 0.0), 10.0, Some(Color::new(0.2, 0.9, 0.95, 1.0)));
         batch.clear_transform();
         draw_text(
             &mut batch.texts,
@@ -78,8 +78,8 @@ fn main() {
         batch.set_position(720.0, 220.0);
         batch.apply_matrix(1.0, 0.0, shear, 1.0, 0.0, 0.0);
         batch.rotate_deg((t * 40.0) % 360.0);
-        draw_rounded_rect(&mut batch, -50.0, -40.0, 100.0, 80.0, 12.0, Some(PURPLE));
-        draw_rect_outline(&mut batch, -50.0, -40.0, 100.0, 80.0, 2.0, Some(WHITE));
+        draw_rounded_rect(&mut batch, Pos::new(-50.0, -40.0), 100.0, 80.0, 12.0, Some(PURPLE));
+        draw_rect_outline(&mut batch, Pos::new(-50.0, -40.0), 100.0, 80.0, 2.0, Some(WHITE));
         batch.clear_transform();
         draw_text(
             &mut batch.texts,
@@ -93,7 +93,7 @@ fn main() {
 
         // 参考点
         for (x, y) in [(150.0, 220.0), (450.0, 280.0), (720.0, 220.0)] {
-            draw_circle_outline(&mut batch, x, y, 4.0, 1.5, Some(Color::new(1.0, 1.0, 1.0, 0.35)), 16);
+            draw_circle_outline(&mut batch, Pos::new(x, y), 4.0, 1.5, Some(Color::new(1.0, 1.0, 1.0, 0.35)), 16);
         }
 
         win.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);

@@ -119,10 +119,10 @@ fn scene_sdf_shapes(b: &mut DrawBatch) {
         b.set_position(x, y);
         b.sdf_feather = Some(1.0);
         match i % 5 {
-            0 => draw_rectangle(b, 0.0, 0.0, 14.0, 14.0, Some(c)),
-            1 => draw_circle(b, 7.0, 7.0, 6.0, Some(c)),
-            2 => draw_rounded_rect(b, 0.0, 0.0, 14.0, 14.0, 3.0, Some(c)),
-            3 => draw_ellipse(b, 7.0, 7.0, 6.0, 4.0, Some(c)),
+            0 => draw_rectangle(b, Pos::new(0.0, 0.0), 14.0, 14.0, Some(c)),
+            1 => draw_circle(b, Pos::new(7.0, 7.0), 6.0, Some(c)),
+            2 => draw_rounded_rect(b, Pos::new(0.0, 0.0), 14.0, 14.0, 3.0, Some(c)),
+            3 => draw_ellipse(b, Pos::new(7.0, 7.0), 6.0, 4.0, Some(c)),
             4 => draw_triangle(b, 0.0, 0.0, 14.0, 0.0, 7.0, 14.0, Some(c)),
             _ => {}
         }
@@ -138,9 +138,9 @@ fn scene_geo_shapes(b: &mut DrawBatch) {
         let c = COLORS[i % COLORS.len()];
         b.set_position(x, y);
         match i % 4 {
-            0 => draw_circle(b, 14.0, 14.0, 12.0, Some(c)),
-            1 => draw_ellipse(b, 14.0, 14.0, 12.0, 8.0, Some(c)),
-            2 => draw_rounded_rect(b, 0.0, 0.0, 28.0, 28.0, 6.0, Some(c)),
+            0 => draw_circle(b, Pos::new(14.0, 14.0), 12.0, Some(c)),
+            1 => draw_ellipse(b, Pos::new(14.0, 14.0), 12.0, 8.0, Some(c)),
+            2 => draw_rounded_rect(b, Pos::new(0.0, 0.0), 28.0, 28.0, 6.0, Some(c)),
             3 => {
                 let pts = [(0.0, 0.0), (28.0, 4.0), (24.0, 28.0), (4.0, 22.0)];
                 draw_polygon(b, &pts, Some(c));
@@ -159,10 +159,10 @@ fn scene_mixed(b: &mut DrawBatch) {
         b.set_position(x, y);
         if i % 2 == 0 {
             b.sdf_feather = Some(0.8);
-            draw_rounded_rect(b, 0.0, 0.0, 18.0, 18.0, 4.0, Some(c));
+            draw_rounded_rect(b, Pos::new(0.0, 0.0), 18.0, 18.0, 4.0, Some(c));
         } else {
             b.sdf_feather = None;
-            draw_circle(b, 9.0, 9.0, 8.0, Some(c));
+            draw_circle(b, Pos::new(9.0, 9.0), 8.0, Some(c));
         }
     }
 }
@@ -221,7 +221,7 @@ fn scene_transforms(b: &mut DrawBatch) {
         b.set_position(x, y);
         b.set_deg((i as f32) * 7.0);
         b.set_scale(1.0 + (i % 3) as f32 * 0.3, 1.0 + (i % 2) as f32 * 0.2);
-        draw_rounded_rect(b, -6.0, -6.0, 6.0, 6.0, 2.0, Some(c));
+        draw_rounded_rect(b, Pos::new(-6.0, -6.0), 6.0, 6.0, 2.0, Some(c));
         b.clear_transform();
     }
 }
