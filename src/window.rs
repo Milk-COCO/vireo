@@ -409,7 +409,15 @@ impl VireoWindow {
         } else {
             self.inner.scale_factor() as f32
         };
-        self.renderer.borrow_mut().resize(self.logical_width, self.logical_height, width, height, scale);
+        let dpi_scale = self.inner.scale_factor() as f32;
+        self.renderer.borrow_mut().resize(
+            self.logical_width,
+            self.logical_height,
+            width,
+            height,
+            scale,
+            dpi_scale,
+        );
     }
 
     /// 获取当前投影矩阵（逻辑像素）

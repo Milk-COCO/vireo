@@ -245,19 +245,29 @@ impl Renderer {
         dt.as_ref().unwrap().1.clone()
     }
 
-    /// 更新相机投影（窗口 resize 时调用）
-    pub fn resize(&mut self, logical_width: u32, logical_height: u32, physical_width: u32, physical_height: u32, scale: f32) {
+    /// 更新相机投影（窗口 resize 时调用）。
+    /// `scale`：逻辑→物理（文字/scissor）；`dpi_scale`：OS 缩放（SDF feather，可与 scale 不同）。
+    pub fn resize(
+        &mut self,
+        logical_width: u32,
+        logical_height: u32,
+        physical_width: u32,
+        physical_height: u32,
+        scale: f32,
+        dpi_scale: f32,
+    ) {
         let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
-        camera_raw[64..68].copy_from_slice(&self.dpi_scale.to_le_bytes());
+        camera_raw[64..68].copy_from_slice(&dpi_scale.to_le_bytes());
         self.gpu.queue.write_buffer(&self.camera_buf, 0, &camera_raw);
         self.physical_width = physical_width;
         self.physical_height = physical_height;
         self.logical_width = logical_width;
         self.logical_height = logical_height;
         self.scale = scale;
+        self.dpi_scale = dpi_scale;
         *self.msaa_tex.borrow_mut() = None;
         *self.ds_tex.borrow_mut() = None;
     }
@@ -399,10 +409,13 @@ impl Renderer {
         let mut ref_stack: Vec<u32> = Vec::new();
         let mut active_clip: Option<u32> = None;
         let mut area_depth: u32 = 0;
+        // 连续 cleanup AreaOp 只 -1 一次（compile_erase 可多 op）
+        let mut prev_area_cleanup = false;
 
         for event in &events {
             match event {
                 DrawEvent::Batch(batch) => {
+                    prev_area_cleanup = false;
                     // ancestors_area_depth = 当前仍在生效的祖先 Area 数（不含自身）。
                     // 自身有 Area → content level = active_clip + ancestors + 1；
                     // 自身无 Area → content level = active_clip + ancestors。
@@ -417,11 +430,17 @@ impl Renderer {
                     }
                     let content_level =
                         active_clip.unwrap_or(0) + ancestors_area_depth + (has_own_area as u32);
-                    // scissor 代替 stencil：跳过 stencil 设置，scissor 由 ScissorPush 事件处理
+                    // scissor 代替本层 Push；仍须 Test 祖先 stencil（content_level>0）
                     let use_scissor = batch.scissor.is_some()
                         || (batch.clips_children && !has_own_area && batch.auto_scissor().is_some());
                     let (stencil_op, stencil_ref) = if use_scissor {
-                        (0u32, 0u32)
+                        let has_draw =
+                            !batch.vertices.is_empty() || !batch.texts.entries.is_empty();
+                        if content_level > 0 && batch.inherit.clipped && has_draw {
+                            (2u32, content_level) // Test 祖先，不 Push
+                        } else {
+                            (0u32, 0u32)
+                        }
                     } else {
                         compute_stencil_at_level(
                             batch,
@@ -444,6 +463,7 @@ impl Renderer {
                     });
                 }
                 DrawEvent::StencilPop => {
+                    prev_area_cleanup = false;
                     let popped = ref_stack.pop();
                     if let Some(prev) = popped {
                         if prev > 1 {
@@ -464,8 +484,7 @@ impl Renderer {
                 }
                 DrawEvent::AreaOp { op, is_setup } => {
                     // Area 单 op：cover (op 4) 在 batch 前，erase (op 3) 在子树后。
-                    // area_depth 含义：当前仍处于祖先 Area 框架内的层数（不含本 batch 自身 Area）。
-                    // setup 在 Batch 事件里 +1；cleanup 在此立即 -1（子树已结束）。
+                    // setup 在 Batch 事件里 +1；cleanup 连续多 op 只 -1 一次。
                     let pipe_op = op.stencil_pipeline_op(); // 3 or 4
                     let r = op.stencil_ref();
                     event_infos.push(EventInfo {
@@ -478,7 +497,12 @@ impl Renderer {
                         scissor_pop: false,
                     });
                     if !is_setup {
-                        area_depth = area_depth.saturating_sub(1);
+                        if !prev_area_cleanup {
+                            area_depth = area_depth.saturating_sub(1);
+                        }
+                        prev_area_cleanup = true;
+                    } else {
+                        prev_area_cleanup = false;
                     }
                 }
                 DrawEvent::ScissorPush(rect) => {
@@ -900,15 +924,22 @@ impl Renderer {
                 if let Some(scissor_rect) = info.scissor_push {
                     let sx = self.physical_width as f32 / self.logical_width.max(1) as f32;
                     let sy = self.physical_height as f32 / self.logical_height.max(1) as f32;
-                    let px = (scissor_rect.x * sx) as u32;
-                    let py = (scissor_rect.y * sy) as u32;
-                    let pw = (scissor_rect.w * sx).max(0.0) as u32;
-                    let ph = (scissor_rect.h * sy).max(0.0) as u32;
+                    let fw = self.physical_width as f32;
+                    let fh = self.physical_height as f32;
+                    // 负坐标 / 越界：先 float 裁到视口再转 u32，避免 as u32 回绕
+                    let x0 = (scissor_rect.x * sx).clamp(0.0, fw);
+                    let y0 = (scissor_rect.y * sy).clamp(0.0, fh);
+                    let x1 = ((scissor_rect.x + scissor_rect.w) * sx).clamp(0.0, fw);
+                    let y1 = ((scissor_rect.y + scissor_rect.h) * sy).clamp(0.0, fh);
+                    let px = x0.floor() as u32;
+                    let py = y0.floor() as u32;
+                    let pr = x1.ceil() as u32;
+                    let pb = y1.ceil() as u32;
                     let (cx, cy, cw, ch) = *scissor_stack.last().unwrap_or(&(0, 0, self.physical_width, self.physical_height));
                     let ix = px.max(cx);
                     let iy = py.max(cy);
-                    let ir = (px + pw).min(cx + cw);
-                    let ib = (py + ph).min(cy + ch);
+                    let ir = pr.min(cx + cw);
+                    let ib = pb.min(cy + ch);
                     let (nx, ny, nw, nh) = if ir > ix && ib > iy {
                         (ix, iy, ir - ix, ib - iy)
                     } else {
@@ -1716,39 +1747,62 @@ impl DrawBatch {
         )
     }
 
-    /// 计算本 batch 自身顶点在**世界（绝对逻辑）空间**的 AABB。
-    /// 不含子节点的顶点。按每顶点 `transform_index` 查表，不用画笔 `current_matrix`。
+    /// 计算本 batch 自身在**世界（绝对逻辑）空间**的 AABB。
+    /// 含形状顶点 + 文字近似框（pos / 字号）；不含子节点。
+    /// 按 `transform_index` 查表，不用画笔 `current_matrix`。
     fn compute_own_world_aabb(&self) -> Option<Rect> {
-        if self.vertices.is_empty() {
-            return None;
-        }
         let mut w_min_x = f32::INFINITY;
         let mut w_max_x = f32::NEG_INFINITY;
         let mut w_min_y = f32::INFINITY;
         let mut w_max_y = f32::NEG_INFINITY;
+        let mut any = false;
+        let expand = |w_min_x: &mut f32, w_max_x: &mut f32, w_min_y: &mut f32, w_max_y: &mut f32, wx: f32, wy: f32| {
+            if wx < *w_min_x { *w_min_x = wx; }
+            if wx > *w_max_x { *w_max_x = wx; }
+            if wy < *w_min_y { *w_min_y = wy; }
+            if wy > *w_max_y { *w_max_y = wy; }
+        };
         for v in &self.vertices {
+            any = true;
             let (wx, wy) = Self::world_xy(
                 &self.transform_table,
                 v.transform_index,
                 v.position[0],
                 v.position[1],
             );
-            if wx < w_min_x { w_min_x = wx; }
-            if wx > w_max_x { w_max_x = wx; }
-            if wy < w_min_y { w_min_y = wy; }
-            if wy > w_max_y { w_max_y = wy; }
+            expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
         }
-        if w_min_x > w_max_x {
+        // 文字：逻辑 pos + 近似行高/宽（未 shape 前保守估计，避免纯文字被误裁）
+        for entry in &self.texts.entries {
+            any = true;
+            let p = entry.pos();
+            let ti = entry.transform_index();
+            let fs = entry.approx_font_size();
+            let tw = entry.approx_width();
+            let th = fs * 1.25;
+            for (lx, ly) in [(p.x, p.y), (p.x + tw, p.y), (p.x, p.y + th), (p.x + tw, p.y + th)] {
+                let (wx, wy) = Self::world_xy(&self.transform_table, ti, lx, ly);
+                expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+            }
+        }
+        if !any || w_min_x > w_max_x {
             return None;
         }
         Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
-    /// 检测 batch 自身是否只含一个轴对齐矩形（4 顶点 + 无旋转 transform）。
-    /// 用于 `clips_children` 时自动走 scissor 路径。
+    /// 检测 batch 自身是否只含一个**几何**轴对齐矩形（4 顶点 + 无旋转）。
+    /// SDF 四顶点 AABB 不走 scissor（圆/圆角等须 stencil）。
     /// 世界位置来自顶点 `transform_index`（非画笔）。
     fn auto_scissor(&self) -> Option<Rect> {
+        // SDF 填充也是 4v/6i 外接框 → 禁止 auto-scissor，否则圆裁成方
+        if self.has_sdf || self.sdf_feather.is_some() {
+            return None;
+        }
         if self.vertices.len() != 4 || self.indices.len() != 6 {
+            return None;
+        }
+        if self.vertices.iter().any(|v| v.sdf_type != 0) {
             return None;
         }
         let ti = self.vertices[0].transform_index;
@@ -3146,6 +3200,41 @@ mod tests {
             }
             _ => panic!("expected ScissorPush"),
         }
+    }
+
+    #[test]
+    fn auto_scissor_skips_sdf_circle() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        b.sdf_feather = Some(1.0);
+        draw_circle(&mut b, Pos::new(100.0, 100.0), 40.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        // SDF 圆不得 auto-scissor → StencilPop
+        assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
+        assert!(events.iter().all(|e| !matches!(e, DrawEvent::ScissorPush(_))));
+    }
+
+    #[test]
+    fn text_only_batch_not_culled_when_onscreen() {
+        let mut b = DrawBatch::new();
+        b.text(
+            "hi",
+            Pos::new(10.0, 10.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(WHITE),
+        );
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(
+            &mut events,
+            0,
+            Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            &FxHashMap::default(),
+        );
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

@@ -814,6 +814,7 @@ impl TextOverride {
         self
     }
 
+    /// 裁切矩形，**逻辑像素**（prepare 时 × scale → 物理，与 `pos` 一致）。
     pub fn clip(mut self, l: i32, t: i32, r: i32, b: i32) -> Self {
         self.clip = Some(Some(crate::glyphon::TextBounds { left: l, top: t, right: r, bottom: b }));
         self
@@ -1223,6 +1224,37 @@ impl TextEntry {
             | TextEntry::Stable { pos, .. } => *pos,
         }
     }
+
+    /// 裁剪/culling 用：近似字号（Stable 无 def 时用 16）。
+    pub(crate) fn approx_font_size(&self) -> f32 {
+        match self {
+            TextEntry::Normal { def, .. } | TextEntry::Parts { def, .. } => def.font_size,
+            TextEntry::Stable { .. } => 16.0,
+        }
+    }
+
+    /// 裁剪/culling 用：近似逻辑宽度（未 shape 前保守值）。
+    pub(crate) fn approx_width(&self) -> f32 {
+        let fs = self.approx_font_size();
+        match self {
+            TextEntry::Normal { text, def, .. } => {
+                def.max_width.unwrap_or_else(|| (text.chars().count() as f32) * fs * 0.6)
+            }
+            TextEntry::Parts { parts, def, .. } => {
+                if let Some(w) = def.max_width {
+                    return w;
+                }
+                let n: usize = parts.iter().map(|p| match p {
+                    OwnedTextPart::Static(s) | OwnedTextPart::Dynamic(s) | OwnedTextPart::Digits(s) => {
+                        s.chars().count()
+                    }
+                    OwnedTextPart::Stable(..) => 8,
+                }).sum();
+                n as f32 * fs * 0.6
+            }
+            TextEntry::Stable { .. } => fs * 8.0,
+        }
+    }
 }
 
 /// 文本条目列表，存储一组待渲染的文本。
@@ -1482,14 +1514,13 @@ impl TextEntryList {
             override_transform: &crate::context::Transform,
         ) -> u32 {
             let base = transform_index as usize * 12;
-            if base + 12 > transform_table.len() {
-                return 0;
-            }
-            let t = &transform_table[base..base + 12];
-            // 表布局：col0=(a,c), col1=(b,d), col2=(tx,ty) — 与 register_transform 一致
-            let m = crate::context::Transform::matrix(
-                t[0], t[4], t[1], t[5], t[8], t[9],
-            );
+            // 越界：仍应用 override（视作 I * O），避免静默丢变换
+            let m = if base + 12 <= transform_table.len() {
+                let t = &transform_table[base..base + 12];
+                crate::context::Transform::matrix(t[0], t[4], t[1], t[5], t[8], t[9])
+            } else {
+                crate::context::Transform::IDENTITY
+            };
             // M' = M * O（override 作用在 batch 局部空间）
             let composed = m.then(override_transform);
             let (c0, c1, c2) = composed.to_cols();
@@ -1512,6 +1543,19 @@ impl TextEntryList {
             }
         }
 
+        /// 逻辑 TextBounds → 物理（与 left/top × scale 一致）。全屏 default 不缩放。
+        fn scale_text_bounds(b: TextBounds, scale: f32) -> TextBounds {
+            if b == TextBounds::default() {
+                return b;
+            }
+            TextBounds {
+                left: (b.left as f32 * scale).round() as i32,
+                top: (b.top as f32 * scale).round() as i32,
+                right: (b.right as f32 * scale).round() as i32,
+                bottom: (b.bottom as f32 * scale).round() as i32,
+            }
+        }
+
         let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
         // 注：StableText 的 Arc<Buffer> 直接放 metas.buf.Stable 里，延寿到第二次循环消费完。
         // 不再需要平行 stable_bufs vec + hi 计数器。
@@ -1525,11 +1569,11 @@ impl TextEntryList {
                 (color_rgb.b * 255.0) as u8,
                 (color_rgb.a * 255.0) as u8,
             );
-            // clip: Some(Some(b)) > batch_text_clip > 全屏（不裁）
+            // clip：逻辑像素 → 物理（× scale）
             let bounds = match entry.override_().clip {
-                Some(Some(b)) => b,
+                Some(Some(b)) => scale_text_bounds(b, scale),
                 Some(None) => TextBounds::default(),
-                None => batch_text_clip.unwrap_or_default(),
+                None => scale_text_bounds(batch_text_clip.unwrap_or_default(), scale),
             };
             // transform: override 在 batch 局部空间上右乘叠加
             let phys_idx = if let Some(ref ov_xform) = entry.override_().transform {
