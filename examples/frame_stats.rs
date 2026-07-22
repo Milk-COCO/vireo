@@ -236,7 +236,9 @@ Init: app {:.0}ms + win {:.0}ms",
             draw_text(
                 &mut batch.texts,
                 &info,
-                TextOptions::default().x(16.0).y(12.0).font_size(12.0).color(WHITE),
+                Pos::new(16.0, 12.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(WHITE),
             );
         }
 
@@ -249,11 +251,9 @@ Init: app {:.0}ms + win {:.0}ms",
             draw_text(
                 &mut batch.texts,
                 &keys,
-                TextOptions::default()
-                    .x(16.0)
-                    .y(148.0)
-                    .font_size(11.0)
-                    .color(Color::new(0.6, 0.6, 0.7, 1.0)),
+                Pos::new(16.0, 148.0),
+                TextDef::default().font_size(11.0),
+                TextOverride::from_color(Color::new(0.6, 0.6, 0.7, 1.0)),
             );
         }
 
@@ -288,11 +288,9 @@ Init: app {:.0}ms + win {:.0}ms",
             draw_text(
                 &mut batch.texts,
                 "spike: encode>=4=ENGINE acquire>=4=ACQUIRE build>=4=BUILD else OS/SCHED",
-                TextOptions::default()
-                    .x(16.0)
-                    .y(228.0)
-                    .font_size(11.0)
-                    .color(Color::new(0.5, 0.5, 0.6, 1.0)),
+                Pos::new(16.0, 228.0),
+                TextDef::default().font_size(11.0),
+                TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
             );
         }
 

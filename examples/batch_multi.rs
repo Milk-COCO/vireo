@@ -15,14 +15,14 @@ fn main() {
 
         // Batch 2: 文字
         let mut batch2 = DrawBatch::new();
-        draw_text(&mut batch2.texts, "Batch 1: 红色边框",
-            TextOptions::default().x(20.0).y(100.0).font_size(14.0).color(WHITE));
+        draw_text(&mut batch2.texts, "Batch 1: 红色边框", Pos::new(20.0, 100.0),
+                  TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
 
         // Batch 3: 绿色圆圈 + 文字
         let mut batch3 = DrawBatch::new();
         draw_circle(&mut batch3, Pos::new(40.0, 180.0), 20.0, Some(GREEN));
-        draw_text(&mut batch3.texts, "Batch 3: 绿色圆圈",
-            TextOptions::default().x(20.0).y(210.0).font_size(14.0).color(WHITE));
+        draw_text(&mut batch3.texts, "Batch 3: 绿色圆圈", Pos::new(20.0, 210.0),
+                  TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&batch1, &batch2, &batch3]);
 

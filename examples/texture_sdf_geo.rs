@@ -54,7 +54,7 @@ fn main() {
                 geo.set_texture(Some(t));
                 draw_shapes(&mut geo);
                 draw_text(&mut geo.texts, "Geometry (sdf_feather = None)",
-                    TextOptions::default().x(10.0).y(155.0).font_size(14.0).color(label));
+                          Pos::new(10.0, 155.0), TextDef::default().font_size(14.0), TextOverride::from_color(label));
 
                 // ---- 下半：SDF 模式 ----
                 let mut sdf = DrawBatch::new();
@@ -63,14 +63,14 @@ fn main() {
                 sdf.sdf_feather = Some(1.0);
                 draw_shapes(&mut sdf);
                 draw_text(&mut sdf.texts, "SDF (sdf_feather = 1.0)",
-                    TextOptions::default().x(10.0).y(155.0).font_size(14.0).color(label));
+                          Pos::new(10.0, 155.0), TextDef::default().font_size(14.0), TextOverride::from_color(label));
 
                 win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&geo, &sdf]);
             }
             None => {
                 let mut batch = DrawBatch::new();
                 draw_text(&mut batch.texts, "Place logo_quad.png in the project root.",
-                    TextOptions::default().x(150.0).y(160.0).font_size(18.0).color(Color::new(0.8, 0.8, 0.8, 1.0)));
+                          Pos::new(150.0, 160.0), TextDef::default().font_size(18.0), TextOverride::from_color(Color::new(0.8, 0.8, 0.8, 1.0)));
                 win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&batch]);
             }
         }

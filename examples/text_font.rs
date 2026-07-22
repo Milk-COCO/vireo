@@ -42,24 +42,16 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Custom fonts (load_font / load_font_file)",
-            TextOptions::default()
-                .x(24.0)
-                .y(24.0)
-                .font_size(22.0)
-                .color(GOLD)
-                .with_weight(Weight::BOLD),
+            Pos::new(24.0, 24.0), TextDef::default().font_size(22.0).with_weight(Weight::BOLD),
+            TextOverride::from_color(GOLD),
         );
 
         let mut y = 80.0;
         draw_text(
             &mut batch.texts,
             "System SansSerif (default)",
-            TextOptions::default()
-                .x(24.0)
-                .y(y)
-                .font_size(20.0)
-                .color(WHITE)
-                .with_family(Family::SansSerif),
+            Pos::new(24.0, y), TextDef::default().font_size(20.0).with_family(Family::SansSerif),
+            TextOverride::from_color(WHITE),
         );
         y += 40.0;
 
@@ -67,12 +59,8 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 "Consolas via Family::Name — 0123456789",
-                TextOptions::default()
-                    .x(24.0)
-                    .y(y)
-                    .font_size(20.0)
-                    .color(Color::new(0.4, 0.9, 1.0, 1.0))
-                    .with_family(Family::Name("Consolas")),
+                Pos::new(24.0, y), TextDef::default().font_size(20.0).with_family(Family::Name("Consolas")),
+                TextOverride::from_color(Color::new(0.4, 0.9, 1.0, 1.0)),
             );
             y += 40.0;
         }
@@ -81,12 +69,8 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 "Segoe UI via Family::Name — Hello 中文",
-                TextOptions::default()
-                    .x(24.0)
-                    .y(y)
-                    .font_size(20.0)
-                    .color(Color::new(1.0, 0.7, 0.4, 1.0))
-                    .with_family(Family::Name("Segoe UI")),
+                Pos::new(24.0, y), TextDef::default().font_size(20.0).with_family(Family::Name("Segoe UI")),
+                TextOverride::from_color(Color::new(1.0, 0.7, 0.4, 1.0)),
             );
             y += 40.0;
         }
@@ -94,23 +78,16 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Arial via Family::Name (if loaded)",
-            TextOptions::default()
-                .x(24.0)
-                .y(y)
-                .font_size(20.0)
-                .color(Color::new(0.7, 0.85, 0.5, 1.0))
-                .with_family(Family::Name("Arial")),
+            Pos::new(24.0, y), TextDef::default().font_size(20.0).with_family(Family::Name("Arial")),
+            TextOverride::from_color(Color::new(0.7, 0.85, 0.5, 1.0)),
         );
         y += 48.0;
 
         draw_text(
             &mut batch.texts,
             "Place/override with any TTF/OTF path in load_font_file.",
-            TextOptions::default()
-                .x(24.0)
-                .y(y)
-                .font_size(13.0)
-                .color(Color::new(0.5, 0.55, 0.65, 1.0)),
+            Pos::new(24.0, y), TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),
         );
 
         win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);

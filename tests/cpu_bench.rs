@@ -27,19 +27,19 @@ fn bench_shape_generation() {
     bench("SDF rect (4 vertices)", 50_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(RED));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
     });
 
     bench("SDF rounded_rect", 50_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rounded_rect(&mut b, 0.0, 0.0, 10.0, 10.0, 4.0, Some(RED));
+        draw_rounded_rect(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, 4.0, Some(RED));
     });
 
     bench("SDF circle", 50_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_circle(&mut b, 5.0, 5.0, 4.0, Some(RED));
+        draw_circle(&mut b, Pos::new(5.0, 5.0), 4.0, Some(RED));
     });
 
     bench("SDF triangle", 50_000, || {
@@ -58,13 +58,13 @@ fn bench_shape_generation() {
     bench("geo rounded_rect (fan)", 10_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = None;
-        draw_rounded_rect(&mut b, 0.0, 0.0, 10.0, 10.0, 4.0, Some(RED));
+        draw_rounded_rect(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, 4.0, Some(RED));
     });
 
     bench("geo circle (fan, ~260 verts)", 10_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = None;
-        draw_circle(&mut b, 5.0, 5.0, 4.0, Some(RED));
+        draw_circle(&mut b, Pos::new(5.0, 5.0), 4.0, Some(RED));
     });
 }
 
@@ -77,7 +77,7 @@ fn bench_batch_lifecycle() {
         b.sdf_feather = Some(1.0);
         for i in 0..100 {
             b.set_position((i * 10) as f32, 0.0);
-            draw_rectangle(&mut b, 0.0, 0.0, 8.0, 8.0, Some(BLUE));
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(BLUE));
         }
         b.clear();
     });
@@ -87,7 +87,7 @@ fn bench_batch_lifecycle() {
         for _ in 0..10 {
             b.sdf_feather = Some(1.0);
             for i in 0..100 {
-                draw_rectangle(&mut b, i as f32, 0.0, 8.0, 8.0, Some(BLUE));
+                draw_rectangle(&mut b, Pos::new(i as f32, 0.0), 8.0, 8.0, Some(BLUE));
             }
             b.clear();
         }
@@ -124,7 +124,7 @@ fn bench_transform_api() {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
         b.set_position(100.0, 200.0);
-        draw_rectangle(&mut b, 0.0, 0.0, 5.0, 5.0, Some(RED));
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
         b.clear_transform();
     });
 }
@@ -139,7 +139,7 @@ fn bench_transform_dedup() {
         b.sdf_feather = Some(1.0);
         b.set_position(100.0, 200.0);
         for _ in 0..100 {
-            draw_rectangle(&mut b, 0.0, 0.0, 8.0, 8.0, Some(RED));
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
         }
     });
 
@@ -149,7 +149,7 @@ fn bench_transform_dedup() {
         b.sdf_feather = Some(1.0);
         for i in 0..100 {
             b.set_position(i as f32, (i * 2) as f32);
-            draw_rectangle(&mut b, 0.0, 0.0, 8.0, 8.0, Some(RED));
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
         }
     });
 
@@ -160,7 +160,7 @@ fn bench_transform_dedup() {
         for i in 0..100 {
             if i % 2 == 0 { b.set_position(10.0, 20.0); }
             else { b.set_position(i as f32, i as f32); }
-            draw_rectangle(&mut b, 0.0, 0.0, 8.0, 8.0, Some(RED));
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
         }
     });
 }
@@ -171,15 +171,17 @@ fn bench_text_entries() {
 
     bench("draw_text single", 50_000, || {
         let mut list = vireo::text::TextEntryList::new();
-        draw_text(&mut list, "Hello Vireo!", TextOptions::default()
-            .x(10.0).y(20.0).font_size(16.0).color(WHITE));
+        draw_text(&mut list, "Hello Vireo!", Pos::new(10.0, 20.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::default().color(WHITE));
     });
 
     bench("draw_text x100", 1_000, || {
         let mut list = vireo::text::TextEntryList::new();
         for i in 0..100 {
-            draw_text(&mut list, &format!("Line {}", i), TextOptions::default()
-                .x(10.0).y(i as f32 * 20.0).font_size(14.0).color(WHITE));
+            draw_text(&mut list, &format!("Line {}", i), Pos::new(10.0, i as f32 * 20.0),
+                TextDef::default().font_size(14.0),
+                TextOverride::default().color(WHITE));
         }
     });
 }
@@ -195,10 +197,10 @@ fn bench_typical_frames() {
         for i in 0..2000 {
             b.set_position((i % 50) as f32 * 15.0, (i / 50) as f32 * 15.0);
             match i % 5 {
-                0 => draw_rectangle(&mut b, 0., 0., 12., 12., Some(RED)),
-                1 => draw_circle(&mut b, 6., 6., 5., Some(GREEN)),
-                2 => draw_rounded_rect(&mut b, 0., 0., 12., 12., 3., Some(BLUE)),
-                3 => draw_ellipse(&mut b, 6., 6., 5., 3., Some(YELLOW)),
+                0 => draw_rectangle(&mut b, Pos::new(0., 0.), 12., 12., Some(RED)),
+                1 => draw_circle(&mut b, Pos::new(6., 6.), 5., Some(GREEN)),
+                2 => draw_rounded_rect(&mut b, Pos::new(0., 0.), 12., 12., 3., Some(BLUE)),
+                3 => draw_ellipse(&mut b, Pos::new(6., 6.), 5., 3., Some(YELLOW)),
                 4 => draw_triangle(&mut b, 0., 0., 12., 0., 6., 12., Some(MAGENTA)),
                 _ => {}
             }
@@ -213,7 +215,7 @@ fn bench_typical_frames() {
         b.sdf_feather = None;
         for i in 0..500 {
             b.set_position((i % 25) as f32 * 30.0, (i / 25) as f32 * 30.0);
-            draw_rounded_rect(&mut b, 0., 0., 25., 25., 6., Some(RED));
+            draw_rounded_rect(&mut b, Pos::new(0., 0.), 25., 25., 6., Some(RED));
         }
     });
     println!("  Geo 500 rounded_rects:     {:.3} ms", t2);
@@ -226,7 +228,7 @@ fn bench_typical_frames() {
             b.set_position((i % 40) as f32 * 20., (i / 40) as f32 * 20.);
             b.set_deg((i as f32) * 7.0);
             b.set_scale(1.0 + (i%3) as f32 * 0.3, 1.0);
-            draw_rounded_rect(&mut b, -5., -5., 5., 5., 2., Some(WHITE));
+            draw_rounded_rect(&mut b, Pos::new(-5., -5.), 5., 5., 2., Some(WHITE));
             b.clear_transform();
         }
     });
@@ -236,9 +238,10 @@ fn bench_typical_frames() {
     let (_, t4) = time_ms(|| {
         let mut list = vireo::text::TextEntryList::new();
         for i in 0..200 {
-            draw_text(&mut list, &format!("Text {i}"), TextOptions::default()
-                .x((i%20) as f32 * 40.).y((i/20) as f32 * 25.)
-                .font_size(14.0).color(WHITE));
+            draw_text(&mut list, &format!("Text {i}"),
+                Pos::new((i%20) as f32 * 40., (i/20) as f32 * 25.),
+                TextDef::default().font_size(14.0),
+                TextOverride::default().color(WHITE));
         }
     });
     println!("  200 text entries:          {:.3} ms", t4);
@@ -282,13 +285,13 @@ fn bench_outline_and_chain() {
     bench("SDF rect_outline", 10_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rect_outline(&mut b, 0.0, 0.0, 20.0, 20.0, 2.0, Some(GREEN));
+        draw_rect_outline(&mut b, Pos::new(0.0, 0.0), 20.0, 20.0, 2.0, Some(GREEN));
     });
 
     bench("SDF rounded_rect_outline", 5_000, || {
         let mut b = DrawBatch::new();
         b.sdf_feather = Some(1.0);
-        draw_rounded_rect_outline(&mut b, 0.0, 0.0, 30.0, 20.0, 6.0, 2.0, Some(WHITE), 8);
+        draw_rounded_rect_outline(&mut b, Pos::new(0.0, 0.0), 30.0, 20.0, 6.0, 2.0, Some(WHITE), 8);
     });
 }
 
@@ -302,7 +305,7 @@ fn bench_merge_path_cpu() {
         b.sdf_feather = Some(1.0);
         for i in 0..2000 {
             b.set_position((i % 50) as f32 * 15.0, (i / 50) as f32 * 15.0);
-            draw_rectangle(&mut b, 0., 0., 12., 12., Some(RED));
+            draw_rectangle(&mut b, Pos::new(0., 0.), 12., 12., Some(RED));
         }
         let mut combined: Vec<Vertex> = Vec::with_capacity(b.vertices.len());
         combined.extend_from_slice(&b.vertices);
@@ -322,7 +325,7 @@ fn bench_merge_path_cpu() {
                     let pts = [(0., 0.), (10., 0.), (8., 8.), (0., 10.)];
                     draw_polygon(&mut b, &pts, Some(BLUE));
                 } else {
-                    draw_rectangle(&mut b, 0., 0., 10., 10., Some(RED));
+                    draw_rectangle(&mut b, Pos::new(0., 0.), 10., 10., Some(RED));
                 }
             }
             batches.push(b);

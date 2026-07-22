@@ -1,4 +1,4 @@
-//! 文本裁剪与对齐：`TextOptions::clip` + Justified / End / max_width
+//! 文本裁剪与对齐：`TextOverride::clip` + Justified / End / max_width
 
 use vireo::prelude::*;
 
@@ -17,11 +17,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "clip + TextAlign (Left / Center / Right / End / Justified)",
-            TextOptions::default()
-                .x(20.0)
-                .y(16.0)
-                .font_size(15.0)
-                .color(Color::new(0.7, 0.75, 0.85, 1.0)),
+            Pos::new(20.0, 16.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
         );
 
         // 裁剪框 + 横向滚动文字
@@ -31,21 +29,16 @@ fn main() {
         draw_text(
             &mut batch.texts,
             long,
-            TextOptions::default()
-                .x(scroll_x)
-                .y(78.0)
-                .font_size(18.0)
-                .color(WHITE)
-                .clip(clip.0, clip.1, clip.2, clip.3),
+            Pos::new(scroll_x, 78.0),
+            TextDef::default().font_size(18.0),
+            TextOverride::from_color(WHITE).clip(clip.0, clip.1, clip.2, clip.3),
         );
         draw_text(
             &mut batch.texts,
             "clip marquee",
-            TextOptions::default()
-                .x(40.0)
-                .y(128.0)
-                .font_size(12.0)
-                .color(Color::new(0.5, 0.55, 0.65, 1.0)),
+            Pos::new(40.0, 128.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),
         );
 
         // 对齐演示
@@ -65,22 +58,19 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 label,
-                TextOptions::default()
-                    .x(box_x + 8.0)
-                    .y(y - 18.0)
-                    .font_size(11.0)
-                    .color(GOLD),
+                Pos::new(box_x + 8.0, y - 18.0),
+                TextDef::default().font_size(11.0),
+                TextOverride::from_color(GOLD),
             );
             draw_text(
                 &mut batch.texts,
                 sample,
-                TextOptions::default()
-                    .x(box_x)
-                    .y(y)
+                Pos::new(box_x, y),
+                TextDef::default()
                     .font_size(16.0)
-                    .color(WHITE)
                     .max_width(box_w)
                     .align(align),
+                TextOverride::from_color(WHITE),
             );
         }
 

@@ -55,15 +55,11 @@ fn main() {
         let mut text = DrawBatch::new();
         let wb = (t * 4.0).sin() * 4.0;
         draw_text(&mut text.texts, "Ciallo, Vireo!",
-            TextOptions::default()
-                .x(cx - 115.0 + wb).y(cy - 55.0)
-                .font_size(42.0)
-                .color(Color::new(1.0, 0.95, 0.65, 1.0)));
+                  Pos::new(cx - 115.0 + wb, cy - 55.0), TextDef::default().font_size(42.0),
+                  TextOverride::from_color(Color::new(1.0, 0.95, 0.65, 1.0)));
         draw_text(&mut text.texts, "\u{2014} Just a genus of bird!",
-            TextOptions::default()
-                .x(cx - 50.).y(cy + 0.0)
-                .font_size(16.0)
-                .color(Color::new(0.5, 0.65, 0.85, 1.0)));
+                  Pos::new(cx - 50., cy + 0.0), TextDef::default().font_size(16.0),
+                  TextOverride::from_color(Color::new(0.5, 0.65, 0.85, 1.0)));
 
         win.draw(Some(Color::new(0.04, 0.06, 0.1, 1.0)), &[&ring, &logo_batch, &text]);
 

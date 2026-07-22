@@ -30,8 +30,8 @@ fn main() {
         let fill_labels = ["Rect", "Circle", "Ellipse", "RndRect", "Triangle", "Polygon", "Arc"];
         let fill_xs =   [20.0, 190.0, 330.0, 470.0, 610.0, 735.0, 920.0];
         for i in 0..fill_labels.len() {
-            draw_text(&mut batch.texts, fill_labels[i],
-                TextOptions::default().x(fill_xs[i]).y(115.0).font_size(12.0).color(Color::new(0.6, 0.6, 0.7, 1.0)));
+            draw_text(&mut batch.texts, fill_labels[i], Pos::new(fill_xs[i], 115.0),
+                      TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.6, 0.6, 0.7, 1.0)));
         }
 
         // ====== 描边形状 ======
@@ -46,8 +46,8 @@ fn main() {
 
         let outline_labels = ["Rect", "Circle", "Ellipse", "RndRect", "Triangle", "Polygon", "Arc"];
         for i in 0..outline_labels.len() {
-            draw_text(&mut batch.texts, outline_labels[i],
-                TextOptions::default().x(fill_xs[i]).y(y + 95.0).font_size(12.0).color(Color::new(0.6, 0.6, 0.7, 1.0)));
+            draw_text(&mut batch.texts, outline_labels[i], Pos::new(fill_xs[i], y + 95.0),
+                      TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.6, 0.6, 0.7, 1.0)));
         }
 
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);

@@ -59,19 +59,20 @@ fn main() {
         let bg = Color::new(0.06, 0.06, 0.09, 1.0);
         let white = WHITE;
         let dim = Color::new(0.55, 0.55, 0.65, 1.0);
-        let opt = |x: f32, y: f32, sz: f32, c: Color| {
-            TextOptions::default().x(x).y(y).font_size(sz).color(c)
-        };
+        let ov = |c: Color| TextOverride::from_color(c);
+        let def = |sz: f32| TextDef::default().font_size(sz);
 
         draw_text(
             &mut batch.texts,
             "HudLine / parts / auto-split (Space = toggle auto)",
-            opt(16.0, 12.0, 13.0, dim),
+            Pos::new(16.0, 12.0),
+            def(13.0),
+            ov(dim),
         );
 
         // 1) HudLine：只改 Digits 槽
-        score_line.draw(&mut batch.texts, opt(16.0, 48.0, 22.0, white));
-        mode_line.draw(&mut batch.texts, opt(16.0, 84.0, 16.0, Color::new(0.75, 0.85, 1.0, 1.0)));
+        score_line.draw(&mut batch.texts, Pos::new(16.0, 48.0), def(22.0), ov(white));
+        mode_line.draw(&mut batch.texts, Pos::new(16.0, 84.0), def(16.0), ov(Color::new(0.75, 0.85, 1.0, 1.0)));
 
         // 2) 手写 parts：Static + Digits（FPS）
         draw_text_parts(
@@ -80,7 +81,9 @@ fn main() {
                 TextPart::Static("FPS "),
                 TextPart::Digits(&fps_s),
             ],
-            opt(16.0, 120.0, 16.0, Color::new(0.9, 0.9, 0.5, 1.0)),
+            Pos::new(16.0, 120.0),
+            def(16.0),
+            ov(Color::new(0.9, 0.9, 0.5, 1.0)),
         );
 
         // 3) 自动切分对照
@@ -88,11 +91,15 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 "auto (draw_text_hud!):",
-                opt(16.0, 168.0, 14.0, dim),
+                Pos::new(16.0, 168.0),
+                def(14.0),
+                ov(dim),
             );
             draw_text_hud!(
                 &mut batch.texts,
-                opt(16.0, 192.0, 18.0, Color::new(0.5, 1.0, 0.7, 1.0));
+                Pos::new(16.0, 192.0),
+                def(18.0),
+                ov(Color::new(0.5, 1.0, 0.7, 1.0));
                 "击杀 {}  金币 {}",
                 score,
                 score * 3,
@@ -100,13 +107,17 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 "(split_hud → Static 标签 + Digits 数字)",
-                opt(16.0, 224.0, 12.0, dim),
+                Pos::new(16.0, 224.0),
+                def(12.0),
+                ov(dim),
             );
         } else {
             draw_text(
                 &mut batch.texts,
                 "auto line hidden (Space to show)",
-                opt(16.0, 168.0, 14.0, dim),
+                Pos::new(16.0, 168.0),
+                def(14.0),
+                ov(dim),
             );
         }
 
@@ -114,7 +125,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "avoid: draw_text(&format!(\"分数: {n}\")) every frame → shape miss",
-            opt(16.0, 280.0, 12.0, Color::new(0.7, 0.4, 0.4, 1.0)),
+            Pos::new(16.0, 280.0),
+            def(12.0),
+            ov(Color::new(0.7, 0.4, 0.4, 1.0)),
         );
 
         let st = app.gpu.shape_cache_stats();
@@ -132,7 +145,9 @@ fn main() {
                 TextPart::Static("%  entries "),
                 TextPart::Digits(&app.gpu.shape_cache_len().to_string()),
             ],
-            opt(16.0, 312.0, 13.0, dim),
+            Pos::new(16.0, 312.0),
+            def(13.0),
+            ov(dim),
         );
 
         win.draw(Some(bg), &[&batch]);

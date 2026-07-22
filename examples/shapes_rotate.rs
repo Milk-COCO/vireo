@@ -29,7 +29,7 @@ fn main() {
         // 文字也受 transform 影响
         spinning.clear_transform();
         draw_text(&mut spinning.texts, "Rotate!",
-            TextOptions::default().font_size(16.0).color(WHITE));
+                  Pos::ZERO, TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
 
         win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&rotors, &spinning]);
 

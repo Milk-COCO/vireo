@@ -34,11 +34,10 @@ fn scene_text_dynamic(b: &mut DrawBatch, frame: u32) {
         draw_text(
             &mut b.texts,
             &msg,
-            TextOptions::default()
-                .x(x)
-                .y(y)
-                .font_size(sz)
-                .color(WHITE),
+            Pos::new(x, y),
+            TextDef::default()
+                .font_size(sz),
+            TextOverride::from_color(WHITE),
         );
     }
 }
@@ -56,11 +55,10 @@ fn scene_text_static(b: &mut DrawBatch) {
         draw_text(
             &mut b.texts,
             msg,
-            TextOptions::default()
-                .x(x)
-                .y(y)
-                .font_size(sz)
-                .color(WHITE),
+            Pos::new(x, y),
+            TextDef::default()
+                .font_size(sz),
+            TextOverride::from_color(WHITE),
         );
     }
 }

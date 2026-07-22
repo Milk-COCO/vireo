@@ -85,11 +85,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Touch: on_touch + input.touches  |  LMB = simulate finger",
-            TextOptions::default()
-                .x(16.0)
-                .y(14.0)
-                .font_size(16.0)
-                .color(Color::new(0.75, 0.8, 0.9, 1.0)),
+            Pos::new(16.0, 14.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(Color::new(0.75, 0.8, 0.9, 1.0)),
         );
 
         let touches: Vec<(u64, f32, f32, Option<f64>)> = win
@@ -109,11 +107,9 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 &format!("id={id}"),
-                TextOptions::default()
-                    .x(*x - 20.0)
-                    .y(*y - 8.0)
-                    .font_size(12.0)
-                    .color(WHITE),
+                Pos::new(*x - 20.0, *y - 8.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(WHITE),
             );
         }
 
@@ -129,11 +125,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             &format!("active: {}  events: {}\n{last_s}", touches.len(), g.count),
-            TextOptions::default()
-                .x(16.0)
-                .y(492.0)
-                .font_size(14.0)
-                .color(Color::new(0.7, 0.75, 0.85, 1.0)),
+            Pos::new(16.0, 492.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
         );
 
         win.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);

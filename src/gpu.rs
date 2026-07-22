@@ -583,7 +583,7 @@ impl GpuContext {
     }
 
     /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。
-    pub fn measure_text(&self, text: &str, options: &crate::text::TextOptions) -> (f32, f32) {
+    pub fn measure_text(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
         use crate::glyphon::{Attrs, Buffer, Metrics, Shaping};
 
         let mut text_ctx = self.text_ctx.borrow_mut();
@@ -680,7 +680,7 @@ impl GpuContext {
     /// **首帧性能提示**：首次 `make_stable_text` 会触发 `harfrust` shape 成本
     /// （典型 ~5–30ms / 字符串）。建议在加载/初始化阶段预创建常用 handle，
     /// 或先调 [`GpuContext::preheat_text`] 触发字体/atlas lazy init。
-    pub fn make_stable_text(&self, text: &str, options: &crate::text::TextOptions) -> crate::text::StableText {
+    pub fn make_stable_text(&self, text: &str, options: &crate::text::TextDef) -> crate::text::StableText {
         self.text_ctx.borrow_mut().make_stable(text, options)
     }
 

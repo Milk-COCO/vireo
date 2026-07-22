@@ -27,29 +27,23 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "左 clips=true  |  右 false  |  子文字 + TRANSFORM（父不旋转）",
-            TextOptions::default()
-                .x(16.0)
-                .y(12.0)
-                .font_size(15.0)
-                .color(Color::new(0.75, 0.8, 0.9, 1.0)),
+            Pos::new(16.0, 12.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.75, 0.8, 0.9, 1.0)),
         );
         draw_text(
             &mut ui.texts,
             "clips",
-            TextOptions::default()
-                .x(190.0)
-                .y(40.0)
-                .font_size(14.0)
-                .color(Color::new(0.6, 0.7, 0.85, 1.0)),
+            Pos::new(190.0, 40.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.6, 0.7, 0.85, 1.0)),
         );
         draw_text(
             &mut ui.texts,
             "no clip",
-            TextOptions::default()
-                .x(640.0)
-                .y(40.0)
-                .font_size(14.0)
-                .color(Color::new(0.6, 0.7, 0.85, 1.0)),
+            Pos::new(640.0, 40.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.6, 0.7, 0.85, 1.0)),
         );
 
         let left = text_clip_panel(220.0, 260.0, t, true, long);
@@ -85,20 +79,16 @@ fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatc
     let scroll = -100.0 + (t * 50.0) % 220.0;
     child.text(
         long,
-        TextOptions::default()
-            .x(scroll)
-            .y(-14.0)
-            .font_size(22.0)
-            .color(Color::new(0.98, 0.95, 0.88, 1.0)),
+        Pos::new(scroll, -14.0),
+        TextDef::default().font_size(22.0),
+        TextOverride::from_color(Color::new(0.98, 0.95, 0.88, 1.0)),
     );
 
     child.text(
         if clip { "CLIPPED" } else { "VISIBLE" },
-        TextOptions::default()
-            .x(-52.0)
-            .y(30.0)
-            .font_size(24.0)
-            .color(Color::new(1.0, 0.85, 0.3, 1.0)),
+        Pos::new(-52.0, 30.0),
+        TextDef::default().font_size(24.0),
+        TextOverride::from_color(Color::new(1.0, 0.85, 0.3, 1.0)),
     );
 
     // 对照：形状裁切

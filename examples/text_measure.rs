@@ -13,7 +13,7 @@ fn main() {
     let font_size = 48.0;
 
     // 预先测量一次（文本不变，尺寸不变）
-    let opts = TextOptions::default().font_size(font_size);
+    let opts = TextDef::default().font_size(font_size);
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -58,8 +58,7 @@ fn main() {
         draw_circle(&mut batch, Pos::new(tx + tw, ty + th), 2.5, Some(Color::new(0.0, 1.0, 0.0, 0.7)));
 
         // 文本
-        let text_opts = TextOptions::default().font_size(font_size).x(tx).y(ty).color(WHITE);
-        draw_text(&mut batch.texts, text, text_opts);
+        draw_text(&mut batch.texts, text, Pos::new(tx, ty), TextDef::default().font_size(font_size), TextOverride::from_color(WHITE));
 
         // 信息
         let info = format!(
@@ -72,7 +71,7 @@ fn main() {
         draw_text(
             &mut batch.texts,
             &info,
-            TextOptions::default().x(20.0).y(20.0).font_size(13.0).color(Color::new(0.5, 0.5, 0.6, 1.0)),
+            Pos::new(20.0, 20.0), TextDef::default().font_size(13.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
         );
 
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);

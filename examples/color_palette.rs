@@ -15,11 +15,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "color_u8! / from_hex / lerp / with_alpha",
-            TextOptions::default()
-                .x(20.0)
-                .y(16.0)
-                .font_size(16.0)
-                .color(Color::new(0.75, 0.78, 0.88, 1.0)),
+            Pos::new(20.0, 16.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(Color::new(0.75, 0.78, 0.88, 1.0)),
         );
 
         // color_u8! 色板
@@ -36,21 +34,17 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 &c.to_hex(),
-                TextOptions::default()
-                    .x(x)
-                    .y(124.0)
-                    .font_size(11.0)
-                    .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+                Pos::new(x, 124.0),
+                TextDef::default().font_size(11.0),
+                TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
             );
         }
         draw_text(
             &mut batch.texts,
             "color_u8! + to_hex",
-            TextOptions::default()
-                .x(30.0)
-                .y(48.0)
-                .font_size(12.0)
-                .color(GOLD),
+            Pos::new(30.0, 48.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(GOLD),
         );
 
         // from_hex
@@ -62,21 +56,17 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 *h,
-                TextOptions::default()
-                    .x(x)
-                    .y(234.0)
-                    .font_size(11.0)
-                    .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+                Pos::new(x, 234.0),
+                TextDef::default().font_size(11.0),
+                TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
             );
         }
         draw_text(
             &mut batch.texts,
             "from_hex",
-            TextOptions::default()
-                .x(30.0)
-                .y(158.0)
-                .font_size(12.0)
-                .color(GOLD),
+            Pos::new(30.0, 158.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(GOLD),
         );
 
         // lerp 渐变条
@@ -94,11 +84,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "lerp  |  with_alpha pulse",
-            TextOptions::default()
-                .x(30.0)
-                .y(268.0)
-                .font_size(12.0)
-                .color(GOLD),
+            Pos::new(30.0, 268.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(GOLD),
         );
 
         win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);

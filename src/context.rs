@@ -800,6 +800,8 @@ impl Renderer {
                         self.scale,
                         &batch.transform_table,
                         &mut global_transforms,
+                        batch.text_clip,
+                        batch.color,
                     );
                     event_infos[ei].text = Some((start, count));
                 }
@@ -1113,7 +1115,7 @@ impl Renderer {
     }
 }
 
-use crate::text::{TextEntryList, TextOptions};
+use crate::text::{TextEntryList, TextDef};
 
 /// 形状仿射变换：线性部分 + 平移 + 局部 pivot。
 ///
@@ -2317,41 +2319,50 @@ impl DrawBatch {
     }
 
     /// 添加文字，自动捕获当前 transform。
-    pub fn text(&mut self, text: &str, options: TextOptions) {
+    pub fn text(&mut self, text: &str, pos: Pos, def: TextDef, ov: crate::text::TextOverride) {
         let idx = self.current_transform_index();
-        self.texts.push_indexed(text, options, idx);
+        self.texts.push_indexed(text, pos, def, ov, idx);
     }
 
-    /// 使用 [`StableText`] 直接绘制（位置 x/y + 颜色 color；字号等已在创建时定型）。
-    pub fn text_stable(&mut self, stable: &crate::text::StableText, x: f32, y: f32, color: crate::color::Color) {
+    /// 使用 [`StableText`] 直接绘制（位置 pos + 覆盖 ov；字号等已在创建时定型）。
+    pub fn text_stable(
+        &mut self,
+        stable: &crate::text::StableText,
+        pos: Pos,
+        ov: crate::text::TextOverride,
+    ) {
         let idx = self.current_transform_index();
-        let opts = TextOptions {
-            x, y, color,
-            clip: None,
-            font_size: 0.0,
-            max_width: None,
-            align: crate::text::TextAlign::Left,
-            attrs: None,
-        };
-        self.texts.push_stable_indexed(stable, opts, idx);
+        self.texts.push_stable_indexed(stable, pos, ov, idx);
     }
 
     /// HUD 多段（Static / Dynamic / Digits / Stable），捕获当前 transform。
-    pub fn text_parts(&mut self, parts: &[crate::text::TextPart<'_>], options: TextOptions) {
+    pub fn text_parts(
+        &mut self,
+        parts: &[crate::text::TextPart<'_>],
+        pos: Pos,
+        def: TextDef,
+        ov: crate::text::TextOverride,
+    ) {
         let idx = self.current_transform_index();
-        self.texts.push_parts_indexed(parts, options, idx);
+        self.texts.push_parts_indexed(parts, pos, def, ov, idx);
     }
 
     /// HUD 自动切分（[`crate::text::split_hud`]），捕获当前 transform。
-    pub fn text_hud(&mut self, text: &str, options: TextOptions) {
+    pub fn text_hud(&mut self, text: &str, pos: Pos, def: TextDef, ov: crate::text::TextOverride) {
         let idx = self.current_transform_index();
-        self.texts.push_hud_indexed(text, options, idx);
+        self.texts.push_hud_indexed(text, pos, def, ov, idx);
     }
 
     /// 绘制 [`crate::text::HudLine`]，捕获当前 transform。
-    pub fn hud_line(&mut self, line: &crate::text::HudLine, options: TextOptions) {
+    pub fn hud_line(
+        &mut self,
+        line: &crate::text::HudLine,
+        pos: Pos,
+        def: TextDef,
+        ov: crate::text::TextOverride,
+    ) {
         let idx = self.current_transform_index();
-        line.draw_indexed(&mut self.texts, options, idx);
+        line.draw_indexed(&mut self.texts, pos, def, ov, idx);
     }
 }
 
@@ -2360,7 +2371,7 @@ mod tests {
     use super::*;
     use crate::color::colors::*;
     use crate::shapes::{draw_circle, draw_polygon, draw_rectangle, draw_rounded_rect};
-    use crate::text::TextOptions;
+    use crate::text::{TextDef, TextOverride};
 
     #[test]
     fn has_sdf_flag_set_on_sdf_shapes() {
@@ -2687,23 +2698,29 @@ mod tests {
         draw_circle(&mut leaf, Pos::new(0.0, 0.0), 18.0, Some(WHITE));
         leaf.text(
             "LEAF",
-            TextOptions::default().x(-40.0).y(-14.0).font_size(28.0).color(BLACK),
+            Pos::new(-40.0, -14.0),
+            TextDef::default().font_size(28.0),
+            TextOverride::from_color(BLACK),
         );
 
         mid.push_child(leaf);
         mid.text(
             "MID",
-            TextOptions::default().x(-36.0).y(-34.0).font_size(26.0).color(YELLOW),
+            Pos::new(-36.0, -34.0),
+            TextDef::default().font_size(26.0),
+            TextOverride::from_color(YELLOW),
         );
         root.push_child(mid);
         root.text(
             "ROOT",
-            TextOptions::default().x(-50.0).y(-58.0).font_size(26.0).color(SKYBLUE),
+            Pos::new(-50.0, -58.0),
+            TextDef::default().font_size(26.0),
+            TextOverride::from_color(SKYBLUE),
         );
 
         // --- root ---
         assert_eq!(root.texts.entries.len(), 1);
-        let rti = root.texts.entries[0].transform_index;
+        let rti = root.texts.entries[0].transform_index();
         let rvi = root.vertices[0].transform_index;
         assert_eq!(rti, rvi, "root text/shape index");
         let (_, _, _, _, rtx, rty) = mat6(&root.transform_table, rti);
@@ -2713,7 +2730,7 @@ mod tests {
         // --- mid（继承后应为 root∘mid_local = (270, 270)）---
         let mid = &root.children[0];
         assert_eq!(mid.texts.entries.len(), 1);
-        let mti = mid.texts.entries[0].transform_index;
+        let mti = mid.texts.entries[0].transform_index();
         let mvi = mid.vertices[0].transform_index;
         assert_eq!(mti, mvi, "mid text/shape index");
         let (_, _, _, _, mtx, mty) = mat6(&mid.transform_table, mti);
@@ -2725,7 +2742,7 @@ mod tests {
         // --- leaf（继承后应与 mid 同世界原点 (270,270)）---
         let leaf = &root.children[0].children[0];
         assert_eq!(leaf.texts.entries.len(), 1);
-        let lti = leaf.texts.entries[0].transform_index;
+        let lti = leaf.texts.entries[0].transform_index();
         let lvi = leaf.vertices[0].transform_index;
         assert_eq!(lti, lvi, "leaf text/shape index");
         let (_, _, _, _, ltx, lty) = mat6(&leaf.transform_table, lti);
@@ -2735,8 +2752,8 @@ mod tests {
         );
 
         // 文字局部坐标：LEAF 在 leaf 原点附近，变换后世界 ≈ (230,256) 仍在 mid 圆内
-        let wx = ltx + leaf.texts.entries[0].options.x;
-        let wy = lty + leaf.texts.entries[0].options.y;
+        let wx = ltx + leaf.texts.entries[0].pos().x;
+        let wy = lty + leaf.texts.entries[0].pos().y;
         let dx = wx - 270.0;
         let dy = wy - 270.0;
         let dist = (dx * dx + dy * dy).sqrt();
@@ -2757,17 +2774,19 @@ mod tests {
         child.inherit = InheritFromParent::TRANSFORM;
         child.text(
             "hi",
-            TextOptions::default().x(0.0).y(0.0).font_size(16.0).color(WHITE),
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(WHITE),
         );
         // text() 会注册当前 transform（恒等）到 table
         assert!(!child.transform_table.is_empty());
-        let ti_before = child.texts.entries[0].transform_index;
+        let ti_before = child.texts.entries[0].transform_index();
         let (_, _, _, _, tx0, ty0) = mat6(&child.transform_table, ti_before);
         assert!(tx0.abs() < 1e-5 && ty0.abs() < 1e-5);
 
         parent.push_child(child);
         let c = &parent.children[0];
-        let ti = c.texts.entries[0].transform_index;
+        let ti = c.texts.entries[0].transform_index();
         let (_, _, _, _, tx, ty) = mat6(&c.transform_table, ti);
         assert!((tx - 100.0).abs() < 1e-3, "tx={tx}");
         assert!((ty - 50.0).abs() < 1e-3, "ty={ty}");
@@ -2780,15 +2799,17 @@ mod tests {
         b.set_position(12.0, 34.0);
         b.text(
             "A",
-            TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE),
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(WHITE),
         );
         // 形状 Pos 与 batch 平移一致 → 共享 transform entry
         draw_rectangle(&mut b, Pos::new(12.0, 34.0), 4.0, 4.0, Some(RED));
         assert_eq!(
-            b.texts.entries[0].transform_index,
+            b.texts.entries[0].transform_index(),
             b.vertices[0].transform_index
         );
-        let (_, _, _, _, tx, ty) = mat6(&b.transform_table, b.texts.entries[0].transform_index);
+        let (_, _, _, _, tx, ty) = mat6(&b.transform_table, b.texts.entries[0].transform_index());
         assert!((tx - 12.0).abs() < 1e-4 && (ty - 34.0).abs() < 1e-4);
     }
 
@@ -2798,12 +2819,12 @@ mod tests {
         let mut root = DrawBatch::new();
         root.clips_children = true;
         draw_rectangle(&mut root, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
-        root.text("R", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
+        root.text("R", Pos::new(0.0, 0.0), TextDef::default().font_size(12.0), TextOverride::from_color(WHITE));
 
         let mut child = DrawBatch::new();
         child.inherit = InheritFromParent::TRANSFORM;
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 10.0, 10.0, Some(BLUE));
-        child.text("C", TextOptions::default().x(0.0).y(0.0).font_size(12.0).color(WHITE));
+        child.text("C", Pos::new(0.0, 0.0), TextDef::default().font_size(12.0), TextOverride::from_color(WHITE));
         root.push_child(child);
 
         let mut flat: Vec<Option<&DrawBatch>> = Vec::new();

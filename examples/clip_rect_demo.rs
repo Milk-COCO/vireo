@@ -15,11 +15,9 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
     draw_text(
         &mut batch.texts,
         text,
-        TextOptions::default()
-            .x(x)
-            .y(y)
-            .font_size(14.0)
-            .color(Color::new(0.65, 0.68, 0.78, 1.0)),
+        Pos::new(x, y),
+        TextDef::default().font_size(14.0),
+        TextOverride::from_color(Color::new(0.65, 0.68, 0.78, 1.0)),
     );
 }
 
@@ -121,11 +119,9 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "左：子 batch 色块超出 scissor 的部分被裁断    右：无 scissor，越界完全可见",
-            TextOptions::default()
-                .x(20.0)
-                .y(510.0)
-                .font_size(13.0)
-                .color(Color::new(0.5, 0.55, 0.65, 1.0)),
+            Pos::new(20.0, 510.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),
         );
 
         win.draw(

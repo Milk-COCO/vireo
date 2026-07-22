@@ -6,9 +6,9 @@
 //! let win = app.window(WindowDesc::new("Hello", 400, 300), None::<fn()>);
 //! app.run(move |app| {
 //!     let mut batch = DrawBatch::new();
-//!     draw_rectangle(&mut batch, 10.0, 10.0, 100.0, 80.0, Some(RED));
-//!     draw_text(&mut batch.texts, "Hello!", TextOptions::default()
-//!         .x(20.0).y(20.0).font_size(16.0).color(WHITE));
+//!     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
+//!     draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
+//!         TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
 //!     app.window_ref(&win).unwrap().draw(Some(BLACK), &[&batch]);
 //!     true
 //! });
@@ -57,7 +57,6 @@ pub mod prelude {
     pub use crate::text::Weight;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
-    pub use crate::text::TextOptions;
     pub use crate::text::HudLine;
     pub use crate::text::HudPart;
     pub use crate::text::StableText;

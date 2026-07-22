@@ -30,19 +30,19 @@ fn main() {
                 draw_text(
                     &mut batch.texts,
                     "From file (logo.png)",
-                    TextOptions::default().x(20.0).y(60.0).font_size(14.0).color(Color::new(0.6, 0.6, 0.7, 1.0)),
+                    Pos::new(20.0, 60.0), TextDef::default().font_size(14.0), TextOverride::from_color(Color::new(0.6, 0.6, 0.7, 1.0)),
                 );
                 draw_text(
                     &mut batch.texts,
                     "2x scaled",
-                    TextOptions::default().x(250.0).y(480.0).font_size(12.0).color(Color::new(0.5, 0.5, 0.6, 1.0)),
+                    Pos::new(250.0, 480.0), TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
                 );
             }
             None => {
                 draw_text(
                     &mut batch.texts,
                     "Texture not found.\nPlace a logo.png in examples/",
-                    TextOptions::default().x(200.0).y(250.0).font_size(20.0).color(Color::new(0.8, 0.8, 0.8, 1.0)),
+                    Pos::new(200.0, 250.0), TextDef::default().font_size(20.0), TextOverride::from_color(Color::new(0.8, 0.8, 0.8, 1.0)),
                 );
             }
         }

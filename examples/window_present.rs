@@ -70,17 +70,14 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 line,
-                TextOptions::default()
-                    .x(24.0)
-                    .y(28.0 + i as f32 * 30.0)
-                    .font_size(17.0)
-                    .color(if i == 0 {
-                        GOLD
-                    } else if i == 3 {
-                        Color::new(0.6, 0.85, 0.7, 1.0)
-                    } else {
-                        WHITE
-                    }),
+                Pos::new(24.0, 28.0 + i as f32 * 30.0), TextDef::default().font_size(17.0),
+                TextOverride::from_color(if i == 0 {
+                    GOLD
+                } else if i == 3 {
+                    Color::new(0.6, 0.85, 0.7, 1.0)
+                } else {
+                    WHITE
+                }),
             );
         }
 

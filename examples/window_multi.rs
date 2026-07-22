@@ -41,12 +41,8 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 &format!("({:.0}, {:.0})", cx, cy),
-                TextOptions {
-                    x: cx + 24.0,
-                    y: cy - 20.0,
-                    font_size: 14.0,
-                    ..TextOptions::default()
-                },
+                Pos::new(cx + 24.0, cy - 20.0), TextDef::default().font_size(14.0),
+                TextOverride::default(),
             );
         }
         win_a.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&batch]);
@@ -63,38 +59,23 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Vireo 文本渲染! Hello World!",
-            TextOptions {
-                x: 10.0,
-                y: 10.0,
-                font_size: 20.0,
-                color: Color::new(0.9, 0.9, 1.0, 1.0),
-                ..TextOptions::default()
-            },
+            Pos::new(10.0, 10.0), TextDef::default().font_size(20.0),
+            TextOverride::from_color(Color::new(0.9, 0.9, 1.0, 1.0)),
         );
 
         if has_mouse {
             draw_text(
                 &mut batch.texts,
                 &format!("鼠标: ({:.0}, {:.0})", mouse.0, mouse.1),
-                TextOptions {
-                    x: 10.0,
-                    y: 40.0,
-                    font_size: 14.0,
-                    color: Color::new(0.7, 0.7, 0.7, 1.0),
-                    ..TextOptions::default()
-                },
+                Pos::new(10.0, 40.0), TextDef::default().font_size(14.0),
+                TextOverride::from_color(Color::new(0.7, 0.7, 0.7, 1.0)),
             );
         } else {
             draw_text(
                 &mut batch.texts,
                 "移动鼠标到本窗口...",
-                TextOptions {
-                    x: 10.0,
-                    y: 40.0,
-                    font_size: 14.0,
-                    color: Color::new(0.5, 0.5, 0.5, 1.0),
-                    ..TextOptions::default()
-                },
+                Pos::new(10.0, 40.0), TextDef::default().font_size(14.0),
+                TextOverride::from_color(Color::new(0.5, 0.5, 0.5, 1.0)),
             );
         }
 

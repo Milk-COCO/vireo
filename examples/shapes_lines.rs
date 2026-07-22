@@ -32,11 +32,9 @@ fn main() {
                 "draw_line / draw_line_chain  |  mode: {}  (S toggle)",
                 if use_sdf { "SDF feather=1" } else { "geometry" }
             ),
-            TextOptions::default()
-                .x(20.0)
-                .y(16.0)
-                .font_size(16.0)
-                .color(Color::new(0.75, 0.78, 0.88, 1.0)),
+            Pos::new(20.0, 16.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(Color::new(0.75, 0.78, 0.88, 1.0)),
         );
 
         // 粗细网格
@@ -47,21 +45,17 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 &format!("{th:.0}px"),
-                TextOptions::default()
-                    .x(290.0)
-                    .y(y - 8.0)
-                    .font_size(13.0)
-                    .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+                Pos::new(290.0, y - 8.0),
+                TextDef::default().font_size(13.0),
+                TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
             );
         }
         draw_text(
             &mut batch.texts,
             "draw_line",
-            TextOptions::default()
-                .x(40.0)
-                .y(50.0)
-                .font_size(13.0)
-                .color(GOLD),
+            Pos::new(40.0, 50.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(GOLD),
         );
 
         // 斜线
@@ -79,11 +73,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "draw_line_chain(animated)",
-            TextOptions::default()
-                .x(380.0)
-                .y(50.0)
-                .font_size(13.0)
-                .color(GOLD),
+            Pos::new(380.0, 50.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(GOLD),
         );
 
         // 闭合多边形式折线（不自动闭口，手动接回首点）
@@ -99,11 +91,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "polyline (closed by hand)",
-            TextOptions::default()
-                .x(450.0)
-                .y(380.0)
-                .font_size(12.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(450.0, 380.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         // 旋转射线

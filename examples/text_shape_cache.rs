@@ -162,40 +162,32 @@ fn main() {
         draw_text(
             &mut hud.texts,
             "Shape cache stress + transform",
-            TextOptions::default()
-                .x(16.0)
-                .y(12.0)
-                .font_size(20.0)
-                .color(WHITE),
+            Pos::new(16.0, 12.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(WHITE),
         );
         draw_text(
             &mut hud.texts,
             &status_line,
-            TextOptions::default()
-                .x(16.0)
-                .y(40.0)
-                .font_size(14.0)
-                .color(Color::new(0.7, 0.9, 1.0, 1.0)),
+            Pos::new(16.0, 40.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.7, 0.9, 1.0, 1.0)),
         );
         // 用 parts 显示「帧号」类动态数，避免整段 format 污染
         let frame_digits = frame.to_string();
         draw_text_parts(
             &mut hud.texts,
             &[TextPart::Static("frame "), TextPart::Digits(&frame_digits)],
-            TextOptions::default()
-                .x(16.0)
-                .y(64.0)
-                .font_size(14.0)
-                .color(Color::new(0.85, 0.85, 0.55, 1.0)),
+            Pos::new(16.0, 64.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.85, 0.85, 0.55, 1.0)),
         );
         draw_text(
             &mut hud.texts,
             "stats -> terminal every 1s | 1/2 TTL  3/4 max  C clear  Space mode",
-            TextOptions::default()
-                .x(16.0)
-                .y(86.0)
-                .font_size(12.0)
-                .color(Color::new(0.5, 0.5, 0.55, 1.0)),
+            Pos::new(16.0, 86.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.5, 0.5, 0.55, 1.0)),
         );
         batches.push(hud);
 
@@ -239,12 +231,14 @@ fn main() {
                         STATIC_POOL[i % STATIC_POOL.len()],
                         frame.wrapping_add(i as u32)
                     );
-                    cell.text(&label, TextOptions::default().font_size(sz).color(c));
+                    cell.text(&label, Pos::new(0.0, 0.0), TextDef::default().font_size(sz), TextOverride::from_color(c));
                 } else {
                     // 静态：池内固定串 + 可选 frame 用 Digits 叠在旁（不占新整段 key）
                     cell.text(
                         STATIC_POOL[i % STATIC_POOL.len()],
-                        TextOptions::default().font_size(sz).color(c),
+                        Pos::new(0.0, 0.0),
+                        TextDef::default().font_size(sz),
+                        TextOverride::from_color(c),
                     );
                 }
                 batches.push(cell);
@@ -267,18 +261,18 @@ fn main() {
                 let label = format!("R{k}:{frame}");
                 ob.text(
                     &label,
-                    TextOptions::default()
-                        .font_size(13.0)
-                        .color(Color::new(1.0, 0.75, 0.35, 1.0)),
+                    Pos::new(0.0, 0.0),
+                    TextDef::default().font_size(13.0),
+                    TextOverride::from_color(Color::new(1.0, 0.75, 0.35, 1.0)),
                 );
             } else {
                 // 固定 "R" + 数字位
                 let kd = k.to_string();
                 ob.text_parts(
                     &[TextPart::Static("R"), TextPart::Digits(&kd)],
-                    TextOptions::default()
-                        .font_size(13.0)
-                        .color(Color::new(1.0, 0.75, 0.35, 1.0)),
+                    Pos::new(0.0, 0.0),
+                    TextDef::default().font_size(13.0),
+                    TextOverride::from_color(Color::new(1.0, 0.75, 0.35, 1.0)),
                 );
             }
             batches.push(ob);
@@ -288,20 +282,16 @@ fn main() {
         draw_text(
             &mut footer.texts,
             "load: ~116 text draws / frame (grid 96 + orbit 16 + HUD)",
-            TextOptions::default()
-                .x(16.0)
-                .y(560.0)
-                .font_size(13.0)
-                .color(Color::new(0.75, 0.75, 0.55, 1.0)),
+            Pos::new(16.0, 560.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.75, 0.75, 0.55, 1.0)),
         );
         draw_text(
             &mut footer.texts,
             "STATIC: pool+transform. DYNAMIC: new strings. Stats on terminal every 1s.",
-            TextOptions::default()
-                .x(16.0)
-                .y(590.0)
-                .font_size(12.0)
-                .color(Color::new(0.5, 0.5, 0.55, 1.0)),
+            Pos::new(16.0, 590.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.5, 0.5, 0.55, 1.0)),
         );
         batches.push(footer);
 

@@ -21,11 +21,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Absolute set_*  |  Incremental stack  |  apply_matrix",
-            TextOptions::default()
-                .x(20.0)
-                .y(16.0)
-                .font_size(16.0)
-                .color(Color::new(0.7, 0.75, 0.85, 1.0)),
+            Pos::new(20.0, 16.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
         );
 
         // ---- 绝对：set_position + set_rad ----
@@ -39,11 +37,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "set_position + set_rad",
-            TextOptions::default()
-                .x(70.0)
-                .y(320.0)
-                .font_size(13.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(70.0, 320.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         // ---- 叠加：基座 → 大臂 → 小臂（右乘局部）----
@@ -63,11 +59,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "translate → rotate → scale_by",
-            TextOptions::default()
-                .x(360.0)
-                .y(320.0)
-                .font_size(13.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(360.0, 320.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         // ---- apply_matrix：剪切 + 平移 ----
@@ -84,11 +78,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "apply_matrix (shear)",
-            TextOptions::default()
-                .x(650.0)
-                .y(320.0)
-                .font_size(13.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(650.0, 320.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         // 参考点

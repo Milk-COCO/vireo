@@ -28,11 +28,9 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "Area 模板裁切（per-batch，stencil 掩码）",
-            TextOptions::default()
-                .x(16.0)
-                .y(12.0)
-                .font_size(15.0)
-                .color(Color::new(0.75, 0.8, 0.9, 1.0)),
+            Pos::new(16.0, 12.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.75, 0.8, 0.9, 1.0)),
         );
 
         let panel_y = 260.0;
@@ -153,11 +151,9 @@ fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {
     draw_text(
         &mut b.texts,
         title,
-        TextOptions::default()
-            .x(cx - w * 0.5 + 6.0)
-            .y(cy - h * 0.5 + 4.0)
-            .font_size(12.0)
-            .color(Color::new(0.7, 0.75, 0.85, 1.0)),
+        Pos::new(cx - w * 0.5 + 6.0, cy - h * 0.5 + 4.0),
+        TextDef::default().font_size(12.0),
+        TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
     );
     b
 }

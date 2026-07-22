@@ -29,29 +29,23 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "三层嵌套：root 外圆 → mid 内圆角 → leaf 内容  |  左双裁  |  右 root 不裁",
-            TextOptions::default()
-                .x(16.0)
-                .y(12.0)
-                .font_size(15.0)
-                .color(Color::new(0.75, 0.8, 0.9, 1.0)),
+            Pos::new(16.0, 12.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.75, 0.8, 0.9, 1.0)),
         );
         draw_text(
             &mut ui.texts,
             "clips×2",
-            TextOptions::default()
-                .x(180.0)
-                .y(40.0)
-                .font_size(14.0)
-                .color(Color::new(0.6, 0.7, 0.85, 1.0)),
+            Pos::new(180.0, 40.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.6, 0.7, 0.85, 1.0)),
         );
         draw_text(
             &mut ui.texts,
             "root no clip",
-            TextOptions::default()
-                .x(620.0)
-                .y(40.0)
-                .font_size(14.0)
-                .color(Color::new(0.6, 0.7, 0.85, 1.0)),
+            Pos::new(620.0, 40.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.6, 0.7, 0.85, 1.0)),
         );
 
         let left = three_level(220.0, 270.0, t, true, true);
@@ -88,11 +82,9 @@ fn three_level(
     );
     root.text(
         "ROOT",
-        TextOptions::default()
-            .x(-28.0)
-            .y(-118.0)
-            .font_size(14.0)
-            .color(Color::new(0.55, 0.65, 0.8, 1.0)),
+        Pos::new(-28.0, -118.0),
+        TextDef::default().font_size(14.0),
+        TextOverride::from_color(Color::new(0.55, 0.65, 0.8, 1.0)),
     );
 
     // ---- mid：内圆角 mask（相对 root 平移 + 再转）----
@@ -114,11 +106,9 @@ fn three_level(
     );
     mid.text(
         "MID",
-        TextOptions::default()
-            .x(-18.0)
-            .y(-64.0)
-            .font_size(13.0)
-            .color(Color::new(0.7, 0.8, 0.95, 1.0)),
+        Pos::new(-18.0, -64.0),
+        TextDef::default().font_size(13.0),
+        TextOverride::from_color(Color::new(0.7, 0.8, 0.95, 1.0)),
     );
 
     // ---- leaf：色块 + 文字（故意伸出 mid）----
@@ -153,11 +143,9 @@ fn three_level(
     );
     leaf.text(
         "LEAF",
-        TextOptions::default()
-            .x(-28.0)
-            .y(-10.0)
-            .font_size(20.0)
-            .color(Color::new(0.1, 0.1, 0.15, 1.0)),
+        Pos::new(-28.0, -10.0),
+        TextDef::default().font_size(20.0),
+        TextOverride::from_color(Color::new(0.1, 0.1, 0.15, 1.0)),
     );
 
     // 一条伸出 mid 的条：被 mid 裁、在右图 root 不裁时仍可能被 mid 裁

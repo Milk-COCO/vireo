@@ -22,11 +22,9 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "Batch clips_children = true   vs   clips_children = false (对照)",
-            TextOptions::default()
-                .x(20.0)
-                .y(12.0)
-                .font_size(15.0)
-                .color(Color::new(0.75, 0.8, 0.9, 1.0)),
+            Pos::new(20.0, 12.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.75, 0.8, 0.9, 1.0)),
         );
 
         // 圆心 / 半径
@@ -47,11 +45,9 @@ fn main() {
         draw_text(
             &mut clip_batch.texts,
             "clips_children = true",
-            TextOptions::default()
-                .x(cx_l - 70.0)
-                .y(cy - r + 12.0)
-                .font_size(14.0)
-                .color(Color::new(0.3, 0.35, 0.5, 1.0)),
+            Pos::new(cx_l - 70.0, cy - r + 12.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.3, 0.35, 0.5, 1.0)),
         );
 
         // 子内容：色块大幅上下左右晃动，故意越界
@@ -87,11 +83,9 @@ fn main() {
         draw_text(
             &mut no_clip_batch.texts,
             "clips_children = false",
-            TextOptions::default()
-                .x(cx_r - 75.0)
-                .y(cy - r + 12.0)
-                .font_size(14.0)
-                .color(Color::new(0.5, 0.35, 0.3, 1.0)),
+            Pos::new(cx_r - 75.0, cy - r + 12.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(Color::new(0.5, 0.35, 0.3, 1.0)),
         );
 
         let mut no_inner = DrawBatch::new();
@@ -115,11 +109,9 @@ fn main() {
         draw_text(
             &mut ui.texts,
             "左侧色块被圆形裁切，右侧越界可见",
-            TextOptions::default()
-                .x(250.0)
-                .y(455.0)
-                .font_size(12.0)
-                .color(Color::new(0.5, 0.55, 0.65, 1.0)),
+            Pos::new(250.0, 455.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),
         );
 
         win.draw(

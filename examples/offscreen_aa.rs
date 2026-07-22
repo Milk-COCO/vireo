@@ -39,12 +39,12 @@ fn main() {
             b.set_texture(Some(&c1.texture)); draw_rectangle(&mut b, Pos::new(15.0, 30.0), 300.0, 300.0, Some(WHITE));
             b.set_texture(Some(&c2.texture)); draw_rectangle(&mut b, Pos::new(350.0, 30.0), 300.0, 300.0, Some(WHITE));
             b.set_texture(Some(&c3.texture)); draw_rectangle(&mut b, Pos::new(685.0, 30.0), 300.0, 300.0, Some(WHITE));
-            draw_text(&mut b.texts, "SSAA x4 + SDF 1px",
-                TextOptions::default().x(75.0).y(345.0).font_size(14.0).color(WHITE));
-            draw_text(&mut b.texts, "MSAA x4 (geometry)",
-                TextOptions::default().x(415.0).y(345.0).font_size(14.0).color(WHITE));
-            draw_text(&mut b.texts, "SDF 1px only",
-                TextOptions::default().x(785.0).y(345.0).font_size(14.0).color(WHITE));
+            draw_text(&mut b.texts, "SSAA x4 + SDF 1px", Pos::new(75.0, 345.0),
+                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
+            draw_text(&mut b.texts, "MSAA x4 (geometry)", Pos::new(415.0, 345.0),
+                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
+            draw_text(&mut b.texts, "SDF 1px only", Pos::new(785.0, 345.0),
+                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
             w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
         }
         true

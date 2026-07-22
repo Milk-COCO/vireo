@@ -98,10 +98,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             &info,
-            TextOptions::default()
-                .x(10.0).y(10.0)
-                .font_size(13.0)
-                .color(Color::new(0.8, 0.8, 0.9, 1.0)),
+            Pos::new(10.0, 10.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.8, 0.8, 0.9, 1.0)),
         );
 
         // 焦点状态
@@ -118,10 +117,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             focus_text,
-            TextOptions::default()
-                .x(10.0).y(560.0)
-                .font_size(12.0)
-                .color(focus_color),
+            Pos::new(10.0, 560.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(focus_color),
         );
 
         win.draw(Some(BLACK), &[&batch]);

@@ -19,8 +19,8 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
     draw_circle(batch, Pos::new(260.0, 130.0), 50.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
     draw_line(batch, 10.0, 110.0, 310.0, 110.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
     draw_line_chain(batch, &[(10.0, 30.0), (80.0, 20.0), (150.0, 50.0)], 3.0, Some(WHITE));
-    draw_text(&mut batch.texts, label,
-        TextOptions::default().x(10.0).y(215.0).font_size(14.0).color(Color::new(0.5, 0.5, 0.6, 1.0)));
+    draw_text(&mut batch.texts, label, Pos::new(10.0, 215.0),
+              TextDef::default().font_size(14.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)));
 }
 
 fn main() {

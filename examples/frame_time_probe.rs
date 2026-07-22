@@ -57,29 +57,20 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 &info,
-                TextOptions::default()
-                    .x(20.0)
-                    .y(20.0)
-                    .font_size(16.0)
-                    .color(WHITE),
+                Pos::new(20.0, 20.0),
+                TextDef::default().font_size(16.0), TextOverride::from_color(WHITE),
             );
             draw_text(
                 &mut batch.texts,
                 "static line two",
-                TextOptions::default()
-                    .x(20.0)
-                    .y(100.0)
-                    .font_size(12.0)
-                    .color(WHITE),
+                Pos::new(20.0, 100.0),
+                TextDef::default().font_size(12.0), TextOverride::from_color(WHITE),
             );
             draw_text(
                 &mut batch.texts,
                 "static line three",
-                TextOptions::default()
-                    .x(20.0)
-                    .y(130.0)
-                    .font_size(12.0)
-                    .color(WHITE),
+                Pos::new(20.0, 130.0),
+                TextDef::default().font_size(12.0), TextOverride::from_color(WHITE),
             );
         }
 

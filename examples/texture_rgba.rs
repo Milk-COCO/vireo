@@ -59,11 +59,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "from_rgba / from_bytes (procedural + optional logo.png)",
-            TextOptions::default()
-                .x(20.0)
-                .y(16.0)
-                .font_size(15.0)
-                .color(Color::new(0.7, 0.75, 0.85, 1.0)),
+            Pos::new(20.0, 16.0),
+            TextDef::default().font_size(15.0),
+            TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
         );
 
         batch.set_texture(Some(&check));
@@ -71,11 +69,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "from_rgba checker",
-            TextOptions::default()
-                .x(40.0)
-                .y(230.0)
-                .font_size(13.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(40.0, 230.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         batch.set_texture(Some(&grad));
@@ -83,11 +79,9 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "from_rgba gradient",
-            TextOptions::default()
-                .x(240.0)
-                .y(170.0)
-                .font_size(13.0)
-                .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+            Pos::new(240.0, 170.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
         );
 
         if let Some(ref tex) = embedded {
@@ -97,21 +91,17 @@ fn main() {
             draw_text(
                 &mut batch.texts,
                 "from_bytes logo.png",
-                TextOptions::default()
-                    .x(480.0)
-                    .y(200.0)
-                    .font_size(13.0)
-                    .color(Color::new(0.55, 0.55, 0.65, 1.0)),
+                Pos::new(480.0, 200.0),
+                TextDef::default().font_size(13.0),
+                TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
             );
         } else {
             draw_text(
                 &mut batch.texts,
                 "(no logo.png for from_bytes)",
-                TextOptions::default()
-                    .x(480.0)
-                    .y(100.0)
-                    .font_size(13.0)
-                    .color(ORANGE),
+                Pos::new(480.0, 100.0),
+                TextDef::default().font_size(13.0),
+                TextOverride::from_color(ORANGE),
             );
         }
 

@@ -85,20 +85,16 @@ fn main() {
         draw_text(
             &mut batch.texts,
             &overlay,
-            TextOptions::default()
-                .x(12.0).y(8.0)
-                .font_size(16.0)
-                .color(WHITE),
+            Pos::new(12.0, 8.0),
+            TextDef::default().font_size(16.0), TextOverride::from_color(WHITE),
         );
 
         // 场景切换提示
         draw_text(
             &mut batch.texts,
             "Press 1-8 to switch scene",
-            TextOptions::default()
-                .x(12.0).y(670.0)
-                .font_size(12.0)
-                .color(Color::new(0.4, 0.4, 0.5, 1.0)),
+            Pos::new(12.0, 670.0),
+            TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.4, 0.4, 0.5, 1.0)),
         );
 
         win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&batch]);
@@ -184,10 +180,8 @@ fn scene_text_dynamic(b: &mut DrawBatch) {
         draw_text(
             &mut b.texts,
             &msg,
-            TextOptions::default()
-                .x(x).y(y)
-                .font_size(sz)
-                .color(WHITE),
+            Pos::new(x, y),
+            TextDef::default().font_size(sz), TextOverride::from_color(WHITE),
         );
     }
 }
@@ -203,10 +197,8 @@ fn scene_text_static(b: &mut DrawBatch) {
         draw_text(
             &mut b.texts,
             msg,
-            TextOptions::default()
-                .x(x).y(y)
-                .font_size(sz)
-                .color(WHITE),
+            Pos::new(x, y),
+            TextDef::default().font_size(sz), TextOverride::from_color(WHITE),
         );
     }
 }

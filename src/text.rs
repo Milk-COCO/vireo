@@ -23,6 +23,7 @@ pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
 use crate::color::Color;
+use crate::context::Pos;
 use crate::gpu::GpuContext;
 
 /// 默认硬顶（可 `set_shape_cache_max_entries` 修改；`None` = 不限制条数）。
@@ -48,7 +49,7 @@ struct ShapeKey {
 }
 
 impl ShapeKey {
-    fn from_text(text: &str, options: &TextOptions) -> Self {
+    fn from_text(text: &str, options: &TextDef) -> Self {
         let max_width_bits = options
             .max_width
             .map(|w| w.to_bits())
@@ -62,9 +63,6 @@ impl ShapeKey {
         }
     }
 
-    fn from_entry(entry: &TextEntry) -> Self {
-        Self::from_text(&entry.text, &entry.options)
-    }
 }
 
 pub(crate) struct ShapeCacheSlot {
@@ -497,7 +495,7 @@ impl TextContext {
     }
 
     /// 获取或创建已 shape 的 buffer，返回 slot 下标。
-    fn get_or_shape(&mut self, key: ShapeKey, options: &TextOptions) -> u32 {
+    fn get_or_shape(&mut self, key: ShapeKey, options: &TextDef) -> u32 {
         let now = Instant::now();
         if let Some(&idx) = self.shape_map.get(&key) {
             self.shape_slots[idx as usize].last_used = now;
@@ -583,7 +581,7 @@ impl TextContext {
         idx
     }
 
-    fn get_or_shape_text(&mut self, text: &str, options: &TextOptions) -> u32 {
+    fn get_or_shape_text(&mut self, text: &str, options: &TextDef) -> u32 {
         // 段 shape 不使用 max_width（横拼由调用方控制）
         let mut opts = options.clone();
         opts.max_width = None;
@@ -627,7 +625,7 @@ impl TextContext {
     ///
     /// 当非 held 槽已达 `shape_max_entries` 且无法淘汰时，仍会 push 新槽（突破 cap）；
     /// 此时 `shape_cache_len()` 可能大于 max_entries。
-    pub fn make_stable(&mut self, text: &str, options: &TextOptions) -> StableText {
+    pub fn make_stable(&mut self, text: &str, options: &TextDef) -> StableText {
         // 直接走统一 get_or_shape（绕过 get_or_shape_text 的强制 None/Left）
         let mut opts = options.clone();
         if opts.max_width.is_none() {
@@ -656,7 +654,7 @@ impl TextContext {
     }
 
     /// 确保 0-9 + 常用数学符号已 shape；digit_step 取 0-9 最大宽（tabular）。
-    fn ensure_digit_table(&mut self, options: &TextOptions) -> f32 {
+    fn ensure_digit_table(&mut self, options: &TextDef) -> f32 {
         let bits = options.font_size.to_bits();
         let attrs = options.attrs.clone();
         let need = !self.digit_table_ready
@@ -693,7 +691,7 @@ impl TextContext {
         max_w
     }
 
-    fn digit_slot(&mut self, d: u32, options: &TextOptions) -> u32 {
+    fn digit_slot(&mut self, d: u32, options: &TextDef) -> u32 {
         debug_assert!(d < 10);
         let s = ((b'0' + d as u8) as char).to_string();
         let mut opts = options.clone();
@@ -705,12 +703,12 @@ impl TextContext {
 
     /// 在 opts 的 attrs 上加 `tnum` OpenType feature（字体级等宽数字）。
     /// 仅影响支持 tnum 的字体；不支持的字体会忽略此 feature。
-    fn add_tnum(opts: &mut TextOptions) {
+    fn add_tnum(opts: &mut TextDef) {
         let attrs = opts.attrs.get_or_insert_with(|| AttrsOwned::new(&Attrs::new()));
         attrs.font_features.enable(FeatureTag::new(b"tnum"));
     }
 
-    fn glyph_slot_char(&mut self, ch: char, options: &TextOptions) -> u32 {
+    fn glyph_slot_char(&mut self, ch: char, options: &TextDef) -> u32 {
         let s = ch.to_string();
         let mut opts = options.clone();
         opts.max_width = None;
@@ -788,43 +786,6 @@ impl From<TextAlign> for cosmic_text::Align {
     }
 }
 
-/// 文本定义（WHAT）——决定文字"长什么样"，在绘制前定型。
-/// 与位置（`Pos`）、覆盖（`TextOverride`）区分。
-/// `font_size` 为必填，其余可选。
-#[derive(Clone, Debug)]
-pub struct TextDef {
-    pub font_size: f32,
-    pub max_width: Option<f32>,
-    pub align: TextAlign,
-    pub attrs: Option<AttrsOwned>,
-}
-
-impl TextDef {
-    pub fn new(font_size: f32) -> Self {
-        Self {
-            font_size,
-            max_width: None,
-            align: TextAlign::Left,
-            attrs: None,
-        }
-    }
-
-    pub fn max_width(mut self, w: f32) -> Self {
-        self.max_width = Some(w);
-        self
-    }
-
-    pub fn align(mut self, a: TextAlign) -> Self {
-        self.align = a;
-        self
-    }
-
-    pub fn attrs(mut self, a: AttrsOwned) -> Self {
-        self.attrs = Some(a);
-        self
-    }
-}
-
 /// 文本绘制覆盖（OVERRIDE）——覆盖 batch 文本状态机。
 /// 与 `ShapeOverride` 语义对称。`None` = 保持 batch 状态。
 #[derive(Clone, Debug, Default)]
@@ -833,11 +794,19 @@ pub struct TextOverride {
     pub color: Option<Color>,
     /// `None` = 保持 batch.text_clip；`Some(None)` = 清除裁剪；`Some(Some(b))` = 设置
     pub clip: Option<Option<crate::glyphon::TextBounds>>,
+    /// `Some` = 在 batch 局部空间上叠加变换（右乘 batch 变换），不污染 batch 状态。
+    /// `None` = 保持 batch 当前变换。
+    pub transform: Option<crate::context::Transform>,
 }
 
 impl TextOverride {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 仅覆盖 color 的快捷构造。
+    pub fn from_color(c: Color) -> Self {
+        Self { color: Some(c), clip: None, transform: None }
     }
 
     pub fn color(mut self, c: Color) -> Self {
@@ -854,58 +823,40 @@ impl TextOverride {
         self.clip = Some(None);
         self
     }
+
+    /// 在 batch 局部空间上叠加变换（不覆盖整个 batch transform，仅对本次绘制生效）。
+    pub fn transform(mut self, t: crate::context::Transform) -> Self {
+        self.transform = Some(t);
+        self
+    }
 }
 
-/// 文本渲染选项
-#[derive(Clone)]
-pub struct TextOptions {
-    pub x: f32,
-    pub y: f32,
+/// 文本渲染选项——决定文字长什么样。
+#[derive(Clone, Debug)]
+pub struct TextDef {
     pub font_size: f32,
-    pub color: Color,
     /// 最大宽度，超过则换行。None 表示不换行。
     pub max_width: Option<f32>,
     /// 水平对齐。需要配合 max_width 使用才有效果。
     pub align: TextAlign,
     /// 字体属性（family、weight、style 等）。None 使用默认 Attrs。
     pub attrs: Option<AttrsOwned>,
-    /// 裁剪区域 (left, top, right, bottom)，物理像素坐标。None 不裁剪。超出区域的文本会被隐藏。
-    pub clip: Option<(i32, i32, i32, i32)>,
 }
 
-impl Default for TextOptions {
+impl Default for TextDef {
     fn default() -> Self {
         Self {
-            x: 0.0,
-            y: 0.0,
             font_size: 16.0,
-            color: Color::new(1.0, 1.0, 1.0, 1.0),
             max_width: None,
             align: TextAlign::Left,
             attrs: None,
-            clip: None,
         }
     }
 }
 
-impl TextOptions {
-    pub fn x(mut self, x: f32) -> Self {
-        self.x = x;
-        self
-    }
-
-    pub fn y(mut self, y: f32) -> Self {
-        self.y = y;
-        self
-    }
-
+impl TextDef {
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = size;
-        self
-    }
-
-    pub fn color(mut self, color: Color) -> Self {
-        self.color = color;
         self
     }
 
@@ -916,11 +867,6 @@ impl TextOptions {
 
     pub fn align(mut self, align: TextAlign) -> Self {
         self.align = align;
-        self
-    }
-
-    pub fn clip(mut self, left: i32, top: i32, right: i32, bottom: i32) -> Self {
-        self.clip = Some((left, top, right, bottom));
         self
     }
 
@@ -991,12 +937,12 @@ fn is_hud_digit_char(ch: char) -> bool {
 ///   需要等宽数字请用 [`TextPart::Digits`] 或 [`crate::text::HudLine`]。
 ///
 /// ## 绘制 API
-/// - [`DrawBatch::text_stable`]：每帧传 `x/y/color`；其余已在 `make_stable_text` 时定型。
+/// - [`DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `make_stable_text` 时定型。
 /// - [`TextEntryList::push_stable`]：添加到 `TextEntryList`（与 `text_parts` 配合使用）。
 ///
 /// ```ignore
 /// let h = gpu.make_stable_text("Score: {}", TextOptions::default().font_size(20.0));
-/// batch.text_stable(&h, 16.0, 16.0, WHITE);
+/// batch.text_stable(&h, Pos::new(16.0, 16.0), TextOverride::from_color(WHITE));
 /// ```
 #[derive(Clone)]
 pub struct StableText {
@@ -1048,8 +994,8 @@ pub enum TextPart<'a> {
     /// 预 shape 稳定文本，直接使用 [`StableText`] 的 `Arc<Buffer>`，不走 cache 查询。
     /// 可在多帧间复用而无需重新 shape。
     ///
-    /// **与外层 `TextOptions` 的关系**（`draw_text_parts` / `push_parts`）：
-    /// - **生效**：`x`/`y`（行起点；段内用 `StableText.line_width` 横拼）、`color`、`clip`、`transform`
+    /// **与外层 `TextOptions` / `TextOverride` 的关系**（`draw_text_parts` / `push_parts`）：
+    /// - **生效**：`pos`（行起点；段内用 `StableText.line_width` 横拼）、`TextOverride.color/clip/transform`
     /// - **不生效**（已在 `make_stable_text` 时定型）：`font_size`、`attrs`
     /// - **`max_width`/`align`**：已在 `make_stable_text` 时定型（见 [`StableText`] 文档），段内不重新生效
     Stable(&'a StableText),
@@ -1129,17 +1075,19 @@ impl HudLine {
         }
     }
 
-    pub fn draw(&self, list: &mut TextEntryList, options: TextOptions) {
-        list.push_hud_parts(&self.spans, options);
+    pub fn draw(&self, list: &mut TextEntryList, pos: Pos, def: TextDef, ov: TextOverride) {
+        list.push_hud_parts(&self.spans, pos, def, ov);
     }
 
     pub(crate) fn draw_indexed(
         &self,
         list: &mut TextEntryList,
-        options: TextOptions,
+        pos: Pos,
+        def: TextDef,
+        ov: TextOverride,
         transform_index: u32,
     ) {
-        list.push_hud_parts_indexed(&self.spans, options, transform_index);
+        list.push_hud_parts_indexed(&self.spans, pos, def, ov, transform_index);
     }
 }
 
@@ -1200,7 +1148,7 @@ pub fn split_hud(s: &str) -> Vec<HudPart> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum OwnedTextPart {
+pub enum OwnedTextPart {
     Static(String),
     Dynamic(String),
     Digits(String),
@@ -1227,19 +1175,54 @@ impl OwnedTextPart {
     }
 }
 
-/// 文本条目，pushed by draw_text / draw_text_parts / text_handle
-#[derive(Clone)]
-pub struct TextEntry {
-    pub text: String,
-    pub options: TextOptions,
-    /// Batch-local transform index（逻辑空间）。
-    /// `draw_text` 默认 0：在全局表中约定为**单位矩阵**（见 `Renderer::draw` 预留槽 0），
-    /// 不是「首个 batch 矩阵」。有 batch transform 时请用 `batch.text()` / `push_indexed`。
-    pub(crate) transform_index: u32,
-    /// `Some` = HUD 多段（忽略 `text`）；`None` = 普通整段 `text`
-    pub(crate) parts: Option<Vec<OwnedTextPart>>,
-    /// `Some` = StableText 直接绘制（忽略 `text` 和 `parts`）。
-    pub(crate) stable: Option<Arc<Buffer>>,
+/// 文本条目——三种变体，互斥字段不混存。
+#[derive(Clone, Debug)]
+pub enum TextEntry {
+    Normal {
+        text: String,
+        pos: Pos,
+        def: TextDef,
+        override_: TextOverride,
+        transform_index: u32,
+    },
+    Parts {
+        pos: Pos,
+        def: TextDef,
+        parts: Vec<OwnedTextPart>,
+        override_: TextOverride,
+        transform_index: u32,
+    },
+    Stable {
+        pos: Pos,
+        override_: TextOverride,
+        transform_index: u32,
+        buffer: Arc<Buffer>,
+    },
+}
+
+// 公共字段访问器，避免调用方 match
+impl TextEntry {
+    pub fn override_(&self) -> &TextOverride {
+        match self {
+            TextEntry::Normal { override_, .. }
+            | TextEntry::Parts { override_, .. }
+            | TextEntry::Stable { override_, .. } => override_,
+        }
+    }
+    pub fn transform_index(&self) -> u32 {
+        match self {
+            TextEntry::Normal { transform_index, .. }
+            | TextEntry::Parts { transform_index, .. }
+            | TextEntry::Stable { transform_index, .. } => *transform_index,
+        }
+    }
+    pub fn pos(&self) -> Pos {
+        match self {
+            TextEntry::Normal { pos, .. }
+            | TextEntry::Parts { pos, .. }
+            | TextEntry::Stable { pos, .. } => *pos,
+        }
+    }
 }
 
 /// 文本条目列表，存储一组待渲染的文本。
@@ -1269,113 +1252,127 @@ impl TextEntryList {
     }
 
     /// 添加文本条目（默认 transform_index = 0，恒等变换）。
-    pub fn push(&mut self, text: &str, options: TextOptions) {
-        self.entries.push(TextEntry {
+    pub fn push(&mut self, text: &str, pos: Pos, def: TextDef, ov: TextOverride) {
+        self.entries.push(TextEntry::Normal {
             text: text.to_string(),
-            options,
+            pos,
+            def,
+            override_: ov,
             transform_index: 0,
-            parts: None,
-            stable: None,
         });
     }
 
     /// 添加文本条目并指定 transform index。
-    pub(crate) fn push_indexed(&mut self, text: &str, options: TextOptions, transform_index: u32) {
-        self.entries.push(TextEntry {
+    pub(crate) fn push_indexed(
+        &mut self,
+        text: &str,
+        pos: Pos,
+        def: TextDef,
+        ov: TextOverride,
+        transform_index: u32,
+    ) {
+        self.entries.push(TextEntry::Normal {
             text: text.to_string(),
-            options,
+            pos,
+            def,
+            override_: ov,
             transform_index,
-            parts: None,
-            stable: None,
         });
     }
 
     /// 使用预 shape 的 [`StableText`] 直接添加条目（跳过 cache 查询）。
-    pub fn push_stable(&mut self, stable: &StableText, options: TextOptions) {
-        self.push_stable_indexed(stable, options, 0);
+    /// `def` 已在 `make_stable_text` 时定型，此处不需要。
+    pub fn push_stable(&mut self, stable: &StableText, pos: Pos, ov: TextOverride) {
+        self.push_stable_indexed(stable, pos, ov, 0);
     }
 
     pub(crate) fn push_stable_indexed(
         &mut self,
         stable: &StableText,
-        options: TextOptions,
+        pos: Pos,
+        ov: TextOverride,
         transform_index: u32,
     ) {
-        self.entries.push(TextEntry {
-            text: String::new(),
-            options,
+        self.entries.push(TextEntry::Stable {
+            pos,
+            override_: ov,
             transform_index,
-            parts: None,
-            stable: Some(stable.buffer.clone()),
+            buffer: stable.buffer.clone(),
         });
     }
 
     /// HUD 多段文字（默认无 transform）。
-    pub fn push_parts(&mut self, parts: &[TextPart<'_>], options: TextOptions) {
-        self.push_parts_indexed(parts, options, 0);
+    pub fn push_parts(&mut self, parts: &[TextPart<'_>], pos: Pos, def: TextDef, ov: TextOverride) {
+        self.push_parts_indexed(parts, pos, def, ov, 0);
     }
 
     pub(crate) fn push_parts_indexed(
         &mut self,
         parts: &[TextPart<'_>],
-        options: TextOptions,
+        pos: Pos,
+        def: TextDef,
+        ov: TextOverride,
         transform_index: u32,
     ) {
         let owned: Vec<OwnedTextPart> = parts.iter().map(OwnedTextPart::from_part).collect();
-        self.entries.push(TextEntry {
-            text: String::new(),
-            options,
+        self.entries.push(TextEntry::Parts {
+            pos,
+            def,
+            parts: owned,
+            override_: ov,
             transform_index,
-            parts: Some(owned),
-            stable: None,
         });
     }
 
     /// 拥有权 span 列表（[`HudLine`] / [`split_hud`]）。
-    pub fn push_hud_parts(&mut self, parts: &[HudPart], options: TextOptions) {
-        self.push_hud_parts_indexed(parts, options, 0);
+    pub fn push_hud_parts(&mut self, parts: &[HudPart], pos: Pos, def: TextDef, ov: TextOverride) {
+        self.push_hud_parts_indexed(parts, pos, def, ov, 0);
     }
 
     pub(crate) fn push_hud_parts_indexed(
         &mut self,
         parts: &[HudPart],
-        options: TextOptions,
+        pos: Pos,
+        def: TextDef,
+        ov: TextOverride,
         transform_index: u32,
     ) {
         if parts.is_empty() {
             return;
         }
         let owned: Vec<OwnedTextPart> = parts.iter().cloned().map(OwnedTextPart::from_hud).collect();
-        self.entries.push(TextEntry {
-            text: String::new(),
-            options,
+        self.entries.push(TextEntry::Parts {
+            pos,
+            def,
+            parts: owned,
+            override_: ov,
             transform_index,
-            parts: Some(owned),
-            stable: None,
         });
     }
 
     /// 按 [`split_hud`] 规则自动切分后加入（默认无 transform）。
-    pub fn push_hud(&mut self, text: &str, options: TextOptions) {
-        self.push_hud_indexed(text, options, 0);
+    pub fn push_hud(&mut self, text: &str, pos: Pos, def: TextDef, ov: TextOverride) {
+        self.push_hud_indexed(text, pos, def, ov, 0);
     }
 
     pub(crate) fn push_hud_indexed(
         &mut self,
         text: &str,
-        options: TextOptions,
+        pos: Pos,
+        def: TextDef,
+        ov: TextOverride,
         transform_index: u32,
     ) {
         let owned: Vec<OwnedTextPart> = split_hud(text).into_iter().map(OwnedTextPart::from_hud).collect();
         if owned.is_empty() {
             return;
         }
-        self.entries.push(TextEntry {
-            text: String::new(),
-            options,
+        self.entries.push(TextEntry::Parts {
+            pos,
+            def,
+            parts: owned,
+            override_: ov,
             transform_index,
-            parts: Some(owned),
-            stable: None,
         });
     }
 
@@ -1385,6 +1382,8 @@ impl TextEntryList {
     /// `transform_table`：batch 的本地变换矩阵表（12 f32 / mat3x3）。
     /// `global_transforms`：全局矩阵表（物理空间），新增矩阵追加到此。
     /// `scale`：逻辑→物理像素缩放因子。
+    /// `batch_text_clip`：batch 状态的默认文字裁切（被 `TextOverride.clip` 覆盖）。
+    /// `batch_color`：batch 状态的默认文字色（被 `TextOverride.color` 覆盖；无 override 时使用）。
     pub fn prepare_texts(
         &self,
         gpu: &GpuContext,
@@ -1393,6 +1392,8 @@ impl TextEntryList {
         scale: f32,
         transform_table: &[f32],
         global_transforms: &mut Vec<f32>,
+        batch_text_clip: Option<crate::glyphon::TextBounds>,
+        batch_color: Color,
     ) -> (u32, u32) {
         if self.entries.is_empty() {
             return (0, 0);
@@ -1468,172 +1469,238 @@ impl TextEntryList {
             }
         }
 
+        /// 在 batch 局部空间上叠加 `override_transform`（右乘），写回 global_transforms。
+        fn phys_transform_index_with_override(
+            transform_index: u32,
+            transform_table: &[f32],
+            global_transforms: &mut Vec<f32>,
+            scale: f32,
+            override_transform: &crate::context::Transform,
+        ) -> u32 {
+            let base = transform_index as usize * 12;
+            if base + 12 > transform_table.len() {
+                return 0;
+            }
+            let mut row: [f32; 12] = transform_table[base..base + 12].try_into().unwrap();
+            // 矩阵乘法 M' = M * O（override 作用在 batch 局部空间）
+            let (ov0, ov1, ov2) = override_transform.to_cols();
+            let a2 = ov0[0];
+            let b2 = ov1[0];
+            let c2 = ov0[1];
+            let d2 = ov1[1];
+            let tx2 = ov2[0];
+            let ty2 = ov2[1];
+            let a = row[0];
+            let b = row[1];
+            let c = row[4];
+            let d = row[5];
+            let tx = row[8];
+            let ty = row[9];
+            row[0] = a * a2 + b * c2;
+            row[1] = a * b2 + b * d2;
+            row[4] = c * a2 + d * c2;
+            row[5] = c * b2 + d * d2;
+            row[8] = tx * a2 + ty * c2 + tx2;
+            row[9] = tx * b2 + ty * d2 + ty2;
+
+            let composed_is_identity = row[0] == 1.0
+                && row[1] == 0.0
+                && row[4] == 0.0
+                && row[5] == 1.0
+                && row[8] == 0.0
+                && row[9] == 0.0;
+            if composed_is_identity {
+                0
+            } else {
+                let idx = (global_transforms.len() / 12) as u32;
+                global_transforms.extend_from_slice(&[
+                    row[0], row[1], 0.0, 0.0, row[4], row[5], 0.0, 0.0, row[8] * scale,
+                    row[9] * scale, 1.0, 0.0,
+                ]);
+                idx
+            }
+        }
+
         let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
         // 注：StableText 的 Arc<Buffer> 直接放 metas.buf.Stable 里，延寿到第二次循环消费完。
         // 不再需要平行 stable_bufs vec + hi 计数器。
 
         for entry in &self.entries {
+            // color: override > batch_color
+            let color_rgb = entry.override_().color.unwrap_or(batch_color);
             let color = crate::glyphon::Color::rgba(
-                (entry.options.color.r * 255.0) as u8,
-                (entry.options.color.g * 255.0) as u8,
-                (entry.options.color.b * 255.0) as u8,
-                (entry.options.color.a * 255.0) as u8,
+                (color_rgb.r * 255.0) as u8,
+                (color_rgb.g * 255.0) as u8,
+                (color_rgb.b * 255.0) as u8,
+                (color_rgb.a * 255.0) as u8,
             );
-            let bounds = match entry.options.clip {
-                Some((l, t, r, b)) => TextBounds {
-                    left: l,
-                    top: t,
-                    right: r,
-                    bottom: b,
-                },
-                None => TextBounds::default(),
+            // clip: Some(Some(b)) > batch_text_clip > 全屏（不裁）
+            let bounds = match entry.override_().clip {
+                Some(Some(b)) => b,
+                Some(None) => TextBounds::default(),
+                None => batch_text_clip.unwrap_or_default(),
             };
-            let phys_idx = phys_transform_index(
-                entry.transform_index,
-                transform_table,
-                global_transforms,
-                scale,
-            );
-            let top = entry.options.y * scale;
+            // transform: override 在 batch 局部空间上右乘叠加
+            let phys_idx = if let Some(ref ov_xform) = entry.override_().transform {
+                phys_transform_index_with_override(
+                    entry.transform_index(),
+                    transform_table,
+                    global_transforms,
+                    scale,
+                    ov_xform,
+                )
+            } else {
+                phys_transform_index(
+                    entry.transform_index(),
+                    transform_table,
+                    global_transforms,
+                    scale,
+                )
+            };
+            let top = entry.pos().y * scale;
 
-            if let Some(ref arc) = entry.stable {
-                metas.push(AreaMeta {
-                    buf: MetaBuf::Stable(arc.clone()),
-                    left: entry.options.x * scale,
-                    top,
-                    color,
-                    bounds,
-                    transform_index: phys_idx,
-                });
-            } else if let Some(ref parts) = entry.parts {
-                // HUD 多段：逻辑 x 横拼，再 * scale
-                let mut cursor_x = entry.options.x;
-                let step = text_ctx.ensure_digit_table(&entry.options);
-                for part in parts {
-                    match part {
-                        OwnedTextPart::Static(s) => {
-                            if s.is_empty() {
-                                continue;
-                            }
-                            let slot = text_ctx.get_or_shape_text(s, &entry.options);
-                            let w = text_ctx.slot_line_width(slot);
-                            metas.push(AreaMeta {
-                                buf: MetaBuf::Slot(slot),
-                                left: cursor_x * scale,
-                                top,
-                                color,
-                                bounds,
-                                transform_index: phys_idx,
-                            });
-                            cursor_x += w;
-                        }
-                        OwnedTextPart::Dynamic(s) => {
-                            if s.is_empty() {
-                                continue;
-                            }
-                            let opts = TextOptions {
-                                max_width: None,
-                                align: TextAlign::Left,
-                                ..entry.options.clone()
-                            };
-                            let key = ShapeKey::from_text(s, &opts);
-                            let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
-                                Some(si) => {
-                                    text_ctx.pin_slot(si);
-                                    let w = text_ctx.slot_line_width(si);
-                                    (AreaMeta {
-                                        buf: MetaBuf::Slot(si),
-                                        left: cursor_x * scale,
-                                        top,
-                                        color,
-                                        bounds,
-                                        transform_index: phys_idx,
-                                    }, w)
-                                }
-                                None => {
-                                    let metrics = Metrics::new(entry.options.font_size, entry.options.font_size * 1.2);
-                                    let mut buffer = text_ctx.take_buffer(metrics);
-                                    let attrs = opts.attrs.as_ref()
-                                        .map(|a| a.as_attrs())
-                                        .unwrap_or_else(Attrs::new);
-                                    buffer.set_size(None, None);
-                                    buffer.set_text(s, &attrs, Shaping::Advanced, None);
-                                    buffer.shape_until_scroll(&mut text_ctx.font_system, false);
-                                    let lw = buffer
-                                        .line_layout(&mut text_ctx.font_system, 0)
-                                        .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
-                                        .unwrap_or(0.0);
-                                    (AreaMeta {
-                                        buf: MetaBuf::Stable(Arc::new(buffer)),
-                                        left: cursor_x * scale,
-                                        top,
-                                        color,
-                                        bounds,
-                                        transform_index: phys_idx,
-                                    }, lw)
-                                }
-                            };
-                            metas.push(area_meta);
-                            cursor_x += w;
-                        }
-                        OwnedTextPart::Stable(arc, line_width) => {
-                            metas.push(AreaMeta {
-                                buf: MetaBuf::Stable(arc.clone()),
-                                left: cursor_x * scale,
-                                top,
-                                color,
-                                bounds,
-                                transform_index: phys_idx,
-                            });
-                            cursor_x += line_width;
-                        }
-                        OwnedTextPart::Digits(s) => {
-                            for ch in s.chars() {
-                                if ch == ' ' {
-                                    cursor_x += step * 0.5;
+            match entry {
+                TextEntry::Stable { pos, buffer, .. } => {
+                    metas.push(AreaMeta {
+                        buf: MetaBuf::Stable(buffer.clone()),
+                        left: pos.x * scale,
+                        top,
+                        color,
+                        bounds,
+                        transform_index: phys_idx,
+                    });
+                }
+                TextEntry::Parts { pos, def, parts, .. } => {
+                    // HUD 多段：逻辑 x 横拼，再 * scale
+                    let mut cursor_x = pos.x;
+                    let step = text_ctx.ensure_digit_table(def);
+                    for part in parts {
+                        match part {
+                            OwnedTextPart::Static(s) => {
+                                if s.is_empty() {
                                     continue;
                                 }
-                                if let Some(d) = ch.to_digit(10) {
-                                    let slot = text_ctx.digit_slot(d, &entry.options);
-                                    metas.push(AreaMeta {
-                                        buf: MetaBuf::Slot(slot),
-                                        left: cursor_x * scale,
-                                        top,
-                                        color,
-                                        bounds,
-                                        transform_index: phys_idx,
-                                    });
-                                    cursor_x += step;
-                                } else if is_hud_digit_char(ch) {
-                                    // 数学符号：预 shape 表项，宽度用自身 glyph（非 tabular）
-                                    let slot = text_ctx.glyph_slot_char(ch, &entry.options);
-                                    let w = text_ctx.slot_line_width(slot);
-                                    metas.push(AreaMeta {
-                                        buf: MetaBuf::Slot(slot),
-                                        left: cursor_x * scale,
-                                        top,
-                                        color,
-                                        bounds,
-                                        transform_index: phys_idx,
-                                    });
-                                    cursor_x += w;
+                                let slot = text_ctx.get_or_shape_text(s, def);
+                                let w = text_ctx.slot_line_width(slot);
+                                metas.push(AreaMeta {
+                                    buf: MetaBuf::Slot(slot),
+                                    left: cursor_x * scale,
+                                    top,
+                                    color,
+                                    bounds,
+                                    transform_index: phys_idx,
+                                });
+                                cursor_x += w;
+                            }
+                            OwnedTextPart::Dynamic(s) => {
+                                if s.is_empty() {
+                                    continue;
                                 }
-                                // 其它：跳过
+                                let opts = TextDef {
+                                    max_width: None,
+                                    align: TextAlign::Left,
+                                    ..def.clone()
+                                };
+                                let key = ShapeKey::from_text(s, &opts);
+                                let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
+                                    Some(si) => {
+                                        text_ctx.pin_slot(si);
+                                        let w = text_ctx.slot_line_width(si);
+                                        (AreaMeta {
+                                            buf: MetaBuf::Slot(si),
+                                            left: cursor_x * scale,
+                                            top,
+                                            color,
+                                            bounds,
+                                            transform_index: phys_idx,
+                                        }, w)
+                                    }
+                                    None => {
+                                        let metrics = Metrics::new(def.font_size, def.font_size * 1.2);
+                                        let mut buffer = text_ctx.take_buffer(metrics);
+                                        let attrs = opts.attrs.as_ref()
+                                            .map(|a| a.as_attrs())
+                                            .unwrap_or_else(Attrs::new);
+                                        buffer.set_size(None, None);
+                                        buffer.set_text(s, &attrs, Shaping::Advanced, None);
+                                        buffer.shape_until_scroll(&mut text_ctx.font_system, false);
+                                        let lw = buffer
+                                            .line_layout(&mut text_ctx.font_system, 0)
+                                            .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
+                                            .unwrap_or(0.0);
+                                        (AreaMeta {
+                                            buf: MetaBuf::Stable(Arc::new(buffer)),
+                                            left: cursor_x * scale,
+                                            top,
+                                            color,
+                                            bounds,
+                                            transform_index: phys_idx,
+                                        }, lw)
+                                    }
+                                };
+                                metas.push(area_meta);
+                                cursor_x += w;
+                            }
+                            OwnedTextPart::Stable(arc, line_width) => {
+                                metas.push(AreaMeta {
+                                    buf: MetaBuf::Stable(arc.clone()),
+                                    left: cursor_x * scale,
+                                    top,
+                                    color,
+                                    bounds,
+                                    transform_index: phys_idx,
+                                });
+                                cursor_x += line_width;
+                            }
+                            OwnedTextPart::Digits(s) => {
+                                for ch in s.chars() {
+                                    if ch == ' ' {
+                                        cursor_x += step * 0.5;
+                                        continue;
+                                    }
+                                    if let Some(d) = ch.to_digit(10) {
+                                        let slot = text_ctx.digit_slot(d, def);
+                                        metas.push(AreaMeta {
+                                            buf: MetaBuf::Slot(slot),
+                                            left: cursor_x * scale,
+                                            top,
+                                            color,
+                                            bounds,
+                                            transform_index: phys_idx,
+                                        });
+                                        cursor_x += step;
+                                    } else if is_hud_digit_char(ch) {
+                                        // 数学符号：预 shape 表项，宽度用自身 glyph（非 tabular）
+                                        let slot = text_ctx.glyph_slot_char(ch, def);
+                                        let w = text_ctx.slot_line_width(slot);
+                                        metas.push(AreaMeta {
+                                            buf: MetaBuf::Slot(slot),
+                                            left: cursor_x * scale,
+                                            top,
+                                            color,
+                                            bounds,
+                                            transform_index: phys_idx,
+                                        });
+                                        cursor_x += w;
+                                    }
+                                    // 其它：跳过
+                                }
                             }
                         }
                     }
                 }
-            } else {
-                let key = ShapeKey::from_entry(entry);
-                let slot = text_ctx.get_or_shape(key, &entry.options);
-                metas.push(AreaMeta {
-                    buf: MetaBuf::Slot(slot),
-                    left: entry.options.x * scale,
-                    top,
-                    color,
-                    bounds,
-                    transform_index: phys_idx,
-                });
+                TextEntry::Normal { pos, text, def, .. } => {
+                    let key = ShapeKey::from_text(text, def);
+                    let slot = text_ctx.get_or_shape(key, def);
+                    metas.push(AreaMeta {
+                        buf: MetaBuf::Slot(slot),
+                        left: pos.x * scale,
+                        top,
+                        color,
+                        bounds,
+                        transform_index: phys_idx,
+                    });
+                }
             }
         }
 
@@ -1715,6 +1782,8 @@ impl TextEntryList {
             scale,
             &[],
             &mut global_transforms,
+            None,
+            Color::new(1.0, 1.0, 1.0, 1.0),
         );
         let text_ctx = gpu.text_ctx.borrow();
         text_ctx
@@ -1754,8 +1823,8 @@ pub struct TextLayout {
 }
 
 /// 往 batch.texts 中添加一条文本渲染指令
-pub fn draw_text(list: &mut TextEntryList, text: &str, options: TextOptions) {
-    list.push(text, options);
+pub fn draw_text(list: &mut TextEntryList, text: &str, pos: Pos, def: TextDef, ov: TextOverride) {
+    list.push(text, pos, def, ov);
 }
 
 /// HUD 多段：Static / Dynamic / Digits。单行 LTR，不保证与整段 `draw_text` 像素级一致。
@@ -1764,14 +1833,16 @@ pub fn draw_text(list: &mut TextEntryList, text: &str, options: TextOptions) {
 /// draw_text_parts(&mut batch.texts, &[
 ///     TextPart::Static("分数: "),
 ///     TextPart::Digits("123"),       // 数字优化
-/// ], TextOptions::default().x(16.0).y(16.0).font_size(20.0));
+/// ], Pos::new(16.0, 16.0), TextDef::default().font_size(20.0), TextOverride::default());
 /// ```
 pub fn draw_text_parts(
     list: &mut TextEntryList,
     parts: &[TextPart<'_>],
-    options: TextOptions,
+    pos: Pos,
+    def: TextDef,
+    ov: TextOverride,
 ) {
-    list.push_parts(parts, options);
+    list.push_parts(parts, pos, def, ov);
 }
 
 /// HUD 自动切分：`split_hud` → Static + Digits（启发式）。
@@ -1779,16 +1850,28 @@ pub fn draw_text_parts(
 /// 更推荐跨帧 [`HudLine`]：语义上区分 Static / Dynamic，Digits 仅数字槽。
 ///
 /// ```ignore
-/// draw_text_hud(&mut batch.texts, "FPS: 60.5", opts);
-/// draw_text_hud!(&mut batch.texts, opts; "FPS: {:.1}", fps);
+/// draw_text_hud(&mut batch.texts, "FPS: 60.5", Pos::new(16.0, 12.0), def, ov);
+/// draw_text_hud!(&mut batch.texts, pos, def, ov; "FPS: {:.1}", fps);
 /// ```
-pub fn draw_text_hud(list: &mut TextEntryList, text: &str, options: TextOptions) {
-    list.push_hud(text, options);
+pub fn draw_text_hud(
+    list: &mut TextEntryList,
+    text: &str,
+    pos: Pos,
+    def: TextDef,
+    ov: TextOverride,
+) {
+    list.push_hud(text, pos, def, ov);
 }
 
 /// 绘制一条 [`HudLine`]。
-pub fn draw_hud_line(list: &mut TextEntryList, line: &HudLine, options: TextOptions) {
-    line.draw(list, options);
+pub fn draw_hud_line(
+    list: &mut TextEntryList,
+    line: &HudLine,
+    pos: Pos,
+    def: TextDef,
+    ov: TextOverride,
+) {
+    line.draw(list, pos, def, ov);
 }
 
 /// `format!` 拼串后 [`split_hud`]，得到 `Vec<`[`HudPart`]`>`。
@@ -1808,24 +1891,25 @@ macro_rules! hud_format {
 
 /// `format!` + [`draw_text_hud`]。
 ///
-/// 语法：`draw_text_hud!(list, options; "fmt", args...)`
-/// （`;` 分隔选项与 format 参数，避免和 `TextOptions` 里的逗号混淆。）
+/// 语法：`draw_text_hud!(list, pos, def, ov; "fmt", args...)`
 ///
 /// ```ignore
 /// draw_text_hud!(
 ///     &mut batch.texts,
-///     TextOptions::default().x(16.0).y(12.0).font_size(14.0).color(WHITE);
+///     Pos::new(16.0, 12.0),
+///     TextDef::default().font_size(14.0),
+///     TextOverride::from_color(WHITE);
 ///     "FPS: {:.1}  score={}",
 ///     fps,
 ///     score,
 /// );
 /// // 展开为：
-/// // draw_text_hud(list, &format!("FPS: {:.1}  score={}", fps, score), opts)
+/// // draw_text_hud(list, &format!("FPS: {:.1}  score={}", fps, score), pos, def, ov)
 /// ```
 #[macro_export]
 macro_rules! draw_text_hud {
-    ($list:expr, $opts:expr; $($arg:tt)*) => {
-        $crate::text::draw_text_hud($list, &::std::format!($($arg)*), $opts)
+    ($list:expr, $pos:expr, $def:expr, $ov:expr; $($arg:tt)*) => {
+        $crate::text::draw_text_hud($list, &::std::format!($($arg)*), $pos, $def, $ov)
     };
 }
 
@@ -1835,13 +1919,20 @@ mod tests {
     use std::hash::{Hash, Hasher};
     use rustc_hash::FxHasher;
 
-    fn plain_entry(text: &str, options: TextOptions) -> TextEntry {
-        TextEntry {
+    fn plain_entry(text: &str, def: TextDef) -> TextEntry {
+        TextEntry::Normal {
             text: text.into(),
-            options,
+            pos: Pos::new(0.0, 0.0),
+            def,
+            override_: TextOverride::default(),
             transform_index: 0,
-            parts: None,
-            stable: None,
+        }
+    }
+
+    fn shape_key_from_entry(entry: &TextEntry) -> ShapeKey {
+        match entry {
+            TextEntry::Normal { text, def, .. } => ShapeKey::from_text(text, def),
+            _ => panic!("from_entry called on non-Normal TextEntry"),
         }
     }
 
@@ -1861,35 +1952,28 @@ mod tests {
     fn shape_key_ignores_position_and_color() {
         let e1 = plain_entry(
             "Hello",
-            TextOptions::default()
-                .x(10.0)
-                .y(20.0)
-                .color(Color::new(1.0, 0.0, 0.0, 1.0)),
+            TextDef::default(),
         );
-        let mut e2 = plain_entry(
+        let e2 = plain_entry(
             "Hello",
-            TextOptions::default()
-                .x(99.0)
-                .y(0.0)
-                .color(Color::new(0.0, 1.0, 0.0, 1.0)),
+            TextDef::default(),
         );
-        e2.transform_index = 3;
-        assert_eq!(ShapeKey::from_entry(&e1), ShapeKey::from_entry(&e2));
+        assert_eq!(shape_key_from_entry(&e1), shape_key_from_entry(&e2));
     }
 
     #[test]
     fn shape_key_differs_on_font_size_and_text() {
-        let base = plain_entry("Hello", TextOptions::default().font_size(16.0));
-        let sized = plain_entry("Hello", TextOptions::default().font_size(18.0));
-        let other = plain_entry("World", TextOptions::default().font_size(16.0));
-        assert_ne!(ShapeKey::from_entry(&base), ShapeKey::from_entry(&sized));
-        assert_ne!(ShapeKey::from_entry(&base), ShapeKey::from_entry(&other));
+        let base = plain_entry("Hello", TextDef::default().font_size(16.0));
+        let sized = plain_entry("Hello", TextDef::default().font_size(18.0));
+        let other = plain_entry("World", TextDef::default().font_size(16.0));
+        assert_ne!(shape_key_from_entry(&base), shape_key_from_entry(&sized));
+        assert_ne!(shape_key_from_entry(&base), shape_key_from_entry(&other));
     }
 
     #[test]
     fn shape_key_hash_stable() {
-        let e = plain_entry("稳定", TextOptions::default().font_size(14.0));
-        let k = ShapeKey::from_entry(&e);
+        let e = plain_entry("稳定", TextDef::default().font_size(14.0));
+        let k = shape_key_from_entry(&e);
         let mut h1 = FxHasher::default();
         k.hash(&mut h1);
         let mut h2 = FxHasher::default();
@@ -1913,12 +1997,17 @@ mod tests {
         draw_text_parts(
             &mut list,
             &[TextPart::Static("分数: "), TextPart::Digits("42")],
-            TextOptions::default().x(10.0).y(20.0),
+            Pos::new(10.0, 20.0),
+            TextDef::default(),
+            TextOverride::default(),
         );
         assert_eq!(list.entries.len(), 1);
         let e = &list.entries[0];
-        assert!(e.text.is_empty());
-        let parts = e.parts.as_ref().expect("parts");
+        let (parts, text_empty) = match e {
+            TextEntry::Parts { parts, .. } => (parts, true),
+            _ => panic!("expected Parts"),
+        };
+        assert!(text_empty);
         assert_eq!(parts.len(), 2);
         match &parts[0] {
             OwnedTextPart::Static(s) => assert_eq!(s, "分数: "),
@@ -1973,9 +2062,14 @@ mod tests {
         draw_text_hud(
             &mut list,
             "x=9",
-            TextOptions::default().x(1.0).y(2.0),
+            Pos::new(1.0, 2.0),
+            TextDef::default(),
+            TextOverride::default(),
         );
-        let parts = list.entries[0].parts.as_ref().unwrap();
+        let parts = match &list.entries[0] {
+            TextEntry::Parts { parts, .. } => parts,
+            _ => panic!("expected Parts"),
+        };
         assert_eq!(parts.len(), 2);
         match &parts[0] {
             OwnedTextPart::Static(s) => assert_eq!(s, "x"),
@@ -2006,9 +2100,13 @@ mod tests {
             ]
         );
         let mut list = TextEntryList::new();
-        line.draw(&mut list, TextOptions::default());
+        line.draw(&mut list, Pos::new(0.0, 0.0), TextDef::default(), TextOverride::default());
         assert_eq!(list.entries.len(), 1);
-        assert_eq!(list.entries[0].parts.as_ref().unwrap().len(), 4);
+        let parts = match &list.entries[0] {
+            TextEntry::Parts { parts, .. } => parts,
+            _ => panic!("expected Parts"),
+        };
+        assert_eq!(parts.len(), 4);
     }
 
     #[test]
@@ -2046,7 +2144,7 @@ mod tests {
     fn make_stable_liveness_drop_clears_held() {
         let gpu = make_test_gpu();
         assert_eq!(gpu.shape_cache_held_count(), 0);
-        let h = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        let h = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.shape_cache_held_count(), 1);
         assert_eq!(gpu.shape_cache_len(), 1);
         drop(h);
@@ -2059,9 +2157,9 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn make_stable_cache_hit_shares_liveness() {
         let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        let h1 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.shape_cache_held_count(), 1);
-        let h2 = gpu.make_stable_text("hello", &TextOptions::default().font_size(20.0));
+        let h2 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
         // 同文案 cache hit → count 仍为 1
         assert_eq!(gpu.shape_cache_held_count(), 1);
         assert_eq!(gpu.shape_cache_len(), 1);
@@ -2079,15 +2177,15 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn clear_shape_cache_preserves_held_slots() {
         let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("keep", &TextOptions::default().font_size(20.0));
-        let h2 = gpu.make_stable_text("drop", &TextOptions::default().font_size(20.0));
+        let h1 = gpu.make_stable_text("keep", &TextDef::default().font_size(20.0));
+        let h2 = gpu.make_stable_text("drop", &TextDef::default().font_size(20.0));
         drop(h2); // "drop" is now dead
         assert_eq!(gpu.shape_cache_held_count(), 1);
 
         // 加一个非 held 槽（用 draw_text 路径制造）
         let mut list = TextEntryList::new();
-        list.push("nothandled", TextOptions::default().font_size(20.0));
-        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new());
+        list.push("nothandled", Pos::new(0.0, 0.0), TextDef::default().font_size(20.0), TextOverride::default());
+        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new(), None, Color::new(1.0, 1.0, 1.0, 1.0));
         assert_eq!(gpu.shape_cache_len(), 3);
         assert_eq!(gpu.shape_cache_held_count(), 1);
 
@@ -2105,9 +2203,9 @@ mod tests {
         let gpu = make_test_gpu();
         gpu.set_shape_cache_max_entries(Some(2));
         // 创建 3 个 handle → 总槽 = 3，超过 cap = 2；但 cap 只约束非 held
-        let _h1 = gpu.make_stable_text("a", &TextOptions::default().font_size(20.0));
-        let _h2 = gpu.make_stable_text("b", &TextOptions::default().font_size(20.0));
-        let _h3 = gpu.make_stable_text("c", &TextOptions::default().font_size(20.0));
+        let _h1 = gpu.make_stable_text("a", &TextDef::default().font_size(20.0));
+        let _h2 = gpu.make_stable_text("b", &TextDef::default().font_size(20.0));
+        let _h3 = gpu.make_stable_text("c", &TextDef::default().font_size(20.0));
         // 全部被持有，cap 不应触发 evict
         assert_eq!(gpu.shape_cache_held_count(), 3);
         assert_eq!(gpu.shape_cache_len(), 3);
@@ -2117,7 +2215,7 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn stable_text_clone_shares_arc_and_liveness() {
         let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("clone_test", &TextOptions::default().font_size(20.0));
+        let h1 = gpu.make_stable_text("clone_test", &TextDef::default().font_size(20.0));
         let h2 = h1.clone();
         assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
         assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
@@ -2131,16 +2229,16 @@ mod tests {
         let gpu = make_test_gpu();
         // draw_text 走 cache
         let mut list = TextEntryList::new();
-        list.push("shared", TextOptions::default().font_size(20.0));
-        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new());
+        list.push("shared", Pos::new(0.0, 0.0), TextDef::default().font_size(20.0), TextOverride::default());
+        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new(), None, Color::new(1.0, 1.0, 1.0, 1.0));
         // 此时 cache 已有 "shared"，无 liveness
         assert_eq!(gpu.shape_cache_held_count(), 0);
         assert_eq!(gpu.shape_cache_len(), 1);
 
         // make_stable → 命中已有 slot，liveness = Some
-        let h1 = gpu.make_stable_text("shared", &TextOptions::default().font_size(20.0));
+        let h1 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.shape_cache_held_count(), 1);
-        let h2 = gpu.make_stable_text("shared", &TextOptions::default().font_size(20.0));
+        let h2 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.shape_cache_held_count(), 1);
         // 共享 Arc
         assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));

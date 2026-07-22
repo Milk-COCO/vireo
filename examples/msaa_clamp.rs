@@ -63,19 +63,16 @@ fn main() {
         let mut batch = DrawBatch::new();
         draw_circle(&mut batch, Pos::new(240.0, 160.0), 80.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
         draw_rounded_rect(&mut batch, Pos::new(40.0, 40.0), 120.0, 80.0, 16.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
-        draw_text(
-            &mut batch.texts,
-            &format!(
-                "request 8x | hw max {} | supported {:?}",
-                win.gpu().max_sample_count(),
-                win.gpu().supported_sample_counts()
-            ),
-            TextOptions::default()
-                .x(12.0)
-                .y(12.0)
-                .font_size(14.0)
-                .color(WHITE),
-        );
+            draw_text(
+                &mut batch.texts,
+                &format!(
+                    "request 8x | hw max {} | supported {:?}",
+                    win.gpu().max_sample_count(),
+                    win.gpu().supported_sample_counts()
+                ),
+                Pos::new(12.0, 12.0), TextDef::default().font_size(14.0),
+                TextOverride::from_color(WHITE),
+            );
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
 
         if app.frame_count >= 3 {

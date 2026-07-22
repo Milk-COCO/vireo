@@ -33,12 +33,12 @@ fn main() {
         draw_rectangle(&mut batch, Pos::new(280.0, 80.0), w2 as f32 * s, h2 as f32 * s, Some(WHITE));
 
         // 标签
-        draw_text(&mut batch.texts, "Full",
-            TextOptions::default().x(20.0).y(60.0).font_size(14.0).color(WHITE));
-        draw_text(&mut batch.texts, "Top-left",
-            TextOptions::default().x(180.0).y(60.0).font_size(14.0).color(WHITE));
-        draw_text(&mut batch.texts, "Bottom-right",
-            TextOptions::default().x(280.0).y(60.0).font_size(14.0).color(WHITE));
+        draw_text(&mut batch.texts, "Full", Pos::new(20.0, 60.0),
+                  TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
+        draw_text(&mut batch.texts, "Top-left", Pos::new(180.0, 60.0),
+                  TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
+        draw_text(&mut batch.texts, "Bottom-right", Pos::new(280.0, 60.0),
+                  TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
 
         win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
 

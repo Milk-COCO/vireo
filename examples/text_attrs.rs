@@ -36,13 +36,12 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Font Attributes Demo",
-            TextOptions::default()
+            Pos::new(20.0, 30.0),
+            TextDef::default()
                 .with_family(Family::SansSerif)
                 .with_weight(Weight::BOLD)
-                .x(20.0)
-                .y(30.0)
-                .font_size(36.0)
-                .color(GOLD),
+                .font_size(36.0),
+            TextOverride::from_color(GOLD),
         );
 
         let mut y = 90.0_f32;
@@ -51,40 +50,47 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Normal weight — default (400)",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::SansSerif)
-                .x(20.0).y(y).font_size(18.0).color(WHITE),
+                .font_size(18.0),
+            TextOverride::from_color(WHITE),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Light weight (300)",
-            TextOptions::default()
+            Pos::new(30.0, y),
+            TextDef::default()
                 .with_family(Family::SansSerif)
                 .with_weight(Weight::LIGHT)
-                .x(30.0).y(y).font_size(18.0)
-                .color(Color::new(0.7, 0.7, 0.7, 1.0)),
+                .font_size(18.0),
+            TextOverride::from_color(Color::new(0.7, 0.7, 0.7, 1.0)),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Bold weight (700) — 加粗",
-            TextOptions::default()
+            Pos::new(30.0, y),
+            TextDef::default()
                 .with_family(Family::SansSerif)
                 .with_weight(Weight::BOLD)
-                .x(30.0).y(y).font_size(18.0).color(WHITE),
+                .font_size(18.0),
+            TextOverride::from_color(WHITE),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Extra Bold (800)",
-            TextOptions::default()
+            Pos::new(30.0, y),
+            TextDef::default()
                 .with_family(Family::SansSerif)
                 .with_weight(Weight::EXTRA_BOLD)
-                .x(30.0).y(y).font_size(18.0).color(SKYBLUE),
+                .font_size(18.0),
+            TextOverride::from_color(SKYBLUE),
         );
         y += 35.0;
 
@@ -92,26 +98,31 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Normal style — regular",
-            TextOptions::default()
-                .x(20.0).y(y).font_size(18.0).color(WHITE),
+            Pos::new(20.0, y),
+            TextDef::default().font_size(18.0),
+            TextOverride::from_color(WHITE),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Italic style — 意大利斜体",
-            TextOptions::default()
+            Pos::new(30.0, y),
+            TextDef::default()
                 .with_style(Style::Italic)
-                .x(30.0).y(y).font_size(18.0).color(PINK),
+                .font_size(18.0),
+            TextOverride::from_color(PINK),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Oblique style — 机械倾斜",
-            TextOptions::default()
+            Pos::new(30.0, y),
+            TextDef::default()
                 .with_style(Style::Oblique)
-                .x(30.0).y(y).font_size(18.0).color(GREEN),
+                .font_size(18.0),
+            TextOverride::from_color(GREEN),
         );
         y += 35.0;
 
@@ -119,27 +130,33 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Monospace — 等宽字体 0123 abc",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::Monospace)
-                .x(20.0).y(y).font_size(18.0).color(RED),
+                .font_size(18.0),
+            TextOverride::from_color(RED),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Cursive — 手写体风格",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::Cursive)
-                .x(20.0).y(y).font_size(18.0).color(GOLD),
+                .font_size(18.0),
+            TextOverride::from_color(GOLD),
         );
         y += 28.0;
 
         draw_text(
             &mut batch.texts,
             "Serif — 衬线字体",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::Serif)
-                .x(20.0).y(y).font_size(18.0).color(WHITE),
+                .font_size(18.0),
+            TextOverride::from_color(WHITE),
         );
         y += 35.0;
 
@@ -147,10 +164,12 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "中文 粗细 测试 — 属性也影响中文渲染",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::SansSerif)
                 .with_weight(Weight::BOLD)
-                .x(20.0).y(y).font_size(18.0).color(WHITE),
+                .font_size(18.0),
+            TextOverride::from_color(WHITE),
         );
         y += 35.0;
 
@@ -158,21 +177,22 @@ fn main() {
         draw_text(
             &mut batch.texts,
             "Chained: Italic + Bold + Monospace",
-            TextOptions::default()
+            Pos::new(20.0, y),
+            TextDef::default()
                 .with_family(Family::Monospace)
                 .with_weight(Weight::BOLD)
                 .with_style(Style::Italic)
-                .x(20.0).y(y).font_size(18.0)
-                .color(Color::new(0.4, 1.0, 1.0, 1.0)),
+                .font_size(18.0),
+            TextOverride::from_color(Color::new(0.4, 1.0, 1.0, 1.0)),
         );
 
         // 底部提示
         draw_text(
             &mut batch.texts,
             "窗口: 700 x 600  ·  内嵌字体: Fira Sans + Noto Sans SC",
-            TextOptions::default()
-                .x(w * 0.5 - 230.0).y(570.0).font_size(12.0)
-                .color(Color::new(0.4, 0.4, 0.5, 1.0)),
+            Pos::new(w * 0.5 - 230.0, 570.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.4, 0.4, 0.5, 1.0)),
         );
 
         // 背景参考线
