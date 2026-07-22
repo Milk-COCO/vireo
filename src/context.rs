@@ -59,10 +59,14 @@ impl Rect {
 ///   `is_setup=true` 是 batch 子树前的 cover，渲染时累加 area_depth；
 ///   `is_setup=false` 是子树后的 erase，渲染后减回。
 ///   走 stencil 管线 op 3（Erase）或 op 4（Cover），无色。
+/// - `ScissorPush(Rect)`：用 scissor 代替 stencil（`clip_rect` + `clips_children`）。
+/// - `ScissorPop`：恢复前一级 scissor。
 pub(crate) enum DrawEvent<'a> {
     Batch(&'a DrawBatch),
     StencilPop,
     AreaOp { op: AreaStencilOp, is_setup: bool },
+    ScissorPush(Rect),
+    ScissorPop,
 }
 
 /// 渲染目标，封装用于 render pass 的 `TextureView`。
@@ -271,15 +275,7 @@ impl Renderer {
             b.flatten_events(&mut tmp, 0, Some(viewport), &aabb_map);
             for ev in tmp {
                 match &ev {
-                    DrawEvent::Batch(batch) => {
-                        if batch.clips_children {
-                            uses_stencil = true;
-                        }
-                        if batch.effective_area().is_some() {
-                            uses_stencil = true;
-                        }
-                    }
-                    DrawEvent::AreaOp { .. } => {
+                    DrawEvent::StencilPop | DrawEvent::AreaOp { .. } => {
                         uses_stencil = true;
                     }
                     _ => {}
@@ -334,6 +330,10 @@ impl Renderer {
             /// Area 掩码事件专用：3 = Erase / 4 = Cover（来自 AreaStencilOp::stencil_pipeline_op）。
             /// `None` 表示普通 batch 或 StencilPop（走 `stencil_op`）。
             area_op: Option<u32>,
+            /// ScissorPush 事件：设置 scissor rect（逻辑坐标）。
+            scissor_push: Option<Rect>,
+            /// ScissorPop 事件：恢复前一级 scissor。
+            scissor_pop: bool,
         }
 
         let mut event_infos: Vec<EventInfo> = Vec::new();
@@ -405,12 +405,19 @@ impl Renderer {
                     }
                     let content_level =
                         active_clip.unwrap_or(0) + ancestors_area_depth + (has_own_area as u32);
-                    let (stencil_op, stencil_ref) = compute_stencil_at_level(
-                        batch,
-                        content_level,
-                        &mut ref_counter,
-                        &mut ref_stack,
-                    );
+                    // clip_rect 代替 stencil：跳过 stencil 设置，scissor 由 ScissorPush 事件处理
+                    let use_scissor = batch.clip_rect.is_some()
+                        || (batch.clips_children && !has_own_area && batch.auto_clip_rect().is_some());
+                    let (stencil_op, stencil_ref) = if use_scissor {
+                        (0u32, 0u32)
+                    } else {
+                        compute_stencil_at_level(
+                            batch,
+                            content_level,
+                            &mut ref_counter,
+                            &mut ref_stack,
+                        )
+                    };
                     if stencil_op == 1 {
                         active_clip = Some(*ref_stack.last().unwrap_or(&0));
                     }
@@ -420,6 +427,8 @@ impl Renderer {
                         stencil_op,
                         stencil_ref,
                         area_op: None,
+                        scissor_push: None,
+                        scissor_pop: false,
                     });
                 }
                 DrawEvent::StencilPop => {
@@ -437,6 +446,8 @@ impl Renderer {
                         stencil_op: 3,
                         stencil_ref: popped.unwrap_or(0),
                         area_op: None,
+                        scissor_push: None,
+                        scissor_pop: false,
                     });
                 }
                 DrawEvent::AreaOp { op, is_setup } => {
@@ -451,10 +462,34 @@ impl Renderer {
                         stencil_op: pipe_op,
                         stencil_ref: r,
                         area_op: Some(pipe_op),
+                        scissor_push: None,
+                        scissor_pop: false,
                     });
                     if !is_setup {
                         area_depth = area_depth.saturating_sub(1);
                     }
+                }
+                DrawEvent::ScissorPush(rect) => {
+                    event_infos.push(EventInfo {
+                        shape: None,
+                        text: None,
+                        stencil_op: 0,
+                        stencil_ref: 0,
+                        area_op: None,
+                        scissor_push: Some(*rect),
+                        scissor_pop: false,
+                    });
+                }
+                DrawEvent::ScissorPop => {
+                    event_infos.push(EventInfo {
+                        shape: None,
+                        text: None,
+                        stencil_op: 0,
+                        stencil_ref: 0,
+                        area_op: None,
+                        scissor_push: None,
+                        scissor_pop: true,
+                    });
                 }
             }
         }
@@ -614,6 +649,7 @@ impl Renderer {
                     v_offset += 4;
                     idx_offset += 6;
                 }
+                DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop => {}
                 DrawEvent::AreaOp { op, .. } => {
                     // Area 掩码：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
                     // 走 stencil 管线 op 3/4（无色），由 pass 内 `area_op` 决定管线 key。
@@ -834,8 +870,37 @@ impl Renderer {
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
             let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
+            let mut scissor_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
+            scissor_stack.push((0, 0, self.physical_width, self.physical_height));
 
             for info in &event_infos {
+                // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
+                if let Some(scissor_rect) = info.scissor_push {
+                    let sx = self.physical_width as f32 / self.logical_width.max(1) as f32;
+                    let sy = self.physical_height as f32 / self.logical_height.max(1) as f32;
+                    let px = (scissor_rect.x * sx) as u32;
+                    let py = (scissor_rect.y * sy) as u32;
+                    let pw = (scissor_rect.w * sx).max(0.0) as u32;
+                    let ph = (scissor_rect.h * sy).max(0.0) as u32;
+                    let (cx, cy, cw, ch) = *scissor_stack.last().unwrap_or(&(0, 0, self.physical_width, self.physical_height));
+                    let ix = px.max(cx);
+                    let iy = py.max(cy);
+                    let ir = (px + pw).min(cx + cw);
+                    let ib = (py + ph).min(cy + ch);
+                    let (nx, ny, nw, nh) = if ir > ix && ib > iy {
+                        (ix, iy, ir - ix, ib - iy)
+                    } else {
+                        (0u32, 0u32, 0u32, 0u32)
+                    };
+                    pass.set_scissor_rect(nx, ny, nw, nh);
+                    scissor_stack.push((nx, ny, nw, nh));
+                }
+                if info.scissor_pop {
+                    scissor_stack.pop();
+                    let (cx, cy, cw, ch) = *scissor_stack.last().unwrap_or(&(0, 0, self.physical_width, self.physical_height));
+                    pass.set_scissor_rect(cx, cy, cw, ch);
+                }
+
                 if let Some(ref shape) = info.shape {
                     // Area 事件：op 3/4 来自 area_op；普通 batch/StencilPop：op 0..3 来自 stencil_op。
                     let pipe_op = info.area_op.unwrap_or(info.stencil_op);
@@ -1496,6 +1561,9 @@ pub struct DrawBatch {
     /// - `Some(None)`：自动，从顶点计算子树 AABB
     /// - `Some(Some(rect))`：手动，使用指定矩形
     pub bounds: Option<Option<Rect>>,
+    /// 当 `clips_children=true` 时，用此矩形 scissor 代替 stencil。
+    /// 逻辑世界坐标，必须轴对齐。`None` = 走 stencil。
+    pub clip_rect: Option<Rect>,
 }
 
 impl DrawBatch {
@@ -1521,6 +1589,7 @@ impl DrawBatch {
             area_include: None,
             area_exclude: None,
             bounds: Some(None),
+            clip_rect: None,
         }
     }
 
@@ -1545,6 +1614,7 @@ impl DrawBatch {
         self.area_include = None;
         self.area_exclude = None;
         self.bounds = Some(None);
+        self.clip_rect = None;
     }
 
     /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
@@ -1607,6 +1677,51 @@ impl DrawBatch {
             if wy < w_min_y { w_min_y = wy; }
             if wy > w_max_y { w_max_y = wy; }
         }
+        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
+    }
+
+    /// 检测 batch 自身是否只含一个轴对齐矩形（4 顶点 + 无旋转 transform）。
+    /// 用于 `clips_children` 时自动走 scissor 路径。
+    fn auto_clip_rect(&self) -> Option<Rect> {
+        if self.vertices.len() != 4 || self.indices.len() != 6 {
+            return None;
+        }
+        // 检查 transform 无旋转/倾斜（scale 和 translate 不影响 AABB）
+        if let Some(ref t) = self.transform {
+            if t.b.abs() > 1e-6 || t.c.abs() > 1e-6 {
+                return None;
+            }
+        }
+        let (c0, c1, c2) = self.current_matrix();
+        let min_x = self.vertices.iter().map(|v| v.position[0]).reduce(f32::min)?;
+        let max_x = self.vertices.iter().map(|v| v.position[0]).reduce(f32::max)?;
+        let min_y = self.vertices.iter().map(|v| v.position[1]).reduce(f32::min)?;
+        let max_y = self.vertices.iter().map(|v| v.position[1]).reduce(f32::max)?;
+        let corners = [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y]];
+        let mut found = [false; 4];
+        for v in &self.vertices {
+            let wx = c0[0] * v.position[0] + c1[0] * v.position[1] + c2[0];
+            let wy = c0[1] * v.position[0] + c1[1] * v.position[1] + c2[1];
+            let matched = corners.iter().position(|c| {
+                (wx - (c0[0] * c[0] + c1[0] * c[1] + c2[0])).abs() < 1e-4
+                    && (wy - (c0[1] * c[0] + c1[1] * c[1] + c2[1])).abs() < 1e-4
+            });
+            match matched {
+                Some(i) => found[i] = true,
+                None => return None,
+            }
+        }
+        if !found.iter().all(|&x| x) {
+            return None;
+        }
+        // 计算世界空间 AABB
+        let w_corners: Vec<[f32; 2]> = corners.iter().map(|p| {
+            [c0[0] * p[0] + c1[0] * p[1] + c2[0], c0[1] * p[0] + c1[1] * p[1] + c2[1]]
+        }).collect();
+        let w_min_x = w_corners.iter().map(|p| p[0]).reduce(f32::min)?;
+        let w_max_x = w_corners.iter().map(|p| p[0]).reduce(f32::max)?;
+        let w_min_y = w_corners.iter().map(|p| p[1]).reduce(f32::min)?;
+        let w_max_y = w_corners.iter().map(|p| p[1]).reduce(f32::max)?;
         Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
@@ -1758,6 +1873,17 @@ impl DrawBatch {
 
         let area = self.effective_area();
         let has_area = matches!(&area, Some(a) if !a.is_empty());
+        let effective_clip = match self.clip_rect {
+            Some(r) => Some(r),
+            None => {
+                if self.clips_children && !has_area {
+                    self.auto_clip_rect()
+                } else {
+                    None
+                }
+            }
+        };
+        let use_scissor = effective_clip.is_some() && self.clips_children && !has_area;
         if let Some(a) = &area {
             if !a.is_empty() {
                 let mut ops = Vec::new();
@@ -1771,10 +1897,15 @@ impl DrawBatch {
         let child_start = out.len();
         // 子树的 level：若自身有 Area，子 content 在 level+1；否则同 level。
         let child_level = if has_area { level + 1 } else { level };
+        if use_scissor {
+            out.push(DrawEvent::ScissorPush(effective_clip.unwrap()));
+        }
         for child in &self.children {
             child.flatten_events(out, child_level, viewport, aabb_map);
         }
-        if self.clips_children && out.len() > child_start {
+        if use_scissor {
+            out.push(DrawEvent::ScissorPop);
+        } else if self.clips_children && out.len() > child_start {
             out.push(DrawEvent::StencilPop);
         }
         if has_area {
@@ -2092,6 +2223,7 @@ impl DrawBatch {
             area_include: self.area_include.clone(),
             area_exclude: self.area_exclude.clone(),
             bounds: self.bounds,
+            clip_rect: self.clip_rect,
         }
     }
 
@@ -2748,5 +2880,97 @@ mod tests {
         // parent 空容器 → 自身 event（无顶点），子剪掉
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(b) if b.vertices.is_empty()));
+    }
+
+    #[test]
+    fn clip_rect_emits_scissor_events() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        b.clip_rect = Some(Rect::new(10.0, 10.0, 200.0, 150.0));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], DrawEvent::Batch(_)));
+        assert!(matches!(&events[1], DrawEvent::ScissorPush(r) if *r == Rect::new(10.0, 10.0, 200.0, 150.0)));
+        assert!(matches!(&events[2], DrawEvent::Batch(_)));
+        assert!(matches!(&events[3], DrawEvent::ScissorPop));
+    }
+
+    #[test]
+    fn clip_rect_without_clips_children_no_scissor() {
+        let mut b = DrawBatch::new();
+        b.clip_rect = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
+        b.clips_children = false;
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], DrawEvent::Batch(_)));
+        assert!(matches!(&events[1], DrawEvent::Batch(_)));
+    }
+
+    #[test]
+    fn clip_rect_does_not_set_uses_stencil() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        b.clip_rect = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
+        draw_rectangle(&mut b, 0.0, 0.0, 10.0, 10.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        let uses_stencil = events.iter().any(|e| matches!(e, DrawEvent::StencilPop | DrawEvent::AreaOp { .. }));
+        assert!(!uses_stencil);
+    }
+
+    #[test]
+    fn auto_clip_rect_detects_single_rect() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        // 自动检测为矩形 → ScissorPush/Pop 代替 StencilPop
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[1], DrawEvent::ScissorPush(r) if (r.w - 100.0).abs() < 1e-4));
+        assert!(matches!(&events[3], DrawEvent::ScissorPop));
+        assert!(events.iter().all(|e| !matches!(e, DrawEvent::StencilPop)));
+    }
+
+    #[test]
+    fn auto_clip_rect_ignores_nonrect() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        // 三角形（3 顶点），不是矩形
+        crate::shapes::draw_triangle(&mut b, 0.0, 0.0, 100.0, 0.0, 0.0, 50.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, 0.0, 0.0, 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        // 非矩形 → 走 stencil
+        assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
+    }
+
+    #[test]
+    fn auto_clip_rect_clears_with_draw_rect_then_child() {
+        let mut b = DrawBatch::new();
+        b.clips_children = true;
+        draw_rectangle(&mut b, 0.0, 0.0, 100.0, 50.0, Some(WHITE));
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], DrawEvent::Batch(_)));
+        assert!(matches!(&events[1], DrawEvent::ScissorPush(_)));
+        assert!(matches!(&events[2], DrawEvent::ScissorPop));
     }
 }
