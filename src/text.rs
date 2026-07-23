@@ -929,8 +929,8 @@ fn is_hud_digit_char(ch: char) -> bool {
 /// - **`Clone`**：复制 `Arc<Buffer>` 与 `Arc<()>`（liveness 标记），增加 `strong_count`。
 ///   所有 clone 共享同一 cache 槽，只有**所有** clone 均 drop 后槽才变为可淘汰。
 ///
-/// ## 与 [`TextPart::Static`]/[`TextPart::Dynamic`] 的差异
-/// | 维度 | `Static`/`Dynamic` | `Stable` |
+/// ## 与 [`TextPart::Normal`]/[`TextPart::Dynamic`] 的差异
+/// | 维度 | `Normal`/`Dynamic` | `Stable` |
 /// |------|-------------------|----------|
 /// | 缓存条目 | `draw_text` 自动管 | 用户 `make_stable_text` 显式创建 |
 /// | 跨帧复用 | TTL/LRU 可能 evict | **所有 handle 均 drop 前**永不 evict |
@@ -991,47 +991,95 @@ impl std::fmt::Debug for StableText {
     }
 }
 
-/// HUD 文本段（单行 LTR；不保证与整段 `draw_text` 像素级一致）。
+/// HUD 文本段（拥有权；单行 LTR；不保证与整段 `draw_text` 像素级一致）。
 ///
 /// 四种类型的差异：
-/// - [`TextPart::Static`]：内容稳定，走整段 shape 缓存，同内容可命中。
+/// - [`TextPart::Normal`]：内容稳定，走整段 shape 缓存，同内容可命中。
 /// - [`TextPart::Dynamic`]：内容会变但仍需整段 shape，适合不能拆成 Digits 的短句。
 /// - [`TextPart::Digits`]：HUD 数字专用加速路径。**强制 `tnum`（等宽数字）**，
 ///   每个字宽度 = 0-9 最大宽。代码内自带大字表，无需整段 reshape。
-///   若要比例数字，用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
+///   若要比例数字，用 [`TextPart::Dynamic`] 或 [`TextPart::Normal`]。
 /// - [`TextPart::Stable`]：预 shape 句柄，不走 cache 查询。详见 [`StableText`]。
-#[derive(Clone, Debug)]
-pub enum TextPart<'a> {
-    /// 内容稳定（标签、说明）。走整段 shape 缓存，同内容可 hit。
-    Static(&'a str),
-    /// 内容会变的任意文案。仍走整段 shape；字符串一变就 miss。
-    /// 适合低频改动的短句，或无法用 Digits 的动态字。
-    Dynamic(&'a str),
-    /// 强制 `tnum` 等宽的 HUD 数字/符号。单槽预 shape，不整段 reshape。
-    /// 仅接受 `0-9` + 数学符号（.,+-*/%=:()[]等）；其它字符跳过。
-    /// 需要比例数字时请用 [`TextPart::Dynamic`] 或 [`TextPart::Static`]。
-    Digits(&'a str),
-    /// 预 shape 稳定文本，直接使用 [`StableText`] 的 `Arc<Buffer>`，不走 cache 查询。
-    /// 可在多帧间复用而无需重新 shape。
-    ///
-    /// **与外层 `TextOptions` / `TextOverride` 的关系**（`draw_text_parts` / `push_parts`）：
-    /// - **生效**：`pos`（行起点；段内用 `StableText.line_width` 横拼）、`TextOverride.color/clip/transform`
-    /// - **不生效**（已在 `make_stable_text` 时定型）：`font_size`、`attrs`
-    /// - **`max_width`/`align`**：已在 `make_stable_text` 时定型（见 [`StableText`] 文档），段内不重新生效
-    Stable(&'a StableText),
-}
-
-/// 拥有所有权的 HUD 段（`split_hud` / [`HudLine`]）。
 ///
-/// 主轴 Static/Dynamic；[`HudPart::Digits`] 为数字优化。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HudPart {
-    Static(String),
-    Dynamic(String),
-    Digits(String),
+/// **`TextDef`**：`Normal` / `Dynamic` / `Digits` 的第二参数 `None` = 使用
+/// `draw_text_parts` / `push_parts` 的行级 `def`；`Some(def)` = 仅本段覆盖。
+/// [`TextPart::Stable`] 无此项（字号等已在 `make_stable_text` 时定型）。
+///
+/// 提交时传 [`&[TextPart]`](TextPart)（例如 `&vec[..]` / [`HudLine::parts`]）；
+/// 引擎 clone 进 [`TextEntry::Parts`]。
+#[derive(Clone, Debug)]
+pub enum TextPart {
+    /// 内容稳定（标签、说明）。走整段 shape 缓存，同内容可 hit。
+    /// `def: None` → 行级 `TextDef`；`Some` → 本段专用。
+    Normal(String, Option<TextDef>),
+    /// 内容会变的任意文案。仍走整段 shape；字符串一变就 miss。
+    Dynamic(String, Option<TextDef>),
+    /// 强制 `tnum` 等宽的 HUD 数字/符号。
+    Digits(String, Option<TextDef>),
+    /// 预 shape 稳定文本；`TextDef` 已在创建时定型，不可在此覆盖。
+    ///
+    /// **与外层的关系**（`draw_text_parts` / `push_parts`）：
+    /// - **生效**：`pos`（行起点；段内用 `line_width` 横拼）、`TextOverride`
+    /// - **不生效**：字号 / attrs / max_width / align（创建时定型）
+    Stable(StableText),
 }
 
-/// Bevy 式组织：一条 HUD 行 = 若干 span，跨帧复用，只改 Dynamic/Digits 槽。
+impl TextPart {
+    /// 稳定文案，用行级 `TextDef`。
+    #[inline]
+    pub fn normal(text: impl Into<String>) -> Self {
+        Self::Normal(text.into(), None)
+    }
+    /// 稳定文案 + 本段 `TextDef`。
+    #[inline]
+    pub fn normal_def(text: impl Into<String>, def: TextDef) -> Self {
+        Self::Normal(text.into(), Some(def))
+    }
+    /// 动态文案，用行级 `TextDef`。
+    #[inline]
+    pub fn dynamic(text: impl Into<String>) -> Self {
+        Self::Dynamic(text.into(), None)
+    }
+    /// 动态文案 + 本段 `TextDef`。
+    #[inline]
+    pub fn dynamic_def(text: impl Into<String>, def: TextDef) -> Self {
+        Self::Dynamic(text.into(), Some(def))
+    }
+    /// 等宽数字，用行级 `TextDef`。
+    #[inline]
+    pub fn digits(text: impl Into<String>) -> Self {
+        Self::Digits(text.into(), None)
+    }
+    /// 等宽数字 + 本段 `TextDef`。
+    #[inline]
+    pub fn digits_def(text: impl Into<String>, def: TextDef) -> Self {
+        Self::Digits(text.into(), Some(def))
+    }
+    /// 预 shape 句柄（clone `StableText`）。
+    #[inline]
+    pub fn stable(s: &StableText) -> Self {
+        Self::Stable(s.clone())
+    }
+
+    #[inline]
+    fn resolve_def<'a>(&'a self, row: &'a TextDef) -> &'a TextDef {
+        match self {
+            Self::Normal(_, Some(d)) | Self::Dynamic(_, Some(d)) | Self::Digits(_, Some(d)) => d,
+            Self::Normal(_, None) | Self::Dynamic(_, None) | Self::Digits(_, None) => row,
+            Self::Stable(_) => row,
+        }
+    }
+
+    /// 段内字符串（Stable 返回原文案）。
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Normal(s, _) | Self::Dynamic(s, _) | Self::Digits(s, _) => s.as_str(),
+            Self::Stable(h) => h.text(),
+        }
+    }
+}
+
+/// 薄 wrapper：跨帧持有 [`Vec<TextPart>`]，只改 Dynamic/Digits 槽。
 ///
 /// ```ignore
 /// let mut line = HudLine::new()
@@ -1040,63 +1088,64 @@ pub enum HudPart {
 ///     .text("  模式: ")
 ///     .dynamic("Both");
 /// // 每帧
-/// line.set_digits(1, &score.to_string());
-/// line.draw(&mut batch.texts, opts);
+/// line.set_digits(1, score.to_string());
+/// line.draw(&mut batch.texts, pos, def, ov);
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct HudLine {
-    spans: Vec<HudPart>,
+    parts: Vec<TextPart>,
 }
 
 impl HudLine {
     pub fn new() -> Self {
-        Self { spans: Vec::new() }
+        Self { parts: Vec::new() }
     }
 
     pub fn text(mut self, s: impl Into<String>) -> Self {
-        self.spans.push(HudPart::Static(s.into()));
+        self.parts.push(TextPart::normal(s));
         self
     }
 
     pub fn dynamic(mut self, s: impl Into<String>) -> Self {
-        self.spans.push(HudPart::Dynamic(s.into()));
+        self.parts.push(TextPart::dynamic(s));
         self
     }
 
     /// 数字优化槽（见 [`TextPart::Digits`]）。
     pub fn digits(mut self, s: impl Into<String>) -> Self {
-        self.spans.push(HudPart::Digits(s.into()));
+        self.parts.push(TextPart::digits(s));
         self
     }
 
-    pub fn spans(&self) -> &[HudPart] {
-        &self.spans
+    pub fn parts(&self) -> &[TextPart] {
+        &self.parts
     }
 
     pub fn set_text(&mut self, index: usize, s: impl Into<String>) {
-        self.spans[index] = HudPart::Static(s.into());
+        self.parts[index] = TextPart::normal(s);
     }
 
     pub fn set_dynamic(&mut self, index: usize, s: impl Into<String>) {
-        self.spans[index] = HudPart::Dynamic(s.into());
+        self.parts[index] = TextPart::dynamic(s);
     }
 
     pub fn set_digits(&mut self, index: usize, s: impl Into<String>) {
-        self.spans[index] = HudPart::Digits(s.into());
+        self.parts[index] = TextPart::digits(s);
     }
 
-    /// 原地改 Dynamic/Digits 槽的字符串（不清空类型）。
+    /// 原地改 Normal/Dynamic/Digits 槽的字符串（不换变体；Stable 槽忽略）。
     pub fn write_slot(&mut self, index: usize, s: &str) {
-        match &mut self.spans[index] {
-            HudPart::Static(buf) | HudPart::Dynamic(buf) | HudPart::Digits(buf) => {
+        match &mut self.parts[index] {
+            TextPart::Normal(buf, _) | TextPart::Dynamic(buf, _) | TextPart::Digits(buf, _) => {
                 buf.clear();
                 buf.push_str(s);
             }
+            TextPart::Stable(_) => {}
         }
     }
 
     pub fn draw(&self, list: &mut TextEntryList, pos: Pos, def: TextDef, ov: TextOverride) {
-        list.push_hud_parts(&self.spans, pos, def, ov);
+        list.push_parts(&self.parts, pos, def, ov);
     }
 
     pub(crate) fn draw_indexed(
@@ -1107,36 +1156,36 @@ impl HudLine {
         ov: TextOverride,
         transform_index: u32,
     ) {
-        list.push_hud_parts_indexed(&self.spans, pos, def, ov, transform_index);
+        list.push_parts_indexed(&self.parts, pos, def, ov, transform_index);
     }
 }
 
-/// 将 HUD 字符串切成 Static / Digits 段（启发式；Dynamic 需手写或 [`HudLine`]）。
+/// 将 HUD 字符串切成 Normal / Digits 段（启发式；Dynamic 需手写或 [`HudLine`]）。
 ///
 /// 规则：
-/// - 连续 `0-9` 与常用数学符号 → [`HudPart::Digits`]（优化）
-/// - 空格：已在 Digits 段内则并入；否则归 Static
-/// - 其余 → [`HudPart::Static`]（假定标签稳定）
+/// - 连续 `0-9` 与常用数学符号 → [`TextPart::Digits`]（优化）
+/// - 空格：已在 Digits 段内则并入；否则归 Normal
+/// - 其余 → [`TextPart::Normal`]（假定标签稳定）
 ///
-/// 例：`"分数: 42"` → `Static("分数")` + `Digits(": 42")`。
+/// 例：`"分数: 42"` → `Normal("分数")` + `Digits(": 42")`。
 ///
 /// 空串返回空 `Vec`。不保证与整段 `draw_text` 像素级一致。
-pub fn split_hud(s: &str) -> Vec<HudPart> {
+pub fn split_hud(s: &str) -> Vec<TextPart> {
     if s.is_empty() {
         return Vec::new();
     }
-    let mut out: Vec<HudPart> = Vec::new();
+    let mut out: Vec<TextPart> = Vec::new();
     let mut cur = String::new();
     let mut cur_digits: Option<bool> = None;
 
-    let flush = |out: &mut Vec<HudPart>, cur: &mut String, cur_digits: &mut Option<bool>| {
+    let flush = |out: &mut Vec<TextPart>, cur: &mut String, cur_digits: &mut Option<bool>| {
         if cur.is_empty() {
             *cur_digits = None;
             return;
         }
         let part = match *cur_digits {
-            Some(true) => HudPart::Digits(std::mem::take(cur)),
-            _ => HudPart::Static(std::mem::take(cur)),
+            Some(true) => TextPart::digits(std::mem::take(cur)),
+            _ => TextPart::normal(std::mem::take(cur)),
         };
         *cur_digits = None;
         out.push(part);
@@ -1167,34 +1216,6 @@ pub fn split_hud(s: &str) -> Vec<HudPart> {
     out
 }
 
-#[derive(Clone, Debug)]
-pub enum OwnedTextPart {
-    Static(String),
-    Dynamic(String),
-    Digits(String),
-    /// (buffer, cached_line_width)
-    Stable(Arc<Buffer>, f32),
-}
-
-impl OwnedTextPart {
-    fn from_part(p: &TextPart<'_>) -> Self {
-        match p {
-            TextPart::Static(s) => Self::Static((*s).to_string()),
-            TextPart::Dynamic(s) => Self::Dynamic((*s).to_string()),
-            TextPart::Digits(s) => Self::Digits((*s).to_string()),
-            TextPart::Stable(h) => Self::Stable(h.buffer.clone(), h.line_width),
-        }
-    }
-
-    fn from_hud(p: HudPart) -> Self {
-        match p {
-            HudPart::Static(s) => Self::Static(s),
-            HudPart::Dynamic(s) => Self::Dynamic(s),
-            HudPart::Digits(s) => Self::Digits(s),
-        }
-    }
-}
-
 /// 文本条目——三种变体，互斥字段不混存。
 #[derive(Clone, Debug)]
 pub enum TextEntry {
@@ -1208,7 +1229,7 @@ pub enum TextEntry {
     Parts {
         pos: Pos,
         def: TextDef,
-        parts: Vec<OwnedTextPart>,
+        parts: Vec<TextPart>,
         override_: TextOverride,
         transform_index: u32,
     },
@@ -1263,19 +1284,17 @@ impl TextEntry {
                     .unwrap_or_else(|| (text.chars().count() as f32) * fs * 0.6)
             }
             TextEntry::Parts { parts, def, .. } => {
-                let fs = def.font_size;
                 if let Some(w) = def.max_width {
                     return w;
                 }
                 let mut w = 0.0f32;
                 for p in parts {
                     match p {
-                        OwnedTextPart::Static(s)
-                        | OwnedTextPart::Dynamic(s)
-                        | OwnedTextPart::Digits(s) => {
+                        TextPart::Normal(s, d) | TextPart::Dynamic(s, d) | TextPart::Digits(s, d) => {
+                            let fs = d.as_ref().map(|x| x.font_size).unwrap_or(def.font_size);
                             w += s.chars().count() as f32 * fs * 0.6;
                         }
-                        OwnedTextPart::Stable(_, lw) => w += *lw,
+                        TextPart::Stable(h) => w += h.line_width(),
                     }
                 }
                 w
@@ -1367,37 +1386,14 @@ impl TextEntryList {
         });
     }
 
-    /// HUD 多段文字（默认无 transform）。
-    pub fn push_parts(&mut self, parts: &[TextPart<'_>], pos: Pos, def: TextDef, ov: TextOverride) {
+    /// HUD 多段文字（默认无 transform）。`parts` 切片 clone 进 [`TextEntry::Parts`]。
+    pub fn push_parts(&mut self, parts: &[TextPart], pos: Pos, def: TextDef, ov: TextOverride) {
         self.push_parts_indexed(parts, pos, def, ov, 0);
     }
 
     pub(crate) fn push_parts_indexed(
         &mut self,
-        parts: &[TextPart<'_>],
-        pos: Pos,
-        def: TextDef,
-        ov: TextOverride,
-        transform_index: u32,
-    ) {
-        let owned: Vec<OwnedTextPart> = parts.iter().map(OwnedTextPart::from_part).collect();
-        self.entries.push(TextEntry::Parts {
-            pos,
-            def,
-            parts: owned,
-            override_: ov,
-            transform_index,
-        });
-    }
-
-    /// 拥有权 span 列表（[`HudLine`] / [`split_hud`]）。
-    pub fn push_hud_parts(&mut self, parts: &[HudPart], pos: Pos, def: TextDef, ov: TextOverride) {
-        self.push_hud_parts_indexed(parts, pos, def, ov, 0);
-    }
-
-    pub(crate) fn push_hud_parts_indexed(
-        &mut self,
-        parts: &[HudPart],
+        parts: &[TextPart],
         pos: Pos,
         def: TextDef,
         ov: TextOverride,
@@ -1406,11 +1402,10 @@ impl TextEntryList {
         if parts.is_empty() {
             return;
         }
-        let owned: Vec<OwnedTextPart> = parts.iter().cloned().map(OwnedTextPart::from_hud).collect();
         self.entries.push(TextEntry::Parts {
             pos,
             def,
-            parts: owned,
+            parts: parts.to_vec(),
             override_: ov,
             transform_index,
         });
@@ -1429,17 +1424,8 @@ impl TextEntryList {
         ov: TextOverride,
         transform_index: u32,
     ) {
-        let owned: Vec<OwnedTextPart> = split_hud(text).into_iter().map(OwnedTextPart::from_hud).collect();
-        if owned.is_empty() {
-            return;
-        }
-        self.entries.push(TextEntry::Parts {
-            pos,
-            def,
-            parts: owned,
-            override_: ov,
-            transform_index,
-        });
+        let parts = split_hud(text);
+        self.push_parts_indexed(&parts, pos, def, ov, transform_index);
     }
 
     /// 准备文本条目（调用 glyphon prepare），返回 (vertex_start, vertex_count)，
@@ -1636,16 +1622,16 @@ impl TextEntryList {
                     });
                 }
                 TextEntry::Parts { pos, def, parts, .. } => {
-                    // HUD 多段：逻辑 x 横拼，再 * scale
+                    // HUD 多段：逻辑 x 横拼，再 * scale；每段可用 resolve_def 覆盖字号等
                     let mut cursor_x = pos.x;
-                    let step = text_ctx.ensure_digit_table(def);
                     for part in parts {
                         match part {
-                            OwnedTextPart::Static(s) => {
+                            TextPart::Normal(s, _) => {
                                 if s.is_empty() {
                                     continue;
                                 }
-                                let slot = text_ctx.get_or_shape_text(s, def);
+                                let pdef = part.resolve_def(def);
+                                let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
                                 metas.push(AreaMeta {
                                     buf: MetaBuf::Slot(slot),
@@ -1657,14 +1643,15 @@ impl TextEntryList {
                                 });
                                 cursor_x += w;
                             }
-                            OwnedTextPart::Dynamic(s) => {
+                            TextPart::Dynamic(s, _) => {
                                 if s.is_empty() {
                                     continue;
                                 }
+                                let pdef = part.resolve_def(def);
                                 let opts = TextDef {
                                     max_width: None,
                                     align: TextAlign::Left,
-                                    ..def.clone()
+                                    ..pdef.clone()
                                 };
                                 let key = ShapeKey::from_text(s, &opts);
                                 let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
@@ -1681,9 +1668,12 @@ impl TextEntryList {
                                         }, w)
                                     }
                                     None => {
-                                        let metrics = Metrics::new(def.font_size, def.font_size * 1.2);
+                                        let metrics =
+                                            Metrics::new(opts.font_size, opts.font_size * 1.2);
                                         let mut buffer = text_ctx.take_buffer(metrics);
-                                        let attrs = opts.attrs.as_ref()
+                                        let attrs = opts
+                                            .attrs
+                                            .as_ref()
                                             .map(|a| a.as_attrs())
                                             .unwrap_or_else(Attrs::new);
                                         buffer.set_size(None, None);
@@ -1706,25 +1696,27 @@ impl TextEntryList {
                                 metas.push(area_meta);
                                 cursor_x += w;
                             }
-                            OwnedTextPart::Stable(arc, line_width) => {
+                            TextPart::Stable(h) => {
                                 metas.push(AreaMeta {
-                                    buf: MetaBuf::Stable(arc.clone()),
+                                    buf: MetaBuf::Stable(h.buffer.clone()),
                                     left: cursor_x * scale,
                                     top,
                                     color,
                                     bounds,
                                     transform_index: phys_idx,
                                 });
-                                cursor_x += line_width;
+                                cursor_x += h.line_width();
                             }
-                            OwnedTextPart::Digits(s) => {
+                            TextPart::Digits(s, _) => {
+                                let pdef = part.resolve_def(def);
+                                let step = text_ctx.ensure_digit_table(pdef);
                                 for ch in s.chars() {
                                     if ch == ' ' {
                                         cursor_x += step * 0.5;
                                         continue;
                                     }
                                     if let Some(d) = ch.to_digit(10) {
-                                        let slot = text_ctx.digit_slot(d, def);
+                                        let slot = text_ctx.digit_slot(d, pdef);
                                         metas.push(AreaMeta {
                                             buf: MetaBuf::Slot(slot),
                                             left: cursor_x * scale,
@@ -1735,8 +1727,7 @@ impl TextEntryList {
                                         });
                                         cursor_x += step;
                                     } else if is_hud_digit_char(ch) {
-                                        // 数学符号：预 shape 表项，宽度用自身 glyph（非 tabular）
-                                        let slot = text_ctx.glyph_slot_char(ch, def);
+                                        let slot = text_ctx.glyph_slot_char(ch, pdef);
                                         let w = text_ctx.slot_line_width(slot);
                                         metas.push(AreaMeta {
                                             buf: MetaBuf::Slot(slot),
@@ -1748,7 +1739,6 @@ impl TextEntryList {
                                         });
                                         cursor_x += w;
                                     }
-                                    // 其它：跳过
                                 }
                             }
                         }
@@ -1893,17 +1883,21 @@ pub fn draw_text(list: &mut TextEntryList, text: &str, pos: Pos, def: TextDef, o
     list.push(text, pos, def, ov);
 }
 
-/// HUD 多段：Static / Dynamic / Digits。单行 LTR，不保证与整段 `draw_text` 像素级一致。
+/// HUD 多段：Normal / Dynamic / Digits / Stable。单行 LTR，不保证与整段 `draw_text` 像素级一致。
+///
+/// `parts` 为切片引用；引擎 clone 进 [`TextEntry::Parts`]。
 ///
 /// ```ignore
 /// draw_text_parts(&mut batch.texts, &[
-///     TextPart::Static("分数: "),
-///     TextPart::Digits("123"),       // 数字优化
+///     TextPart::normal("分数: "),
+///     TextPart::digits("123"),
+///     // 本段更大字号：
+///     // TextPart::digits_def("99", TextDef::default().font_size(28.0)),
 /// ], Pos::new(16.0, 16.0), TextDef::default().font_size(20.0), TextOverride::default());
 /// ```
 pub fn draw_text_parts(
     list: &mut TextEntryList,
-    parts: &[TextPart<'_>],
+    parts: &[TextPart],
     pos: Pos,
     def: TextDef,
     ov: TextOverride,
@@ -1911,9 +1905,9 @@ pub fn draw_text_parts(
     list.push_parts(parts, pos, def, ov);
 }
 
-/// HUD 自动切分：`split_hud` → Static + Digits（启发式）。
+/// HUD 自动切分：`split_hud` → Normal + Digits（启发式）。
 ///
-/// 更推荐跨帧 [`HudLine`]：语义上区分 Static / Dynamic，Digits 仅数字槽。
+/// 更推荐跨帧 [`HudLine`]：语义上区分 Normal / Dynamic，Digits 仅数字槽。
 ///
 /// ```ignore
 /// draw_text_hud(&mut batch.texts, "FPS: 60.5", Pos::new(16.0, 12.0), def, ov);
@@ -1940,7 +1934,7 @@ pub fn draw_hud_line(
     line.draw(list, pos, def, ov);
 }
 
-/// `format!` 拼串后 [`split_hud`]，得到 `Vec<`[`HudPart`]`>`。
+/// `format!` 拼串后 [`split_hud`]，得到 `Vec<`[`TextPart`]`>`。
 ///
 /// 底层是编译器内建的 `format!`，本宏只做糖：不复刻 format 解析器。
 ///
@@ -2057,69 +2051,83 @@ mod tests {
         assert_eq!(DEFAULT_SHAPE_MAX_ENTRIES, 4096);
     }
 
+    fn part_kind_str(p: &TextPart) -> (&'static str, &str) {
+        match p {
+            TextPart::Normal(s, _) => ("normal", s.as_str()),
+            TextPart::Dynamic(s, _) => ("dynamic", s.as_str()),
+            TextPart::Digits(s, _) => ("digits", s.as_str()),
+            TextPart::Stable(h) => ("stable", h.text()),
+        }
+    }
+
     #[test]
-    fn push_parts_stores_owned_parts() {
+    fn push_parts_stores_parts() {
         let mut list = TextEntryList::new();
         draw_text_parts(
             &mut list,
-            &[TextPart::Static("分数: "), TextPart::Digits("42")],
-            Pos::new(10.0, 20.0),
-            TextDef::default(),
+            &[
+                TextPart::normal("分数: "),
+                TextPart::digits("42"),
+                TextPart::digits_def("99", TextDef::default().font_size(28.0)),
+            ],
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(16.0),
             TextOverride::default(),
         );
         assert_eq!(list.entries.len(), 1);
-        let e = &list.entries[0];
-        let (parts, text_empty) = match e {
-            TextEntry::Parts { parts, .. } => (parts, true),
+        match &list.entries[0] {
+            TextEntry::Parts { parts, def, .. } => {
+                assert_eq!(parts.len(), 3);
+                assert!((def.font_size - 16.0).abs() < 1e-5);
+                match &parts[0] {
+                    TextPart::Normal(s, None) => assert_eq!(s, "分数: "),
+                    _ => panic!("expected Normal(None)"),
+                }
+                match &parts[1] {
+                    TextPart::Digits(s, None) => assert_eq!(s, "42"),
+                    _ => panic!("expected Digits(None)"),
+                }
+                match &parts[2] {
+                    TextPart::Digits(s, Some(d)) => {
+                        assert_eq!(s, "99");
+                        assert!((d.font_size - 28.0).abs() < 1e-5);
+                    }
+                    _ => panic!("expected Digits(Some)"),
+                }
+            }
             _ => panic!("expected Parts"),
-        };
-        assert!(text_empty);
-        assert_eq!(parts.len(), 2);
-        match &parts[0] {
-            OwnedTextPart::Static(s) => assert_eq!(s, "分数: "),
-            _ => panic!("expected Static"),
-        }
-        match &parts[1] {
-            OwnedTextPart::Digits(s) => assert_eq!(s, "42"),
-            _ => panic!("expected Digits"),
         }
     }
 
     #[test]
     fn split_hud_fps_and_score() {
-        // `:` `.` 属 Digits 表 → 与数字并成一段；标签 → Static
-        assert_eq!(
-            split_hud("FPS: 60.5"),
-            vec![
-                HudPart::Static("FPS".into()),
-                HudPart::Digits(": 60.5".into()),
-            ]
-        );
-        assert_eq!(
-            split_hud("分数: 42"),
-            vec![
-                HudPart::Static("分数".into()),
-                HudPart::Digits(": 42".into()),
-            ]
-        );
-        assert_eq!(split_hud(""), Vec::<HudPart>::new());
-        assert_eq!(
-            split_hud("123"),
-            vec![HudPart::Digits("123".into())]
-        );
-        assert_eq!(
-            split_hud("-12.5%"),
-            vec![HudPart::Digits("-12.5%".into())]
-        );
-        assert_eq!(
-            split_hud("a+b=3"),
-            vec![
-                HudPart::Static("a".into()),
-                HudPart::Digits("+".into()),
-                HudPart::Static("b".into()),
-                HudPart::Digits("=3".into()),
-            ]
-        );
+        // `:` `.` 属 Digits 表 → 与数字并成一段；标签 → Normal
+        let p = split_hud("FPS: 60.5");
+        assert_eq!(p.len(), 2);
+        assert_eq!(part_kind_str(&p[0]), ("normal", "FPS"));
+        assert_eq!(part_kind_str(&p[1]), ("digits", ": 60.5"));
+
+        let p = split_hud("分数: 42");
+        assert_eq!(p.len(), 2);
+        assert_eq!(part_kind_str(&p[0]), ("normal", "分数"));
+        assert_eq!(part_kind_str(&p[1]), ("digits", ": 42"));
+
+        assert!(split_hud("").is_empty());
+
+        let p = split_hud("123");
+        assert_eq!(p.len(), 1);
+        assert_eq!(part_kind_str(&p[0]), ("digits", "123"));
+
+        let p = split_hud("-12.5%");
+        assert_eq!(p.len(), 1);
+        assert_eq!(part_kind_str(&p[0]), ("digits", "-12.5%"));
+
+        let p = split_hud("a+b=3");
+        assert_eq!(p.len(), 4);
+        assert_eq!(part_kind_str(&p[0]), ("normal", "a"));
+        assert_eq!(part_kind_str(&p[1]), ("digits", "+"));
+        assert_eq!(part_kind_str(&p[2]), ("normal", "b"));
+        assert_eq!(part_kind_str(&p[3]), ("digits", "=3"));
     }
 
     #[test]
@@ -2138,17 +2146,17 @@ mod tests {
         };
         assert_eq!(parts.len(), 2);
         match &parts[0] {
-            OwnedTextPart::Static(s) => assert_eq!(s, "x"),
-            _ => panic!("expected Static"),
+            TextPart::Normal(s, None) => assert_eq!(s, "x"),
+            _ => panic!("expected Normal"),
         }
         match &parts[1] {
-            OwnedTextPart::Digits(s) => assert_eq!(s, "=9"),
+            TextPart::Digits(s, None) => assert_eq!(s, "=9"),
             _ => panic!("expected Digits"),
         }
     }
 
     #[test]
-    fn hud_line_static_dynamic_digits() {
+    fn hud_line_normal_dynamic_digits() {
         let mut line = HudLine::new()
             .text("分数: ")
             .digits("0")
@@ -2156,15 +2164,12 @@ mod tests {
             .dynamic("Both");
         line.write_slot(1, "42");
         line.set_dynamic(3, "Parts");
-        assert_eq!(
-            line.spans(),
-            &[
-                HudPart::Static("分数: ".into()),
-                HudPart::Digits("42".into()),
-                HudPart::Static("  mode=".into()),
-                HudPart::Dynamic("Parts".into()),
-            ]
-        );
+        let parts = line.parts();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(part_kind_str(&parts[0]), ("normal", "分数: "));
+        assert_eq!(part_kind_str(&parts[1]), ("digits", "42"));
+        assert_eq!(part_kind_str(&parts[2]), ("normal", "  mode="));
+        assert_eq!(part_kind_str(&parts[3]), ("dynamic", "Parts"));
         let mut list = TextEntryList::new();
         line.draw(&mut list, Pos::new(0.0, 0.0), TextDef::default(), TextOverride::default());
         assert_eq!(list.entries.len(), 1);
@@ -2192,8 +2197,11 @@ mod tests {
         let fps = 60.5f64;
         let via_macro = crate::hud_format!("score={score} fps={fps:.1}");
         let via_fn = split_hud(&format!("score={score} fps={fps:.1}"));
-        assert_eq!(via_macro, via_fn);
-        assert!(via_macro.iter().any(|p| matches!(p, HudPart::Digits(_))));
+        assert_eq!(via_macro.len(), via_fn.len());
+        for (a, b) in via_macro.iter().zip(via_fn.iter()) {
+            assert_eq!(part_kind_str(a), part_kind_str(b));
+        }
+        assert!(via_macro.iter().any(|p| matches!(p, TextPart::Digits(_, _))));
     }
 
     // ---- StableText cache tests (require GPU) ----

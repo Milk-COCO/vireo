@@ -58,7 +58,6 @@ pub mod prelude {
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
     pub use crate::text::HudLine;
-    pub use crate::text::HudPart;
     pub use crate::text::StableText;
     pub use crate::text::TextPart;
     pub use crate::text::draw_hud_line;
