@@ -844,6 +844,14 @@ impl App {
                     win.resize(size.width, size.height);
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
+                    let size = win.inner.inner_size();
+                    // 物理尺寸可能不变，仍须刷新逻辑尺寸 / scale / dpi_scale
+                    let _ = scale_factor;
+                    win.resize(size.width, size.height);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
                     win.update_mouse_pos(position.x, position.y);

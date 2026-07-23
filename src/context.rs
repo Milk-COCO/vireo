@@ -375,39 +375,37 @@ impl Renderer {
         let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
         polygon_edges_global.clear();
 
-        // 为每棵子树维护自己的 stencil ref 栈
-        // 父 clips_children → Push 写 mask；子 inherit.clipped → Test；clipped=false → 透传
-        // `content_level` = 当前 batch 的 content 应处的 stencil 级别：
-        //   = active_clip + area_depth (area_depth 已含本 batch 自身 Area 之前的累加)
-        // clips_children 时 Push at content_level；子看 content_level+1。
+        // stencil 两路计数（不可混用）：
+        // - `clip_depth`：仅 clips_children 的 Push 层数（不含 Area）
+        // - `area_depth`：仍打开的 Area 框架数
+        // content_level = clip_depth + area_depth_ancestors + has_own_area
+        // Push@content_level 后 buffer 为 content_level+1；clip_depth+=1，
+        // 子节点 content = (clip_depth) + area… 不会把 Area 算两次。
         fn compute_stencil_at_level(
             batch: &DrawBatch,
             content_level: u32,
-            ref_counter: &mut u32,
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
             let has_geom = !batch.vertices.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
             if batch.clips_children && has_geom {
-                // Push: test content_level（Area 已在前面 cover，buffer==content_level → Inc → +1）
+                // Push: Test content_level → Inc；ref_stack 存抬升后绝对值供 Pop
                 let push_ref = content_level;
-                *ref_counter = push_ref + 1;
-                ref_stack.push(*ref_counter);
+                ref_stack.push(push_ref + 1);
                 (1u32, push_ref)
             } else if content_level > 0 {
                 if batch.inherit.clipped && has_draw {
-                    (2u32, content_level) // Test — 子 opt-in 裁切，测 content level
+                    (2u32, content_level) // Test
                 } else {
-                    (0u32, 0) // unclipped 或无可画内容
+                    (0u32, 0)
                 }
             } else {
                 (0u32, 0)
             }
         }
 
-        let mut ref_counter: u32 = 0;
         let mut ref_stack: Vec<u32> = Vec::new();
-        let mut active_clip: Option<u32> = None;
+        let mut clip_depth: u32 = 0;
         let mut area_depth: u32 = 0;
         // 连续 cleanup AreaOp 只 -1 一次（compile_erase 可多 op）
         let mut prev_area_cleanup = false;
@@ -416,9 +414,6 @@ impl Renderer {
             match event {
                 DrawEvent::Batch(batch) => {
                     prev_area_cleanup = false;
-                    // ancestors_area_depth = 当前仍在生效的祖先 Area 数（不含自身）。
-                    // 自身有 Area → content level = active_clip + ancestors + 1；
-                    // 自身无 Area → content level = active_clip + ancestors。
                     let has_own_area = batch
                         .effective_area()
                         .as_ref()
@@ -429,10 +424,9 @@ impl Renderer {
                         area_depth += 1;
                     }
                     let content_level =
-                        active_clip.unwrap_or(0) + ancestors_area_depth + (has_own_area as u32);
-                    // scissor 代替本层 Push；仍须 Test 祖先 stencil（content_level>0）
-                    let use_scissor = batch.scissor.is_some()
-                        || (batch.clips_children && !has_own_area && batch.auto_scissor().is_some());
+                        clip_depth + ancestors_area_depth + (has_own_area as u32);
+                    // 与 flatten_events 共用条件（见 DrawBatch::uses_scissor_path）
+                    let use_scissor = batch.uses_scissor_path(has_own_area);
                     let (stencil_op, stencil_ref) = if use_scissor {
                         let has_draw =
                             !batch.vertices.is_empty() || !batch.texts.entries.is_empty();
@@ -442,15 +436,11 @@ impl Renderer {
                             (0u32, 0u32)
                         }
                     } else {
-                        compute_stencil_at_level(
-                            batch,
-                            content_level,
-                            &mut ref_counter,
-                            &mut ref_stack,
-                        )
+                        compute_stencil_at_level(batch, content_level, &mut ref_stack)
                     };
                     if stencil_op == 1 {
-                        active_clip = Some(*ref_stack.last().unwrap_or(&0));
+                        // 只增加 clip 层，不含 Area（Area 已在 content_level 里）
+                        clip_depth += 1;
                     }
                     event_infos.push(EventInfo {
                         shape: None,
@@ -465,13 +455,7 @@ impl Renderer {
                 DrawEvent::StencilPop => {
                     prev_area_cleanup = false;
                     let popped = ref_stack.pop();
-                    if let Some(prev) = popped {
-                        if prev > 1 {
-                            active_clip = Some(prev - 1);
-                        } else {
-                            active_clip = None;
-                        }
-                    }
+                    clip_depth = clip_depth.saturating_sub(1);
                     event_infos.push(EventInfo {
                         shape: None,
                         text: None,
@@ -872,7 +856,13 @@ impl Renderer {
                 dv = self.ds_view();
                 // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
                 // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
+                // multi-draw 叠加（clear_color=None）须 Store，否则下一 pass Load 到未定义 stencil
                 let clear_ds = clear_color.is_some();
+                let ds_store = if clear_ds {
+                    wgpu::StoreOp::Discard
+                } else {
+                    wgpu::StoreOp::Store
+                };
                 Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &dv,
                     depth_ops: Some(wgpu::Operations {
@@ -881,7 +871,7 @@ impl Renderer {
                         } else {
                             wgpu::LoadOp::Load
                         },
-                        store: wgpu::StoreOp::Discard,
+                        store: ds_store,
                     }),
                     stencil_ops: Some(wgpu::Operations {
                         load: if clear_ds {
@@ -889,7 +879,7 @@ impl Renderer {
                         } else {
                             wgpu::LoadOp::Load
                         },
-                        store: wgpu::StoreOp::Discard,
+                        store: ds_store,
                     }),
                 })
             } else {
@@ -1791,6 +1781,15 @@ impl DrawBatch {
         Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
     }
 
+    /// flatten / draw 共用：是否走 scissor 代替本层 stencil Push。
+    /// `clips_children && !has_area && (显式 scissor | auto 矩形)`。
+    fn uses_scissor_path(&self, has_area: bool) -> bool {
+        if has_area || !self.clips_children {
+            return false;
+        }
+        self.scissor.is_some() || self.auto_scissor().is_some()
+    }
+
     /// 检测 batch 自身是否只含一个**几何**轴对齐矩形（4 顶点 + 无旋转）。
     /// SDF 四顶点 AABB 不走 scissor（圆/圆角等须 stencil）。
     /// 世界位置来自顶点 `transform_index`（非画笔）。
@@ -1991,17 +1990,12 @@ impl DrawBatch {
 
         let area = self.effective_area();
         let has_area = matches!(&area, Some(a) if !a.is_empty());
-        let effective_clip = match self.scissor {
-            Some(r) => Some(r),
-            None => {
-                if self.clips_children && !has_area {
-                    self.auto_scissor()
-                } else {
-                    None
-                }
-            }
+        let use_scissor = self.uses_scissor_path(has_area);
+        let effective_clip = if use_scissor {
+            self.scissor.or_else(|| self.auto_scissor())
+        } else {
+            None
         };
-        let use_scissor = effective_clip.is_some() && self.clips_children && !has_area;
         if let Some(a) = &area {
             if !a.is_empty() {
                 let mut ops = Vec::new();
@@ -2012,18 +2006,29 @@ impl DrawBatch {
             }
         }
         out.push(DrawEvent::Batch(self));
-        let child_start = out.len();
-        // 子树的 level：若自身有 Area，子 content 在 level+1；否则同 level。
-        let child_level = if has_area { level + 1 } else { level };
-        if use_scissor {
-            out.push(DrawEvent::ScissorPush(effective_clip.unwrap()));
+        let has_geom = !self.vertices.is_empty();
+        // 子树 stencil base（与 draw 的 content_level 抬升一致）：
+        // Area cover → +1；clips_children 且走 stencil Push → 再 +1；scissor 不抬 stencil。
+        let child_level = level
+            + (has_area as u32)
+            + if self.clips_children && !use_scissor && has_geom {
+                1
+            } else {
+                0
+            };
+        // scissor 仅包住子节点；无子则不发 Push/Pop
+        if use_scissor && !self.children.is_empty() {
+            if let Some(r) = effective_clip {
+                out.push(DrawEvent::ScissorPush(r));
+            }
         }
         for child in &self.children {
             child.flatten_events(out, child_level, viewport, aabb_map);
         }
-        if use_scissor {
+        if use_scissor && !self.children.is_empty() {
             out.push(DrawEvent::ScissorPop);
-        } else if self.clips_children && out.len() > child_start {
+        } else if self.clips_children && has_geom && !use_scissor {
+            // 与 draw Push 成对：即使子全被 cull 也要 Pop，避免 clip_depth 泄漏
             out.push(DrawEvent::StencilPop);
         }
         if has_area {
@@ -3022,6 +3027,74 @@ mod tests {
         assert!(matches!(events[0], DrawEvent::Batch(_)));
     }
 
+    /// Area + clips_children：子 Test ref = cover 后 buffer（2），不是双重计数 3
+    #[test]
+    fn area_plus_clips_child_stencil_ref_not_double_counted() {
+        let mut parent = DrawBatch::new();
+        parent.clips_children = true;
+        draw_rectangle(&mut parent, Pos::new(0.0, 0.0), 100.0, 100.0, Some(RED));
+        let mut incl = DrawBatch::new();
+        draw_circle(&mut incl, Pos::new(50.0, 50.0), 40.0, Some(WHITE));
+        parent.area_include = Some(incl.to_area());
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::NONE; // clipped 默认 true
+        draw_rectangle(&mut child, Pos::new(10.0, 10.0), 20.0, 20.0, Some(GREEN));
+        parent.push_child(child);
+
+        let mut events: Vec<DrawEvent> = Vec::new();
+        parent.flatten_events(&mut events, 0, None, &FxHashMap::default());
+
+        // 模拟 draw 路径：clip_depth 与 area_depth 分离
+        let mut clip_depth = 0u32;
+        let mut area_depth = 0u32;
+        let mut prev_cleanup = false;
+        let mut child_test_ref: Option<u32> = None;
+        let mut parent_push_ref: Option<u32> = None;
+
+        for ev in &events {
+            match ev {
+                DrawEvent::Batch(batch) => {
+                    prev_cleanup = false;
+                    let has_own = batch
+                        .effective_area()
+                        .as_ref()
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    let anc = area_depth;
+                    if has_own {
+                        area_depth += 1;
+                    }
+                    let content = clip_depth + anc + (has_own as u32);
+                    let has_geom = !batch.vertices.is_empty();
+                    if batch.clips_children && has_geom {
+                        parent_push_ref = Some(content);
+                        clip_depth += 1;
+                    } else if content > 0 && batch.inherit.clipped && has_geom {
+                        child_test_ref = Some(content);
+                    }
+                }
+                DrawEvent::StencilPop => {
+                    prev_cleanup = false;
+                    clip_depth = clip_depth.saturating_sub(1);
+                }
+                DrawEvent::AreaOp { is_setup, .. } => {
+                    if !*is_setup {
+                        if !prev_cleanup {
+                            area_depth = area_depth.saturating_sub(1);
+                        }
+                        prev_cleanup = true;
+                    } else {
+                        prev_cleanup = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // cover@0 → buffer 1；parent content=1 Push@1 → buffer 2；child Test@2
+        assert_eq!(parent_push_ref, Some(1), "parent Push ref");
+        assert_eq!(child_test_ref, Some(2), "child Test must be 2 not 3");
+    }
+
     // ---- culling tests ----
 
     #[test]
@@ -3153,16 +3226,43 @@ mod tests {
     }
 
     #[test]
-    fn auto_scissor_clears_with_draw_rect_then_child() {
+    fn auto_scissor_no_children_skips_scissor_events() {
         let mut b = DrawBatch::new();
         b.clips_children = true;
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
-        assert_eq!(events.len(), 3);
+        // 无子：不发空 scissor Push/Pop
+        assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
-        assert!(matches!(&events[1], DrawEvent::ScissorPush(_)));
-        assert!(matches!(&events[2], DrawEvent::ScissorPop));
+    }
+
+    #[test]
+    fn stencil_pop_when_children_all_culled() {
+        // 非矩形父 → stencil 路径；子全 cull 仍要 Pop（与 Push 成对）
+        let mut parent = DrawBatch::new();
+        parent.clips_children = true;
+        crate::shapes::draw_triangle(
+            &mut parent,
+            0.0, 0.0, 100.0, 0.0, 0.0, 50.0,
+            Some(RED),
+        );
+        let mut child = DrawBatch::new();
+        child.bounds = Some(Some(Rect::new(9999.0, 9999.0, 4.0, 4.0)));
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
+        parent.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        parent.flatten_events(
+            &mut events,
+            0,
+            Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            &FxHashMap::default(),
+        );
+        assert!(matches!(&events[0], DrawEvent::Batch(_)));
+        assert!(
+            events.iter().any(|e| matches!(e, DrawEvent::StencilPop)),
+            "culled children must still emit StencilPop"
+        );
     }
 
     #[test]

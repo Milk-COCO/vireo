@@ -636,7 +636,13 @@ impl TextContext {
         let liveness = self.mark_slot_live(slot);
         let line_width = self.slot_line_width(slot);
         let buffer = self.shape_slots[slot as usize].buffer.clone();
-        StableText { buffer, line_width, liveness, text: text.to_string() }
+        StableText {
+            buffer,
+            line_width,
+            font_size: opts.font_size,
+            liveness,
+            text: text.to_string(),
+        }
     }
 
     /// 查 shape cache 但不插入（用于 Dynamic 只读 hit）。
@@ -949,6 +955,8 @@ fn is_hud_digit_char(ch: char) -> bool {
 pub struct StableText {
     pub(crate) buffer: Arc<Buffer>,
     pub(crate) line_width: f32,
+    /// 创建时 `TextDef.font_size`（culling 近似高度用）。
+    pub(crate) font_size: f32,
     pub(crate) liveness: Arc<()>,
     /// 原文案（创建时传入的字符串），用于调试和用户侧去重。
     pub(crate) text: String,
@@ -959,12 +967,23 @@ impl StableText {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// 创建时字号。
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// 首行逻辑宽度（shape 后）。
+    pub fn line_width(&self) -> f32 {
+        self.line_width
+    }
 }
 
 impl std::fmt::Debug for StableText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StableText")
             .field("text", &self.text)
+            .field("font_size", &self.font_size)
             .field("line_width", &self.line_width)
             .field("buffer_strong_count", &Arc::strong_count(&self.buffer))
             .field("live_handle_count", &Arc::strong_count(&self.liveness))
@@ -1198,6 +1217,8 @@ pub enum TextEntry {
         override_: TextOverride,
         transform_index: u32,
         buffer: Arc<Buffer>,
+        font_size: f32,
+        line_width: f32,
     },
 }
 
@@ -1225,34 +1246,41 @@ impl TextEntry {
         }
     }
 
-    /// 裁剪/culling 用：近似字号（Stable 无 def 时用 16）。
+    /// 裁剪/culling 用：近似字号。
     pub(crate) fn approx_font_size(&self) -> f32 {
         match self {
             TextEntry::Normal { def, .. } | TextEntry::Parts { def, .. } => def.font_size,
-            TextEntry::Stable { .. } => 16.0,
+            TextEntry::Stable { font_size, .. } => *font_size,
         }
     }
 
-    /// 裁剪/culling 用：近似逻辑宽度（未 shape 前保守值）。
+    /// 裁剪/culling 用：近似逻辑宽度。
     pub(crate) fn approx_width(&self) -> f32 {
-        let fs = self.approx_font_size();
         match self {
             TextEntry::Normal { text, def, .. } => {
-                def.max_width.unwrap_or_else(|| (text.chars().count() as f32) * fs * 0.6)
+                let fs = def.font_size;
+                def.max_width
+                    .unwrap_or_else(|| (text.chars().count() as f32) * fs * 0.6)
             }
             TextEntry::Parts { parts, def, .. } => {
+                let fs = def.font_size;
                 if let Some(w) = def.max_width {
                     return w;
                 }
-                let n: usize = parts.iter().map(|p| match p {
-                    OwnedTextPart::Static(s) | OwnedTextPart::Dynamic(s) | OwnedTextPart::Digits(s) => {
-                        s.chars().count()
+                let mut w = 0.0f32;
+                for p in parts {
+                    match p {
+                        OwnedTextPart::Static(s)
+                        | OwnedTextPart::Dynamic(s)
+                        | OwnedTextPart::Digits(s) => {
+                            w += s.chars().count() as f32 * fs * 0.6;
+                        }
+                        OwnedTextPart::Stable(_, lw) => w += *lw,
                     }
-                    OwnedTextPart::Stable(..) => 8,
-                }).sum();
-                n as f32 * fs * 0.6
+                }
+                w
             }
-            TextEntry::Stable { .. } => fs * 8.0,
+            TextEntry::Stable { line_width, .. } => *line_width,
         }
     }
 }
@@ -1334,6 +1362,8 @@ impl TextEntryList {
             override_: ov,
             transform_index,
             buffer: stable.buffer.clone(),
+            font_size: stable.font_size,
+            line_width: stable.line_width,
         });
     }
 

@@ -734,7 +734,6 @@ fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
             }
         }
         Some(f) => {
-            batch.note_sdf();
             let mut min_x = f32::MAX; let mut min_y = f32::MAX;
             let mut max_x = f32::MIN; let mut max_y = f32::MIN;
             for (px, py) in points {
@@ -744,6 +743,7 @@ fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
 
             let start_idx = (batch.polygon_edges.len() / 4) as u32;
             let mut edge_count: u32 = 0;
+            let mut edge_tmp: Vec<f32> = Vec::with_capacity(n * 4);
             for i in 0..n {
                 let j = (i + 1) % n;
                 let dx = points[j].0 - points[i].0;
@@ -753,13 +753,17 @@ fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
                 let nx = -dy / len;
                 let ny = dx / len;
                 let offset = nx * points[i].0 + ny * points[i].1;
-                batch.polygon_edges.push(nx);
-                batch.polygon_edges.push(ny);
-                batch.polygon_edges.push(offset);
-                batch.polygon_edges.push(0.0);
+                edge_tmp.push(nx);
+                edge_tmp.push(ny);
+                edge_tmp.push(offset);
+                edge_tmp.push(0.0);
                 edge_count += 1;
             }
-            if edge_count < 3 { return; }
+            if edge_count < 3 {
+                return;
+            }
+            batch.note_sdf();
+            batch.polygon_edges.extend_from_slice(&edge_tmp);
 
             let start_f = start_idx as f32;
             let count_f = edge_count as f32;
