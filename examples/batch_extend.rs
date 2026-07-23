@@ -1,7 +1,6 @@
 //! 增量渲染测试：同一帧内 Clear → Load 追加
 //!
-//! 第 0 帧：draw(Some(bg)) 清屏 + 画背景，然后 draw(None) 追加一行
-//! 第 1 帧起保持窗口打开
+//! 每一帧：draw(Some(bg)) 清屏 + 画背景，然后 draw(None) 追加一行
 
 use vireo::prelude::*;
 

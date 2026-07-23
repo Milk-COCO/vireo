@@ -319,11 +319,11 @@ impl VireoWindow {
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
             match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(st) => *ft = Some(st),
+                wgpu::CurrentSurfaceTexture::Success(st)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
                 wgpu::CurrentSurfaceTexture::Outdated
-                | wgpu::CurrentSurfaceTexture::Lost
-                | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                    // 尺寸/swapchain 过期：reconfigure 后重试（Suboptimal 也必须处理，否则 resize 后可能永远拿不到图）
+                | wgpu::CurrentSurfaceTexture::Lost => {
+                    // 尺寸/swapchain 失效：reconfigure 后重试。
                     let cfg = self.surface_config.borrow().clone();
                     self.surface.configure(&self.gpu.device, &cfg);
                     match self.surface.get_current_texture() {
@@ -370,15 +370,17 @@ impl VireoWindow {
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
             match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(st) => *ft = Some(st),
-                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                wgpu::CurrentSurfaceTexture::Success(st)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
+                wgpu::CurrentSurfaceTexture::Outdated
+                | wgpu::CurrentSurfaceTexture::Lost => {
                     // 失效：reconfigure 后重试
                     let cfg = self.surface_config.borrow().clone();
                     self.surface.configure(&self.gpu.device, &cfg);
-                    if let wgpu::CurrentSurfaceTexture::Success(st) = self.surface.get_current_texture() {
-                        *ft = Some(st);
-                    } else {
-                        return;
+                    match self.surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(st)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
+                        _ => return,
                     }
                 }
                 _ => return,
@@ -886,9 +888,17 @@ impl App {
                 }
             }
 
-            fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+            fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
                 // 一帧结束：清掉 `frame_in_tick` 标记，下一 tick 首个 RedrawRequested 可重新跑 on_frame。
                 self.frame_in_tick = false;
+                // 持续驱动渲染：拖动/移动结束后若 OS 不再发 RedrawRequested，
+                // （Windows 拖边框、移动结束后），需要主动触发下一帧。
+                // 用 ControlFlow::Poll + request_redraw 实现。
+                // wgpu 自身在 present 时等 vsync 限速，CPU/GPU 不会狂转。
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                for w in &self.app.windows {
+                    w.inner.request_redraw();
+                }
             }
 
             fn window_event(
@@ -934,8 +944,10 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // 多窗口：`request_redraw` 让所有窗口在同一 tick 各发一次 RedrawRequested；
-                // 只在首个触发时跑 `on_frame`。同 tick 后续事件不再重复跑逻辑。
+                // 多窗口：同一 tick 内多窗口会各发一次；同窗口 OS 偶发重发。
+                // 早退避免重复跑 on_frame。**不在此处调 request_redraw**——
+                // 下一轮的 RedrawRequested 由 about_to_wait 统一触发，
+                // 避免和 about_to_wait 兜底形成自激死循环。
                 if self.frame_in_tick {
                     return;
                 }
@@ -965,7 +977,6 @@ impl App {
                 if (self.on_frame)(&self.app) {
                     for w in &self.app.windows {
                         w.present();
-                        w.inner.request_redraw();
                     }
                 } else {
                     // 退出前 present 掉所有未 present 的 surface texture，

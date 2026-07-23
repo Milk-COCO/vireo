@@ -380,6 +380,11 @@ impl TextContext {
         }
     }
 
+    fn touch_slot(&mut self, slot: u32) {
+        self.shape_slots[slot as usize].last_used = Instant::now();
+        self.pin_slot(slot);
+    }
+
     fn begin_prepare_pins(&mut self) {
         // pins 生命周期只在本次 prepare：prepare 期间 shape 不可被 GC；返回后
         // 已 shape 的 Buffer 由 metas/StableText 持有，无需 pin。
@@ -644,12 +649,14 @@ impl TextContext {
         let liveness = self.mark_slot_live(slot);
         let line_width = self.slot_line_width(slot);
         let buffer = self.shape_slots[slot as usize].buffer.clone();
+        let line_count = buffer.layout_runs().count().max(1) as u32;
         StableText {
             buffer,
             line_width,
             font_size: opts.font_size,
             liveness,
             text: text.to_string(),
+            line_count,
         }
     }
 
@@ -972,6 +979,8 @@ pub struct StableText {
     pub(crate) liveness: Arc<()>,
     /// 原文案（创建时传入的字符串），用于调试和用户侧去重。
     pub(crate) text: String,
+    /// 实际 layout 行数（包含 `max_width` 自动折行后产生的多行）。culling 高度用。
+    pub(crate) line_count: u32,
 }
 
 impl StableText {
@@ -989,6 +998,11 @@ impl StableText {
     pub fn line_width(&self) -> f32 {
         self.line_width
     }
+
+    /// 实际行数（≥ 1；`max_width` 折行后可能 > 1）。
+    pub fn line_count(&self) -> u32 {
+        self.line_count
+    }
 }
 
 impl std::fmt::Debug for StableText {
@@ -997,6 +1011,7 @@ impl std::fmt::Debug for StableText {
             .field("text", &self.text)
             .field("font_size", &self.font_size)
             .field("line_width", &self.line_width)
+            .field("line_count", &self.line_count)
             .field("buffer_strong_count", &Arc::strong_count(&self.buffer))
             .field("live_handle_count", &Arc::strong_count(&self.liveness))
             .finish()
@@ -1266,6 +1281,7 @@ pub enum TextEntry {
         buffer: Arc<Buffer>,
         font_size: f32,
         line_width: f32,
+        line_count: u32,
     },
 }
 
@@ -1296,7 +1312,16 @@ impl TextEntry {
     /// 裁剪/culling 用：近似字号。
     pub(crate) fn approx_font_size(&self) -> f32 {
         match self {
-            TextEntry::Normal { def, .. } | TextEntry::Parts { def, .. } => def.font_size,
+            TextEntry::Normal { def, .. } => def.font_size,
+            TextEntry::Parts { parts, def, .. } => parts.iter().fold(def.font_size, |max, part| {
+                let size = match part {
+                    TextPart::Normal(_, d) | TextPart::Dynamic(_, d) | TextPart::Digits(_, d) => {
+                        d.as_ref().map(|d| d.font_size).unwrap_or(def.font_size)
+                    }
+                    TextPart::Stable(stable) => stable.font_size(),
+                };
+                max.max(size)
+            }),
             TextEntry::Stable { font_size, .. } => *font_size,
         }
     }
@@ -1333,7 +1358,7 @@ impl TextEntry {
     /// 裁剪/culling 用：估算行数。
     /// - `Normal` 文本：按 `max_width` 折行（≥1）。
     /// - `Parts`：单行 LTR 横拼，永远 1。
-    /// - `Stable`：构造时已有行数（line_count > 0）来自 `line_width / max_width`；未指定则 1。
+    /// - `Stable`：使用 layout_runs 数出的实际行数。
     pub(crate) fn approx_line_count(&self) -> u32 {
         match self {
             TextEntry::Normal { text, def, .. } => {
@@ -1346,7 +1371,7 @@ impl TextEntry {
                 lines.max(1)
             }
             TextEntry::Parts { .. } => 1,
-            TextEntry::Stable { .. } => 1,
+            TextEntry::Stable { line_count, .. } => (*line_count).max(1),
         }
     }
 }
@@ -1430,6 +1455,7 @@ impl TextEntryList {
             buffer: stable.buffer.clone(),
             font_size: stable.font_size,
             line_width: stable.line_width,
+            line_count: stable.line_count,
         });
     }
 
@@ -1709,7 +1735,7 @@ impl TextEntryList {
                                 let key = ShapeKey::from_text(s, &opts);
                                 let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
                                     Some(si) => {
-                                        text_ctx.pin_slot(si);
+                                        text_ctx.touch_slot(si);
                                         let w = text_ctx.slot_line_width(si);
                                         (AreaMeta {
                                             buf: MetaBuf::Slot(si),
@@ -2081,6 +2107,21 @@ mod tests {
         let other = plain_entry("World", TextDef::default().font_size(16.0));
         assert_ne!(shape_key_from_entry(&base), shape_key_from_entry(&sized));
         assert_ne!(shape_key_from_entry(&base), shape_key_from_entry(&other));
+    }
+
+    #[test]
+    fn parts_culling_font_size_uses_largest_part() {
+        let entry = TextEntry::Parts {
+            pos: Pos::new(0.0, 0.0),
+            def: TextDef::default().font_size(16.0),
+            parts: vec![
+                TextPart::normal("small"),
+                TextPart::digits_def("99", TextDef::default().font_size(48.0)),
+            ],
+            override_: TextOverride::default(),
+            transform_index: 0,
+        };
+        assert_eq!(entry.approx_font_size(), 48.0);
     }
 
     #[test]

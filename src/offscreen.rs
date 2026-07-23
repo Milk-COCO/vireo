@@ -22,6 +22,12 @@ impl OffscreenCanvas {
 
     /// 构造时由 `App::offscreen()` 传入 AA 预热耗时；外部直接调用时通常传 0。
     pub fn with_aa(gpu: &Arc<GpuContext>, width: u32, height: u32, aa: AntiAliasing, init_duration: f64) -> Self {
+        assert!(
+            width > 0 && height > 0,
+            "OffscreenCanvas dimensions must be non-zero, got {}x{}",
+            width,
+            height
+        );
         let texture = Texture::new(&gpu.device, width, height, gpu.surface_format,
             &gpu.texture_bind_group_layout, &gpu.default_sampler);
         let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa, 1.0);

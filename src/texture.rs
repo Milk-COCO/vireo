@@ -21,6 +21,12 @@ impl Texture {
         device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat,
         bg_layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler,
     ) -> Self {
+        assert!(
+            width > 0 && height > 0,
+            "Texture dimensions must be non-zero, got {}x{}",
+            width,
+            height
+        );
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vireo texture"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },

@@ -144,7 +144,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let seg = polygon_edges[i]; // (x1,y1,x2,y2)
                 let a = seg.xy; let b = seg.zw;
                 let ab = b - a;
-                let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
+                let ab_len2 = max(dot(ab, ab), 1e-8);
+                let t = clamp(dot(in.local_pos - a, ab) / ab_len2, 0.0, 1.0);
                 d = min(d, length(in.local_pos - (a + t * ab)));
             }
             d -= h;

@@ -854,7 +854,8 @@ impl Renderer {
 
         // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
         let has_any_content = event_infos.iter().any(|e| e.shape.is_some() || e.text.is_some());
-        if has_any_content {
+        // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
+        if has_any_content || clear_color.is_some() {
             let msaa_view = self.msaa_view(self.gpu.surface_format);
             let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) = match &msaa_view {
                 Some(msaa) => (msaa, Some(target_view)),
@@ -865,30 +866,16 @@ impl Renderer {
                 dv = self.ds_view();
                 // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
                 // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
-                // multi-draw 叠加（clear_color=None）须 Store，否则下一 pass Load 到未定义 stencil
-                let clear_ds = clear_color.is_some();
-                let ds_store = if clear_ds {
-                    wgpu::StoreOp::Discard
-                } else {
-                    wgpu::StoreOp::Store
-                };
+                // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。
                 Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &dv,
                     depth_ops: Some(wgpu::Operations {
-                        load: if clear_ds {
-                            wgpu::LoadOp::Clear(1.0)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: ds_store,
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: Some(wgpu::Operations {
-                        load: if clear_ds {
-                            wgpu::LoadOp::Clear(0)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: ds_store,
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Discard,
                     }),
                 })
             } else {
@@ -1638,8 +1625,9 @@ pub struct DrawBatch {
     pub area_exclude: Option<Area>,
     /// 本 batch 子树 AABB 模式：
     /// - `None`：不裁剪（始终绘制）
-    /// - `Some(None)`：自动，从顶点计算子树 AABB
-    /// - `Some(Some(rect))`：手动，使用指定矩形
+    /// - `Some(None)`：自动计算当前 batch 及其子树的世界坐标 AABB，会应用 transform
+    /// - `Some(Some(rect))`：手动指定最终的世界坐标轴对齐 AABB；不会再应用 batch
+    ///   或父节点 transform，transform 改变后需由调用者同步更新
     pub bounds: Option<Option<Rect>>,
     /// 当 `clips_children=true` 时，用此矩形 scissor 代替 stencil。
     /// 逻辑世界坐标，必须轴对齐。`None` = 走 stencil。

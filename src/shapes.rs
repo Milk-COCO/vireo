@@ -1008,12 +1008,24 @@ fn emit_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32,
                     join_arc(points[prev], (cx, cy), points[next])
                 } else if i == 0 {
                     // 起点半圆帽
-                    let dir = (points[1].1 - points[0].1).atan2(points[1].0 - points[0].0);
+                    let next = (1..vcount).find(|&j| {
+                        let dx = points[j].0 - points[0].0;
+                        let dy = points[j].1 - points[0].1;
+                        dx * dx + dy * dy >= 0.001 * 0.001
+                    });
+                    let Some(next) = next else { continue };
+                    let dir = (points[next].1 - points[0].1).atan2(points[next].0 - points[0].0);
                     let cap = dir + std::f32::consts::PI;
                     (cap - std::f32::consts::FRAC_PI_2, cap + std::f32::consts::FRAC_PI_2)
                 } else if i == vcount - 1 {
                     // 终点半圆帽
-                    let dir = (points[i].1 - points[i - 1].1).atan2(points[i].0 - points[i - 1].0);
+                    let prev = (0..i).rev().find(|&j| {
+                        let dx = points[i].0 - points[j].0;
+                        let dy = points[i].1 - points[j].1;
+                        dx * dx + dy * dy >= 0.001 * 0.001
+                    });
+                    let Some(prev) = prev else { continue };
+                    let dir = (points[i].1 - points[prev].1).atan2(points[i].0 - points[prev].0);
                     (dir - std::f32::consts::FRAC_PI_2, dir + std::f32::consts::FRAC_PI_2)
                 } else {
                     // 内顶点：转角扇区
@@ -1475,6 +1487,22 @@ mod tests {
         for v in &batch.vertices {
             assert_eq!(v.sdf_type, 0);
         }
+    }
+
+    #[test]
+    fn line_chain_duplicate_endpoint_has_finite_vertices() {
+        let mut batch = test_batch();
+        draw_line_chain(
+            &mut batch,
+            &[(0.0, 0.0), (0.0, 0.0), (20.0, 0.0)],
+            2.0,
+            Some(WHITE),
+        );
+        assert!(!batch.vertices.is_empty());
+        assert!(batch.vertices.iter().all(|v| {
+            v.position.iter().all(|x| x.is_finite())
+                && v.uv.iter().all(|x| x.is_finite())
+        }));
     }
 
     #[test]
