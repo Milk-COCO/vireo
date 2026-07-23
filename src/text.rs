@@ -1302,6 +1302,26 @@ impl TextEntry {
             TextEntry::Stable { line_width, .. } => *line_width,
         }
     }
+
+    /// 裁剪/culling 用：估算行数。
+    /// - `Normal` 文本：按 `max_width` 折行（≥1）。
+    /// - `Parts`：单行 LTR 横拼，永远 1。
+    /// - `Stable`：构造时已有行数（line_count > 0）来自 `line_width / max_width`；未指定则 1。
+    pub(crate) fn approx_line_count(&self) -> u32 {
+        match self {
+            TextEntry::Normal { text, def, .. } => {
+                let max_w = match def.max_width {
+                    Some(w) if w > 0.0 => w,
+                    _ => return 1,
+                };
+                let natural = (text.chars().count() as f32) * def.font_size * 0.6;
+                let lines = (natural / max_w).ceil() as u32;
+                lines.max(1)
+            }
+            TextEntry::Parts { .. } => 1,
+            TextEntry::Stable { .. } => 1,
+        }
+    }
 }
 
 /// 文本条目列表，存储一组待渲染的文本。

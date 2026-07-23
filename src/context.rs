@@ -202,6 +202,7 @@ impl Renderer {
         self.alpha_to_coverage = aa.alpha_to_coverage();
         self.ssaa = aa.is_ssaa();
         *self.msaa_tex.borrow_mut() = None;
+        *self.ds_tex.borrow_mut() = None;
     }
 
     /// 获取匹配当前 sample_count 的 pipeline
@@ -210,7 +211,11 @@ impl Renderer {
     fn msaa_view(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
         if self.sample_count <= 1 { return None; }
         let mut mt = self.msaa_tex.borrow_mut();
-        if mt.is_none() || mt.as_ref().unwrap().0.width() != self.physical_width {
+        if mt.is_none()
+            || mt.as_ref().unwrap().0.width() != self.physical_width
+            || mt.as_ref().unwrap().0.height() != self.physical_height
+            || mt.as_ref().unwrap().0.sample_count() != self.sample_count
+        {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("msaa"),
                 size: wgpu::Extent3d { width: self.physical_width, height: self.physical_height, depth_or_array_layers: 1 },
@@ -228,7 +233,13 @@ impl Renderer {
     /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。sample_count 与 color 一致。
     fn ds_view(&self) -> wgpu::TextureView {
         let mut dt = self.ds_tex.borrow_mut();
-        let ok = dt.as_ref().map(|(t,_)| t.width() == self.physical_width).unwrap_or(false);
+        let ok = dt.as_ref()
+            .map(|(t,_)| {
+                t.width() == self.physical_width
+                    && t.height() == self.physical_height
+                    && t.sample_count() == self.sample_count
+            })
+            .unwrap_or(false);
         if !ok {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("depth_stencil"),
@@ -388,19 +399,27 @@ impl Renderer {
         ) -> (u32, u32) {
             let has_geom = !batch.vertices.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
-            if batch.clips_children && has_geom {
+            if batch.clips_children && (has_geom || batch.scissor.is_some()) {
                 // Push: Test content_level → Inc；ref_stack 存抬升后绝对值供 Pop
                 let push_ref = content_level;
                 ref_stack.push(push_ref + 1);
                 (1u32, push_ref)
-            } else if content_level > 0 {
-                if batch.inherit.clipped && has_draw {
-                    (2u32, content_level) // Test
+            } else {
+                // `clips_children && !has_geom && scissor.is_none()` 是 no-op；
+                // dev 模式立刻提示用户，release 保持原行为（静默跳过）
+                debug_assert!(
+                    !batch.clips_children || has_geom || batch.scissor.is_some(),
+                    "clips_children=true 但 batch 无几何且无显式 scissor；裁切不会生效。请提供几何裁切形状或显式设置 batch.scissor"
+                );
+                if content_level > 0 {
+                    if batch.inherit.clipped && has_draw {
+                        (2u32, content_level) // Test
+                    } else {
+                        (0u32, 0)
+                    }
                 } else {
                     (0u32, 0)
                 }
-            } else {
-                (0u32, 0)
             }
         }
 
@@ -646,12 +665,8 @@ impl Renderer {
                 }
                 DrawEvent::StencilPop => {
                     // 全屏四边形（逻辑像素）；索引相对 base_vertex；单位矩阵
-                    let id_idx = (global_transforms.len() / 12) as u32;
-                    global_transforms.extend_from_slice(&[
-                        1.0, 0.0, 0.0, 0.0,
-                        0.0, 1.0, 0.0, 0.0,
-                        0.0, 0.0, 1.0, 0.0,
-                    ]);
+                    // 复用全局槽 0（恒为单位阵，见 `Renderer::draw` 初始化），避免深嵌套浪费 transform 槽
+                    let id_idx = 0u32;
                     let verts = [
                         Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
                         Vertex::new_uv_xform(lw, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
@@ -716,13 +731,8 @@ impl Renderer {
                         idx_offset += n;
                         info
                     } else {
-                        // Full：全屏四边形 + 单位矩阵
-                        let id_idx = (global_transforms.len() / 12) as u32;
-                        global_transforms.extend_from_slice(&[
-                            1.0, 0.0, 0.0, 0.0,
-                            0.0, 1.0, 0.0, 0.0,
-                            0.0, 0.0, 1.0, 0.0,
-                        ]);
+                        // Full：全屏四边形 + 单位矩阵；复用全局槽 0（恒为单位阵）
+                        let id_idx = 0u32;
                         let verts = [
                             Vertex::new_uv_xform(0.0, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
                             Vertex::new_uv_xform(lw, 0.0, 0.0, 0.0, crate::color::colors::WHITE, id_idx),
@@ -794,11 +804,10 @@ impl Renderer {
             tc.ensure_sample_count(&self.gpu.device, self.sample_count);
             tc.ensure_text_ds(&self.gpu.device, uses_stencil);
         }
-        if clear_color.is_some() {
-            let mut text_ctx = self.gpu.text_ctx.borrow_mut();
-            text_ctx.text_renderer.clear();
-            text_ctx.advance_frame();
-        }
+        let mut text_ctx = self.gpu.text_ctx.borrow_mut();
+        text_ctx.text_renderer.clear();
+        text_ctx.advance_frame();
+        drop(text_ctx);
         for (ei, event) in events.iter().enumerate() {
             if let DrawEvent::Batch(batch) = event {
                 if !batch.texts.entries.is_empty() {
@@ -1137,7 +1146,7 @@ impl Renderer {
     }
 }
 
-use crate::text::{TextEntryList, TextDef};
+use crate::text::{TextDef, TextEntryList};
 
 /// 形状仿射变换：线性部分 + 平移 + 局部 pivot。
 ///
@@ -1768,10 +1777,29 @@ impl DrawBatch {
             let p = entry.pos();
             let ti = entry.transform_index();
             let fs = entry.approx_font_size();
+            // 行数估算：Normal 按 max_width 折行；Parts/Stable 永远单行
+            let lines = entry.approx_line_count();
+            // 宽：用 max_width（若设）或自然宽度（Parts/Stable 无 max_width 概念）
             let tw = entry.approx_width();
-            let th = fs * 1.25;
+            let th = lines as f32 * fs * 1.25;
+            // 叠加 TextOverride.transform（与 prepare_texts 中 phys_transform_index_with_override 一致）
+            let (mc0, mc1, mc2) = match entry.override_().transform.as_ref() {
+                Some(ov) => {
+                    let base = ti as usize * 12;
+                    let m = if base + 12 <= self.transform_table.len() {
+                        let t = &self.transform_table[base..base + 12];
+                        Transform::matrix(t[0], t[4], t[1], t[5], t[8], t[9])
+                    } else {
+                        Transform::IDENTITY
+                    };
+                    let composed = m.then(ov);
+                    composed.to_cols()
+                }
+                None => Self::table_cols_at(&self.transform_table, ti),
+            };
             for (lx, ly) in [(p.x, p.y), (p.x + tw, p.y), (p.x, p.y + th), (p.x + tw, p.y + th)] {
-                let (wx, wy) = Self::world_xy(&self.transform_table, ti, lx, ly);
+                let wx = mc0[0] * lx + mc1[0] * ly + mc2[0];
+                let wy = mc0[1] * lx + mc1[1] * ly + mc2[1];
                 expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
             }
         }
@@ -2128,11 +2156,18 @@ impl DrawBatch {
         let mut t = self.transform.unwrap_or_default();
         let old_sx = (t.a * t.a + t.b * t.b).sqrt();
         let old_sy = (t.c * t.c + t.d * t.d).sqrt();
+        // 旧尺度为 0 时无法用乘法按比例重建 → 退化为绝对 sx/sy=1。
+        // 调用者本意"设旋转"，因此 scale 不重要（仅形状可见性，不影响旋转本身）。
+        let (sx, sy) = if old_sx > 0.0 && old_sy > 0.0 {
+            (old_sx, old_sy)
+        } else {
+            (1.0, 1.0)
+        };
         let (c, s) = (rad.cos(), rad.sin());
-        t.a = old_sx * c;
-        t.b = -old_sx * s;
-        t.c = old_sy * s;
-        t.d = old_sy * c;
+        t.a = sx * c;
+        t.b = -sx * s;
+        t.c = sy * s;
+        t.d = sy * c;
         self.transform = Some(t);
         self.invalidate_transform_cache();
     }
@@ -2156,8 +2191,28 @@ impl DrawBatch {
         let mut t = self.transform.unwrap_or_default();
         let old_sx = (t.a * t.a + t.b * t.b).sqrt();
         let old_sy = (t.c * t.c + t.d * t.d).sqrt();
-        if old_sx > 0.0 { let k = sx / old_sx; t.a *= k; t.b *= k; }
-        if old_sy > 0.0 { let k = sy / old_sy; t.c *= k; t.d *= k; }
+        // 旧尺度为 0：增量乘法永远保持 0；改为按当前角度绝对重建
+        // 这样 `set_scale(0,0); set_scale(1,1)` 之类链式调用可恢复。
+        if old_sx > 0.0 && old_sy > 0.0 {
+            let kx = sx / old_sx;
+            let ky = sy / old_sy;
+            t.a *= kx;
+            t.b *= kx;
+            t.c *= ky;
+            t.d *= ky;
+        } else {
+            // 从 (a,b,c,d) 推角度；零缩放时角度=0
+            let angle = if old_sx > 0.0 {
+                (-t.b).atan2(t.a)
+            } else {
+                0.0
+            };
+            let (c, s) = (angle.cos(), angle.sin());
+            t.a = sx * c;
+            t.b = -sx * s;
+            t.c = sy * s;
+            t.d = sy * c;
+        }
         self.transform = Some(t);
         self.invalidate_transform_cache();
     }

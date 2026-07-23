@@ -1004,7 +1004,6 @@ fn emit_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32,
             }
         }
         Some(f) => {
-            batch.note_sdf();
             let mut min_x = f32::MAX; let mut min_y = f32::MAX;
             let mut max_x = f32::MIN; let mut max_y = f32::MIN;
             for (px, py) in points {
@@ -1025,6 +1024,7 @@ fn emit_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32,
             }
             let actual_seg_count = (batch.polygon_edges.len() / 4) as u32 - start_idx;
             if actual_seg_count == 0 { return; }
+            batch.note_sdf();
 
             let pad = h + f;
             let idx = batch.current_transform_index();
