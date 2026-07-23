@@ -24,7 +24,7 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
 
 fn main() {
     let mut app = App::new();
-    let logo = app.load_texture("logo_quad.png").ok();
+    let logo = Some(app.load_texture("logo_quad.png"));
     let idx = app.window(
         WindowDesc::new("ShapeOverride", 900, 520).high_dpi(true),
         None::<fn()>,

@@ -6,7 +6,7 @@ use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let tex_id = app.load_texture("logo_bg.png").unwrap();
+    let tex_id = app.load_texture("logo_bg.png");
     let idx = app.window(WindowDesc::new("Texture Sub-Region", 450, 220), None::<fn()>);
 
     app.run(move |app| {

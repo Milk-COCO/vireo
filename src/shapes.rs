@@ -316,8 +316,12 @@ pub fn draw_triangle(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, 
     draw_shape(batch, &Shape::Triangle { x1, y1, x2, y2, x3, y3 }, ShapeOverride::from_color(color));
 }
 
-/// 绘制凸多边形（shader SDF，边数据通过 storage buffer 传递）。
+/// 绘制多边形（shader SDF / geo 扇形三角化）。
 /// 顶点须按逆时针排列。坐标即位置，不走 Pos 解耦。
+///
+/// **限制**：仅支持**凸**多边形。SDF 用固定半平面（`shader.wgsl:112-131`），
+/// 凹多边形会填充错误；geo 路径用 fan 三角化，凹多边形同样不正确。
+/// 自交多边形（bowtie）亦不支持。如需凹多边形，请自行用 stencil 或外部 mesh 工具。
 pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Option<Color>) {
     draw_shape(batch, &Shape::Polygon { points }, ShapeOverride::from_color(color));
 }
@@ -488,7 +492,26 @@ fn emit_line(
     thickness: f32, color: Color,
 ) {
     if thickness == 0.0 || color.a == 0.0 { return; }
-    if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 { return; }
+    if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 {
+        // 零长线：没有线段部分，只有端点圆弧帽。
+        // 当前线实现是“线 + 圆弧端点”，端点半径 = thickness/2。
+        // 画一个圆（点），中心在 (x1,y1)（当前 batch 空间）。
+        let r = thickness * 0.5;
+        if r > 0.0 {
+            let saved_xform = batch.transform.take();
+            let saved_cache = batch.cached_transform_index;
+            let dot = Transform::translation(x1, y1);
+            batch.transform = Some(match saved_xform {
+                Some(cur) => cur.then(&dot),
+                None => dot,
+            });
+            batch.cached_transform_index = None;
+            emit_circle(batch, r, color);
+            batch.transform = saved_xform;
+            batch.cached_transform_index = saved_cache;
+        }
+        return;
+    }
     let h = thickness * 0.5;
     match batch.sdf_feather {
         None => {
@@ -673,6 +696,17 @@ fn emit_triangle(
     batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, color: Color,
 ) {
     if color.a == 0.0 { return; }
+    // 退化：任一边长度接近 0 或面积接近 0 → 不画
+    let abx = x2 - x1; let aby = y2 - y1;
+    let bcx = x3 - x2; let bcy = y3 - y2;
+    let cax = x1 - x3; let cay = y1 - y3;
+    let l2ab = abx*abx + aby*aby;
+    let l2bc = bcx*bcx + bcy*bcy;
+    let l2ca = cax*cax + cay*cay;
+    if l2ab < 0.000001 || l2bc < 0.000001 || l2ca < 0.000001 { return; }
+    let area2 = (abx * bcy - aby * bcx).abs();
+    if area2 < 0.0001 { return; }
+
     let idx = batch.current_transform_index();
     match batch.sdf_feather {
         None => {
@@ -1245,10 +1279,11 @@ mod tests {
     }
 
     #[test]
-    fn line_zero_length_skipped() {
+    fn line_zero_length_becomes_dot() {
         let mut batch = test_batch();
         draw_line(&mut batch, 50.0, 50.0, 50.0, 50.0, 2.0, Some(WHITE));
-        assert!(batch.vertices.is_empty());
+        // 零长线：无线段，只有端点圆弧 → 画半径 = thickness/2 的圆（点）
+        assert!(!batch.vertices.is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
+use rustc_hash::FxHashMap;
 
 use winit::{
     application::ApplicationHandler,
@@ -276,7 +276,6 @@ pub struct VireoWindow {
     /// surface 配置（含 present_mode）。用 RefCell 以便 `set_present_mode` 在 `&self` 下更新。
     surface_config: RefCell<wgpu::SurfaceConfiguration>,
     pub gpu: Arc<GpuContext>,
-    pub camera_bind_group: wgpu::BindGroup,
     pub mouse_pos: (f32, f32),
     pub logical_width: u32,
     pub logical_height: u32,
@@ -319,15 +318,38 @@ impl VireoWindow {
         let t0 = std::time::Instant::now();
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
-            *ft = match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(st) => Some(st),
-                _ => {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(st) => *ft = Some(st),
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    // 配置失效（resize / device loss）：reconfigure 后重试一次
+                    let cfg = self.surface_config.borrow().clone();
+                    self.surface.configure(&self.gpu.device, &cfg);
+                    if let wgpu::CurrentSurfaceTexture::Success(st) = self.surface.get_current_texture() {
+                        *ft = Some(st);
+                    } else {
+                        return DrawTimings {
+                            acquire_secs: t0.elapsed().as_secs_f64(),
+                            encode_secs: 0.0,
+                        };
+                    }
+                }
+                wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                    // 亚最优（size mismatch 等）：仍可继续，下一帧 request_redraw 重新配置
                     return DrawTimings {
                         acquire_secs: t0.elapsed().as_secs_f64(),
                         encode_secs: 0.0,
                     };
                 }
-            };
+                wgpu::CurrentSurfaceTexture::Timeout
+                | wgpu::CurrentSurfaceTexture::Occluded
+                | wgpu::CurrentSurfaceTexture::Validation => {
+                    // 暂时拿不到（vsync/遮挡/校验失败），静默跳过
+                    return DrawTimings {
+                        acquire_secs: t0.elapsed().as_secs_f64(),
+                        encode_secs: 0.0,
+                    };
+                }
+            }
         }
         let acquire_secs = t0.elapsed().as_secs_f64();
         let view = ft.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -350,10 +372,20 @@ impl VireoWindow {
     pub fn preheat(&self, clear_color: crate::color::Color) {
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
-            *ft = match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(st) => Some(st),
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(st) => *ft = Some(st),
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    // 失效：reconfigure 后重试
+                    let cfg = self.surface_config.borrow().clone();
+                    self.surface.configure(&self.gpu.device, &cfg);
+                    if let wgpu::CurrentSurfaceTexture::Success(st) = self.surface.get_current_texture() {
+                        *ft = Some(st);
+                    } else {
+                        return;
+                    }
+                }
                 _ => return,
-            };
+            }
         }
         let view = ft.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
         let target = crate::context::RenderTarget::from_texture_view(view);
@@ -494,12 +526,23 @@ impl VireoWindow {
         self.input.modifiers.borrow().alt()
     }
 
-    /// 获取并清零本帧滚轮增量
+    /// 获取并清零本帧**行单位**滚轮增量。鼠标滚轮直接给出此值；
+    /// 触控板/高精度设备的像素增量需用 `take_scroll_pixel`。
+    /// 单位：行（一行 = 一格滚轮）。
     pub fn take_scroll(&self) -> (f32, f32) {
         let mut delta = self.input.scroll_delta.borrow_mut();
-        let result = *delta;
-        delta.0 = 0.0;
-        delta.1 = 0.0;
+        let result = delta.line;
+        delta.line = (0.0, 0.0);
+        result
+    }
+
+    /// 获取并清零本帧**像素单位**滚轮增量。触控板/高精度设备给出此值；
+    /// 普通鼠标滚轮通常无像素值。
+    /// 单位：物理像素（未经 dpi 缩放）。
+    pub fn take_scroll_pixel(&self) -> (f32, f32) {
+        let mut delta = self.input.scroll_delta.borrow_mut();
+        let result = delta.pixel;
+        delta.pixel = (0.0, 0.0);
         result
     }
 
@@ -588,8 +631,12 @@ pub struct App {
     pub windows: Vec<VireoWindow>,
     pub gpu: Arc<GpuContext>,
     instance: Option<wgpu::Instance>,
-    window_ids: Vec<WindowId>,
-    close_hooks: Vec<Option<Box<dyn FnOnce()>>>,
+    /// 稳定 handle → winit WindowId。handle 由 `App::window()` 分配，
+    /// `App::run` 的 `resumed` 阶段填入 winit 给的 id。
+    handle_to_id: FxHashMap<u64, WindowId>,
+    /// 下一个待分配的 handle（单调递增；`App::window()` 自增）。
+    next_handle: u64,
+    close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce()>>>,
     default_icon: Option<Icon>,
     textures: Vec<Texture>,
     offscreens: Vec<OffscreenCanvas>,
@@ -631,8 +678,9 @@ impl App {
             windows: Vec::new(),
             gpu,
             instance: Some(instance),
-            window_ids: Vec::new(),
-            close_hooks: Vec::new(),
+            handle_to_id: FxHashMap::default(),
+            next_handle: 0,
+            close_hooks: FxHashMap::default(),
             default_icon,
             textures: Vec::new(),
             offscreens: Vec::new(),
@@ -668,12 +716,13 @@ impl App {
         self.offscreens.get(idx.0)
     }
 
-    /// 从文件加载纹理（存储在 App 中管理生命周期），返回纹理索引
-    pub fn load_texture(&mut self, path: impl AsRef<std::path::Path>) -> Result<usize, String> {
-        let tex = Texture::from_file(path, &self.gpu)?;
+    /// 从文件加载纹理（存储在 App 中管理生命周期），返回纹理索引。
+    /// 读取或解码失败时会打印错误并返回一个“missing”棋盘纹理（不返回 Err）。
+    pub fn load_texture(&mut self, path: impl AsRef<std::path::Path>) -> usize {
+        let tex = Texture::from_file(path, &self.gpu);
         let idx = self.textures.len();
         self.textures.push(tex);
-        Ok(idx)
+        idx
     }
 
     /// 根据索引获取已加载的纹理
@@ -695,10 +744,11 @@ impl App {
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
         let init_duration = start.elapsed().as_secs_f64();
         self.window_init_durations.push(init_duration);
-        let idx = self.window_descs.len();
+        let handle = self.next_handle;
+        self.next_handle += 1;
         self.window_descs.push(desc);
-        self.close_hooks.push(on_close.map(|f| Box::new(f) as Box<dyn FnOnce()>));
-        WindowIndex(idx)
+        self.close_hooks.insert(handle, on_close.map(|f| Box::new(f) as Box<dyn FnOnce()>));
+        WindowIndex::new(handle)
     }
 
     /// 启动事件循环。在 resumed 里创建所有窗口，然后每帧调用用户闭包。
@@ -706,9 +756,8 @@ impl App {
     pub fn run<F: FnMut(&App) -> bool + 'static>(mut self, on_frame: F) {
         let event_loop = EventLoop::new().unwrap();
 
-        // 预先取出窗口描述
+        // 预先取出窗口描述；close_hooks 跟随 App 一起进 Runner（保持 handle 关联）。
         let window_descs: Vec<_> = self.window_descs.drain(..).collect();
-        let close_hooks: Vec<_> = self.close_hooks.drain(..).collect();
 
         // 启动期管线预热在 app.window() / app.offscreen() 同步完成，不再在 App::run 入口做。
         // 理由：用户调用 app.window() 时就完成管线编译，App::run 入口不应再有「运行时预热」。
@@ -717,8 +766,10 @@ impl App {
             on_frame: F,
             app: App,
             window_descs: Vec<WindowDesc>,
-            close_hooks: Vec<Option<Box<dyn FnOnce()>>>,
             created: bool,
+            /// 一个事件循环 tick 内是否已运行过本帧。多窗口下 `request_redraw`
+            /// 会让所有窗口在同一 tick 各发一次 `RedrawRequested`，避免重复跑 `on_frame`。
+            frame_in_tick: bool,
         }
 
         impl<F: FnMut(&App) -> bool + 'static> ApplicationHandler for Runner<F> {
@@ -781,23 +832,36 @@ impl App {
                     let gpu = self.app.gpu.clone();
 
                     let size = window.inner_size();
+                    // 查询平台支持的 alpha 模式。透明窗要选 `PostMultiplied`
+                    // （与我们的直 alpha blend `ALPHA_BLENDING` 一致），不支持时回退到 `Opaque`。
+                    let caps = surface.get_capabilities(&gpu.adapter);
+                    let alpha_mode = if desc.transparent {
+                        if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+                            wgpu::CompositeAlphaMode::PostMultiplied
+                        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                            // 平台只支持 PreMultiplied：仍可能边缘发灰，但好于不透明
+                            wgpu::CompositeAlphaMode::PreMultiplied
+                        } else {
+                            wgpu::CompositeAlphaMode::Auto
+                        }
+                    } else {
+                        wgpu::CompositeAlphaMode::Auto
+                    };
                     let surface_config = wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                         format: gpu.surface_format,
                         width: size.width,
                         height: size.height,
                         present_mode: desc.present_mode,
-                        alpha_mode: if desc.transparent {
-                            wgpu::CompositeAlphaMode::PreMultiplied
-                        } else {
-                            wgpu::CompositeAlphaMode::Auto
-                        },
+                        alpha_mode,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     surface.configure(&gpu.device, &surface_config);
-                    self.app.window_ids.push(window.id());
+                    // i-th desc was created by the i-th `App::window()` call → its handle is `i` (0-based, monotonically assigned).
+                    let handle = i as u64;
+                    self.app.handle_to_id.insert(handle, window.id());
                     let init_duration = if i < self.app.window_init_durations.len() {
                         self.app.window_init_durations[i]
                     } else {
@@ -809,7 +873,6 @@ impl App {
                         desc.anti_aliasing,
                         init_duration,
                     ));
-                    self.app.close_hooks.push(self.close_hooks[i].take());
                 }
 
                 for w in &self.app.windows {
@@ -817,6 +880,11 @@ impl App {
                     w.preheat(crate::color::Color::new(0.0, 0.0, 0.0, 1.0));
                     w.inner.request_redraw();
                 }
+            }
+
+            fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+                // 一帧结束：清掉 `frame_in_tick` 标记，下一 tick 首个 RedrawRequested 可重新跑 on_frame。
+                self.frame_in_tick = false;
             }
 
             fn window_event(
@@ -829,11 +897,12 @@ impl App {
 
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(pos) = self.app.window_ids.iter().position(|id| *id == window_id) {
-                    if let Some(hook) = self.app.close_hooks[pos].take() {
-                        hook();
+                if let Some((&handle, _)) = self.app.handle_to_id.iter().find(|(_, id)| **id == window_id) {
+                    if let Some(hook_opt) = self.app.close_hooks.get_mut(&handle) {
+                        if let Some(h) = hook_opt.take() { h(); }
                     }
                     self.app.windows.retain(|w| w.inner.id() != window_id);
+                    self.app.handle_to_id.remove(&handle);
                 }
                 if self.app.windows.is_empty() {
                     event_loop.exit();
@@ -858,40 +927,48 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let now = std::time::Instant::now();
-                self.app.frame_count += 1;
-                // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
-                // dt（含启动延迟）不入滑动平均。第二帧起才计算真实 dt。
-                if self.app.frame_count == 1 {
-                    self.app.last_frame = now;
-                } else {
-                    let dt = now.duration_since(self.app.last_frame).as_secs_f64();
-                    self.app.last_frame = now;
-                    if dt > 0.0 && dt < 0.5 {
-                        self.app.frame_time = dt;
-                        self.app.fps_samples.push(dt);
-                        if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
-                            self.app.fps_samples.remove(0);
-                        }
-                        let sum: f64 = self.app.fps_samples.iter().sum();
-                        if sum > 0.0 {
-                            self.app.fps = self.app.fps_samples.len() as f64 / sum;
+                // 多窗口：`request_redraw` 让所有窗口在同一 tick 各发一次 RedrawRequested；
+                // 只在首个触发时跑 `on_frame`、更新 FPS / frame_count，重复事件直接 present 该窗口即可。
+                if !self.frame_in_tick {
+                    self.frame_in_tick = true;
+                    let now = std::time::Instant::now();
+                    self.app.frame_count += 1;
+                    // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
+                    // dt（含启动延迟）不入滑动平均。第二帧起才计算真实 dt。
+                    if self.app.frame_count == 1 {
+                        self.app.last_frame = now;
+                    } else {
+                        let dt = now.duration_since(self.app.last_frame).as_secs_f64();
+                        self.app.last_frame = now;
+                        if dt > 0.0 && dt < 0.5 {
+                            self.app.frame_time = dt;
+                            self.app.fps_samples.push(dt);
+                            if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
+                                self.app.fps_samples.remove(0);
+                            }
+                            let sum: f64 = self.app.fps_samples.iter().sum();
+                            if sum > 0.0 {
+                                self.app.fps = self.app.fps_samples.len() as f64 / sum;
+                            }
                         }
                     }
-                }
 
-                if (self.on_frame)(&self.app) {
-                    for w in &self.app.windows {
-                        w.present();
-                        w.inner.request_redraw();
+                    if (self.on_frame)(&self.app) {
+                        for w in &self.app.windows {
+                            w.present();
+                            w.inner.request_redraw();
+                        }
+                    } else {
+                        // 退出前 present 掉所有未 present 的 surface texture，
+                        // 避免 swapchain drop 时 Arc::into_inner 失败。
+                        for w in &self.app.windows {
+                            w.present();
+                        }
+                        event_loop.exit();
                     }
-                } else {
-                    // 退出前 present 掉所有未 present 的 surface texture，
-                    // 避免 swapchain drop 时 Arc::into_inner 失败。
-                    for w in &self.app.windows {
-                        w.present();
-                    }
-                    event_loop.exit();
+                } else if let Some(win) = self.app.windows.iter().find(|w| w.inner.id() == window_id) {
+                    // 同 tick 内重复事件：仅 present 该窗口（present 在未绘时是 no-op）。
+                    win.present();
                 }
             }
 
@@ -952,14 +1029,18 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(win) = self.app.windows.iter().find(|w| w.inner.id() == window_id) {
                     let mapped = crate::input::map_scroll_delta(delta);
-                    let (dx, dy) = match &mapped {
-                        crate::input::ScrollDelta::Line { x, y } => (*x, *y),
-                        crate::input::ScrollDelta::Pixel { x, y } => (*x, *y),
-                    };
                     {
                         let mut acc = win.input.scroll_delta.borrow_mut();
-                        acc.0 += dx;
-                        acc.1 += dy;
+                        match &mapped {
+                            crate::input::ScrollDelta::Line { x, y } => {
+                                acc.line.0 += x;
+                                acc.line.1 += y;
+                            }
+                            crate::input::ScrollDelta::Pixel { x, y } => {
+                                acc.pixel.0 += x;
+                                acc.pixel.1 += y;
+                            }
+                        }
                     }
                     let vireo_event = crate::input::MouseScrollEvent { delta: mapped };
                     for cb in &mut win.input.callbacks.borrow_mut().on_scroll {
@@ -994,13 +1075,20 @@ impl App {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(win) = self.app.windows.iter().find(|w| w.inner.id() == window_id) {
-                    *win.input.focused.borrow_mut() = focused;
+                    let was_focused = std::mem::replace(&mut *win.input.focused.borrow_mut(), focused);
                     let mut cb = win.input.callbacks.borrow_mut();
                     if focused {
-                        for c in cb.on_focus_gained.drain(..) {
-                            c();
+                        if !was_focused {
+                            for c in cb.on_focus_gained.drain(..) {
+                                c();
+                            }
                         }
                     } else {
+                        // 失焦清空按键/鼠标状态：OS 不一定发 key-up，外部释放的键会卡住。
+                        drop(cb);
+                        win.input.keys_down.borrow_mut().clear();
+                        win.input.mouse_buttons_down.borrow_mut().clear();
+                        let mut cb = win.input.callbacks.borrow_mut();
                         for c in cb.on_focus_lost.drain(..) {
                             c();
                         }
@@ -1066,18 +1154,6 @@ impl App {
                     surface,
                     surface_config: RefCell::new(surface_config),
                     gpu: gpu.clone(),
-                    camera_bind_group: gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("camera bind group"),
-                        layout: &gpu.camera_bind_group_layout,
-                        entries: &[wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("camera buffer"),
-                                contents: bytemuck::cast_slice(&[[0.0f32; 4]; 4]),
-                                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                            }).as_entire_binding(),
-                        }],
-                    }),
                     mouse_pos: (-1.0, -1.0),
                     logical_width,
                     logical_height,
@@ -1098,8 +1174,9 @@ impl App {
                     windows: Vec::new(),
                     gpu: self.gpu.clone(),
                     instance: self.instance.take(),
-                    window_ids: Vec::new(),
-                    close_hooks: Vec::new(),
+                    handle_to_id: FxHashMap::default(),
+                    next_handle: self.next_handle,
+                    close_hooks: std::mem::take(&mut self.close_hooks),
                     default_icon: self.default_icon.take(),
                     textures: self.textures.drain(..).collect(),
                     offscreens: self.offscreens.drain(..).collect(),
@@ -1112,21 +1189,28 @@ impl App {
                     last_frame: std::time::Instant::now(),
                 },
                 window_descs,
-                close_hooks,
                 created: false,
+                frame_in_tick: false,
             })
             .unwrap();
     }
 }
 
-/// 窗口索引 —— 用于在 run() 闭包中引用窗口
-#[derive(Clone, Copy)]
-pub struct WindowIndex(usize);
+/// 窗口索引 —— 用于在 run() 闭包中引用窗口。稳定 handle：关窗后该索引失效（`window_ref` 返回 None），
+/// 不会因其他窗口关闭而重指向新窗口。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct WindowIndex(pub(crate) u64);
+
+impl WindowIndex {
+    fn new(handle: u64) -> Self {
+        Self(handle)
+    }
+}
 
 impl App {
-    /// 根据索引获取窗口引用。返回 None 表示窗口已关闭。
+    /// 根据索引获取窗口引用。返回 None 表示窗口已关闭或索引无效。
     pub fn window_ref(&self, idx: &WindowIndex) -> Option<&VireoWindow> {
-        let id = self.window_ids.get(idx.0)?;
+        let id = self.handle_to_id.get(&idx.0)?;
         self.windows.iter().find(|w| w.inner.id() == *id)
     }
 
@@ -1145,9 +1229,16 @@ impl App {
         &self.windows
     }
 
-    /// 所有存活窗口索引（与遍历 windows() 配合使用）
+    /// 所有存活窗口索引（与遍历 windows() 配合使用）。
+    /// handle 是稳定 id；同一 handle 跨关窗事件不变（关窗后 `window_ref` 返回 None）。
     pub fn window_indices(&self) -> Vec<WindowIndex> {
-        (0..self.windows.len()).map(|i| WindowIndex(i)).collect()
+        self.windows.iter()
+            .filter_map(|w| {
+                self.handle_to_id.iter()
+                    .find(|(_, id)| **id == w.inner.id())
+                    .map(|(h, _)| WindowIndex::new(*h))
+            })
+            .collect()
     }
 }
 

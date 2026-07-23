@@ -26,6 +26,8 @@ pub struct GpuContext {
     pub transform_dummy_bind_group: wgpu::BindGroup,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
+    /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
+    pub(crate) adapter: wgpu::Adapter,
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
@@ -347,6 +349,7 @@ impl GpuContext {
             transform_dummy_bind_group,
             surface_format,
             text_ctx,
+            adapter,
             supported_sample_counts,
             pipelines: RefCell::new(pipelines),
             shader,

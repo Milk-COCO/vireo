@@ -46,7 +46,7 @@ fn main() {
 
     // from_bytes：嵌入 PNG（若仓库有 logo.png）
     let embedded = match std::fs::read("logo.png") {
-        Ok(bytes) => Texture::from_bytes(&bytes, &app.gpu).ok(),
+        Ok(bytes) => Some(Texture::from_bytes(&bytes, &app.gpu)),
         Err(_) => None,
     };
 

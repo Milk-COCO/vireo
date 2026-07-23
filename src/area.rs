@@ -178,24 +178,15 @@ impl Area {
                     stencil_ref: level + 1,
                 });
             }
-            Area::Intersect(a, b) => {
-                // erase(a) 后 a∩b 与 a\b 均在 level-1；再 cover(a\b) 把 a\b 抬回 level。
-                if level == 0 {
-                    a.compile_cover(0, out);
-                    b.compile_cover(1, out);
-                    out.push(AreaStencilOp::EraseFull {
-                        stencil_ref: 1,
-                    });
-                    out.push(AreaStencilOp::EraseFull {
-                        stencil_ref: 2,
-                    });
-                    out.push(AreaStencilOp::EraseFull {
-                        stencil_ref: 1,
-                    });
-                } else {
-                    a.compile_erase(level, out);
-                    Area::Difference(a.clone(), b.clone()).compile_cover(level - 1, out);
-                }
+            Area::Intersect(a, _) => {
+                // 目标：a∩b 从 level 降到 level-1，a\b 与 outside 不动。
+                // `a.erase(level)` 等价于 "Dec a at stencil==level"——
+                //   a∩b 处于 level（在 a 内）→ level-1
+                //   a\b 处于 level-1（不在 level 上）→ 不变
+                //   之前 `Difference(a,b).compile_cover(level-1)` 是错的：
+                //   它会把 a∩b 重新 raise 到 level（cover 序列：a→b→erase→erase），
+                //   抵消本次 erase。统一所有 level 用同一逻辑。
+                a.compile_erase(level, out);
             }
         }
     }
@@ -389,6 +380,18 @@ mod tests {
         a.compile_cover(0, &mut ops);
         assert!(ops.len() >= 4);
         assert_eq!(a.max_stencil_level(0), 2);
+    }
+
+    #[test]
+    fn compile_intersect_erase_is_one_dec() {
+        // 修 Bug 6.1：原非零路径会通过 Difference.cover 错误地把 a∩b 重新 raise 回来。
+        // 统一后 Intersect.erase(level) 应等价于 a.erase(level)：单个 EraseGeom。
+        let a = Area::geom(unit_quad()).intersect(Area::geom(unit_quad()));
+        let mut ops = Vec::new();
+        a.compile_erase(1, &mut ops);
+        assert_eq!(ops.len(), 1, "expected 1 op, got {:?}: {:#?}", ops.len(), ops);
+        assert_eq!(ops[0].stencil_pipeline_op(), 3); // EraseGeom
+        assert_eq!(ops[0].stencil_ref(), 1);
     }
 
     #[test]

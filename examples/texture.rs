@@ -5,13 +5,7 @@ use vireo::prelude::*;
 fn main() {
     let mut app = App::new();
 
-    let tex = match app.load_texture("logo.png") {
-        Ok(idx) => Some(idx),
-        Err(e) => {
-            eprintln!("WARNING: {}", e);
-            None
-        }
-    };
+    let tex = Some(app.load_texture("logo.png"));
 
     let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).high_dpi(true), None::<fn()>);
 

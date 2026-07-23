@@ -21,7 +21,7 @@ fn hue(h: f32) -> Color {
 
 fn main() {
     let mut app = App::new();
-    let logo_idx = app.load_texture("logo.png").ok();
+    let logo_idx = Some(app.load_texture("logo.png"));
     let idx = app.window(
         WindowDesc::new("Ciallo, Vireo!", 640, 420).icon_from_path("logo.png"),
         None::<fn()>,

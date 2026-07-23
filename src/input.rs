@@ -157,8 +157,8 @@ pub struct InputState {
     pub mouse_buttons_down: RefCell<HashSet<MouseButton>>,
     /// 当前修饰键状态
     pub modifiers: RefCell<Modifiers>,
-    /// 本帧滚轮增量累计（用户查询后清零）
-    pub scroll_delta: RefCell<(f32, f32)>,
+    /// 本帧滚轮增量累计（按单位分开，避免鼠标滚轮 vs 触控板的单位混淆）
+    pub scroll_delta: RefCell<ScrollDeltaAccum>,
     /// 窗口是否有焦点
     pub focused: RefCell<bool>,
     /// 鼠标是否在窗口内
@@ -175,13 +175,21 @@ impl Default for InputState {
             keys_down: RefCell::new(HashSet::new()),
             mouse_buttons_down: RefCell::new(HashSet::new()),
             modifiers: RefCell::new(Modifiers::NONE),
-            scroll_delta: RefCell::new((0.0, 0.0)),
+            scroll_delta: RefCell::new(ScrollDeltaAccum::default()),
             focused: RefCell::new(false),
             cursor_inside: RefCell::new(false),
             touches: RefCell::new(HashMap::new()),
             callbacks: RefCell::new(InputCallbacks::default()),
         }
     }
+}
+
+/// 滚轮累计：按单位分桶。鼠标滚轮（Line）与触控板/高精度设备（Pixel）单位不同，
+/// 直接相加会被触控板淹没。`take_scroll` 返回行单位，`take_scroll_pixel` 返回像素单位。
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+pub struct ScrollDeltaAccum {
+    pub line: (f32, f32),
+    pub pixel: (f32, f32),
 }
 
 // ------ Internal mapping functions ------
@@ -346,7 +354,7 @@ mod tests {
         assert!(state.keys_down.borrow().is_empty());
         assert!(state.mouse_buttons_down.borrow().is_empty());
         assert_eq!(*state.modifiers.borrow(), Modifiers::NONE);
-        assert_eq!(*state.scroll_delta.borrow(), (0.0, 0.0));
+        assert_eq!(*state.scroll_delta.borrow(), ScrollDeltaAccum::default());
         assert!(!*state.focused.borrow());
         assert!(!*state.cursor_inside.borrow());
         assert!(state.touches.borrow().is_empty());
@@ -365,10 +373,14 @@ mod tests {
         let state = InputState::default();
         {
             let mut d = state.scroll_delta.borrow_mut();
-            d.0 += 1.5;
-            d.1 += -3.0;
+            d.line.0 += 1.5;
+            d.line.1 += -3.0;
+            d.pixel.0 += 100.0;
+            d.pixel.1 += -200.0;
         }
-        assert_eq!(*state.scroll_delta.borrow(), (1.5, -3.0));
+        let d = *state.scroll_delta.borrow();
+        assert_eq!(d.line, (1.5, -3.0));
+        assert_eq!(d.pixel, (100.0, -200.0));
     }
 
     // ---- InputCallbacks ----

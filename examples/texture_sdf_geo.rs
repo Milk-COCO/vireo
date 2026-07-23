@@ -28,13 +28,7 @@ fn draw_shapes(batch: &mut DrawBatch) {
 fn main() {
     let mut app = App::new();
 
-    let tex = match app.load_texture("logo_quad.png") {
-        Ok(idx) => Some(idx),
-        Err(e) => {
-            eprintln!("WARNING: {}", e);
-            None
-        }
-    };
+    let tex = Some(app.load_texture("logo_quad.png"));
 
     let idx = app.window(
         WindowDesc::new("Texture: Geometry vs SDF", 760, 380),

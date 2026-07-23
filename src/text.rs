@@ -345,6 +345,10 @@ impl TextContext {
 
     /// 立即清空全部 shape 缓存，Buffer 尽量回池。
     /// 跳过 [`StableText`] 仍在活跃持有的槽，不回收它们的 Buffer。
+    ///
+    /// **不要在 `Renderer::draw` 帧内调用**：本方法会重建 `shape_slots` / `shape_map`，
+    /// 若 draw 路径中途还在引用槽 index，会导致 map 与 slot 不一致。约定仅在
+    /// `on_frame` 返回前/后、或下一帧开始前调用。
     pub fn clear_shape_cache(&mut self) {
         self.scavenge_dead_liveness();
         // 重建：只保留活跃持有的槽（其余回池 + 从 map 移除）
@@ -377,6 +381,10 @@ impl TextContext {
     }
 
     fn begin_prepare_pins(&mut self) {
+        // pins 生命周期只在本次 prepare：prepare 期间 shape 不可被 GC；返回后
+        // 已 shape 的 Buffer 由 metas/StableText 持有，无需 pin。
+        // 多 draw 安全：`Renderer::draw` 入口统一 `text_renderer.clear()`，
+        // 不会跨 draw 保留旧 metas 引用，因此 prepare 边界清理正确。
         self.frame_pinned.clear();
     }
 
@@ -903,6 +911,10 @@ impl TextDef {
 
 /// Digits 预 shape 表：`0-9` + 常用数学/HUD 符号（单字符各一条 ShapeKey）。
 /// 数字步进宽取 0-9 最大宽；符号用自身 glyph 宽。
+///
+/// **限制**：未在此表中的字符（如中文、emoji 等）会被 `Digits` 路径**静默丢弃**——
+/// 既不绘制也不占位（避免错误猜测宽度）。HUD 文本只适合数字 + ASCII 标点 + 少量拉丁字母（`e`/`E`）
+/// 的场景；非 ASCII 内容请用 `TextPart::normal` / `dynamic` 走完整 shape 路径。
 const HUD_DIGIT_TABLE: &str = "0123456789.,+-*/%=:()[]{}±×÷°−eE";
 
 #[inline]
@@ -1122,25 +1134,39 @@ impl HudLine {
     }
 
     pub fn set_text(&mut self, index: usize, s: impl Into<String>) {
+        if index >= self.parts.len() {
+            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+        }
         self.parts[index] = TextPart::normal(s);
     }
 
     pub fn set_dynamic(&mut self, index: usize, s: impl Into<String>) {
+        if index >= self.parts.len() {
+            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+        }
         self.parts[index] = TextPart::dynamic(s);
     }
 
     pub fn set_digits(&mut self, index: usize, s: impl Into<String>) {
+        if index >= self.parts.len() {
+            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+        }
         self.parts[index] = TextPart::digits(s);
     }
 
-    /// 原地改 Normal/Dynamic/Digits 槽的字符串（不换变体；Stable 槽忽略）。
+    /// 原地改 Normal/Dynamic/Digits 槽的字符串（不换变体；越界时自动扩充到该下标；Stable 槽忽略）。
     pub fn write_slot(&mut self, index: usize, s: &str) {
+        if index >= self.parts.len() {
+            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+        }
         match &mut self.parts[index] {
             TextPart::Normal(buf, _) | TextPart::Dynamic(buf, _) | TextPart::Digits(buf, _) => {
                 buf.clear();
                 buf.push_str(s);
             }
-            TextPart::Stable(_) => {}
+            TextPart::Stable(_) => {
+                // Stable 槽跨帧持有 Buffer，运行时改字符串会破坏一致性 → 忽略
+            }
         }
     }
 
@@ -1276,6 +1302,10 @@ impl TextEntry {
     }
 
     /// 裁剪/culling 用：近似逻辑宽度。
+    /// - `Normal`：`max_width` 参与换行，用 `max_width` 宽度（单行最大宽）；未设则按字符估算。
+    /// - `Parts`：`get_or_shape_text` 强制 `max_width=None`（单行 LTR 横拼，不换行），
+    ///   所以 `def.max_width` 即使设置了也不会生效；按段长估算更准确。
+    /// - `Stable`：构造时已记录 `line_width`。
     pub(crate) fn approx_width(&self) -> f32 {
         match self {
             TextEntry::Normal { text, def, .. } => {
@@ -1284,9 +1314,6 @@ impl TextEntry {
                     .unwrap_or_else(|| (text.chars().count() as f32) * fs * 0.6)
             }
             TextEntry::Parts { parts, def, .. } => {
-                if let Some(w) = def.max_width {
-                    return w;
-                }
                 let mut w = 0.0f32;
                 for p in parts {
                     match p {
@@ -1501,82 +1528,53 @@ impl TextEntryList {
             Stable(Arc<Buffer>),
         }
 
-        fn phys_transform_index(
-            transform_index: u32,
-            transform_table: &[f32],
-            global_transforms: &mut Vec<f32>,
-            scale: f32,
-        ) -> u32 {
-            let base = transform_index as usize * 12;
-            if base + 12 <= transform_table.len() {
-                let t = &transform_table[base..base + 12];
-                let is_identity = t[0] == 1.0
-                    && t[1] == 0.0
-                    && t[4] == 0.0
-                    && t[5] == 1.0
-                    && t[8] == 0.0
-                    && t[9] == 0.0;
-                if is_identity {
-                    0
-                } else {
-                    let idx = (global_transforms.len() / 12) as u32;
-                    global_transforms.extend_from_slice(&[
-                        t[0],
-                        t[1],
-                        0.0,
-                        0.0,
-                        t[4],
-                        t[5],
-                        0.0,
-                        0.0,
-                        t[8] * scale,
-                        t[9] * scale,
-                        1.0,
-                        0.0,
-                    ]);
-                    idx
-                }
-            } else {
-                0
-            }
+        /// 读取 transform_table[ti] 的列，越界返 None。
+        fn table_cols(table: &[f32], ti: u32) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+            let base = ti as usize * 12;
+            if base + 12 > table.len() { return None; }
+            let t = &table[base..base + 12];
+            Some(([t[0], t[1], 0.0], [t[4], t[5], 0.0], [t[8], t[9], 1.0]))
         }
 
-        /// 在 batch 局部空间上叠加 `override_transform`（右乘），写回 global_transforms。
-        fn phys_transform_index_with_override(
-            transform_index: u32,
-            transform_table: &[f32],
-            global_transforms: &mut Vec<f32>,
+        /// 计算 entry 的**物理空间**列向量（线性 + 平移已 × scale）。
+        /// `override` 存在时 = table[ti] * override；否则 = table[ti]。
+        /// 退化为恒等返 None。
+        fn composed_phys_cols(
+            ti: u32,
+            table: &[f32],
+            ov: Option<&crate::context::Transform>,
             scale: f32,
-            override_transform: &crate::context::Transform,
-        ) -> u32 {
-            let base = transform_index as usize * 12;
-            // 越界：仍应用 override（视作 I * O），避免静默丢变换
-            let m = if base + 12 <= transform_table.len() {
-                let t = &transform_table[base..base + 12];
-                crate::context::Transform::matrix(t[0], t[4], t[1], t[5], t[8], t[9])
+        ) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+            let m = if let Some((c0, c1, c2)) = table_cols(table, ti) {
+                crate::context::Transform::matrix(c0[0], c1[0], c0[1], c1[1], c2[0], c2[1])
             } else {
                 crate::context::Transform::IDENTITY
             };
-            // M' = M * O（override 作用在 batch 局部空间）
-            let composed = m.then(override_transform);
+            let composed = match ov {
+                Some(o) => m.then(o),
+                None => m,
+            };
             let (c0, c1, c2) = composed.to_cols();
-            let composed_is_identity = c0[0] == 1.0
-                && c0[1] == 0.0
-                && c1[0] == 0.0
-                && c1[1] == 1.0
-                && c2[0] == 0.0
-                && c2[1] == 0.0;
-            if composed_is_identity {
-                0
-            } else {
-                let idx = (global_transforms.len() / 12) as u32;
-                global_transforms.extend_from_slice(&[
-                    c0[0], c0[1], 0.0, 0.0,
-                    c1[0], c1[1], 0.0, 0.0,
-                    c2[0] * scale, c2[1] * scale, 1.0, 0.0,
-                ]);
-                idx
+            // to_cols() 总产出 [a c 0; b d 0; tx ty 1]，padding 三行/第三列固定；
+            // 比 6 float 足够判定 identity，padding 不参与语义。
+            let is_identity = c0[0] == 1.0 && c0[1] == 0.0
+                && c1[0] == 0.0 && c1[1] == 1.0
+                && c2[0] == 0.0 && c2[1] == 0.0;
+            if is_identity { None } else {
+                Some(([c0[0], c0[1], 0.0], [c1[0], c1[1], 0.0], [c2[0] * scale, c2[1] * scale, 1.0]))
             }
+        }
+
+        /// 把 composed 列写入 global_transforms，返回新 index；identity 返 0。
+        fn push_phys(global_transforms: &mut Vec<f32>, cols: ([f32; 3], [f32; 3], [f32; 3])) -> u32 {
+            let idx = (global_transforms.len() / 12) as u32;
+            let (c0, c1, c2) = cols;
+            global_transforms.extend_from_slice(&[
+                c0[0], c0[1], 0.0, 0.0,
+                c1[0], c1[1], 0.0, 0.0,
+                c2[0], c2[1], 1.0, 0.0,
+            ]);
+            idx
         }
 
         /// 逻辑 TextBounds → 物理（与 left/top × scale 一致）。全屏 default 不缩放。
@@ -1589,6 +1587,39 @@ impl TextEntryList {
                 top: (b.top as f32 * scale).round() as i32,
                 right: (b.right as f32 * scale).round() as i32,
                 bottom: (b.bottom as f32 * scale).round() as i32,
+            }
+        }
+
+        /// 把物理 TextBounds 的四个角过 `cols` 变换后取 AABB。
+        /// 用于让旋转/缩放文字的 clip 跟随变换（避免「旋转文字被未旋转的方框裁掉」）。
+        fn transform_bounds(
+            b: TextBounds,
+            cols: ([f32; 3], [f32; 3], [f32; 3]),
+        ) -> TextBounds {
+            let (c0, c1, c2) = cols;
+            let corners = [
+                (b.left as f32, b.top as f32),
+                (b.right as f32, b.top as f32),
+                (b.left as f32, b.bottom as f32),
+                (b.right as f32, b.bottom as f32),
+            ];
+            let mut min_x = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            for (cx, cy) in corners {
+                let wx = c0[0] * cx + c1[0] * cy + c2[0];
+                let wy = c0[1] * cx + c1[1] * cy + c2[1];
+                if wx < min_x { min_x = wx; }
+                if wx > max_x { max_x = wx; }
+                if wy < min_y { min_y = wy; }
+                if wy > max_y { max_y = wy; }
+            }
+            TextBounds {
+                left: min_x.round() as i32,
+                top: min_y.round() as i32,
+                right: max_x.round() as i32,
+                bottom: max_y.round() as i32,
             }
         }
 
@@ -1606,27 +1637,29 @@ impl TextEntryList {
                 (color_rgb.a * 255.0) as u8,
             );
             // clip：逻辑像素 → 物理（× scale）
-            let bounds = match entry.override_().clip {
-                Some(Some(b)) => scale_text_bounds(b, scale),
-                Some(None) => TextBounds::default(),
-                None => scale_text_bounds(batch_text_clip.unwrap_or_default(), scale),
-            };
-            // transform: override 在 batch 局部空间上右乘叠加
-            let phys_idx = if let Some(ref ov_xform) = entry.override_().transform {
-                phys_transform_index_with_override(
+            // clip：逻辑像素 → 物理（× scale），再过文字的物理变换 → 旋转/缩放下跟随文字
+            let (bounds, phys_idx) = {
+                let raw_bounds = match entry.override_().clip {
+                    Some(Some(b)) => scale_text_bounds(b, scale),
+                    Some(None) => TextBounds::default(),
+                    None => scale_text_bounds(batch_text_clip.unwrap_or_default(), scale),
+                };
+                // 计算 entry 的物理列（含 override），同步用于 bounds 与 phys_idx
+                let phys_cols = composed_phys_cols(
                     entry.transform_index(),
                     transform_table,
-                    global_transforms,
+                    entry.override_().transform.as_ref(),
                     scale,
-                    ov_xform,
-                )
-            } else {
-                phys_transform_index(
-                    entry.transform_index(),
-                    transform_table,
-                    global_transforms,
-                    scale,
-                )
+                );
+                let new_bounds = match phys_cols {
+                    Some(cols) if raw_bounds != TextBounds::default() => transform_bounds(raw_bounds, cols),
+                    _ => raw_bounds,
+                };
+                let idx = match phys_cols {
+                    Some(cols) => push_phys(global_transforms, cols),
+                    None => 0,
+                };
+                (new_bounds, idx)
             };
             let top = entry.pos().y * scale;
 

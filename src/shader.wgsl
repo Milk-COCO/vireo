@@ -84,7 +84,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         case 3u: {
             // line: sdf_params=(x1,y1,x2,y2), sdf_extra=(half_thickness,0)
             let a = in.sdf_params.xy; let b = in.sdf_params.zw;
-            let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / dot(ab, ab), 0.0, 1.0);
+            let ab = b - a;
+            // 防退化：|ab|² 接近 0 时 t 变 NaN；clamp 到 1e-8 让分母至少为正小数
+            let ab_len2 = max(dot(ab, ab), 1e-8);
+            let t = clamp(dot(in.local_pos - a, ab) / ab_len2, 0.0, 1.0);
             d = length(in.local_pos - (a + t * ab)) - in.sdf_extra.x;
             if feather > 0.0 {
                 if d >= feather { discard; }
@@ -95,10 +98,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 4u: {
             // triangle: sdf_params=(x1,y1,x2,y2), sdf_extra=(x3,y3)
+            // 防退化 normalize(0)：边长过短时退回法线 (1, 0)
             let a = in.sdf_params.xy; let b = in.sdf_params.zw; let c = in.sdf_extra;
-            let n_ab = normalize(vec2(-(b.y - a.y), b.x - a.x));
-            let n_bc = normalize(vec2(-(c.y - b.y), c.x - b.x));
-            let n_ca = normalize(vec2(-(a.y - c.y), a.x - c.x));
+            let ab = b - a; let bc = c - b; let ca = a - c;
+            let n_ab = select(vec2(0.0, 1.0), normalize(vec2(-ab.y, ab.x)), length(ab) > 1e-6);
+            let n_bc = select(vec2(0.0, 1.0), normalize(vec2(-bc.y, bc.x)), length(bc) > 1e-6);
+            let n_ca = select(vec2(0.0, 1.0), normalize(vec2(-ca.y, ca.x)), length(ca) > 1e-6);
             let d_ab = dot(in.local_pos - a, n_ab); let d_bc = dot(in.local_pos - b, n_bc); let d_ca = dot(in.local_pos - c, n_ca);
             let inside = d_ab > -0.0001 && d_bc > -0.0001 && d_ca > -0.0001;
             d = select(max(-d_ab, max(-d_bc, -d_ca)), -min(d_ab, min(d_bc, d_ca)), inside);

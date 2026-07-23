@@ -4,8 +4,8 @@ use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let logo_idx = app.load_texture("logo.png").expect("load logo");
-    let logo_bg_idx = app.load_texture("logo_bg.png").expect("load logo_bg");
+    let logo_idx = app.load_texture("logo.png");
+    let logo_bg_idx = app.load_texture("logo_bg.png");
     let idx = app.window(
         WindowDesc::new("可是我觉得这很神圣啊", 600, 400),
         None::<fn()>,
