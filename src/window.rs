@@ -320,25 +320,22 @@ impl VireoWindow {
         if ft.is_none() {
             match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(st) => *ft = Some(st),
-                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                    // 配置失效（resize / device loss）：reconfigure 后重试一次
+                wgpu::CurrentSurfaceTexture::Outdated
+                | wgpu::CurrentSurfaceTexture::Lost
+                | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                    // 尺寸/swapchain 过期：reconfigure 后重试（Suboptimal 也必须处理，否则 resize 后可能永远拿不到图）
                     let cfg = self.surface_config.borrow().clone();
                     self.surface.configure(&self.gpu.device, &cfg);
-                    if let wgpu::CurrentSurfaceTexture::Success(st) = self.surface.get_current_texture() {
-                        *ft = Some(st);
-                    } else {
-                        return DrawTimings {
-                            acquire_secs: t0.elapsed().as_secs_f64(),
-                            encode_secs: 0.0,
-                        };
+                    match self.surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(st)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
+                        _ => {
+                            return DrawTimings {
+                                acquire_secs: t0.elapsed().as_secs_f64(),
+                                encode_secs: 0.0,
+                            };
+                        }
                     }
-                }
-                wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                    // 亚最优（size mismatch 等）：仍可继续，下一帧 request_redraw 重新配置
-                    return DrawTimings {
-                        acquire_secs: t0.elapsed().as_secs_f64(),
-                        encode_secs: 0.0,
-                    };
                 }
                 wgpu::CurrentSurfaceTexture::Timeout
                 | wgpu::CurrentSurfaceTexture::Occluded
@@ -420,6 +417,11 @@ impl VireoWindow {
         if width == 0 || height == 0 {
             return;
         }
+        // 必须先释放未 present 的 surface texture，再 configure；
+        // 否则持有旧 swapchain 图时 reconfigure 会卡死/校验失败。
+        if let Some(st) = self.frame_texture.borrow_mut().take() {
+            self.gpu.queue.present(st);
+        }
         {
             let mut cfg = self.surface_config.borrow_mut();
             cfg.width = width;
@@ -450,6 +452,8 @@ impl VireoWindow {
             scale,
             dpi_scale,
         );
+        // 拖拽改大小时 OS 可能不走完整 about_to_wait；主动要下一帧
+        self.inner.request_redraw();
     }
 
     /// 获取当前投影矩阵（逻辑像素）
@@ -912,6 +916,8 @@ impl App {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
                     win.resize(size.width, size.height);
                 }
+                // Windows 拖边框时可能长时间不进 about_to_wait；清标记避免卡在「只 present 不 on_frame」
+                self.frame_in_tick = false;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
@@ -920,6 +926,7 @@ impl App {
                     let _ = scale_factor;
                     win.resize(size.width, size.height);
                 }
+                self.frame_in_tick = false;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
@@ -928,47 +935,45 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 // 多窗口：`request_redraw` 让所有窗口在同一 tick 各发一次 RedrawRequested；
-                // 只在首个触发时跑 `on_frame`、更新 FPS / frame_count，重复事件直接 present 该窗口即可。
-                if !self.frame_in_tick {
-                    self.frame_in_tick = true;
-                    let now = std::time::Instant::now();
-                    self.app.frame_count += 1;
-                    // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
-                    // dt（含启动延迟）不入滑动平均。第二帧起才计算真实 dt。
-                    if self.app.frame_count == 1 {
-                        self.app.last_frame = now;
-                    } else {
-                        let dt = now.duration_since(self.app.last_frame).as_secs_f64();
-                        self.app.last_frame = now;
-                        if dt > 0.0 && dt < 0.5 {
-                            self.app.frame_time = dt;
-                            self.app.fps_samples.push(dt);
-                            if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
-                                self.app.fps_samples.remove(0);
-                            }
-                            let sum: f64 = self.app.fps_samples.iter().sum();
-                            if sum > 0.0 {
-                                self.app.fps = self.app.fps_samples.len() as f64 / sum;
-                            }
+                // 只在首个触发时跑 `on_frame`。同 tick 后续事件不再重复跑逻辑。
+                if self.frame_in_tick {
+                    return;
+                }
+                self.frame_in_tick = true;
+                let now = std::time::Instant::now();
+                self.app.frame_count += 1;
+                // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
+                // dt（含启动延迟）不入滑动平均。第二帧起才计算真实 dt。
+                if self.app.frame_count == 1 {
+                    self.app.last_frame = now;
+                } else {
+                    let dt = now.duration_since(self.app.last_frame).as_secs_f64();
+                    self.app.last_frame = now;
+                    if dt > 0.0 && dt < 0.5 {
+                        self.app.frame_time = dt;
+                        self.app.fps_samples.push(dt);
+                        if self.app.fps_samples.len() > FPS_SAMPLE_CAP {
+                            self.app.fps_samples.remove(0);
+                        }
+                        let sum: f64 = self.app.fps_samples.iter().sum();
+                        if sum > 0.0 {
+                            self.app.fps = self.app.fps_samples.len() as f64 / sum;
                         }
                     }
+                }
 
-                    if (self.on_frame)(&self.app) {
-                        for w in &self.app.windows {
-                            w.present();
-                            w.inner.request_redraw();
-                        }
-                    } else {
-                        // 退出前 present 掉所有未 present 的 surface texture，
-                        // 避免 swapchain drop 时 Arc::into_inner 失败。
-                        for w in &self.app.windows {
-                            w.present();
-                        }
-                        event_loop.exit();
+                if (self.on_frame)(&self.app) {
+                    for w in &self.app.windows {
+                        w.present();
+                        w.inner.request_redraw();
                     }
-                } else if let Some(win) = self.app.windows.iter().find(|w| w.inner.id() == window_id) {
-                    // 同 tick 内重复事件：仅 present 该窗口（present 在未绘时是 no-op）。
-                    win.present();
+                } else {
+                    // 退出前 present 掉所有未 present 的 surface texture，
+                    // 避免 swapchain drop 时 Arc::into_inner 失败。
+                    for w in &self.app.windows {
+                        w.present();
+                    }
+                    event_loop.exit();
                 }
             }
 
