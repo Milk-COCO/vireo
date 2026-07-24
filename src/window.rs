@@ -454,8 +454,6 @@ impl VireoWindow {
             scale,
             dpi_scale,
         );
-        // 拖拽改大小时 OS 可能不走完整 about_to_wait；主动要下一帧
-        self.inner.request_redraw();
     }
 
     /// 获取当前投影矩阵（逻辑像素）
@@ -773,9 +771,6 @@ impl App {
             app: App,
             window_descs: Vec<WindowDesc>,
             created: bool,
-            /// 一个事件循环 tick 内是否已运行过本帧。多窗口下 `request_redraw`
-            /// 会让所有窗口在同一 tick 各发一次 `RedrawRequested`，避免重复跑 `on_frame`。
-            frame_in_tick: bool,
         }
 
         impl<F: FnMut(&App) -> bool + 'static> ApplicationHandler for Runner<F> {
@@ -889,16 +884,16 @@ impl App {
             }
 
             fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-                // 一帧结束：清掉 `frame_in_tick` 标记，下一 tick 首个 RedrawRequested 可重新跑 on_frame。
-                self.frame_in_tick = false;
-                // 持续驱动渲染：拖动/移动结束后若 OS 不再发 RedrawRequested，
-                // （Windows 拖边框、移动结束后），需要主动触发下一帧。
-                // 用 ControlFlow::Poll + request_redraw 实现。
-                // wgpu 自身在 present 时等 vsync 限速，CPU/GPU 不会狂转。
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-                for w in &self.app.windows {
-                    w.inner.request_redraw();
-                }
+                #[cfg(not(target_os = "windows"))]
+                // workaround
+                // 借鉴：bevy PR#18004 https://github.com/bevyengine/bevy/pull/18004
+                //       完整修复 Windows 拖动/缩放期间画面冻。
+                //       根因：winit#3272 https://github.com/rust-windowing/winit/issues/3272
+                //       Win32 移动与大小调整模态循环期间 about_to_wait 不触发。
+                //       本方案：Windows 平台在 RedrawRequested 末尾 request_redraw 自维持，
+                //       其余平台正常在 about_to_wait 中 redraw
+                self.redraw_requested(event_loop);
             }
 
             fn window_event(
@@ -926,8 +921,6 @@ impl App {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
                     win.resize(size.width, size.height);
                 }
-                // Windows 拖边框时可能长时间不进 about_to_wait；清标记避免卡在「只 present 不 on_frame」
-                self.frame_in_tick = false;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
@@ -936,7 +929,6 @@ impl App {
                     let _ = scale_factor;
                     win.resize(size.width, size.height);
                 }
-                self.frame_in_tick = false;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(win) = self.app.windows.iter_mut().find(|w| w.inner.id() == window_id) {
@@ -944,14 +936,6 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // 多窗口：同一 tick 内多窗口会各发一次；同窗口 OS 偶发重发。
-                // 早退避免重复跑 on_frame。**不在此处调 request_redraw**——
-                // 下一轮的 RedrawRequested 由 about_to_wait 统一触发，
-                // 避免和 about_to_wait 兜底形成自激死循环。
-                if self.frame_in_tick {
-                    return;
-                }
-                self.frame_in_tick = true;
                 let now = std::time::Instant::now();
                 self.app.frame_count += 1;
                 // 第一帧按 A 语义：没有「上一帧」，frame_time / fps 保持 0；
@@ -977,6 +961,15 @@ impl App {
                 if (self.on_frame)(&self.app) {
                     for w in &self.app.windows {
                         w.present();
+                        #[cfg(target_os = "windows")]
+                        // workaround
+                        // 借鉴：bevy PR#18004 https://github.com/bevyengine/bevy/pull/18004
+                        //       完整修复 Windows 拖动/缩放期间画面冻。
+                        //       根因：winit#3272 https://github.com/rust-windowing/winit/issues/3272
+                        //       Win32 移动与大小调整模态循环期间 about_to_wait 不触发。
+                        //       本方案：Windows 平台在 RedrawRequested 末尾 request_redraw 自维持，
+                        //       其余平台正常在 about_to_wait 中 redraw
+                        w.inner.request_redraw();
                     }
                 } else {
                     // 退出前 present 掉所有未 present 的 surface texture，
@@ -1206,7 +1199,6 @@ impl App {
                 },
                 window_descs,
                 created: false,
-                frame_in_tick: false,
             })
             .unwrap();
     }
