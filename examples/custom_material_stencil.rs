@@ -22,7 +22,7 @@ struct Pulse {
     hue: f32,
 };
 
-@group(4) @binding(0) var<storage> u_pulse: Pulse;
+@group(3) @binding(0) var<storage> u_pulse: Pulse;
 
 fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     let k = vec3<f32>(1.0, 2.0/3.0, 1.0/3.0);

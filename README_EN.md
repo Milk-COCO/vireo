@@ -61,6 +61,29 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - Window controls (fullscreen, icon, PresentMode, AA, high_dpi, …)
 - Frame stats + input (polling / events / touch)
 
+### Material Resource Layout
+
+Vireo stays within WebGPU's baseline four bind groups: `group 0` contains view parameters,
+`group 1` engine textures, `group 2` transform/polygon storage, and `group 3` user Material
+resources. Material WGSL may declare up to 1024B of storage uniforms and four independent
+texture/sampler pairs in `group 3`.
+
+```wgsl
+@group(3) @binding(0) var<storage> params: Params;
+@group(3) @binding(1) var tex0: texture_2d<f32>;
+@group(3) @binding(2) var samp0: sampler;
+
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+```
+
+Shape, text, and post share this Material ABI. The post source is bound separately by the engine
+in `group 1`, leaving Material tex0 available to user shaders; call
+`win.draw_post(&source_canvas.texture, &material)`. The default shape VS automatically selects
+per-pixel or per-sample interpolation for MSAA/SSAA. A single custom shape VS remains per-pixel
+across all AA modes.
+
 ## Examples
 
 Flat `examples/*.rs`; the file stem is the `--example` name.

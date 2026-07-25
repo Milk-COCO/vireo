@@ -33,7 +33,7 @@ var atlas_sampler: sampler;
 @group(1) @binding(0)
 var<uniform> params: Params;
 
-@group(3) @binding(0)
+@group(2) @binding(0)
 var<storage> transforms: array<mat3x3<f32>>;
 
 fn srgb_to_linear(c: f32) -> f32 {

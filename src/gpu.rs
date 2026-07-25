@@ -23,16 +23,27 @@ struct VertexOutput {
 };
 "#;
 
-fn default_shape_vertex_wgsl() -> String {
-    include_str!("shader.wgsl")
-        .replace("@interpolate(linear, sample)", "@interpolate(linear)")
+fn default_shape_vertex_wgsl(ssaa: bool) -> String {
+    let source = include_str!("shader.wgsl");
+    if ssaa {
+        source.to_owned()
+    } else {
+        source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+    }
 }
 
-fn material_fragment_source(source: &str, target: MaterialTarget) -> String {
+fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) -> String {
     match target {
         MaterialTarget::Shape => format!(
             "{}\n{}\n{}\n{}\n{}",
-            SHAPE_VERTEX_OUTPUT_WGSL,
+            if ssaa {
+                SHAPE_VERTEX_OUTPUT_WGSL.replace(
+                    "@interpolate(linear) local_pos",
+                    "@interpolate(linear, sample) local_pos",
+                )
+            } else {
+                SHAPE_VERTEX_OUTPUT_WGSL.to_owned()
+            },
             MATERIAL_INPUT_WGSL,
             SHAPE_FRAGMENT_SUPPORT_WGSL,
             source,
@@ -83,31 +94,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 "#
             )
         ),
-        MaterialTarget::Post => {
-            let cleaned = strip_wgsl_comments(source);
-            let has_tex0 = cleaned.contains("@binding(1)") || cleaned.contains("@binding (1)");
-            let resources = if has_tex0 {
-                ""
-            } else {
-                "@group(4) @binding(1) var material_tex0: texture_2d<f32>;\n@group(4) @binding(2) var material_samp0: sampler;"
-            };
-            let base = if has_tex0 {
-                "vec4<f32>(1.0)"
-            } else {
-                "textureSample(material_tex0, material_samp0, in.uv)"
-            };
-            format!(
-                "{}\n{}\n{}\n{}\n{}",
-                MATERIAL_INPUT_WGSL,
-                "struct PostVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };",
-                resources,
-                source,
-                format!(
-                    "@fragment\nfn fs_main(in: PostVertexOutput) -> @location(0) vec4<f32> {{\n    let material_in = MaterialInput(in.uv, {}, in.position.xy, vec4<f32>(0.0), vec2<f32>(0.0), 0u, 0.0, 0u, 2u);\n    return material_main(material_in);\n}}",
-                    base
-                )
-            )
-        }
+        MaterialTarget::Post => format!(
+            "{}\n{}\n{}\n{}\n{}",
+            MATERIAL_INPUT_WGSL,
+            "struct PostVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };",
+            "@group(1) @binding(0) var vireo_post_source: texture_2d<f32>;\n@group(1) @binding(1) var vireo_post_sampler: sampler;",
+            source,
+            "@fragment\nfn fs_main(in: PostVertexOutput) -> @location(0) vec4<f32> {\n    let base = textureSample(vireo_post_source, vireo_post_sampler, in.uv);\n    let material_in = MaterialInput(in.uv, base, in.position.xy, vec4<f32>(0.0), vec2<f32>(0.0), 0u, 0.0, 0u, 2u);\n    return material_main(material_in);\n}"
+        ),
     }
 }
 
@@ -133,7 +127,7 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var vireo_shape_texture: texture_2d<f32>;
 @group(1) @binding(1) var vireo_shape_sampler: sampler;
-@group(2) @binding(0) var<storage> polygon_edges: array<vec4<f32>>;
+@group(2) @binding(1) var<storage> polygon_edges: array<vec4<f32>>;
 
 fn vireo_apply_sdf(in: VertexOutput, base_color: vec4<f32>) -> vec4<f32> {
     var out_color = base_color;
@@ -283,13 +277,16 @@ fn material_pipeline_key(
     target: MaterialTarget,
     sample_count: u32,
     alpha_to_coverage: bool,
+    ssaa: bool,
     stencil_mode: bool,
     stencil_op: u32,
 ) -> u64 {
+    let ssaa = ssaa && target == MaterialTarget::Shape;
     target as u64
         | ((sample_count as u64) << 4)
         | ((alpha_to_coverage as u64) << 12)
         | ((stencil_mode as u64) << 13)
+        | ((ssaa as u64) << 14)
         | ((stencil_op.min(4) as u64) << 16)
 }
 
@@ -300,15 +297,15 @@ pub struct GpuContext {
     pub render_pipeline: wgpu::RenderPipeline,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
-    pub polygon_bind_group_layout: wgpu::BindGroupLayout,
-    pub transform_bind_group_layout: wgpu::BindGroupLayout,
+    pub engine_storage_bind_group_layout: wgpu::BindGroupLayout,
     pub custom_material_bgl: wgpu::BindGroupLayout,
     pub default_sampler: wgpu::Sampler,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub white_bind_group: Arc<wgpu::BindGroup>,
-    pub polygon_dummy_bind_group: wgpu::BindGroup,
-    pub transform_dummy_bind_group: wgpu::BindGroup,
+    pub engine_storage_dummy_bind_group: wgpu::BindGroup,
+    pub(crate) polygon_dummy_buf: wgpu::Buffer,
+    pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
     /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
@@ -345,16 +342,11 @@ impl GpuContext {
             required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         }
 
-        let mut limits = wgpu::Limits::default();
-        if limits.max_bind_groups < 5 {
-            limits.max_bind_groups = 5;
-        }
-
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("vireo device"),
                 required_features,
-                required_limits: limits,
+                required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::default(),
@@ -415,19 +407,31 @@ impl GpuContext {
                 ],
             });
 
-        let polygon_bind_group_layout =
+        let engine_storage_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("polygon bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                label: Some("engine storage bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -496,32 +500,7 @@ impl GpuContext {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let polygon_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("polygon dummy bind group"),
-            layout: &polygon_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: polygon_dummy_buf.as_entire_binding(),
-            }],
-        });
-
-        // Transform bind group layout（group 3，storage buffer of mat3x3）
-        let transform_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("transform bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        // Custom material bind group layout (group 4)：
+        // Custom material bind group layout (group 3)：
         //   0 storage (VS|FS) | 1 tex0 | 2 samp0 | 3 tex1 | 4 samp1 | 5 tex2 | 6 samp2 | 7 tex3 | 8 samp3
         let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
@@ -575,13 +554,19 @@ impl GpuContext {
             contents: bytemuck::cast_slice(&identity),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let transform_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("transform dummy bind group"),
-            layout: &transform_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: transform_dummy_buf.as_entire_binding(),
-            }],
+        let engine_storage_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("engine storage dummy bind group"),
+            layout: &engine_storage_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: transform_dummy_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: polygon_dummy_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let shader_src = include_str!("shader.wgsl");
@@ -614,8 +599,7 @@ impl GpuContext {
                 bind_group_layouts: &[
                     Some(&camera_bind_group_layout),
                     Some(&texture_bind_group_layout),
-                    Some(&polygon_bind_group_layout),
-                    Some(&transform_bind_group_layout),
+                    Some(&engine_storage_bind_group_layout),
                 ],
                 immediate_size: 0,
             })),
@@ -645,7 +629,7 @@ impl GpuContext {
             cache: None,
         });
 
-        let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode, &transform_bind_group_layout));
+        let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode, &engine_storage_bind_group_layout));
 
         let mut pipelines = FxHashMap::default();
         pipelines.insert(1, render_pipeline.clone());
@@ -672,15 +656,15 @@ impl GpuContext {
             render_pipeline,
             camera_bind_group_layout,
             texture_bind_group_layout,
-            polygon_bind_group_layout,
-            transform_bind_group_layout,
+            engine_storage_bind_group_layout,
             custom_material_bgl,
             default_sampler,
             white_texture,
             white_texture_view,
             white_bind_group,
-            polygon_dummy_bind_group,
-            transform_dummy_bind_group,
+            engine_storage_dummy_bind_group,
+            polygon_dummy_buf,
+            transform_dummy_buf,
             surface_format,
             text_ctx,
             adapter,
@@ -741,8 +725,7 @@ impl GpuContext {
             bind_group_layouts: &[
                 Some(&self.camera_bind_group_layout),
                 Some(&self.texture_bind_group_layout),
-                Some(&self.polygon_bind_group_layout),
-                Some(&self.transform_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -818,8 +801,7 @@ impl GpuContext {
             bind_group_layouts: &[
                 Some(&self.camera_bind_group_layout),
                 Some(&self.texture_bind_group_layout),
-                Some(&self.polygon_bind_group_layout),
-                Some(&self.transform_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -1035,7 +1017,7 @@ impl GpuContext {
     /// The source must define `fn material_main(in: MaterialInput) -> vec4<f32>`.
     /// Shape rendering preserves the engine texture/color and applies SDF clipping and feathering
     /// after `material_main`. Text starts with the glyph atlas color, while post starts by sampling
-    /// group 4 `material_tex0` with `material_samp0`.
+    /// group 1 source texture. Material-owned textures remain in group 3.
     pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
         self.create_material_inner(source, None)
     }
@@ -1073,10 +1055,11 @@ impl GpuContext {
                 1,
                 false,
                 false,
+                false,
                 0,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, 0),
+                material_pipeline_key(target, 1, false, false, false, 0),
                 Arc::new(pipeline),
             );
         }
@@ -1175,13 +1158,18 @@ impl GpuContext {
         target: MaterialTarget,
         sample_count: u32,
         alpha_to_coverage: bool,
+        ssaa: bool,
         stencil_mode: bool,
         stencil_op: u32,
     ) -> Arc<wgpu::RenderPipeline> {
+        let ssaa = ssaa
+            && target == MaterialTarget::Shape
+            && material.shape_vertex_source.is_none();
         let key = material_pipeline_key(
             target,
             sample_count,
             alpha_to_coverage,
+            ssaa,
             stencil_mode,
             stencil_op,
         );
@@ -1197,6 +1185,7 @@ impl GpuContext {
             target,
             sample_count,
             alpha_to_coverage,
+            ssaa,
             stencil_mode,
             stencil_op,
         ).expect("material WGSL was validated by create_material");
@@ -1212,11 +1201,15 @@ impl GpuContext {
         target: MaterialTarget,
         sample_count: u32,
         alpha_to_coverage: bool,
+        ssaa: bool,
         stencil_mode: bool,
         stencil_op: u32,
     ) -> Result<wgpu::RenderPipeline, String> {
+        let ssaa = ssaa
+            && target == MaterialTarget::Shape
+            && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let fragment_source = material_fragment_source(source, target);
+        let fragment_source = material_fragment_source(source, target, ssaa);
         let depth_stencil = if !stencil_mode {
             None
         } else if target == MaterialTarget::Text {
@@ -1271,7 +1264,10 @@ impl GpuContext {
         let pipeline = match target {
             MaterialTarget::Shape => self.create_shape_material_pipeline(
                 &fragment_source,
-                shape_vertex_source.unwrap_or(&default_shape_vertex_wgsl()),
+                shape_vertex_source
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| default_shape_vertex_wgsl(ssaa))
+                    .as_str(),
                 multisample,
                 depth_stencil,
                 stencil_op,
@@ -1311,8 +1307,7 @@ impl GpuContext {
             label: Some("material shape layout"),
             bind_group_layouts: &[
                 Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
-                Some(&self.polygon_bind_group_layout), Some(&self.transform_bind_group_layout),
-                Some(&self.custom_material_bgl),
+                Some(&self.engine_storage_bind_group_layout), Some(&self.custom_material_bgl),
             ],
             immediate_size: 0,
         });
@@ -1338,7 +1333,7 @@ impl GpuContext {
         });
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("material post layout"),
-            bind_group_layouts: &[None, None, None, None, Some(&self.custom_material_bgl)],
+            bind_group_layouts: &[None, Some(&self.texture_bind_group_layout), None, Some(&self.custom_material_bgl)],
             immediate_size: 0,
         });
         self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1353,43 +1348,15 @@ impl GpuContext {
     }
 }
 
-fn strip_wgsl_comments(src: &str) -> String {
-    let bytes = src.as_bytes();
-    let mut out = String::with_capacity(src.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'/' {
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            if bytes[i + 1] == b'*' {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
 #[cfg(test)]
 mod custom_material_tests {
     use super::*;
 
     #[test]
     fn target_pipeline_keys_are_distinct() {
-        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, 0);
-        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, 0);
-        let post = material_pipeline_key(MaterialTarget::Post, 4, false, false, 0);
+        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0);
+        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0);
+        let post = material_pipeline_key(MaterialTarget::Post, 4, false, false, false, 0);
         assert_ne!(shape, text);
         assert_ne!(shape, post);
         assert_ne!(text, post);
@@ -1399,22 +1366,61 @@ mod custom_material_tests {
     fn material_stencil_key_ignores_unused_flags() {
         // 同 sample/atc/op 必须同 key
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Shape, 4, true, true, 2),
-            material_pipeline_key(MaterialTarget::Shape, 4, true, true, 2)
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2),
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, 1),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, 2)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 1, false, true, 1),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, 1)
+            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1)
         );
         // 不同 target 必须不同 key
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, 1),
-            material_pipeline_key(MaterialTarget::Text, 4, false, true, 1)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1),
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1)
         );
+    }
+
+    #[test]
+    fn material_shape_ssaa_pipeline_key_is_distinct() {
+        assert_ne!(
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0),
+        );
+        assert_eq!(
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0),
+            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0),
+        );
+    }
+
+    #[test]
+    fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
+        assert!(default_shape_vertex_wgsl(true).contains("@interpolate(linear, sample)"));
+        assert!(!default_shape_vertex_wgsl(false).contains("@interpolate(linear, sample)"));
+    }
+
+    #[test]
+    fn post_material_uses_engine_source_texture() {
+        let source = material_fragment_source(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }",
+            MaterialTarget::Post,
+            false,
+        );
+        assert!(source.contains("@group(1) @binding(0) var vireo_post_source"));
+        assert!(source.contains("textureSample(vireo_post_source, vireo_post_sampler, in.uv)"));
+        assert!(!source.contains("material_tex0"));
+    }
+
+    #[test]
+    fn material_shape_fragment_matches_ssaa_interpolation() {
+        let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
+        assert!(material_fragment_source(shader, MaterialTarget::Shape, true)
+            .contains("@interpolate(linear, sample) local_pos"));
+        assert!(!material_fragment_source(shader, MaterialTarget::Shape, false)
+            .contains("@interpolate(linear, sample) local_pos"));
     }
 }
 
@@ -1447,7 +1453,7 @@ pub struct Vertex {
     /// 5 arc: (start_angle, end_angle)
     /// 其余 type 未使用。
     pub sdf_extra: [f32; 2],
-    /// 变换矩阵索引，指向 `transforms` storage buffer（group 3）。
+    /// 变换矩阵索引，指向 `transforms` storage buffer（group 2 binding 0）。
     /// 0 = 恒等矩阵（默认）。
     pub transform_index: u32,
 }

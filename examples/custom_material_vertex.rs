@@ -19,7 +19,7 @@ struct Camera {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(3) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,

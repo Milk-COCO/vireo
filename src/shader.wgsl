@@ -28,8 +28,8 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var tex_sampler: sampler;
-@group(2) @binding(0) var<storage> polygon_edges: array<vec4<f32>>;
-@group(3) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+@group(2) @binding(1) var<storage> polygon_edges: array<vec4<f32>>;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {

@@ -465,9 +465,9 @@ impl TextRenderer {
         }
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
-        pass.set_bind_group(3, transform_bind_group, &[]);
+        pass.set_bind_group(2, transform_bind_group, &[]);
         if let Some((_, bind_group)) = material {
-            pass.set_bind_group(4, bind_group, &[]);
+            pass.set_bind_group(3, bind_group, &[]);
         }
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(byte_offset..));
         pass.draw(0..4, 0..vertex_count);

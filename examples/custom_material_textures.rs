@@ -16,11 +16,11 @@ struct Mix {
     mix: f32,
 };
 
-@group(4) @binding(0) var<storage> u_mix: Mix;
-@group(4) @binding(1) var tex0: texture_2d<f32>;
-@group(4) @binding(2) var samp0: sampler;
-@group(4) @binding(3) var tex1: texture_2d<f32>;
-@group(4) @binding(4) var samp1: sampler;
+@group(3) @binding(0) var<storage> u_mix: Mix;
+@group(3) @binding(1) var tex0: texture_2d<f32>;
+@group(3) @binding(2) var samp0: sampler;
+@group(3) @binding(3) var tex1: texture_2d<f32>;
+@group(3) @binding(4) var samp1: sampler;
 
 fn material_main(in: MaterialInput) -> vec4<f32> {
     let uv = in.uv;
@@ -109,7 +109,7 @@ fn main() {
         let mut title = DrawBatch::new();
         draw_text(
             &mut title.texts,
-            "tex0 + tex1 mix (group4 bind 1/3/4/5)",
+            "tex0 + tex1 mix (group3 bindings 1-4)",
             Pos::new(16.0, 16.0),
             TextDef::default().font_size(14.0),
             TextOverride::from_color(WHITE),

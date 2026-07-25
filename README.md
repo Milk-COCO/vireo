@@ -61,6 +61,26 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - 窗口控制（全屏、图标、PresentMode、AA、high_dpi 等）
 - 帧统计 + 输入（轮询 / 事件 / 触摸）
 
+### Material 资源布局
+
+Vireo 固定使用 WebGPU 保底的 4 个 bind group：`group 0` 为视口参数，`group 1` 为引擎纹理，
+`group 2` 为 transform/polygon storage，`group 3` 为用户 Material。Material WGSL 在 `group 3`
+声明最多 1024B storage uniform 和 4 组独立 texture/sampler。
+
+```wgsl
+@group(3) @binding(0) var<storage> params: Params;
+@group(3) @binding(1) var tex0: texture_2d<f32>;
+@group(3) @binding(2) var samp0: sampler;
+
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+```
+
+Shape、text、post 共用这份 Material ABI。Post 的场景源纹理由引擎单独绑定到 `group 1`，不会占用
+Material 的 tex0；调用方式为 `win.draw_post(&source_canvas.texture, &material)`。默认 shape VS 会按
+MSAA/SSAA 自动选择 per-pixel/per-sample 插值；单份自定义 shape VS 在所有 AA 模式下保持 per-pixel。
+
 ## 示例
 
 扁平 `examples/*.rs`，文件名即 `cargo run --example` 名。

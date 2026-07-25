@@ -308,9 +308,9 @@ impl VireoWindow {
 
     /// 在当前 surface texture 上执行一次全屏 Material pass。
     ///
-    /// 通常先把场景画到 [`OffscreenCanvas`](crate::offscreen::OffscreenCanvas)，将其纹理
-    /// 绑定到 material slot 0，再调用此方法贴回窗口。不能同时采样当前 surface 本身。
-    pub fn draw_post(&self, material: &crate::material::Material) {
+    /// 通常先把场景画到 [`OffscreenCanvas`](crate::offscreen::OffscreenCanvas)，再将其
+    /// [`Texture`](crate::texture::Texture) 作为 `source` 传入。不能采样当前 surface 本身。
+    pub fn draw_post(&self, source: &crate::texture::Texture, material: &crate::material::Material) {
         let mut ft = self.frame_texture.borrow_mut();
         if ft.is_none() {
             match self.surface.get_current_texture() {
@@ -336,7 +336,7 @@ impl VireoWindow {
             .create_view(&wgpu::TextureViewDescriptor::default());
         drop(ft);
         let target = RenderTarget::from_texture_view(view);
-        target.draw_post(&self.renderer.borrow(), material);
+        target.draw_post(&self.renderer.borrow(), source, material);
     }
 
     /// 与 [`draw`] 相同，并返回分段耗时（秒），用于卡顿诊断。

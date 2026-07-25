@@ -31,11 +31,6 @@ fn main() {
             mat.clone()
         } else {
             let mat = win.gpu().create_material(WGSL).expect("material WGSL");
-            mat.set_texture(
-                &win.gpu().device,
-                scene_canvas.view(),
-                &win.gpu().default_sampler,
-            );
             *material.borrow_mut() = Some(mat.clone());
             mat
         };
@@ -58,7 +53,7 @@ fn main() {
             TextOverride::from_color(WHITE),
         );
         scene_canvas.draw(Some(Color::new(0.055, 0.07, 0.11, 1.0)), &[&batch]);
-        win.draw_post(&mat);
+        win.draw_post(&scene_canvas.texture, &mat);
         true
     });
 }

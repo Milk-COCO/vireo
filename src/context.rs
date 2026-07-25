@@ -106,8 +106,8 @@ impl RenderTarget {
     }
 
     /// Runs a fullscreen material pass over this target with `Load` semantics.
-    pub fn draw_post(&self, renderer: &Renderer, material: &Material) {
-        renderer.draw_post(self, material);
+    pub fn draw_post(&self, renderer: &Renderer, source: &crate::texture::Texture, material: &Material) {
+        renderer.draw_post(self, source, material);
     }
 }
 
@@ -132,9 +132,8 @@ pub struct Renderer {
     msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     ds_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    polygon_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
     transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    transform_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
+    engine_storage_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
     /// 逻辑视口尺寸（逻辑像素）
     logical_width: u32,
     logical_height: u32,
@@ -192,9 +191,8 @@ impl Renderer {
             msaa_tex: RefCell::new(None),
             ds_tex: RefCell::new(None),
             polygon_edge_buf: RefCell::new(None),
-            polygon_bind_group_cache: RefCell::new(None),
             transform_buf: RefCell::new(None),
-            transform_bind_group_cache: RefCell::new(None),
+            engine_storage_bind_group_cache: RefCell::new(None),
             scratch_vdata: RefCell::new(Vec::new()),
             scratch_idata: RefCell::new(Vec::new()),
             scratch_transforms: RefCell::new(Vec::new()),
@@ -795,7 +793,7 @@ impl Renderer {
         }
 
         // ---- 上传多边形边数据 ----
-        let polygon_bind_group: Option<wgpu::BindGroup> = if !polygon_edges_global.is_empty() {
+        if !polygon_edges_global.is_empty() {
             let size = (polygon_edges_global.len() * 4) as u64;
             self.ensure_polygon_edge_buffer(size);
             {
@@ -803,22 +801,7 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&polygon_edges_global));
             }
-            let mut cache = self.polygon_bind_group_cache.borrow_mut();
-            if cache.is_none() {
-                let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("polygon bind group"),
-                    layout: &self.gpu.polygon_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.polygon_edge_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
-                    }],
-                });
-                *cache = Some(bg);
-            }
-            cache.clone()
-        } else {
-            None
-        };
+        }
 
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
         {
@@ -855,6 +838,7 @@ impl Renderer {
                                 MaterialTarget::Text,
                                 self.sample_count,
                                 self.alpha_to_coverage,
+                                false,
                                 uses_stencil,
                                 if text_tests_stencil { 2 } else { 0 },
                             ),
@@ -865,7 +849,7 @@ impl Renderer {
         }
 
         // ---- 上传 transform 数据 ----
-        let transform_bind_group: Option<wgpu::BindGroup> = if !global_transforms.is_empty() {
+        if !global_transforms.is_empty() {
             let size = (global_transforms.len() * 4) as u64;
             self.ensure_transform_buffer(size);
             {
@@ -873,21 +857,30 @@ impl Renderer {
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&global_transforms));
             }
-            let mut cache = self.transform_bind_group_cache.borrow_mut();
+        }
+        let engine_storage_bind_group = {
+            let mut cache = self.engine_storage_bind_group_cache.borrow_mut();
             if cache.is_none() {
-                let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("transform bind group"),
-                    layout: &self.gpu.transform_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.transform_buf.borrow().as_ref().unwrap().0.as_entire_binding(),
-                    }],
-                });
-                *cache = Some(bg);
+                let transforms = self.transform_buf.borrow();
+                let polygons = self.polygon_edge_buf.borrow();
+                let transform_buf = transforms
+                    .as_ref()
+                    .map(|(buf, _)| buf)
+                    .unwrap_or(&self.gpu.transform_dummy_buf);
+                let polygon_buf = polygons
+                    .as_ref()
+                    .map(|(buf, _)| buf)
+                    .unwrap_or(&self.gpu.polygon_dummy_buf);
+                *cache = Some(self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("engine storage bind group"),
+                    layout: &self.gpu.engine_storage_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: transform_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: polygon_buf.as_entire_binding() },
+                    ],
+                }));
             }
-            cache.clone()
-        } else {
-            None
+            cache.clone().unwrap()
         };
 
         // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
@@ -934,8 +927,7 @@ impl Renderer {
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
             let mut text_ctx = self.gpu.text_ctx.borrow_mut();
-            let poly_bg = polygon_bind_group.as_ref().unwrap_or(&self.gpu.polygon_dummy_bind_group);
-            let xform_bg = transform_bind_group.as_ref().unwrap_or(&self.gpu.transform_dummy_bind_group);
+            let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
@@ -1001,6 +993,7 @@ impl Renderer {
                                     MaterialTarget::Shape,
                                     self.sample_count,
                                     self.alpha_to_coverage,
+                                    self.ssaa,
                                     true,
                                     pipe_op.min(4),
                                 );
@@ -1010,6 +1003,7 @@ impl Renderer {
                                     MaterialTarget::Shape,
                                     self.sample_count,
                                     self.alpha_to_coverage,
+                                    self.ssaa,
                                     false,
                                     0,
                                 );
@@ -1035,12 +1029,11 @@ impl Renderer {
                         };
                         pass.set_pipeline(pipe);
                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                        pass.set_bind_group(2, poly_bg, &[]);
-                        pass.set_bind_group(3, xform_bg, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
                         if use_custom {
                             let mat = info.custom_material.as_ref().unwrap();
                             let bg = mat.bind_group.borrow();
-                            pass.set_bind_group(4, &*bg, &[]);
+                            pass.set_bind_group(3, &*bg, &[]);
                         }
                         if let Some(vb) = vbuf.as_ref() {
                             pass.set_vertex_buffer(0, vb.slice(..));
@@ -1099,7 +1092,7 @@ impl Renderer {
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
                         &mut pass,
-                        xform_bg,
+                        engine_bg,
                         start,
                         count,
                         if uses_stencil { Some(text_ref) } else { None },
@@ -1115,11 +1108,12 @@ impl Renderer {
     }
 
     /// Runs a fullscreen post material directly on `target` using a `Load` render pass.
-    pub fn draw_post(&self, target: &RenderTarget, material: &Material) {
+    pub fn draw_post(&self, target: &RenderTarget, source: &crate::texture::Texture, material: &Material) {
         let pipeline = self.gpu.ensure_material_pipeline(
             material,
             MaterialTarget::Post,
             1,
+            false,
             false,
             false,
             0,
@@ -1139,8 +1133,9 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&pipeline);
+            pass.set_bind_group(1, &source.bind_group, &[]);
             let bind_group = material.bind_group.borrow();
-            pass.set_bind_group(4, &*bind_group, &[]);
+            pass.set_bind_group(3, &*bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         self.gpu.queue.submit([encoder.finish()]);
@@ -1226,7 +1221,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *slot = Some((buf, new_cap));
-        *self.polygon_bind_group_cache.borrow_mut() = None;
+        *self.engine_storage_bind_group_cache.borrow_mut() = None;
     }
 
     fn ensure_transform_buffer(&self, size: u64) {
@@ -1242,7 +1237,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *slot = Some((buf, new_cap));
-        *self.transform_bind_group_cache.borrow_mut() = None;
+        *self.engine_storage_bind_group_cache.borrow_mut() = None;
     }
 }
 

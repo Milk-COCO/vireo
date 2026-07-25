@@ -132,3 +132,40 @@ fn gpu_bench_scenes() {
     measure_scene("Polygons x200", &canvas, scene_polygons, FRAMES);
     measure_scene("Full SDF+xform", &canvas, scene_full, FRAMES);
 }
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_shape_text_ssaa_and_post_paths() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * vec3<f32>(0.8, 1.0, 0.9), in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let source = OffscreenCanvas::with_aa(
+        &gpu,
+        320,
+        180,
+        AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },
+        0.0,
+    );
+    let output = OffscreenCanvas::new(&gpu, 320, 180);
+    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+
+    let mut batch = DrawBatch::new();
+    batch.custom_material = Some(material.clone());
+    batch.sdf_feather = Some(1.0);
+    draw_rounded_rect(&mut batch, Pos::new(20.0, 20.0), 280.0, 140.0, 20.0, Some(WHITE));
+    draw_text(
+        &mut batch.texts,
+        "shape + text + SSAA",
+        Pos::new(60.0, 75.0),
+        TextDef::default().font_size(20.0),
+        TextOverride::from_color(WHITE),
+    );
+
+    source.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
+    output.draw_post(&source.texture, &material);
+}

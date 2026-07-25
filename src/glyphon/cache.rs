@@ -38,14 +38,14 @@ struct Inner {
     vertex_buffers: [Option<wgpu::VertexBufferLayout<'static>>; 1],
     atlas_layout: BindGroupLayout,
     uniforms_layout: BindGroupLayout,
-    transform_layout: BindGroupLayout,
+    engine_storage_layout: BindGroupLayout,
     pipeline_layout: PipelineLayout,
     cache: InnerCache,
 }
 
 impl Cache {
     /// Creates a new `Cache` with the given `device` and transform bind group layout.
-    pub fn new(device: &Device, transform_bgl: &BindGroupLayout) -> Self {
+    pub fn new(device: &Device, engine_storage_bgl: &BindGroupLayout) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("glyphon sampler"),
             min_filter: FilterMode::Nearest,
@@ -153,8 +153,7 @@ impl Cache {
             bind_group_layouts: &[
                 Some(&atlas_layout),   // group 0: color/mask atlas + sampler
                 Some(&uniforms_layout),// group 1: screen resolution
-                None,                  // group 2: unused (geometry uses polygon edges)
-                Some(transform_bgl),   // group 3: transforms (shared with geometry)
+                Some(engine_storage_bgl), // group 2: transforms + polygon dummy
             ],
             ..Default::default()
         });
@@ -164,7 +163,7 @@ impl Cache {
             shader,
             vertex_buffers: [Some(vertex_buffer_layout)],
             uniforms_layout,
-            transform_layout: transform_bgl.clone(),
+            engine_storage_layout: engine_storage_bgl.clone(),
             atlas_layout,
             pipeline_layout,
             cache: Mutex::new(Vec::new()),
@@ -284,8 +283,7 @@ impl Cache {
             bind_group_layouts: &[
                 Some(&self.0.atlas_layout),
                 Some(&self.0.uniforms_layout),
-                None,
-                Some(&self.0.transform_layout),
+                Some(&self.0.engine_storage_layout),
                 Some(material_layout),
             ],
             ..Default::default()

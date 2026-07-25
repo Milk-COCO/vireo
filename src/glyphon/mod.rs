@@ -127,7 +127,7 @@ pub struct TextArea<'a> {
     pub default_color: Color,
     /// Additional custom glyphs to render.
     pub custom_glyphs: &'a [CustomGlyph],
-    /// Index into the `transforms` storage buffer (group 3).
+    /// Index into the `transforms` storage buffer (group 2 binding 0).
     /// 0 = identity (default).
     pub transform_index: u32,
 }

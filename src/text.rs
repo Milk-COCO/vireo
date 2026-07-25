@@ -1926,7 +1926,7 @@ impl TextEntryList {
                 &text_ctx.text_atlas,
                 &text_ctx.viewport,
                 render_pass,
-                &gpu.transform_dummy_bind_group,
+                &gpu.engine_storage_dummy_bind_group,
             )
             .expect("glyphon render failed");
     }

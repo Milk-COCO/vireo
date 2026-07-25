@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-/// group 4 纹理槽数量（tex0..tex3）。
+/// group 3 纹理槽数量（tex0..tex3）。
 pub const MATERIAL_TEX_SLOTS: usize = 4;
 
-/// group 4 `@binding(0)` storage uniform 字节上限。
+/// group 3 `@binding(0)` storage uniform 字节上限。
 pub const MATERIAL_UNIFORM_SIZE: usize = 1024;
 
 /// 运行时自定义 shader 材质。
@@ -14,7 +14,7 @@ pub const MATERIAL_UNIFORM_SIZE: usize = 1024;
 /// 由 [`GpuContext::create_material`](crate::gpu::GpuContext::create_material) 创建。
 /// **同一 Material 可同时用于形状、文字、后处理**——引擎按用途自动选对应顶点布局与 pipeline。
 ///
-/// **group 4 layout**：
+/// **group 3 layout**：
 /// - `@binding(0)` storage uniform（[`MATERIAL_UNIFORM_SIZE`] B，**VERTEX|FRAGMENT**）
 /// - `@binding(1)` tex0 · `@binding(2)` samp0
 /// - `@binding(3)` tex1 · `@binding(4)` samp1
@@ -26,7 +26,7 @@ pub struct Material {
     pub(crate) bgl: wgpu::BindGroupLayout,
     pub(crate) uniform_buf: wgpu::Buffer,
     pub(crate) bind_group: RefCell<wgpu::BindGroup>,
-    /// 统一 pipeline 缓存：key = (Target, sample_count, atc, stencil_op?)
+    /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
     pub(crate) pipelines: RefCell<FxHashMap<u64, Arc<wgpu::RenderPipeline>>>,
     pub(crate) source: String,
     pub(crate) shape_vertex_source: Option<String>,
