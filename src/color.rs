@@ -160,6 +160,54 @@ impl From<glam::Vec4> for Color {
     }
 }
 
+/// HSL → RGB
+///
+/// `h`: 0–360, `s`: 0–1, `l`: 0–1
+pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    Color::new(r + m, g + m, b + m, 1.0)
+}
+
+/// RGB → HSL
+///
+/// 返回 `(h, s, l)`，`h`: 0–360，`s`: 0–1，`l`: 0–1
+pub fn rgb_to_hsl(color: Color) -> (f32, f32, f32) {
+    let r = color.r;
+    let g = color.g;
+    let b = color.b;
+    let cmax = r.max(g).max(b);
+    let cmin = r.min(g).min(b);
+    let delta = cmax - cmin;
+    let l = (cmax + cmin) / 2.0;
+    if delta == 0.0 {
+        return (0.0, 0.0, l);
+    }
+    let s = delta / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if cmax == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if cmax == g {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    (if h < 0.0 { h + 360.0 } else { h }, s, l)
+}
+
 /// u8 构建颜色
 #[macro_export]
 macro_rules! color_u8 {
@@ -295,6 +343,56 @@ mod tests {
     fn color_u8_macro_zero() {
         let c = color_u8!(0, 0, 0, 0);
         assert_eq!(c, Color::new(0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn hsl_red_is_red() {
+        let c = hsl_to_rgb(0.0, 1.0, 0.5);
+        assert!((c.r - 1.0).abs() < 0.01);
+        assert!((c.g).abs() < 0.01);
+        assert!((c.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_green_is_green() {
+        let c = hsl_to_rgb(120.0, 1.0, 0.5);
+        assert!((c.r).abs() < 0.01);
+        assert!((c.g - 1.0).abs() < 0.01);
+        assert!((c.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_blue_is_blue() {
+        let c = hsl_to_rgb(240.0, 1.0, 0.5);
+        assert!((c.r).abs() < 0.01);
+        assert!((c.g).abs() < 0.01);
+        assert!((c.b - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_black_is_black() {
+        let c = hsl_to_rgb(0.0, 0.0, 0.0);
+        assert!((c.r).abs() < 0.01);
+        assert!((c.g).abs() < 0.01);
+        assert!((c.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_white_is_white() {
+        let c = hsl_to_rgb(0.0, 0.0, 1.0);
+        assert!((c.r - 1.0).abs() < 0.01);
+        assert!((c.g - 1.0).abs() < 0.01);
+        assert!((c.b - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_roundtrip() {
+        let orig = (200.0, 0.7, 0.4);
+        let c = hsl_to_rgb(orig.0, orig.1, orig.2);
+        let (h, s, l) = rgb_to_hsl(c);
+        assert!((h - orig.0).abs() < 0.5, "h diff: {}", (h - orig.0).abs());
+        assert!((s - orig.1).abs() < 0.01, "s diff: {}", (s - orig.1).abs());
+        assert!((l - orig.2).abs() < 0.01, "l diff: {}", (l - orig.2).abs());
     }
 
     #[test]
