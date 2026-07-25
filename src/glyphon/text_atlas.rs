@@ -389,6 +389,24 @@ impl TextAtlas {
             .get_or_create_pipeline(device, self.format, multisample, depth_stencil)
     }
 
+    pub(crate) fn create_material_pipeline(
+        &self,
+        device: &Device,
+        material_layout: &wgpu::BindGroupLayout,
+        fragment_source: &str,
+        multisample: MultisampleState,
+        depth_stencil: Option<DepthStencilState>,
+    ) -> RenderPipeline {
+        self.cache.create_material_pipeline(
+            device,
+            material_layout,
+            fragment_source,
+            self.format,
+            multisample,
+            depth_stencil,
+        )
+    }
+
     fn rebind(&mut self, device: &wgpu::Device) {
         self.bind_group = self.cache.create_atlas_bind_group(
             device,

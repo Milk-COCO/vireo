@@ -55,6 +55,7 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - Filled + outlined shapes (SDF / geometry paths via `sdf_feather`)
 - Affine transform table (vertex `transform_index`; slot 0 reserved as identity)
 - Text: shape cache, HUD parts, `StableText`, custom fonts / attrs
+- **Custom Material**: one `material_main(MaterialInput)` for shape / text / post; MSAA, stencil, and SDF aware
 - Multi-window + offscreen rendering
 - Textures (file / bytes / RGBA, UV subregions)
 - Window controls (fullscreen, icon, PresentMode, AA, high_dpi, …)
@@ -99,6 +100,14 @@ cargo run --example batch_child_clip
 cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
 cargo run --example clip_rect_demo
+
+# Custom Material
+cargo run --example custom_material
+cargo run --example custom_material_stencil
+cargo run --example custom_material_textures
+cargo run --example custom_material_vertex
+cargo run --example custom_material_text
+cargo run --example custom_material_post
 
 # Window / input / offscreen
 cargo run --example window_controls

@@ -1,12 +1,15 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
 use crate::gpu::GpuContext;
+use crate::gpu::MaterialTarget;
+use crate::material::Material;
 use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
 
 /// 轴对齐矩形，用于 culling 的包围盒/视口。
@@ -100,6 +103,11 @@ impl RenderTarget {
     /// 使用给定的 Renderer 渲染 batch 到此 target
     pub fn draw(&self, renderer: &Renderer, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
         renderer.draw(self, clear_color, batches);
+    }
+
+    /// Runs a fullscreen material pass over this target with `Load` semantics.
+    pub fn draw_post(&self, renderer: &Renderer, material: &Material) {
+        renderer.draw_post(self, material);
     }
 }
 
@@ -370,6 +378,9 @@ impl Renderer {
             scissor_push: Option<Rect>,
             /// ScissorPop 事件：恢复前一级 scissor。
             scissor_pop: bool,
+            /// 自定义材质（`None` = 使用内置 shader）。
+            custom_material: Option<Arc<Material>>,
+            custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
         }
 
         let mut event_infos: Vec<EventInfo> = Vec::new();
@@ -461,6 +472,7 @@ impl Renderer {
                         // 只增加 clip 层，不含 Area（Area 已在 content_level 里）
                         clip_depth += 1;
                     }
+                    let custom_mat = batch.custom_material.clone();
                     event_infos.push(EventInfo {
                         shape: None,
                         text: None,
@@ -469,6 +481,8 @@ impl Renderer {
                         area_op: None,
                         scissor_push: None,
                         scissor_pop: false,
+                        custom_material: custom_mat,
+                        custom_text_pipeline: None,
                     });
                 }
                 DrawEvent::StencilPop => {
@@ -483,6 +497,8 @@ impl Renderer {
                         area_op: None,
                         scissor_push: None,
                         scissor_pop: false,
+                        custom_material: None,
+                        custom_text_pipeline: None,
                     });
                 }
                 DrawEvent::AreaOp { op, is_setup } => {
@@ -498,6 +514,8 @@ impl Renderer {
                         area_op: Some(pipe_op),
                         scissor_push: None,
                         scissor_pop: false,
+                        custom_material: None,
+                        custom_text_pipeline: None,
                     });
                     if !is_setup {
                         if !prev_area_cleanup {
@@ -517,6 +535,8 @@ impl Renderer {
                         area_op: None,
                         scissor_push: Some(*rect),
                         scissor_pop: false,
+                        custom_material: None,
+                        custom_text_pipeline: None,
                     });
                 }
                 DrawEvent::ScissorPop => {
@@ -528,6 +548,8 @@ impl Renderer {
                         area_op: None,
                         scissor_push: None,
                         scissor_pop: true,
+                        custom_material: None,
+                        custom_text_pipeline: None,
                     });
                 }
             }
@@ -822,6 +844,22 @@ impl Renderer {
                         batch.color,
                     );
                     event_infos[ei].text = Some((start, count));
+                    if let Some(material) = batch.custom_material.as_ref() {
+                        let text_tests_stencil = uses_stencil
+                            && (event_infos[ei].stencil_op == 1
+                                || event_infos[ei].stencil_op == 2
+                                || event_infos[ei].area_op.is_some());
+                        event_infos[ei].custom_text_pipeline = Some(
+                            self.gpu.ensure_material_pipeline(
+                                material,
+                                MaterialTarget::Text,
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                uses_stencil,
+                                if text_tests_stencil { 2 } else { 0 },
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -901,6 +939,7 @@ impl Renderer {
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
+            let mut last_custom_ptr: *const Material = std::ptr::null();
             let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
             let mut scissor_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
@@ -943,30 +982,66 @@ impl Renderer {
                 if let Some(ref shape) = info.shape {
                     // Area 事件：op 3/4 来自 area_op；普通 batch/StencilPop：op 0..3 来自 stencil_op。
                     let pipe_op = info.area_op.unwrap_or(info.stencil_op);
+                    let custom_ptr: *const Material = info.custom_material
+                        .as_ref()
+                        .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
+                    let use_custom = info.custom_material.is_some();
                     let need_rebind = !shapes_bound
-                        || last_geometry != Some(shape.geometry)
+                        || custom_ptr != last_custom_ptr
+                        || (!use_custom && last_geometry != Some(shape.geometry))
                         || (uses_stencil && pipe_op != last_stencil_op);
                     if need_rebind {
-                        let pipe = if uses_stencil {
-                            self.gpu.ensure_stencil_pipeline(
+                        let tmp_pipe: wgpu::RenderPipeline;
+                        let custom_pipe: Arc<wgpu::RenderPipeline>;
+                        let pipe: &wgpu::RenderPipeline = if use_custom {
+                            let mat = info.custom_material.as_ref().unwrap();
+                            if uses_stencil {
+                                custom_pipe = self.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    true,
+                                    pipe_op.min(4),
+                                );
+                            } else {
+                                custom_pipe = self.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    false,
+                                    0,
+                                );
+                            }
+                            &custom_pipe
+                        } else if uses_stencil {
+                            tmp_pipe = self.gpu.ensure_stencil_pipeline(
                                 self.sample_count,
                                 self.alpha_to_coverage,
                                 self.ssaa,
                                 shape.geometry,
                                 pipe_op.min(4),
-                            )
+                            );
+                            &tmp_pipe
                         } else {
-                            self.gpu.ensure_pipeline(
+                            tmp_pipe = self.gpu.ensure_pipeline(
                                 self.sample_count,
                                 self.alpha_to_coverage,
                                 self.ssaa,
                                 shape.geometry,
-                            )
+                            );
+                            &tmp_pipe
                         };
-                        pass.set_pipeline(&pipe);
+                        pass.set_pipeline(pipe);
                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                         pass.set_bind_group(2, poly_bg, &[]);
                         pass.set_bind_group(3, xform_bg, &[]);
+                        if use_custom {
+                            let mat = info.custom_material.as_ref().unwrap();
+                            let bg = mat.bind_group.borrow();
+                            pass.set_bind_group(4, &*bg, &[]);
+                        }
                         if let Some(vb) = vbuf.as_ref() {
                             pass.set_vertex_buffer(0, vb.slice(..));
                         }
@@ -974,6 +1049,7 @@ impl Renderer {
                             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                         }
                         shapes_bound = true;
+                        last_custom_ptr = custom_ptr;
                         last_geometry = Some(shape.geometry);
                         last_stencil_op = pipe_op;
                     }
@@ -1015,7 +1091,11 @@ impl Renderer {
                     };
                     // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
                     // 否则部分后端会把 ref 重置为 0。
-                    let _ = text_ctx.text_renderer.render_range_with_stencil_ref(
+                    let material_bg = info.custom_material.as_ref().map(|m| m.bind_group.borrow());
+                    let material_render = info.custom_text_pipeline.as_deref().zip(
+                        material_bg.as_deref(),
+                    );
+                    let _ = text_ctx.text_renderer.render_range_with_material(
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,
                         &mut pass,
@@ -1023,6 +1103,7 @@ impl Renderer {
                         start,
                         count,
                         if uses_stencil { Some(text_ref) } else { None },
+                        material_render,
                     );
                     shapes_bound = false;
                     last_geometry = None;
@@ -1030,6 +1111,38 @@ impl Renderer {
             }
         }
 
+        self.gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Runs a fullscreen post material directly on `target` using a `Load` render pass.
+    pub fn draw_post(&self, target: &RenderTarget, material: &Material) {
+        let pipeline = self.gpu.ensure_material_pipeline(
+            material,
+            MaterialTarget::Post,
+            1,
+            false,
+            false,
+            0,
+        );
+        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("vireo post encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vireo post pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            let bind_group = material.bind_group.borrow();
+            pass.set_bind_group(4, &*bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.gpu.queue.submit([encoder.finish()]);
     }
 
@@ -1636,6 +1749,10 @@ pub struct DrawBatch {
     /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
     /// 可通过 `TextOverride.clip` 单条覆盖。
     pub text_clip: Option<crate::glyphon::TextBounds>,
+    /// 自定义材质。`Some` 时该 batch 的 **shape** 走自定义 VS/FS（非整段 SDF 内置管线）。
+    /// `None` = 内置。文字路径不使用此字段。
+    /// 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
+    pub custom_material: Option<Arc<Material>>,
 }
 
 impl DrawBatch {
@@ -1666,6 +1783,7 @@ impl DrawBatch {
             bounds: Some(None),
             scissor: None,
             text_clip: None,
+            custom_material: None,
         }
     }
 
@@ -1691,6 +1809,7 @@ impl DrawBatch {
         self.bounds = Some(None);
         self.scissor = None;
         self.text_clip = None;
+        self.custom_material = None;
     }
 
     /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
@@ -2395,6 +2514,7 @@ impl DrawBatch {
             bounds: self.bounds,
             scissor: self.scissor,
             text_clip: self.text_clip,
+            custom_material: self.custom_material.clone(),
         }
     }
 
@@ -3394,5 +3514,13 @@ mod tests {
         assert!(c1[1].abs() < 1e-5);
         assert!((c2[0] - 10.0).abs() < 1e-3);
         assert!((c2[1] - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn custom_material_new_and_clear_are_none() {
+        let mut b = DrawBatch::new();
+        assert!(b.custom_material.is_none());
+        b.clear();
+        assert!(b.custom_material.is_none());
     }
 }

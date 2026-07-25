@@ -55,6 +55,7 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - 填充形状 + 描边（SDF / 几何双路径，`sdf_feather`）
 - 仿射变换表（顶点 `transform_index`；槽 0 固定单位阵）
 - 文本：shape 缓存、HUD 分段、`StableText`、自定义字体 / attrs
+- **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text / post；MSAA/stencil/SDF 兼容
 - 多窗口 + 离屏渲染
 - 纹理（文件 / 字节 / RGBA，UV 子区域）
 - 窗口控制（全屏、图标、PresentMode、AA、high_dpi 等）
@@ -99,6 +100,14 @@ cargo run --example batch_child_clip
 cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
 cargo run --example clip_rect_demo
+
+# 自定义 Material
+cargo run --example custom_material
+cargo run --example custom_material_stencil
+cargo run --example custom_material_textures
+cargo run --example custom_material_vertex
+cargo run --example custom_material_text
+cargo run --example custom_material_post
 
 # 窗口 / 输入 / 离屏
 cargo run --example window_controls

@@ -306,6 +306,39 @@ impl VireoWindow {
         let _ = self.draw_timed(clear_color, batches);
     }
 
+    /// 在当前 surface texture 上执行一次全屏 Material pass。
+    ///
+    /// 通常先把场景画到 [`OffscreenCanvas`](crate::offscreen::OffscreenCanvas)，将其纹理
+    /// 绑定到 material slot 0，再调用此方法贴回窗口。不能同时采样当前 surface 本身。
+    pub fn draw_post(&self, material: &crate::material::Material) {
+        let mut ft = self.frame_texture.borrow_mut();
+        if ft.is_none() {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(st)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
+                wgpu::CurrentSurfaceTexture::Outdated
+                | wgpu::CurrentSurfaceTexture::Lost => {
+                    let cfg = self.surface_config.borrow().clone();
+                    self.surface.configure(&self.gpu.device, &cfg);
+                    match self.surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(st)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
+                        _ => return,
+                    }
+                }
+                _ => return,
+            }
+        }
+        let view = ft
+            .as_ref()
+            .unwrap()
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        drop(ft);
+        let target = RenderTarget::from_texture_view(view);
+        target.draw_post(&self.renderer.borrow(), material);
+    }
+
     /// 与 [`draw`] 相同，并返回分段耗时（秒），用于卡顿诊断。
     ///
     /// - `acquire`：`get_current_texture`（可能等 swapchain / 上一帧 present / vsync）

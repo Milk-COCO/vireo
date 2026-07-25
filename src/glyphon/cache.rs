@@ -38,6 +38,7 @@ struct Inner {
     vertex_buffers: [Option<wgpu::VertexBufferLayout<'static>>; 1],
     atlas_layout: BindGroupLayout,
     uniforms_layout: BindGroupLayout,
+    transform_layout: BindGroupLayout,
     pipeline_layout: PipelineLayout,
     cache: InnerCache,
 }
@@ -163,6 +164,7 @@ impl Cache {
             shader,
             vertex_buffers: [Some(vertex_buffer_layout)],
             uniforms_layout,
+            transform_layout: transform_bgl.clone(),
             atlas_layout,
             pipeline_layout,
             cache: Mutex::new(Vec::new()),
@@ -262,5 +264,59 @@ impl Cache {
                 pipeline
             })
             .clone()
+    }
+
+    pub(crate) fn create_material_pipeline(
+        &self,
+        device: &Device,
+        material_layout: &BindGroupLayout,
+        fragment_source: &str,
+        format: TextureFormat,
+        multisample: MultisampleState,
+        depth_stencil: Option<DepthStencilState>,
+    ) -> RenderPipeline {
+        let fragment = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("glyphon material fragment"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(fragment_source)),
+        });
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("glyphon material pipeline layout"),
+            bind_group_layouts: &[
+                Some(&self.0.atlas_layout),
+                Some(&self.0.uniforms_layout),
+                None,
+                Some(&self.0.transform_layout),
+                Some(material_layout),
+            ],
+            ..Default::default()
+        });
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("glyphon material pipeline"),
+            layout: Some(&layout),
+            vertex: VertexState {
+                module: &self.0.shader,
+                entry_point: Some("vs_main"),
+                buffers: &self.0.vertex_buffers,
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &fragment,
+                entry_point: Some("fs_main"),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    write_mask: ColorWrites::default(),
+                })],
+                compilation_options: PipelineCompilationOptions::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample,
+            cache: None,
+            multiview_mask: None,
+        })
     }
 }

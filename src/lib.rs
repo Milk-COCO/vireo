@@ -17,6 +17,7 @@
 pub mod area;
 pub mod color;
 pub mod context;
+pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
@@ -32,6 +33,7 @@ pub mod prelude {
     pub use crate::area::AreaGeom;
     pub use crate::color::colors::*;
     pub use crate::color::Color;
+    pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
     pub use crate::context::DrawBatch;
     pub use crate::context::InheritFromParent;
@@ -42,6 +44,9 @@ pub mod prelude {
     pub use crate::context::Transform;
     pub use crate::context::UvRect;
     pub use crate::texture::Texture;
+    pub use crate::material::Material;
+    pub use crate::material::MATERIAL_TEX_SLOTS;
+    pub use crate::material::MATERIAL_UNIFORM_SIZE;
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::Vertex;
     pub use crate::shapes::*;

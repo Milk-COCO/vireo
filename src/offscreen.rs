@@ -45,6 +45,13 @@ impl OffscreenCanvas {
         target.draw(&self.renderer, clear_color, batches);
     }
 
+    /// 在画布当前内容上执行全屏 Material pass。
+    /// material 采样的纹理不能是本画布自身；需要 ping-pong 时使用两个 OffscreenCanvas。
+    pub fn draw_post(&self, material: &crate::material::Material) {
+        let target = self.texture.target();
+        target.draw_post(&self.renderer, material);
+    }
+
     /// 获取纹理视图（用于贴到窗口等）
     pub fn view(&self) -> &wgpu::TextureView {
         &self.texture.view

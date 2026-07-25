@@ -431,18 +431,44 @@ impl TextRenderer {
         vertex_count: u32,
         stencil_ref: Option<u32>,
     ) -> Result<(), RenderError> {
+        self.render_range_with_material(
+            atlas,
+            viewport,
+            pass,
+            transform_bind_group,
+            vertex_start,
+            vertex_count,
+            stencil_ref,
+            None,
+        )
+    }
+
+    pub(crate) fn render_range_with_material(
+        &self,
+        atlas: &TextAtlas,
+        viewport: &Viewport,
+        pass: &mut RenderPass<'_>,
+        transform_bind_group: &BindGroup,
+        vertex_start: u32,
+        vertex_count: u32,
+        stencil_ref: Option<u32>,
+        material: Option<(&RenderPipeline, &BindGroup)>,
+    ) -> Result<(), RenderError> {
         if vertex_count == 0 {
             return Ok(());
         }
 
         let byte_offset = vertex_start as u64 * std::mem::size_of::<GlyphToRender>() as u64;
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(material.map_or(&self.pipeline, |(pipeline, _)| pipeline));
         if let Some(r) = stencil_ref {
             pass.set_stencil_reference(r);
         }
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(3, transform_bind_group, &[]);
+        if let Some((_, bind_group)) = material {
+            pass.set_bind_group(4, bind_group, &[]);
+        }
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(byte_offset..));
         pass.draw(0..4, 0..vertex_count);
 
