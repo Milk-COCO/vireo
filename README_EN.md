@@ -55,32 +55,39 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - Filled + outlined shapes (SDF / geometry paths via `sdf_feather`)
 - Affine transform table (vertex `transform_index`; slot 0 reserved as identity)
 - Text: shape cache, HUD parts, `StableText`, custom fonts / attrs
-- **Custom Material**: one `material_main(MaterialInput)` for shape / text / post; MSAA, stencil, and SDF aware
+- **Custom Material**: one `material_main(MaterialInput)` for shape / text; MSAA, stencil, and SDF aware
 - Multi-window + offscreen rendering
 - Textures (file / bytes / RGBA, UV subregions)
 - Window controls (fullscreen, icon, PresentMode, AA, high_dpi, …)
 - Frame stats + input (polling / events / touch)
 
-### Material Resource Layout
+### Material conventions (not frozen)
 
-Vireo stays within WebGPU's baseline four bind groups: `group 0` contains view parameters,
-`group 1` engine textures, `group 2` transform/polygon storage, and `group 3` user Material
-resources. Material WGSL may declare up to 1024B of storage uniforms and four independent
-texture/sampler pairs in `group 3`.
+Prefer injected helpers over internal binding names:
 
 ```wgsl
-@group(3) @binding(0) var<storage> params: Params;
-@group(3) @binding(1) var tex0: texture_2d<f32>;
-@group(3) @binding(2) var samp0: sampler;
-
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    return in.color;
+    let base = vireo_base_sample(in.base_uv); // DrawBatch::set_texture
+    if in.target_type == 1u { // text
+        return vec4<f32>(base.rgb, in.color.a);
+    }
+    return vec4<f32>(base.rgb * in.color.rgb, in.color.a);
 }
 ```
 
-Shape and text share this Material ABI. The default shape VS automatically selects per-pixel or
-per-sample interpolation for MSAA/SSAA. A single custom shape VS remains per-pixel across all AA
-modes.
+| Field / helper | Meaning |
+|---|---|
+| `in.uv` | Content-native UV (shape primitive / text glyph atlas) |
+| `in.base_uv` | Batch base-texture UV (`set_texture` + `set_uv`; text **repeats per glyph**, not whole-line; continuous mapping needs a future field) |
+| `in.color` | Engine default base color (rgb); alpha reapplied after `material_main` |
+| `vireo_base_sample(uv)` | Sample batch base texture |
+| `vireo_base_color(in)` | Current default base color |
+| `vireo_has_*()` | Capability probes (base sample / local_pos / sdf) |
+
+Internal 4-group layout: `0` view, `1` engine textures, `2` transform/polygon, `3` user Material
+(1024B storage + 4 texture/sampler pairs). Shape and text share this ABI. The default shape VS
+selects per-pixel or per-sample interpolation for MSAA/SSAA; a custom shape VS stays per-pixel
+across AA modes.
 
 ## Examples
 

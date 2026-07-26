@@ -52,7 +52,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 const FRAGMENT_WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
     let stripe = 0.5 + 0.5 * sin(in.local_pos.x * 0.12);
-    return vec4<f32>(0.15 + stripe * 0.75, 0.25, 0.95 - stripe * 0.55, 0.95);
+    let tint = vec3<f32>(0.15 + stripe * 0.75, 0.25, 0.95 - stripe * 0.55);
+    let base = vireo_base_sample(in.base_uv);
+    return vec4<f32>(base.rgb * tint, 0.95);
 }
 "#;
 

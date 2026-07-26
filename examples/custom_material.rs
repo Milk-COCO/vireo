@@ -34,17 +34,18 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
 
 fn material_main(in: MaterialInput) -> vec4<f32> {
     let t = u_pulse.time;
-    let wave = 0.5 + 0.5 * sin(t * u_pulse.speed + in.uv.x * 6.2831);
+    let wave = 0.5 + 0.5 * sin(t * u_pulse.speed + in.base_uv.x * 6.2831);
     let h = fract(u_pulse.hue + wave * 0.3);
     let rgb = hsv2rgb(h, 0.7, 0.9);
-    // local_pos：矩形局部坐标（中心 0）；径向暗角证明注入可用
+    // local_pos：shape 局部坐标（text 侧为 0）
     let r = length(in.local_pos) / 55.0;
     let vignette = clamp(1.2 - r, 0.25, 1.0);
-    let cell = floor(in.uv * 10.0);
+    let cell = floor(in.base_uv * 10.0);
     let check = (cell.x + cell.y) % 2.0;
     let darken = 0.55 + 0.45 * check;
-    // in.color 已经是 texture * in.color（白色），直接叠加 HSV 脉动
-    return vec4<f32>(rgb * darken * vignette, 0.95);
+    // 无 set_texture 时 base 为白；有贴图时 vireo_base_sample 采 batch 纹理
+    let base = vireo_base_sample(in.base_uv);
+    return vec4<f32>(base.rgb * rgb * darken * vignette, 0.95);
 }
 "#;
 

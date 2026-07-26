@@ -65,6 +65,7 @@ pub(crate) struct GlyphToRender {
     content_type_with_srgb: [u16; 2],
     depth: f32,
     transform_index: u32,
+    base_uv_rect: [f32; 4],
 }
 
 /// The screen resolution to use when rendering text.
@@ -130,6 +131,9 @@ pub struct TextArea<'a> {
     /// Index into the `transforms` storage buffer (group 2 binding 0).
     /// 0 = identity (default).
     pub transform_index: u32,
+    /// 当前 batch 基础贴图 UV 区域 `(u0, v0, u1, v1)`。
+    /// VS 按字形 corner 插值到 `VertexOutput.base_uv`（每字形独立映射，可重复）。
+    pub base_uv_rect: [f32; 4],
 }
 
 pub(crate) struct State<'a> {

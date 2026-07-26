@@ -22,7 +22,9 @@ struct Mix {
 @group(3) @binding(4) var samp1: sampler;
 
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    let uv = in.uv;
+    // group 3 = Material 额外纹理槽（不是 batch set_texture）
+    // batch 基础贴图请用 vireo_base_sample(in.base_uv)
+    let uv = in.base_uv;
     let a = textureSample(tex0, samp0, uv);
     let b = textureSample(tex1, samp1, uv);
     let w = 0.5 + 0.5 * sin(u_mix.time * 2.0 + uv.x * 6.2831);

@@ -167,3 +167,152 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
     source.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
 }
+
+fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+    let mut v = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..(w * h) {
+        v.extend_from_slice(&[r, g, b, 255]);
+    }
+    v
+}
+
+/// Batch base texture via `vireo_base_sample(in.base_uv)` on shape + text,
+/// white fallback when no texture, UV remap, and MSAA path.
+///
+/// 默认跑（需本机 GPU；无 GPU 环境会失败）。
+#[test]
+fn material_base_sample_shape_text_paths() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    let base = vireo_base_sample(in.base_uv);
+    if in.target_type == VIREO_TARGET_TEXT {
+        return vec4<f32>(base.rgb, in.color.a);
+    }
+    return vec4<f32>(base.rgb * in.color.rgb, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+    let tex_red = Texture::from_rgba(32, 32, &solid_rgba(32, 32, 220, 40, 40), &gpu);
+    let tex_blue = Texture::from_rgba(32, 32, &solid_rgba(32, 32, 40, 80, 220), &gpu);
+
+    // 1) No set_texture: white base fallback for shape + text.
+    {
+        let canvas = OffscreenCanvas::new(&gpu, 256, 128);
+        let mut batch = DrawBatch::new();
+        batch.custom_material = Some(material.clone());
+        batch.sdf_feather = Some(1.0);
+        draw_rectangle(&mut batch, Pos::new(8.0, 8.0), 100.0, 48.0, Some(WHITE));
+        draw_text(
+            &mut batch.texts,
+            "white base",
+            Pos::new(16.0, 70.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&batch]);
+    }
+
+    // 2) Shape + text share one batch texture via vireo_base_sample.
+    {
+        let canvas = OffscreenCanvas::new(&gpu, 320, 160);
+        let mut batch = DrawBatch::new();
+        batch.custom_material = Some(material.clone());
+        batch.set_texture(Some(&tex_red));
+        batch.sdf_feather = Some(1.0);
+        draw_rounded_rect(&mut batch, Pos::new(16.0, 16.0), 200.0, 80.0, 12.0, Some(WHITE));
+        draw_text(
+            &mut batch.texts,
+            "base sample",
+            Pos::new(40.0, 110.0),
+            TextDef::default().font_size(18.0),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&batch]);
+    }
+
+    // 3) Text texture segments: later set_texture only affects later text entries.
+    {
+        let canvas = OffscreenCanvas::new(&gpu, 360, 120);
+        let mut batch = DrawBatch::new();
+        batch.custom_material = Some(material.clone());
+        batch.set_texture(Some(&tex_red));
+        batch.text(
+            "red",
+            Pos::new(12.0, 40.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(WHITE),
+        );
+        batch.set_texture(Some(&tex_blue));
+        batch.text(
+            "blue",
+            Pos::new(120.0, 40.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&batch]);
+    }
+
+    // 4) UV remap on shape path.
+    {
+        let canvas = OffscreenCanvas::new(&gpu, 200, 100);
+        let mut batch = DrawBatch::new();
+        batch.custom_material = Some(material.clone());
+        batch.set_texture(Some(&tex_blue));
+        batch.set_uv(0.25, 0.25, 0.75, 0.75);
+        draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 180.0, 80.0, Some(WHITE));
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&batch]);
+    }
+
+    // 5) MSAA path with base sample.
+    {
+        let canvas = OffscreenCanvas::with_aa(
+            &gpu,
+            240,
+            120,
+            AntiAliasing::Msaa {
+                samples: 4,
+                alpha_to_coverage: false,
+            },
+            0.0,
+        );
+        let mut batch = DrawBatch::new();
+        batch.custom_material = Some(material.clone());
+        batch.set_texture(Some(&tex_red));
+        batch.sdf_feather = Some(1.0);
+        draw_circle(&mut batch, Pos::new(60.0, 60.0), 40.0, Some(WHITE));
+        draw_text(
+            &mut batch.texts,
+            "msaa",
+            Pos::new(120.0, 50.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&batch]);
+    }
+
+    // 6) Stencil/clip path with custom material + base sample.
+    {
+        let canvas = OffscreenCanvas::new(&gpu, 240, 160);
+        let mut parent = DrawBatch::new();
+        parent.clips_children = true;
+        parent.sdf_feather = Some(1.0);
+        draw_rounded_rect(&mut parent, Pos::new(20.0, 20.0), 200.0, 120.0, 16.0, Some(WHITE));
+
+        let mut child = DrawBatch::new();
+        child.custom_material = Some(material.clone());
+        child.set_texture(Some(&tex_blue));
+        child.sdf_feather = Some(1.0);
+        draw_rectangle(&mut child, Pos::new(40.0, 40.0), 160.0, 80.0, Some(WHITE));
+        child.text(
+            "clip",
+            Pos::new(70.0, 70.0),
+            TextDef::default().font_size(18.0),
+            TextOverride::from_color(WHITE),
+        );
+        parent.children.push(child);
+        canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&parent]);
+    }
+}

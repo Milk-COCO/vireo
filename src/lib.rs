@@ -49,6 +49,8 @@ pub mod prelude {
     pub use crate::material::MATERIAL_UNIFORM_SIZE;
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::Vertex;
+    pub use crate::gpu::VIREO_TARGET_SHAPE;
+    pub use crate::gpu::VIREO_TARGET_TEXT;
     pub use crate::shapes::*;
     pub use crate::text::Attrs;
     pub use crate::text::AttrsOwned;
@@ -62,6 +64,7 @@ pub mod prelude {
     pub use crate::text::Weight;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
+    pub use crate::text::TextTextureState;
     pub use crate::text::HudLine;
     pub use crate::text::StableText;
     pub use crate::text::TextPart;

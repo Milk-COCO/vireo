@@ -7,7 +7,7 @@ use lru::LruCache;
 use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use wgpu::{
-    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
+    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue, Sampler,
     RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
@@ -290,12 +290,29 @@ pub struct TextAtlas {
     pub(crate) mask_atlas: InnerAtlas,
     pub(crate) format: TextureFormat,
     pub(crate) color_mode: ColorMode,
+    pub(crate) default_base_texture: TextureView,
+    pub(crate) default_base_sampler: Sampler,
 }
 
 impl TextAtlas {
     /// Creates a new [`TextAtlas`].
-    pub fn new(device: &Device, queue: &Queue, cache: &Cache, format: TextureFormat) -> Self {
-        Self::with_color_mode(device, queue, cache, format, ColorMode::Accurate)
+    pub fn new(
+        device: &Device,
+        queue: &Queue,
+        cache: &Cache,
+        format: TextureFormat,
+        default_base_texture: &TextureView,
+        default_base_sampler: &Sampler,
+    ) -> Self {
+        Self::with_color_mode(
+            device,
+            queue,
+            cache,
+            format,
+            ColorMode::Accurate,
+            default_base_texture,
+            default_base_sampler,
+        )
     }
 
     /// Creates a new [`TextAtlas`] with the given [`ColorMode`].
@@ -305,6 +322,8 @@ impl TextAtlas {
         cache: &Cache,
         format: TextureFormat,
         color_mode: ColorMode,
+        default_base_texture: &TextureView,
+        default_base_sampler: &Sampler,
     ) -> Self {
         let state = State { device, queue };
         let color_atlas = InnerAtlas::new(
@@ -322,6 +341,8 @@ impl TextAtlas {
             device,
             &color_atlas.texture_view,
             &mask_atlas.texture_view,
+            default_base_texture,
+            default_base_sampler,
         );
 
         Self {
@@ -331,7 +352,23 @@ impl TextAtlas {
             mask_atlas,
             format,
             color_mode,
+            default_base_texture: default_base_texture.clone(),
+            default_base_sampler: default_base_sampler.clone(),
         }
+    }
+
+    pub(crate) fn bind_group_for_base_texture(
+        &self,
+        device: &Device,
+        base_texture: &TextureView,
+    ) -> BindGroup {
+        self.cache.create_atlas_bind_group(
+            device,
+            &self.color_atlas.texture_view,
+            &self.mask_atlas.texture_view,
+            base_texture,
+            &self.default_base_sampler,
+        )
     }
 
     pub fn trim(&mut self) {
@@ -412,6 +449,8 @@ impl TextAtlas {
             device,
             &self.color_atlas.texture_view,
             &self.mask_atlas.texture_view,
+            &self.default_base_texture,
+            &self.default_base_sampler,
         );
     }
 }

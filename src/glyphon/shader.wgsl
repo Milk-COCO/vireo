@@ -7,6 +7,7 @@ struct VertexInput {
     @location(4) content_type_with_srgb: u32,
     @location(5) depth: f32,
     @location(6) @interpolate(flat) transform_index: u32,
+    @location(7) base_uv_rect: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -14,6 +15,7 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) content_type: u32,
+    @location(3) base_uv: vec2<f32>,
 };
 
 struct Params {
@@ -29,6 +31,12 @@ var mask_atlas_texture: texture_2d<f32>;
 
 @group(0) @binding(2)
 var atlas_sampler: sampler;
+
+@group(0) @binding(3)
+var base_texture: texture_2d<f32>;
+
+@group(0) @binding(4)
+var base_sampler: sampler;
 
 @group(1) @binding(0)
 var<uniform> params: Params;
@@ -115,6 +123,9 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.content_type = content_type;
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
+    let base_uv0 = in_vert.base_uv_rect.xy;
+    let base_uv1 = in_vert.base_uv_rect.zw;
+    vert_output.base_uv = base_uv0 + vec2<f32>(corner_position) * (base_uv1 - base_uv0);
 
     return vert_output;
 }

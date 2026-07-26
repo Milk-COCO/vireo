@@ -14,6 +14,21 @@ pub const MATERIAL_UNIFORM_SIZE: usize = 1024;
 /// 由 [`GpuContext::create_material`](crate::gpu::GpuContext::create_material) 创建。
 /// **同一 Material 可同时用于形状、文字**——引擎按用途自动选对应顶点布局与 pipeline。
 ///
+/// # 推荐入口（当前约定，尚未冻结）
+///
+/// ```wgsl
+/// fn material_main(in: MaterialInput) -> vec4<f32> {
+///     let base = vireo_base_sample(in.base_uv);
+///     return vec4<f32>(base.rgb, in.color.a);
+/// }
+/// ```
+///
+/// - `MaterialInput` 字段约定见 [`GpuContext::create_material`]
+/// - `vireo_base_sample` 采的是 `DrawBatch::set_texture` 的 batch 基础贴图，不是 group 3 槽
+/// - text 的 `base_uv` 按**每个字形 quad**映射 batch UV（可重复），与 shape 每图元一致；
+///   若需要整行连续 UV，应新增字段（如 `text_uv`），不要复用 `base_uv`
+/// - group 3 仅用于用户额外 uniform / tex0..tex3
+///
 /// **group 3 layout**：
 /// - `@binding(0)` storage uniform（[`MATERIAL_UNIFORM_SIZE`] B，**VERTEX|FRAGMENT**）
 /// - `@binding(1)` tex0 · `@binding(2)` samp0

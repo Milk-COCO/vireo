@@ -31,14 +31,14 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
 
 fn material_main(in: MaterialInput) -> vec4<f32> {
     let t = u_pulse.time;
-    let wave = 0.5 + 0.5 * sin(t * u_pulse.speed + in.uv.x * 6.2831);
+    let wave = 0.5 + 0.5 * sin(t * u_pulse.speed + in.base_uv.x * 6.2831);
     let h = fract(u_pulse.hue + wave * 0.3);
     let rgb = hsv2rgb(h, 0.8, 0.95);
-    let cell = floor(in.uv * 12.0);
+    let cell = floor(in.base_uv * 12.0);
     let check = (cell.x + cell.y) % 2.0;
     let intensity = 0.55 + 0.45 * check;
-    // in.color 已经是 texture * in.color（白色），直接叠加 HSV 脉动
-    return vec4<f32>(rgb * intensity, 0.95);
+    let base = vireo_base_sample(in.base_uv);
+    return vec4<f32>(base.rgb * rgb * intensity, 0.95);
 }
 "#;
 

@@ -3,6 +3,10 @@
 //! `prepare_texts` 对「内容相同」的条目复用已 shape 的 `Buffer`（跳过 harfrust），
 //! 位置/颜色/transform 不参与缓存键。
 //!
+//! batch 基础贴图：`DrawBatch::set_texture` / `set_uv` 更新画笔，`push*` 时冻结到
+//! [`TextEntry`] 的 [`TextTextureState`]；prepare 按 generation 输出
+//! [`PreparedTextSegment`] 供 Renderer 分段绑定。
+//!
 //! 缓存策略（均可配置，经 `GpuContext`）：
 //! - TTL：`set_shape_cache_ttl(Some(d) | None)`，`None` = 不按时间回收
 //! - 条数：`set_shape_cache_max_entries(Some(n) | None)`，`None` = 不限制
@@ -263,6 +267,7 @@ impl TextContext {
                 default_color: crate::glyphon::Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
                 transform_index: 0,
+                base_uv_rect: [0.0, 0.0, 1.0, 1.0],
             }],
             &mut self.swash_cache,
         );
@@ -745,14 +750,23 @@ impl TextContext {
         texture_format: TextureFormat,
         color_mode: ColorMode,
         transform_bgl: &wgpu::BindGroupLayout,
+        default_base_texture: &wgpu::TextureView,
+        default_base_sampler: &wgpu::Sampler,
     ) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_system_fonts();
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device, transform_bgl);
-        let mut text_atlas =
-            TextAtlas::with_color_mode(device, queue, &cache, texture_format, color_mode);
+        let mut text_atlas = TextAtlas::with_color_mode(
+            device,
+            queue,
+            &cache,
+            texture_format,
+            color_mode,
+            default_base_texture,
+            default_base_sampler,
+        );
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             device,
@@ -1257,7 +1271,62 @@ pub fn split_hud(s: &str) -> Vec<TextPart> {
     out
 }
 
+/// 文字入队时捕获的 batch 贴图状态。
+///
+/// 由 [`DrawBatch::set_texture`] / [`DrawBatch::set_uv`] 更新画笔，并在
+/// `text` / `push*` 时 **clone 冻结** 到对应 [`TextEntry`]。连续相同
+/// [`generation`](Self::generation) 的条目在 prepare 时合并为同一渲染段。
+///
+/// 请用访问器读取；不要手改字段或自行构造后塞回引擎（引擎只认入队时快照，
+/// `generation` 仅由 `set_texture` / `set_uv` 递增）。
+#[derive(Clone, Debug)]
+pub struct TextTextureState {
+    pub(crate) generation: u64,
+    pub(crate) view: Option<wgpu::TextureView>,
+    pub(crate) uv: crate::context::UvRect,
+}
+
+/// 一次 `prepare_texts` 产出的连续文字渲染段（内部用）。
+///
+/// 同一段内 `texture_view` 相同；`None` = 白贴图 / 默认 base。
+/// `vertex_start` + `vertex_count` 对应 glyphon 实例缓冲中的 glyph 范围。
+pub(crate) struct PreparedTextSegment {
+    pub vertex_start: u32,
+    pub vertex_count: u32,
+    pub texture_view: Option<wgpu::TextureView>,
+}
+
+impl Default for TextTextureState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            view: None,
+            uv: crate::context::UvRect::default(),
+        }
+    }
+}
+
+impl TextTextureState {
+    /// 状态代数：`set_texture` / `set_uv` 各递增一次；同 generation 的条目合并渲染。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 是否绑定了 batch 基础贴图（`None` = 白贴图路径）。
+    pub fn has_texture(&self) -> bool {
+        self.view.is_some()
+    }
+
+    /// 捕获时的 batch UV 子区域。
+    pub fn uv(&self) -> crate::context::UvRect {
+        self.uv
+    }
+}
+
 /// 文本条目——三种变体，互斥字段不混存。
+///
+/// 各变体均含 `texture_state`：入队时从 [`TextEntryList`] 画笔 clone，
+/// 供材质 `vireo_base_sample(in.base_uv)` 与分段绑定使用。
 #[derive(Clone, Debug)]
 pub enum TextEntry {
     Normal {
@@ -1266,6 +1335,8 @@ pub enum TextEntry {
         def: TextDef,
         override_: TextOverride,
         transform_index: u32,
+        /// 入队时冻结的 batch 贴图状态。
+        texture_state: TextTextureState,
     },
     Parts {
         pos: Pos,
@@ -1273,6 +1344,8 @@ pub enum TextEntry {
         parts: Vec<TextPart>,
         override_: TextOverride,
         transform_index: u32,
+        /// 入队时冻结的 batch 贴图状态。
+        texture_state: TextTextureState,
     },
     Stable {
         pos: Pos,
@@ -1282,6 +1355,8 @@ pub enum TextEntry {
         font_size: f32,
         line_width: f32,
         line_count: u32,
+        /// 入队时冻结的 batch 贴图状态。
+        texture_state: TextTextureState,
     },
 }
 
@@ -1306,6 +1381,17 @@ impl TextEntry {
             TextEntry::Normal { pos, .. }
             | TextEntry::Parts { pos, .. }
             | TextEntry::Stable { pos, .. } => *pos,
+        }
+    }
+
+    /// 该条目入队时冻结的 batch 贴图状态（只读）。
+    ///
+    /// 与后续 `DrawBatch::set_texture` / `set_uv` 无关；仅反映 push 瞬间的画笔。
+    pub fn texture_state(&self) -> &TextTextureState {
+        match self {
+            TextEntry::Normal { texture_state, .. }
+            | TextEntry::Parts { texture_state, .. }
+            | TextEntry::Stable { texture_state, .. } => texture_state,
         }
     }
 
@@ -1378,28 +1464,49 @@ impl TextEntry {
 
 /// 文本条目列表，存储一组待渲染的文本。
 ///
-/// 通过 `draw_text(&mut list, "text", options)` 添加条目，
-/// 或直接调用 `push("text", options)`。
+/// 通过 `draw_text(&mut list, …)` / `push` 等添加条目；
+/// 经 [`DrawBatch`] 时优先用 `batch.text` 等以捕获 transform。
+///
+/// 内部维护文字画笔 [`TextTextureState`]：由 batch 的 `set_texture` / `set_uv`
+/// 更新，在每次 push 时冻结到条目。
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
+    texture_state: TextTextureState,
 }
 
 impl TextEntryList {
     pub fn new() -> Self {
         Self {
             entries: Vec::with_capacity(8),
+            texture_state: TextTextureState::default(),
         }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.texture_state = TextTextureState::default();
     }
 
     /// 从另一个 TextEntryList 复制条目
     pub fn new_from_entries(other: &Self) -> Self {
         Self {
             entries: other.entries.clone(),
+            texture_state: other.texture_state.clone(),
         }
+    }
+
+    /// 更新当前文字画笔的 batch 贴图（由 [`DrawBatch::set_texture`] / [`DrawBatch::set_bind_group`] 调用）。
+    /// 递增 `generation`；之后 `push*` 的条目会冻结新状态。
+    pub(crate) fn set_texture_state(&mut self, view: Option<wgpu::TextureView>) {
+        self.texture_state.generation = self.texture_state.generation.wrapping_add(1);
+        self.texture_state.view = view;
+    }
+
+    /// 更新当前文字画笔的 UV 子区域（由 [`DrawBatch::set_uv`] / [`DrawBatch::clear_uv`] 调用）。
+    /// 递增 `generation`；之后 `push*` 的条目会冻结新状态。
+    pub(crate) fn set_uv_state(&mut self, uv: crate::context::UvRect) {
+        self.texture_state.generation = self.texture_state.generation.wrapping_add(1);
+        self.texture_state.uv = uv;
     }
 
     /// 添加文本条目。
@@ -1414,6 +1521,7 @@ impl TextEntryList {
             def,
             override_: ov,
             transform_index: 0,
+            texture_state: self.texture_state.clone(),
         });
     }
 
@@ -1432,6 +1540,7 @@ impl TextEntryList {
             def,
             override_: ov,
             transform_index,
+            texture_state: self.texture_state.clone(),
         });
     }
 
@@ -1456,6 +1565,7 @@ impl TextEntryList {
             font_size: stable.font_size,
             line_width: stable.line_width,
             line_count: stable.line_count,
+            texture_state: self.texture_state.clone(),
         });
     }
 
@@ -1481,6 +1591,7 @@ impl TextEntryList {
             parts: parts.to_vec(),
             override_: ov,
             transform_index,
+            texture_state: self.texture_state.clone(),
         });
     }
 
@@ -1501,15 +1612,19 @@ impl TextEntryList {
         self.push_parts_indexed(&parts, pos, def, ov, transform_index);
     }
 
-    /// 准备文本条目（调用 glyphon prepare），返回 (vertex_start, vertex_count)，
-    /// 用于后续 render_range() 分段绘制。多 batch 时逐个调用，最后用返回的范围渲染。
+    /// 准备文本条目（glyphon prepare），按入队时冻结的贴图状态分段返回。
     ///
-    /// `transform_table`：batch 的本地变换矩阵表（12 f32 / mat3x3）。
-    /// `global_transforms`：全局矩阵表（物理空间），新增矩阵追加到此。
-    /// `scale`：逻辑→物理像素缩放因子。
-    /// `batch_text_clip`：batch 状态的默认文字裁切（被 `TextOverride.clip` 覆盖）。
-    /// `batch_color`：batch 状态的默认文字色（被 `TextOverride.color` 覆盖；无 override 时使用）。
-    pub fn prepare_texts(
+    /// 连续相同 [`TextTextureState::generation`] 的条目合并为一段
+    /// [`PreparedTextSegment`]；段内 glyph 写入全局 glyphon 顶点缓冲，
+    /// 由 Renderer 按段绑定 base texture 后 `render_range`。
+    ///
+    /// - `transform_table`：batch 本地变换表（12 f32 / mat3x3）
+    /// - `global_transforms`：全局物理空间矩阵表（本函数会追加）
+    /// - `scale`：逻辑→物理像素
+    /// - `batch_text_clip` / `batch_color`：默认裁切与颜色（可被 `TextOverride` 覆盖）
+    ///
+    /// 空列表返回空 `Vec`。
+    pub(crate) fn prepare_texts(
         &self,
         gpu: &GpuContext,
         physical_width: u32,
@@ -1519,9 +1634,9 @@ impl TextEntryList {
         global_transforms: &mut Vec<f32>,
         batch_text_clip: Option<crate::glyphon::TextBounds>,
         batch_color: Color,
-    ) -> (u32, u32) {
+    ) -> Vec<PreparedTextSegment> {
         if self.entries.is_empty() {
-            return (0, 0);
+            return Vec::new();
         }
 
         let mut text_ctx = gpu.text_ctx.borrow_mut();
@@ -1547,6 +1662,8 @@ impl TextEntryList {
             color: crate::glyphon::Color,
             bounds: TextBounds,
             transform_index: u32,
+            base_uv_rect: [f32; 4],
+            texture_state: TextTextureState,
         }
 
         enum MetaBuf {
@@ -1654,6 +1771,9 @@ impl TextEntryList {
         // 不再需要平行 stable_bufs vec + hi 计数器。
 
         for entry in &self.entries {
+            let texture_state = entry.texture_state().clone();
+            let uv = texture_state.uv;
+            let batch_base_uv = [uv.u0, uv.v0, uv.u1, uv.v1];
             // color: override > batch_color
             let color_rgb = entry.override_().color.unwrap_or(batch_color);
             let color = crate::glyphon::Color::rgba(
@@ -1698,6 +1818,8 @@ impl TextEntryList {
                         color,
                         bounds,
                         transform_index: phys_idx,
+                        base_uv_rect: batch_base_uv,
+                        texture_state: texture_state.clone(),
                     });
                 }
                 TextEntry::Parts { pos, def, parts, .. } => {
@@ -1719,6 +1841,8 @@ impl TextEntryList {
                                     color,
                                     bounds,
                                     transform_index: phys_idx,
+                                    base_uv_rect: batch_base_uv,
+                                    texture_state: texture_state.clone(),
                                 });
                                 cursor_x += w;
                             }
@@ -1744,6 +1868,8 @@ impl TextEntryList {
                                             color,
                                             bounds,
                                             transform_index: phys_idx,
+                                            base_uv_rect: batch_base_uv,
+                                            texture_state: texture_state.clone(),
                                         }, w)
                                     }
                                     None => {
@@ -1769,6 +1895,8 @@ impl TextEntryList {
                                             color,
                                             bounds,
                                             transform_index: phys_idx,
+                                            base_uv_rect: batch_base_uv,
+                                            texture_state: texture_state.clone(),
                                         }, lw)
                                     }
                                 };
@@ -1783,6 +1911,8 @@ impl TextEntryList {
                                     color,
                                     bounds,
                                     transform_index: phys_idx,
+                                    base_uv_rect: batch_base_uv,
+                                    texture_state: texture_state.clone(),
                                 });
                                 cursor_x += h.line_width();
                             }
@@ -1803,6 +1933,8 @@ impl TextEntryList {
                                             color,
                                             bounds,
                                             transform_index: phys_idx,
+                                            base_uv_rect: batch_base_uv,
+                                            texture_state: texture_state.clone(),
                                         });
                                         cursor_x += step;
                                     } else if is_hud_digit_char(ch) {
@@ -1815,6 +1947,8 @@ impl TextEntryList {
                                             color,
                                             bounds,
                                             transform_index: phys_idx,
+                                            base_uv_rect: batch_base_uv,
+                                            texture_state: texture_state.clone(),
                                         });
                                         cursor_x += w;
                                     }
@@ -1833,13 +1967,14 @@ impl TextEntryList {
                         color,
                         bounds,
                         transform_index: phys_idx,
+                        base_uv_rect: batch_base_uv,
+                        texture_state: texture_state.clone(),
                     });
                 }
             }
         }
 
-        let vertex_start;
-        let vertex_count;
+        let mut segments = Vec::new();
         {
             let TextContext {
                 ref mut font_system,
@@ -1851,48 +1986,66 @@ impl TextEntryList {
                 ..
             } = *text_ctx;
 
-            let mut areas: Vec<TextArea> = Vec::with_capacity(metas.len());
-            for meta in &metas {
-                let buf: &Buffer = match &meta.buf {
-                    MetaBuf::Stable(arc) => arc,
-                    MetaBuf::Slot(si) => {
-                        debug_assert!(
-                            (*si as usize) < shape_slots.len(),
-                            "shape slot {} out of bounds (len {})",
-                            si,
-                            shape_slots.len()
-                        );
-                        &*shape_slots[*si as usize].buffer
-                    }
-                };
-                areas.push(TextArea {
-                    buffer: buf,
-                    left: meta.left,
-                    top: meta.top,
-                    scale,
-                    bounds: meta.bounds,
-                    default_color: meta.color,
-                    custom_glyphs: &[],
-                    transform_index: meta.transform_index,
-                });
-            }
+            let mut first = 0;
+            while first < metas.len() {
+                let generation = metas[first].texture_state.generation;
+                let mut end = first + 1;
+                while end < metas.len() && metas[end].texture_state.generation == generation {
+                    end += 1;
+                }
 
-            vertex_start = text_renderer.glyph_vertex_count();
-            text_renderer
-                .prepare(
-                    &gpu.device,
-                    &gpu.queue,
-                    font_system,
-                    text_atlas,
-                    viewport,
-                    areas,
-                    swash_cache,
-                )
-                .expect("glyphon prepare failed");
-            vertex_count = text_renderer.glyph_vertex_count() - vertex_start;
+                let mut areas: Vec<TextArea> = Vec::with_capacity(end - first);
+                for meta in &metas[first..end] {
+                    let buf: &Buffer = match &meta.buf {
+                        MetaBuf::Stable(arc) => arc,
+                        MetaBuf::Slot(si) => {
+                            debug_assert!(
+                                (*si as usize) < shape_slots.len(),
+                                "shape slot {} out of bounds (len {})",
+                                si,
+                                shape_slots.len()
+                            );
+                            &*shape_slots[*si as usize].buffer
+                        }
+                    };
+                    areas.push(TextArea {
+                        buffer: buf,
+                        left: meta.left,
+                        top: meta.top,
+                        scale,
+                        bounds: meta.bounds,
+                        default_color: meta.color,
+                        custom_glyphs: &[],
+                        transform_index: meta.transform_index,
+                        base_uv_rect: meta.base_uv_rect,
+                    });
+                }
+
+                let vertex_start = text_renderer.glyph_vertex_count();
+                text_renderer
+                    .prepare(
+                        &gpu.device,
+                        &gpu.queue,
+                        font_system,
+                        text_atlas,
+                        viewport,
+                        areas,
+                        swash_cache,
+                    )
+                    .expect("glyphon prepare failed");
+                let vertex_count = text_renderer.glyph_vertex_count() - vertex_start;
+                if vertex_count > 0 {
+                    segments.push(PreparedTextSegment {
+                        vertex_start,
+                        vertex_count,
+                        texture_view: metas[first].texture_state.view.clone(),
+                    });
+                }
+                first = end;
+            }
         }
 
-        (vertex_start, vertex_count)
+        segments
     }
 
     /// prepare + render 所有文本条目到 render pass（单 batch 便利方法）。
@@ -2065,6 +2218,7 @@ mod tests {
             def,
             override_: TextOverride::default(),
             transform_index: 0,
+            texture_state: TextTextureState::default(),
         }
     }
 
@@ -2111,7 +2265,7 @@ mod tests {
 
     #[test]
     fn parts_culling_font_size_uses_largest_part() {
-        let entry = TextEntry::Parts {
+let entry = TextEntry::Parts {
             pos: Pos::new(0.0, 0.0),
             def: TextDef::default().font_size(16.0),
             parts: vec![
@@ -2120,6 +2274,7 @@ mod tests {
             ],
             override_: TextOverride::default(),
             transform_index: 0,
+            texture_state: TextTextureState::default(),
         };
         assert_eq!(entry.approx_font_size(), 48.0);
     }
@@ -2152,6 +2307,49 @@ mod tests {
             TextPart::Digits(s, _) => ("digits", s.as_str()),
             TextPart::Stable(h) => ("stable", h.text()),
         }
+    }
+
+    #[test]
+    fn text_entry_captures_texture_state_on_push() {
+        let mut list = TextEntryList::new();
+        list.set_texture_state(None);
+        list.push(
+            "a",
+            Pos::new(0.0, 0.0),
+            TextDef::default(),
+            TextOverride::default(),
+        );
+        assert_eq!(list.entries[0].texture_state().generation(), 1);
+        assert!(!list.entries[0].texture_state().has_texture());
+
+        list.set_uv_state(crate::context::UvRect {
+            u0: 0.1,
+            v0: 0.2,
+            u1: 0.9,
+            v1: 0.8,
+        });
+        list.push(
+            "b",
+            Pos::new(0.0, 16.0),
+            TextDef::default(),
+            TextOverride::default(),
+        );
+        assert_eq!(list.entries[1].texture_state().generation(), 2);
+        assert_eq!(list.entries[1].texture_state().uv().u0, 0.1);
+        assert_ne!(
+            list.entries[0].texture_state().generation(),
+            list.entries[1].texture_state().generation()
+        );
+
+        list.clear();
+        assert!(list.entries.is_empty());
+        list.push(
+            "c",
+            Pos::new(0.0, 0.0),
+            TextDef::default(),
+            TextOverride::default(),
+        );
+        assert_eq!(list.entries[0].texture_state().generation(), 0);
     }
 
     #[test]

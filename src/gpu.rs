@@ -50,9 +50,9 @@ fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) ->
             r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let base = textureSample(vireo_shape_texture, vireo_shape_sampler, in.uv) * in.color;
+    let base = textureSample(vireo_base_texture, vireo_base_sampler, in.uv) * in.color;
     let material_in = MaterialInput(
-        in.uv, vec4<f32>(base.rgb, 1.0), in.local_pos, in.sdf_params, in.sdf_extra,
+        in.uv, in.uv, vec4<f32>(base.rgb, 1.0), in.local_pos, in.sdf_params, in.sdf_extra,
         in.sdf_type, in.sdf_feather, 0u, 0u,
     );
     var out_color = material_main(material_in);
@@ -69,6 +69,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 @group(0) @binding(0) var vireo_color_atlas: texture_2d<f32>;
 @group(0) @binding(1) var vireo_mask_atlas: texture_2d<f32>;
 @group(0) @binding(2) var vireo_atlas_sampler: sampler;
+@group(0) @binding(3) var vireo_base_texture: texture_2d<f32>;
+@group(0) @binding(4) var vireo_base_sampler: sampler;
+
+fn vireo_base_sample(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(vireo_base_texture, vireo_base_sampler, uv);
+}
+
+fn vireo_base_color(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+
+fn vireo_has_base_sample() -> bool { return true; }
+fn vireo_has_local_pos() -> bool { return false; }
+fn vireo_has_sdf_data() -> bool { return false; }
 "#,
             format!(
                 "{}\n{}",
@@ -84,7 +98,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         base = vec4<f32>(in.color.rgb, in.color.a * mask);
     }
     let material_in = MaterialInput(
-        in.uv, vec4<f32>(base.rgb, 1.0), vec2<f32>(0.0), vec4<f32>(0.0), vec2<f32>(0.0),
+        in.uv, in.base_uv, vec4<f32>(base.rgb, 1.0), vec2<f32>(0.0), vec4<f32>(0.0), vec2<f32>(0.0),
         0u, 0.0, in.content_type, 1u,
     );
     var out_color = material_main(material_in);
@@ -97,9 +111,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 }
 
+/// Material target discriminators (injected into WGSL as constants).
+pub const VIREO_TARGET_SHAPE: u32 = 0;
+pub const VIREO_TARGET_TEXT: u32 = 1;
+
 const MATERIAL_INPUT_WGSL: &str = r#"
+// MaterialInput contract for shape and text (not a frozen ABI yet).
+//
+// Fields (always present; some are target-specific):
+// - uv: content-native UV
+//     shape = current primitive texture UV
+//     text  = glyph atlas UV
+// - base_uv: batch base-texture UV from DrawBatch::set_texture / set_uv
+//     shape = primitive UV mapped into batch UV rect (each draw_* remaps independently)
+//     text  = per-glyph-quad UV mapped into batch UV rect (REPEATS per glyph; intentional)
+//     NOT a continuous whole-line/text-area UV. Continuous text mapping needs a future
+//     field (e.g. text_uv / screen_uv) — do NOT repurpose base_uv.
+// - color: default base color after engine sampling * vertex/text color (rgb only for material_main;
+//          alpha is reapplied by the engine wrapper after material_main)
+// - local_pos: shape-only local position; text fills (0,0)
+// - sdf_params / sdf_extra / sdf_type / sdf_feather: shape-only SDF data; text fills zeros
+// - content_type: text-only (0=color atlas glyph, 1=mask glyph); shape fills 0
+// - target_type: VIREO_TARGET_SHAPE (0) or VIREO_TARGET_TEXT (1)
+//
+// Prefer helpers over internal resource names:
+// - vireo_base_sample(uv)
+// - vireo_base_color(in)
+// - vireo_has_base_sample() / vireo_has_local_pos() / vireo_has_sdf_data()
+const VIREO_TARGET_SHAPE: u32 = 0u;
+const VIREO_TARGET_TEXT: u32 = 1u;
+
 struct MaterialInput {
     uv: vec2<f32>,
+    base_uv: vec2<f32>,
     color: vec4<f32>,
     local_pos: vec2<f32>,
     sdf_params: vec4<f32>,
@@ -117,9 +161,21 @@ struct Camera {
     dpi_scale: f32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var vireo_shape_texture: texture_2d<f32>;
-@group(1) @binding(1) var vireo_shape_sampler: sampler;
+@group(1) @binding(0) var vireo_base_texture: texture_2d<f32>;
+@group(1) @binding(1) var vireo_base_sampler: sampler;
 @group(2) @binding(1) var<storage> polygon_edges: array<vec4<f32>>;
+
+fn vireo_base_sample(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(vireo_base_texture, vireo_base_sampler, uv);
+}
+
+fn vireo_base_color(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+
+fn vireo_has_base_sample() -> bool { return true; }
+fn vireo_has_local_pos() -> bool { return true; }
+fn vireo_has_sdf_data() -> bool { return true; }
 
 fn vireo_apply_sdf(in: VertexOutput, base_color: vec4<f32>) -> vec4<f32> {
     var out_color = base_color;
@@ -239,6 +295,7 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) content_type: u32,
+    @location(3) base_uv: vec2<f32>,
 };
 "#;
 
@@ -604,7 +661,15 @@ impl GpuContext {
             cache: None,
         });
 
-        let text_ctx = RefCell::new(TextContext::new(&device, &queue, surface_format, color_mode, &engine_storage_bind_group_layout));
+        let text_ctx = RefCell::new(TextContext::new(
+            &device,
+            &queue,
+            surface_format,
+            color_mode,
+            &engine_storage_bind_group_layout,
+            &white_texture_view,
+            &default_sampler,
+        ));
 
         let mut pipelines = FxHashMap::default();
         pipelines.insert(1, render_pipeline.clone());
@@ -990,8 +1055,26 @@ impl GpuContext {
     /// Creates a material shared by shape and text targets.
     ///
     /// The source must define `fn material_main(in: MaterialInput) -> vec4<f32>`.
-    /// Shape rendering preserves the engine texture/color and applies SDF clipping and feathering
-    /// after `material_main`. Text starts with the glyph atlas color. Material-owned textures remain in group 3.
+    ///
+    /// # `MaterialInput` contract (current; may still change)
+    ///
+    /// | field | always | shape | text |
+    /// |---|---|---|---|
+    /// | `uv` | yes | primitive texture UV | glyph atlas UV |
+    /// | `base_uv` | yes | batch base-texture UV | per-glyph-quad batch UV (**repeats**; not whole-line) |
+    /// | `color` | yes | base texture × vertex color (rgb) | glyph/mask × text color (rgb) |
+    /// | `local_pos` | present | valid | default `(0,0)` |
+    /// | `sdf_*` | present | valid when SDF | defaults / zero |
+    /// | `content_type` | present | `0` | glyph content kind |
+    /// | `target_type` | yes | [`VIREO_TARGET_SHAPE`] | [`VIREO_TARGET_TEXT`] |
+    ///
+    /// Prefer injected helpers over internal bind names:
+    /// - `vireo_base_sample(uv)` — sample batch base texture (`DrawBatch::set_texture`)
+    /// - `vireo_base_color(in)` — current default base color
+    /// - `vireo_has_base_sample()` / `vireo_has_local_pos()` / `vireo_has_sdf_data()`
+    ///
+    /// Shape path applies SDF clip/feather **after** `material_main`. Text starts from glyph atlas
+    /// color/mask. User-owned Material textures stay in group 3.
     pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
         self.create_material_inner(source, None)
     }
@@ -1357,6 +1440,33 @@ mod custom_material_tests {
             .contains("@interpolate(linear, sample) local_pos"));
         assert!(!material_fragment_source(shader, MaterialTarget::Shape, false)
             .contains("@interpolate(linear, sample) local_pos"));
+    }
+
+    #[test]
+    fn material_helpers_exist_for_both_targets() {
+        let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return vireo_base_color(in); }";
+        let shape = material_fragment_source(shader, MaterialTarget::Shape, false);
+        let text = material_fragment_source(shader, MaterialTarget::Text, false);
+        for src in [shape, text] {
+            assert!(src.contains("fn vireo_base_sample(uv: vec2<f32>) -> vec4<f32>"));
+            assert!(src.contains("fn vireo_base_color(in: MaterialInput) -> vec4<f32>"));
+            assert!(src.contains("fn vireo_has_base_sample() -> bool"));
+            assert!(src.contains("fn vireo_has_local_pos() -> bool"));
+            assert!(src.contains("fn vireo_has_sdf_data() -> bool"));
+        }
+    }
+
+    #[test]
+    fn material_input_exposes_base_uv() {
+        assert!(MATERIAL_INPUT_WGSL.contains("base_uv: vec2<f32>"));
+        assert!(MATERIAL_INPUT_WGSL.contains("const VIREO_TARGET_SHAPE: u32 = 0u;"));
+        assert!(MATERIAL_INPUT_WGSL.contains("const VIREO_TARGET_TEXT: u32 = 1u;"));
+    }
+
+    #[test]
+    fn material_target_constants_match_rust() {
+        assert_eq!(VIREO_TARGET_SHAPE, 0);
+        assert_eq!(VIREO_TARGET_TEXT, 1);
     }
 }
 

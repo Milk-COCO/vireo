@@ -100,6 +100,11 @@ impl Cache {
                     offset: mem::size_of::<u32>() as u64 * 7,
                     shader_location: 6,
                 },
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: mem::size_of::<u32>() as u64 * 8,
+                    shader_location: 7,
+                },
             ],
         };
 
@@ -131,6 +136,22 @@ impl Cache {
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
             label: Some("glyphon atlas bind group layout"),
         });
@@ -151,7 +172,7 @@ impl Cache {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             bind_group_layouts: &[
-                Some(&atlas_layout),   // group 0: color/mask atlas + sampler
+                Some(&atlas_layout),   // group 0: color/mask atlas + sampler + batch base texture
                 Some(&uniforms_layout),// group 1: screen resolution
                 Some(engine_storage_bgl), // group 2: transforms + polygon dummy
             ],
@@ -175,6 +196,8 @@ impl Cache {
         device: &Device,
         color_atlas: &TextureView,
         mask_atlas: &TextureView,
+        base_texture: &TextureView,
+        base_sampler: &Sampler,
     ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
             layout: &self.0.atlas_layout,
@@ -190,6 +213,14 @@ impl Cache {
                 BindGroupEntry {
                     binding: 2,
                     resource: BindingResource::Sampler(&self.0.sampler),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::TextureView(base_texture),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::Sampler(base_sampler),
                 },
             ],
             label: Some("glyphon atlas bind group"),

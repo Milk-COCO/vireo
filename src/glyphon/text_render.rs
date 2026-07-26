@@ -224,6 +224,7 @@ impl TextRenderer {
                         metadata: glyph.metadata,
                         cache_key,
                         transform_index: text_area.transform_index,
+                        base_uv_rect: text_area.base_uv_rect,
                     },
                     bounds,
                     |_system, rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
@@ -296,6 +297,7 @@ impl TextRenderer {
                             cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
                             scale_factor: text_area.scale,
                             transform_index: text_area.transform_index,
+                            base_uv_rect: text_area.base_uv_rect,
                         },
                         bounds,
                         |system, _rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
@@ -440,6 +442,7 @@ impl TextRenderer {
             vertex_count,
             stencil_ref,
             None,
+            None,
         )
     }
 
@@ -452,6 +455,7 @@ impl TextRenderer {
         vertex_start: u32,
         vertex_count: u32,
         stencil_ref: Option<u32>,
+        atlas_bind_group: Option<&BindGroup>,
         material: Option<(&RenderPipeline, &BindGroup)>,
     ) -> Result<(), RenderError> {
         if vertex_count == 0 {
@@ -463,7 +467,7 @@ impl TextRenderer {
         if let Some(r) = stencil_ref {
             pass.set_stencil_reference(r);
         }
-        pass.set_bind_group(0, &atlas.bind_group, &[]);
+        pass.set_bind_group(0, atlas_bind_group.unwrap_or(&atlas.bind_group), &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(2, transform_bind_group, &[]);
         if let Some((_, bind_group)) = material {
@@ -538,6 +542,7 @@ struct GlyphMetadata {
     metadata: usize,
     cache_key: GlyphonCacheKey,
     transform_index: u32,
+    base_uv_rect: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -742,5 +747,6 @@ where
         ],
         depth,
         transform_index: metadata.transform_index,
+        base_uv_rect: metadata.base_uv_rect,
     }))
 }

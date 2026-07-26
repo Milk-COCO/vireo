@@ -55,30 +55,37 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - 填充形状 + 描边（SDF / 几何双路径，`sdf_feather`）
 - 仿射变换表（顶点 `transform_index`；槽 0 固定单位阵）
 - 文本：shape 缓存、HUD 分段、`StableText`、自定义字体 / attrs
-- **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text / post；MSAA/stencil/SDF 兼容
+- **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text；MSAA/stencil/SDF 兼容
 - 多窗口 + 离屏渲染
 - 纹理（文件 / 字节 / RGBA，UV 子区域）
 - 窗口控制（全屏、图标、PresentMode、AA、high_dpi 等）
 - 帧统计 + 输入（轮询 / 事件 / 触摸）
 
-### Material 资源布局
+### Material 约定（未冻结）
 
-Vireo 固定使用 WebGPU 保底的 4 个 bind group：`group 0` 为视口参数，`group 1` 为引擎纹理，
-`group 2` 为 transform/polygon storage，`group 3` 为用户 Material。Material WGSL 在 `group 3`
-声明最多 1024B storage uniform 和 4 组独立 texture/sampler。
+用户优先依赖注入 helper，不要写内部绑定名：
 
 ```wgsl
-@group(3) @binding(0) var<storage> params: Params;
-@group(3) @binding(1) var tex0: texture_2d<f32>;
-@group(3) @binding(2) var samp0: sampler;
-
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    return in.color;
+    let base = vireo_base_sample(in.base_uv); // DrawBatch::set_texture
+    if in.target_type == 1u { // text
+        return vec4<f32>(base.rgb, in.color.a);
+    }
+    return vec4<f32>(base.rgb * in.color.rgb, in.color.a);
 }
 ```
 
-Shape、text 共用这份 Material ABI。默认 shape VS 会按 MSAA/SSAA 自动选择
-per-pixel/per-sample 插值；单份自定义 shape VS 在所有 AA 模式下保持 per-pixel。
+| 字段 / helper | 含义 |
+|---|---|
+| `in.uv` | 内容自身 UV（shape 图元 / text glyph atlas） |
+| `in.base_uv` | batch 基础贴图 UV（`set_texture` + `set_uv`；text **每字形重复**，非整行连续；连续映射需未来新字段） |
+| `in.color` | 引擎默认基色（rgb）；alpha 由包装器在 `material_main` 后重乘 |
+| `vireo_base_sample(uv)` | 采 batch 基础贴图 |
+| `vireo_base_color(in)` | 当前默认基色 |
+| `vireo_has_*()` | 能力探针（base sample / local_pos / sdf） |
+
+引擎内部 4-group：`0` 视口、`1` 引擎纹理、`2` transform/polygon、`3` 用户 Material（1024B storage + 4 组 tex/sampler）。
+Shape / text 共用 ABI；默认 shape VS 按 MSAA/SSAA 选 per-pixel / per-sample；自定义 shape VS 全 AA 模式保持 per-pixel。
 
 ## 示例
 

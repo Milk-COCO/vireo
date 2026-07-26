@@ -360,9 +360,15 @@ impl Renderer {
             geometry: bool,
         }
 
+        struct TextRenderSegment {
+            vertex_start: u32,
+            vertex_count: u32,
+            bind_group: Option<wgpu::BindGroup>,
+        }
+
         struct EventInfo {
             shape: Option<ShapeInfo>,
-            text: Option<(u32, u32)>,
+            text: Vec<TextRenderSegment>,
             stencil_op: u32,
             stencil_ref: u32,
             /// Area 掩码事件专用：3 = Erase / 4 = Cover（来自 AreaStencilOp::stencil_pipeline_op）。
@@ -372,7 +378,7 @@ impl Renderer {
             scissor_push: Option<Rect>,
             /// ScissorPop 事件：恢复前一级 scissor。
             scissor_pop: bool,
-            /// 自定义材质（`None` = 使用内置 shader）。
+            /// 自定义材质（`None` = 内置 shader）；shape/text 共用。
             custom_material: Option<Arc<Material>>,
             custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
         }
@@ -469,7 +475,7 @@ impl Renderer {
                     let custom_mat = batch.custom_material.clone();
                     event_infos.push(EventInfo {
                         shape: None,
-                        text: None,
+                        text: Vec::new(),
                         stencil_op,
                         stencil_ref,
                         area_op: None,
@@ -485,7 +491,7 @@ impl Renderer {
                     clip_depth = clip_depth.saturating_sub(1);
                     event_infos.push(EventInfo {
                         shape: None,
-                        text: None,
+                        text: Vec::new(),
                         stencil_op: 3,
                         stencil_ref: popped.unwrap_or(0),
                         area_op: None,
@@ -502,7 +508,7 @@ impl Renderer {
                     let r = op.stencil_ref();
                     event_infos.push(EventInfo {
                         shape: None,
-                        text: None,
+                        text: Vec::new(),
                         stencil_op: pipe_op,
                         stencil_ref: r,
                         area_op: Some(pipe_op),
@@ -523,7 +529,7 @@ impl Renderer {
                 DrawEvent::ScissorPush(rect) => {
                     event_infos.push(EventInfo {
                         shape: None,
-                        text: None,
+                        text: Vec::new(),
                         stencil_op: 0,
                         stencil_ref: 0,
                         area_op: None,
@@ -536,7 +542,7 @@ impl Renderer {
                 DrawEvent::ScissorPop => {
                     event_infos.push(EventInfo {
                         shape: None,
-                        text: None,
+                        text: Vec::new(),
                         stencil_op: 0,
                         stencil_ref: 0,
                         area_op: None,
@@ -812,7 +818,7 @@ impl Renderer {
         for (ei, event) in events.iter().enumerate() {
             if let DrawEvent::Batch(batch) = event {
                 if !batch.texts.entries.is_empty() {
-                    let (start, count) = batch.texts.prepare_texts(
+                    let prepared = batch.texts.prepare_texts(
                         &self.gpu,
                         self.physical_width,
                         self.physical_height,
@@ -822,7 +828,20 @@ impl Renderer {
                         batch.text_clip,
                         batch.color,
                     );
-                    event_infos[ei].text = Some((start, count));
+                    let text_ctx = self.gpu.text_ctx.borrow();
+                    event_infos[ei].text = prepared
+                        .into_iter()
+                        .map(|segment| TextRenderSegment {
+                            vertex_start: segment.vertex_start,
+                            vertex_count: segment.vertex_count,
+                            bind_group: segment.texture_view.as_ref().map(|view| {
+                                text_ctx
+                                    .text_atlas
+                                    .bind_group_for_base_texture(&self.gpu.device, view)
+                            }),
+                        })
+                        .collect();
+                    drop(text_ctx);
                     if let Some(material) = batch.custom_material.as_ref() {
                         let text_tests_stencil = uses_stencil
                             && (event_infos[ei].stencil_op == 1
@@ -880,7 +899,7 @@ impl Renderer {
         };
 
         // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
-        let has_any_content = event_infos.iter().any(|e| e.shape.is_some() || e.text.is_some());
+        let has_any_content = event_infos.iter().any(|e| e.shape.is_some() || !e.text.is_empty());
         // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
         if has_any_content || clear_color.is_some() {
             let msaa_view = self.msaa_view(self.gpu.surface_format);
@@ -1055,7 +1074,7 @@ impl Renderer {
                     }
                 }
 
-                if let Some((start, count)) = info.text {
+                if !info.text.is_empty() {
                     // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
                     // Area 存在时：当前文本在 Area content level，测 (Test)。
                     let has_area_at_text = info.area_op.is_some()
@@ -1084,16 +1103,19 @@ impl Renderer {
                     let material_render = info.custom_text_pipeline.as_deref().zip(
                         material_bg.as_deref(),
                     );
-                    let _ = text_ctx.text_renderer.render_range_with_material(
-                        &text_ctx.text_atlas,
-                        &text_ctx.viewport,
-                        &mut pass,
-                        engine_bg,
-                        start,
-                        count,
-                        if uses_stencil { Some(text_ref) } else { None },
-                        material_render,
-                    );
+                    for segment in &info.text {
+                        let _ = text_ctx.text_renderer.render_range_with_material(
+                            &text_ctx.text_atlas,
+                            &text_ctx.viewport,
+                            &mut pass,
+                            engine_bg,
+                            segment.vertex_start,
+                            segment.vertex_count,
+                            if uses_stencil { Some(text_ref) } else { None },
+                            segment.bind_group.as_ref(),
+                            material_render,
+                        );
+                    }
                     shapes_bound = false;
                     last_geometry = None;
                 }
@@ -1655,6 +1677,7 @@ pub struct DrawBatch {
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
     pub(crate) bind_group: Option<wgpu::BindGroup>,
+    pub(crate) text_texture_view: Option<wgpu::TextureView>,
     texture_segments: Vec<TextureSegment>,
     pub(crate) transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
@@ -1663,7 +1686,8 @@ pub struct DrawBatch {
     pub sdf_feather: Option<f32>,
     /// 当前画笔颜色；`draw_*(…, None)` 使用此值。
     pub color: crate::color::Color,
-    /// 纹理坐标子区域，后续形状的 UV 在此范围内映射。
+    /// 纹理坐标子区域：后续 shape 顶点 UV，以及之后 text 入队冻结的
+    /// [`crate::text::TextTextureState::uv`]，均在此范围内映射。
     pub uv: UvRect,
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
@@ -1706,8 +1730,9 @@ pub struct DrawBatch {
     /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
     /// 可通过 `TextOverride.clip` 单条覆盖。
     pub text_clip: Option<crate::glyphon::TextBounds>,
-    /// 自定义材质。`Some` 时该 batch 的 **shape** 走自定义 VS/FS（非整段 SDF 内置管线）。
-    /// `None` = 内置。文字路径不使用此字段。
+    /// 自定义材质。`Some` 时该 batch 的 shape/text 都走自定义材质 fragment shader。
+    /// shape 仍用对应顶点管线；text 仍走 glyphon 顶点管线。
+    /// `None` = 内置。
     /// 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
     pub custom_material: Option<Arc<Material>>,
 }
@@ -1722,6 +1747,7 @@ impl DrawBatch {
             indices: Vec::with_capacity(96),
             texts: TextEntryList::new(),
             bind_group: None,
+            text_texture_view: None,
             texture_segments: Vec::with_capacity(2),
             transform: None,
             sdf_feather: None,
@@ -1749,6 +1775,7 @@ impl DrawBatch {
         self.indices.clear();
         self.texts.clear();
         self.bind_group = None;
+        self.text_texture_view = None;
         self.texture_segments.clear();
         self.transform = None;
         self.sdf_feather = None; // 与 new() 一致：几何路径
@@ -2453,6 +2480,7 @@ impl DrawBatch {
             vertices: self.vertices.clone(),
             indices: self.indices.clone(),
             bind_group: self.bind_group.clone(),
+            text_texture_view: self.text_texture_view.clone(),
             texture_segments: self.texture_segments.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
@@ -2476,31 +2504,43 @@ impl DrawBatch {
         }
     }
 
-    /// 直接设置 bind group（高级用法，如离屏画布贴回窗口）。
+    /// 直接设置 shape 用 bind group（高级用法）。
     /// `None` 与 [`set_texture`]`(None)` 相同：后续形状走白纹理。
+    ///
+    /// **文字**：无法从裸 bind group 取出 view，会清空文字画笔贴图
+    ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`set_texture`]。
     pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
         self.add_texture_segment(self.bind_group.clone());
         self.bind_group = bg;
+        self.text_texture_view = None;
+        self.texts.set_texture_state(None);
     }
 
-    /// 设置 UV 子区域，后续形状的纹理坐标在此范围内映射。
+    /// 设置 UV 子区域：后续 **shape** 顶点 UV 与之后 **text** 入队时冻结的
+    /// [`crate::text::TextTextureState::uv`] 均用此范围。
     pub fn set_uv(&mut self, u0: f32, v0: f32, u1: f32, v1: f32) {
         self.uv = UvRect { u0, v0, u1, v1 };
+        self.texts.set_uv_state(self.uv);
     }
 
-    /// 恢复 UV 为全纹理范围 (0,0)-(1,1)。
+    /// 恢复 UV 为全纹理 (0,0)-(1,1)（shape 与之后 text 入队画笔同步）。
     pub fn clear_uv(&mut self) {
         self.uv = UvRect::default();
+        self.texts.set_uv_state(self.uv);
     }
 
-    /// 绑定纹理（`Some`）或清除为白纹理路径（`None`）。
-    /// 同一 batch 多次切换会写入 texture segments。
+    /// 绑定 batch 基础贴图（`Some`）或白贴图路径（`None`）。
     ///
-    /// 内部只存 `BindGroup`（绘制时 group 1 需要的），不持有 `Texture`：
-    /// 生命周期更短、可与 `set_bind_group` 共用同一状态，且不强制 batch 拥有整张贴图。
+    /// - **Shape**：同一 batch 多次切换会写入 texture segments（已画顶点归上一段）。
+    /// - **Text**：同步更新文字画笔；**仅影响之后** `text` / `push*` 的条目
+    ///   （入队时冻结到 [`crate::text::TextEntry::texture_state`]；按 generation 分段渲染）。
+    ///
+    /// 内部 shape 侧只存 `BindGroup`；文字侧另存 `TextureView` 供 glyphon base 绑定。
     pub fn set_texture(&mut self, texture: Option<&crate::texture::Texture>) {
         self.add_texture_segment(self.bind_group.clone());
         self.bind_group = texture.map(|t| t.bind_group.clone());
+        self.text_texture_view = texture.map(|t| t.view.clone());
+        self.texts.set_texture_state(self.text_texture_view.clone());
     }
 
     /// 记录纹理段：自上次段以来的新索引归入此 bind group（`None` = 白纹理路径）。

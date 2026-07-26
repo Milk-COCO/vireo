@@ -5,10 +5,12 @@ use vireo::prelude::*;
 
 const WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    let center = in.uv - vec2<f32>(0.5);
+    // batch base texture from DrawBatch::set_texture (scene canvas)
+    let src = vireo_base_sample(in.base_uv);
+    let center = in.base_uv - vec2<f32>(0.5);
     let vignette = clamp(1.15 - dot(center, center) * 1.8, 0.35, 1.0);
-    let split = vec3<f32>(in.color.r * 1.08, in.color.g, in.color.b * 1.12);
-    return vec4<f32>(split * vignette, in.color.a);
+    let split = vec3<f32>(src.r * 1.08, src.g, src.b * 1.12);
+    return vec4<f32>(split * vignette, src.a);
 }
 "#;
 
