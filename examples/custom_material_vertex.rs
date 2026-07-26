@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 const VERTEX_WGSL: &str = r#"
@@ -63,23 +62,15 @@ fn main() {
         WindowDesc::new("Custom Vertex Shader", 640, 420),
         None::<fn()>,
     );
-    let material: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
+    let material = app
+        .material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .expect("custom vertex WGSL compile");
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
-        let material = if material.borrow().is_none() {
-            let mat = win
-                .gpu()
-                .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
-                .expect("custom vertex WGSL compile");
-            *material.borrow_mut() = Some(mat.clone());
-            mat
-        } else {
-            material.borrow().as_ref().unwrap().clone()
-        };
 
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material);
+        batch.custom_material = Some(material.clone());
         batch.set_position(320.0, 210.0);
         batch.set_rad(0.15);
         draw_rectangle(&mut batch, Pos::new(-170.0, -110.0), 340.0, 220.0, Some(WHITE));

@@ -1,6 +1,5 @@
 //! 同一份 Material 自动作用于 batch 中的 shape 与 text。
 
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 const WGSL: &str = r#"
@@ -19,20 +18,13 @@ fn main() {
         WindowDesc::new("One Material: Shape + Text", 640, 400),
         None::<fn()>,
     );
-    let material: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
+    let material = app.material(WGSL).expect("material WGSL");
 
     app.run(move |app| {
         let win = app.window_ref(&window).unwrap();
-        let mat = if let Some(mat) = material.borrow().as_ref() {
-            mat.clone()
-        } else {
-            let mat = win.gpu().create_material(WGSL).expect("material WGSL");
-            *material.borrow_mut() = Some(mat.clone());
-            mat
-        };
 
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(mat);
+        batch.custom_material = Some(material.clone());
         batch.sdf_feather = Some(1.5);
         draw_rounded_rect(
             &mut batch,

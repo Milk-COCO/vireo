@@ -3,7 +3,6 @@
 //! 父 batch 开 clips_children，子 batch 用 custom shader 画出界内容；
 //! 证明 stencil 路径下自定义 FS 仍生效（不再回退 builtin）。
 
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 #[repr(C)]
@@ -49,26 +48,15 @@ fn main() {
         WindowDesc::new("Custom Material + Stencil", 640, 480),
         None::<fn()>,
     );
-
-    let mat: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
+    let mat = app.material(WGSL).expect("WGSL compile");
     let start = std::time::Instant::now();
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
-        let mat = if mat.borrow().is_none() {
-            let m = win
-                .gpu()
-                .create_material(WGSL)
-                .expect("WGSL compile");
-            *mat.borrow_mut() = Some(m.clone());
-            m
-        } else {
-            mat.borrow().as_ref().unwrap().clone()
-        };
 
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
-            &win.gpu().queue,
+            &app.gpu.queue,
             &PulseParams {
                 time: t,
                 speed: 3.0,
@@ -102,7 +90,7 @@ fn main() {
 
         // 右侧：无 clip，同样 custom material
         let mut free = DrawBatch::new();
-        free.custom_material = Some(mat);
+        free.custom_material = Some(mat.clone());
         for i in 0..3 {
             free.set_position(480.0, 120.0 + i as f32 * 100.0);
             free.set_rad(t * 0.6 - i as f32 * 0.4);

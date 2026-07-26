@@ -77,9 +77,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 ```
 
-Shape、text、post 共用这份 Material ABI。Post 的场景源纹理由引擎单独绑定到 `group 1`，不会占用
-Material 的 tex0；调用方式为 `win.draw_post(&source_canvas.texture, &material)`。默认 shape VS 会按
-MSAA/SSAA 自动选择 per-pixel/per-sample 插值；单份自定义 shape VS 在所有 AA 模式下保持 per-pixel。
+Shape、text 共用这份 Material ABI。默认 shape VS 会按 MSAA/SSAA 自动选择
+per-pixel/per-sample 插值；单份自定义 shape VS 在所有 AA 模式下保持 per-pixel。
 
 ## 示例
 

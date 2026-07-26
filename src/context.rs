@@ -105,10 +105,6 @@ impl RenderTarget {
         renderer.draw(self, clear_color, batches);
     }
 
-    /// Runs a fullscreen material pass over this target with `Load` semantics.
-    pub fn draw_post(&self, renderer: &Renderer, source: &crate::texture::Texture, material: &Material) {
-        renderer.draw_post(self, source, material);
-    }
 }
 
 /// 渲染器 —— 管理 vertex/index buffer 复用，执行单 pass 渲染。
@@ -1104,40 +1100,6 @@ impl Renderer {
             }
         }
 
-        self.gpu.queue.submit([encoder.finish()]);
-    }
-
-    /// Runs a fullscreen post material directly on `target` using a `Load` render pass.
-    pub fn draw_post(&self, target: &RenderTarget, source: &crate::texture::Texture, material: &Material) {
-        let pipeline = self.gpu.ensure_material_pipeline(
-            material,
-            MaterialTarget::Post,
-            1,
-            false,
-            false,
-            false,
-            0,
-        );
-        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("vireo post encoder"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vireo post pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(1, &source.bind_group, &[]);
-            let bind_group = material.bind_group.borrow();
-            pass.set_bind_group(3, &*bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
         self.gpu.queue.submit([encoder.finish()]);
     }
 

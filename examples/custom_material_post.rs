@@ -1,44 +1,39 @@
-//! 同一 Material API 的全屏后处理：OffscreenCanvas -> window。
+//! “后处理”示例：先画到 OffscreenCanvas，再把它当普通纹理贴回窗口，
+//! 并在这次贴图绘制上挂 Material。
 
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 const WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    if in.target_type != 2u {
-        return in.color;
-    }
     let center = in.uv - vec2<f32>(0.5);
     let vignette = clamp(1.15 - dot(center, center) * 1.8, 0.35, 1.0);
     let split = vec3<f32>(in.color.r * 1.08, in.color.g, in.color.b * 1.12);
-    return vec4<f32>(split * vignette, 1.0);
+    return vec4<f32>(split * vignette, in.color.a);
 }
 "#;
 
 fn main() {
     let mut app = App::new();
     let window = app.window(
-        WindowDesc::new("Unified Material: Post", 640, 400),
+        WindowDesc::new("Material on Offscreen Texture", 640, 400),
         None::<fn()>,
     );
     let scene = app.offscreen(640, 400, AntiAliasing::None);
-    let material: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
+    let material = app.material(WGSL).expect("material WGSL");
 
     app.run(move |app| {
         let win = app.window_ref(&window).unwrap();
         let scene_canvas = app.offscreen_ref(&scene).unwrap();
-        let mat = if let Some(mat) = material.borrow().as_ref() {
-            mat.clone()
-        } else {
-            let mat = win.gpu().create_material(WGSL).expect("material WGSL");
-            *material.borrow_mut() = Some(mat.clone());
-            mat
-        };
 
-        let mut batch = DrawBatch::new();
-        draw_circle(&mut batch, Pos::new(210.0, 205.0), 115.0, Some(Color::new(0.95, 0.2, 0.35, 1.0)));
+        let mut scene_batch = DrawBatch::new();
+        draw_circle(
+            &mut scene_batch,
+            Pos::new(210.0, 205.0),
+            115.0,
+            Some(Color::new(0.95, 0.2, 0.35, 1.0)),
+        );
         draw_rounded_rect(
-            &mut batch,
+            &mut scene_batch,
             Pos::new(325.0, 105.0),
             220.0,
             200.0,
@@ -46,14 +41,20 @@ fn main() {
             Some(Color::new(0.15, 0.55, 1.0, 0.9)),
         );
         draw_text(
-            &mut batch.texts,
-            "OFFSCREEN -> MATERIAL -> WINDOW",
+            &mut scene_batch.texts,
+            "CANVAS -> TEXTURE -> MATERIAL",
             Pos::new(128.0, 342.0),
             TextDef::default().font_size(18.0),
             TextOverride::from_color(WHITE),
         );
-        scene_canvas.draw(Some(Color::new(0.055, 0.07, 0.11, 1.0)), &[&batch]);
-        win.draw_post(&scene_canvas.texture, &mat);
+        scene_canvas.draw(Some(Color::new(0.055, 0.07, 0.11, 1.0)), &[&scene_batch]);
+
+        let mut present = DrawBatch::new();
+        present.set_texture(Some(&scene_canvas.texture));
+        present.custom_material = Some(material.clone());
+        draw_rectangle(&mut present, Pos::new(0.0, 0.0), 640.0, 400.0, Some(WHITE));
+
+        win.draw(Some(BLACK), &[&present]);
         true
     });
 }

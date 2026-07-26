@@ -78,11 +78,9 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 ```
 
-Shape, text, and post share this Material ABI. The post source is bound separately by the engine
-in `group 1`, leaving Material tex0 available to user shaders; call
-`win.draw_post(&source_canvas.texture, &material)`. The default shape VS automatically selects
-per-pixel or per-sample interpolation for MSAA/SSAA. A single custom shape VS remains per-pixel
-across all AA modes.
+Shape and text share this Material ABI. The default shape VS automatically selects per-pixel or
+per-sample interpolation for MSAA/SSAA. A single custom shape VS remains per-pixel across all AA
+modes.
 
 ## Examples
 

@@ -135,7 +135,7 @@ fn gpu_bench_scenes() {
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
-fn material_shape_text_ssaa_and_post_paths() {
+fn material_shape_text_ssaa_paths() {
     const MATERIAL_WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
     return vec4<f32>(in.color.rgb * vec3<f32>(0.8, 1.0, 0.9), in.color.a);
@@ -151,7 +151,6 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },
         0.0,
     );
-    let output = OffscreenCanvas::new(&gpu, 320, 180);
     let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
 
     let mut batch = DrawBatch::new();
@@ -167,5 +166,4 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     );
 
     source.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
-    output.draw_post(&source.texture, &material);
 }

@@ -6,7 +6,6 @@
 //! set VIREO_AA=ssaa4; cargo run --example custom_material
 //! ```
 
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 #[repr(C)]
@@ -62,22 +61,11 @@ fn main() {
         AntiAliasing::Ssaa { .. } => "Custom Material (SSAA x4)",
     };
     let idx = app.window(WindowDesc::new(title, 500, 400).anti_aliasing(aa), None::<fn()>);
-
-    let mat: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
+    let mat = app.material(WGSL).expect("WGSL compile");
     let start = std::time::Instant::now();
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
-        let mat = if mat.borrow().is_none() {
-            let m = win
-                .gpu()
-                .create_material(WGSL)
-                .expect("WGSL compile");
-            *mat.borrow_mut() = Some(m.clone());
-            m
-        } else {
-            mat.borrow().as_ref().unwrap().clone()
-        };
 
         let t = start.elapsed().as_secs_f32();
         let params = PulseParams {
@@ -86,7 +74,7 @@ fn main() {
             hue: t * 0.1,
             _pad: 0.0,
         };
-        mat.set_uniform(&win.gpu().queue, &params);
+        mat.set_uniform(&app.gpu.queue, &params);
 
         let mut b = DrawBatch::new();
         b.custom_material = Some(mat.clone());

@@ -12,7 +12,7 @@ pub const MATERIAL_UNIFORM_SIZE: usize = 1024;
 /// 运行时自定义 shader 材质。
 ///
 /// 由 [`GpuContext::create_material`](crate::gpu::GpuContext::create_material) 创建。
-/// **同一 Material 可同时用于形状、文字、后处理**——引擎按用途自动选对应顶点布局与 pipeline。
+/// **同一 Material 可同时用于形状、文字**——引擎按用途自动选对应顶点布局与 pipeline。
 ///
 /// **group 3 layout**：
 /// - `@binding(0)` storage uniform（[`MATERIAL_UNIFORM_SIZE`] B，**VERTEX|FRAGMENT**）

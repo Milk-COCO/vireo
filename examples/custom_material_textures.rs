@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use vireo::prelude::*;
 
 #[repr(C)]
@@ -58,40 +57,27 @@ fn main() {
         WindowDesc::new("Custom Material Multi-Texture", 560, 360),
         None::<fn()>,
     );
-
-    let mat: RefCell<Option<std::sync::Arc<Material>>> = RefCell::new(None);
-    let tex_keep: RefCell<Option<(Texture, Texture)>> = RefCell::new(None);
+    let mat = app.material(WGSL).expect("WGSL compile");
+    let tex0 = Texture::from_rgba(64, 64, &solid_rgba(64, 64, 40, 120, 255), &app.gpu);
+    let tex1 = Texture::from_rgba(
+        64,
+        64,
+        &checker_rgba(64, 64, [255, 80, 40], [40, 200, 120], 8),
+        &app.gpu,
+    );
+    mat.set_texture_slots(
+        &app.gpu.device,
+        &[Some(&tex0.view), Some(&tex1.view), None, None],
+    );
     let start = std::time::Instant::now();
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
-        let mat = if mat.borrow().is_none() {
-            let gpu = win.gpu();
-            let m = gpu
-                .create_material(WGSL)
-                .expect("WGSL compile");
-
-            let tex0 = Texture::from_rgba(64, 64, &solid_rgba(64, 64, 40, 120, 255), gpu);
-            let tex1 = Texture::from_rgba(
-                64,
-                64,
-                &checker_rgba(64, 64, [255, 80, 40], [40, 200, 120], 8),
-                gpu,
-            );
-            m.set_texture_slots(
-                &gpu.device,
-                &[Some(&tex0.view), Some(&tex1.view), None, None],
-            );
-            *tex_keep.borrow_mut() = Some((tex0, tex1));
-            *mat.borrow_mut() = Some(m.clone());
-            m
-        } else {
-            mat.borrow().as_ref().unwrap().clone()
-        };
+        let _keep_textures_alive = (&tex0, &tex1);
 
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
-            &win.gpu().queue,
+            &app.gpu.queue,
             &MixParams {
                 time: t,
                 mix: 0.5,
@@ -101,7 +87,7 @@ fn main() {
         );
 
         let mut b = DrawBatch::new();
-        b.custom_material = Some(mat);
+        b.custom_material = Some(mat.clone());
         b.set_position(280.0, 180.0);
         b.set_rad(t * 0.25);
         draw_rectangle(&mut b, Pos::new(-120.0, -120.0), 240.0, 240.0, Some(WHITE));

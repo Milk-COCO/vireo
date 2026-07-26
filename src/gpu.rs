@@ -94,14 +94,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 "#
             )
         ),
-        MaterialTarget::Post => format!(
-            "{}\n{}\n{}\n{}\n{}",
-            MATERIAL_INPUT_WGSL,
-            "struct PostVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };",
-            "@group(1) @binding(0) var vireo_post_source: texture_2d<f32>;\n@group(1) @binding(1) var vireo_post_sampler: sampler;",
-            source,
-            "@fragment\nfn fs_main(in: PostVertexOutput) -> @location(0) vec4<f32> {\n    let base = textureSample(vireo_post_source, vireo_post_sampler, in.uv);\n    let material_in = MaterialInput(in.uv, base, in.position.xy, vec4<f32>(0.0), vec2<f32>(0.0), 0u, 0.0, 0u, 2u);\n    return material_main(material_in);\n}"
-        ),
     }
 }
 
@@ -241,22 +233,6 @@ fn vireo_apply_sdf(in: VertexOutput, base_color: vec4<f32>) -> vec4<f32> {
 }
 "#;
 
-const POST_VERTEX_WGSL: &str = r#"
-struct PostVertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> PostVertexOutput {
-    var out: PostVertexOutput;
-    let x = f32(i32(vi & 1u) * 4 - 1);
-    let y = f32(i32(vi >> 1u) * 4 - 1);
-    out.position = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
-    return out;
-}
-"#;
-
 const TEXT_VERTEX_OUTPUT_WGSL: &str = r#"
 struct VertexOutput {
     @invariant @builtin(position) position: vec4<f32>,
@@ -270,7 +246,6 @@ struct VertexOutput {
 pub(crate) enum MaterialTarget {
     Shape = 0,
     Text = 1,
-    Post = 2,
 }
 
 fn material_pipeline_key(
@@ -1012,17 +987,16 @@ impl GpuContext {
             .preheat(device, queue, physical_width, physical_height);
     }
 
-    /// Creates a material shared by shape, text, and post targets.
+    /// Creates a material shared by shape and text targets.
     ///
     /// The source must define `fn material_main(in: MaterialInput) -> vec4<f32>`.
     /// Shape rendering preserves the engine texture/color and applies SDF clipping and feathering
-    /// after `material_main`. Text starts with the glyph atlas color, while post starts by sampling
-    /// group 1 source texture. Material-owned textures remain in group 3.
+    /// after `material_main`. Text starts with the glyph atlas color. Material-owned textures remain in group 3.
     pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
         self.create_material_inner(source, None)
     }
 
-    /// Creates a unified material with a custom shape vertex shader. Text and post targets still
+    /// Creates a unified material with a custom shape vertex shader. Text targets still
     /// use their engine vertex shaders.
     pub fn create_material_with_vertex_shader(
         &self,
@@ -1047,7 +1021,7 @@ impl GpuContext {
         let samp = &self.default_sampler;
         let init_bg = self.make_material_bind_group(&uniform_buf, white, samp);
         let mut pipelines = FxHashMap::default();
-        for target in [MaterialTarget::Shape, MaterialTarget::Text, MaterialTarget::Post] {
+        for target in [MaterialTarget::Shape, MaterialTarget::Text] {
             let pipeline = self.create_material_pipeline_raw(
                 source,
                 shape_vertex_source.as_deref(),
@@ -1279,7 +1253,6 @@ impl GpuContext {
                 multisample,
                 depth_stencil,
             ),
-            MaterialTarget::Post => self.create_post_material_pipeline(&fragment_source),
         };
 
         let err = pollster::block_on(_scope.pop());
@@ -1324,28 +1297,6 @@ impl GpuContext {
         })
     }
 
-    fn create_post_material_pipeline(&self, fragment_source: &str) -> wgpu::RenderPipeline {
-        let vertex = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("material post vertex"), source: wgpu::ShaderSource::Wgsl(POST_VERTEX_WGSL.into()),
-        });
-        let fragment = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("material post fragment"), source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
-        });
-        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("material post layout"),
-            bind_group_layouts: &[None, Some(&self.texture_bind_group_layout), None, Some(&self.custom_material_bgl)],
-            immediate_size: 0,
-        });
-        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("material post pipeline"), layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &vertex, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &fragment, entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState {
-                format: self.surface_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL,
-            })], compilation_options: Default::default() }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
-            depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1356,10 +1307,7 @@ mod custom_material_tests {
     fn target_pipeline_keys_are_distinct() {
         let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0);
         let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0);
-        let post = material_pipeline_key(MaterialTarget::Post, 4, false, false, false, 0);
         assert_ne!(shape, text);
-        assert_ne!(shape, post);
-        assert_ne!(text, post);
     }
 
     #[test]
@@ -1400,18 +1348,6 @@ mod custom_material_tests {
     fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
         assert!(default_shape_vertex_wgsl(true).contains("@interpolate(linear, sample)"));
         assert!(!default_shape_vertex_wgsl(false).contains("@interpolate(linear, sample)"));
-    }
-
-    #[test]
-    fn post_material_uses_engine_source_texture() {
-        let source = material_fragment_source(
-            "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }",
-            MaterialTarget::Post,
-            false,
-        );
-        assert!(source.contains("@group(1) @binding(0) var vireo_post_source"));
-        assert!(source.contains("textureSample(vireo_post_source, vireo_post_sampler, in.uv)"));
-        assert!(!source.contains("material_tex0"));
     }
 
     #[test]

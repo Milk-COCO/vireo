@@ -306,39 +306,6 @@ impl VireoWindow {
         let _ = self.draw_timed(clear_color, batches);
     }
 
-    /// 在当前 surface texture 上执行一次全屏 Material pass。
-    ///
-    /// 通常先把场景画到 [`OffscreenCanvas`](crate::offscreen::OffscreenCanvas)，再将其
-    /// [`Texture`](crate::texture::Texture) 作为 `source` 传入。不能采样当前 surface 本身。
-    pub fn draw_post(&self, source: &crate::texture::Texture, material: &crate::material::Material) {
-        let mut ft = self.frame_texture.borrow_mut();
-        if ft.is_none() {
-            match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(st)
-                | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
-                wgpu::CurrentSurfaceTexture::Outdated
-                | wgpu::CurrentSurfaceTexture::Lost => {
-                    let cfg = self.surface_config.borrow().clone();
-                    self.surface.configure(&self.gpu.device, &cfg);
-                    match self.surface.get_current_texture() {
-                        wgpu::CurrentSurfaceTexture::Success(st)
-                        | wgpu::CurrentSurfaceTexture::Suboptimal(st) => *ft = Some(st),
-                        _ => return,
-                    }
-                }
-                _ => return,
-            }
-        }
-        let view = ft
-            .as_ref()
-            .unwrap()
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        drop(ft);
-        let target = RenderTarget::from_texture_view(view);
-        target.draw_post(&self.renderer.borrow(), source, material);
-    }
-
     /// 与 [`draw`] 相同，并返回分段耗时（秒），用于卡顿诊断。
     ///
     /// - `acquire`：`get_current_texture`（可能等 swapchain / 上一帧 present / vsync）
@@ -1249,6 +1216,22 @@ impl WindowIndex {
 }
 
 impl App {
+    /// 创建统一 Material。可在 `run()` 之前调用；内部直接复用 App 的唯一 GPU。
+    pub fn material(&self, source: &str) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material(source)
+    }
+
+    /// 创建带自定义 shape 顶点着色器的统一 Material。
+    /// text 仍使用引擎内置顶点着色器。
+    pub fn material_with_vertex_shader(
+        &self,
+        source: &str,
+        vertex_source: &str,
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu
+            .create_material_with_vertex_shader(source, vertex_source)
+    }
+
     /// 根据索引获取窗口引用。返回 None 表示窗口已关闭或索引无效。
     pub fn window_ref(&self, idx: &WindowIndex) -> Option<&VireoWindow> {
         let id = self.handle_to_id.get(&idx.0)?;
