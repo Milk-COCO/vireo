@@ -37,7 +37,7 @@ fn main() {
 
         // ===== 演示组：scissor =====
         let mut scissor_batch = DrawBatch::new();
-        scissor_batch.clips_children = true;
+        scissor_batch.clips_children = false;
         scissor_batch.scissor = Some(Rect::new(50.0, 50.0, 300.0, 220.0));
 
         // 父 batch 自身内容：画一个贯穿 scissor 的大矩形（应不被裁）
@@ -64,8 +64,8 @@ fn main() {
             let hue = (i as f32 / n as f32 + t * 0.05) % 1.0;
 
             // 越界部分应被裁掉
-            draw_rounded_rect(
-                &mut child, Pos::new(x, y), 30.0, 22.0, 4.0,
+            draw_rectangle(
+                &mut child, Pos::new(x, y), 30.0, 22.0,
                 Some(Color::new(
                     0.3 + hue * 0.6,
                     0.4 + (1.0 - hue) * 0.4,
@@ -85,7 +85,7 @@ fn main() {
 
         // ===== 对比组：无 scissor =====
         let mut no_clip = DrawBatch::new();
-        no_clip.clips_children = true;
+        no_clip.clips_children = false;
 
         draw_rectangle(
             &mut no_clip,

@@ -1912,12 +1912,13 @@ impl DrawBatch {
     }
 
     /// flatten / draw 共用：是否走 scissor 代替本层 stencil Push。
-    /// `clips_children && !has_area && (显式 scissor | auto 矩形)`。
+    /// - 显式 `scissor`：独立于 `clips_children`
+    /// - auto-scissor（单矩形检测）：仍要求 `clips_children=true`
     fn uses_scissor_path(&self, has_area: bool) -> bool {
-        if has_area || !self.clips_children {
+        if has_area {
             return false;
         }
-        self.scissor.is_some() || self.auto_scissor().is_some()
+        self.scissor.is_some() || (self.clips_children && self.auto_scissor().is_some())
     }
 
     /// 检测 batch 自身是否只含一个**几何**轴对齐矩形（4 顶点 + 无旋转）。
@@ -3322,7 +3323,7 @@ mod tests {
     }
 
     #[test]
-    fn scissor_without_clips_children_no_scissor() {
+    fn scissor_without_clips_children_still_emits_scissor() {
         let mut b = DrawBatch::new();
         b.scissor = Some(Rect::new(0.0, 0.0, 100.0, 100.0));
         b.clips_children = false;
@@ -3331,9 +3332,12 @@ mod tests {
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
         b.flatten_events(&mut events, 0, None, &FxHashMap::default());
-        assert_eq!(events.len(), 2);
+        // scissor 现在不依赖 clips_children，仍会为子节点发 ScissorPush/Pop
+        assert_eq!(events.len(), 4);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
-        assert!(matches!(&events[1], DrawEvent::Batch(_)));
+        assert!(matches!(&events[1], DrawEvent::ScissorPush(_)));
+        assert!(matches!(&events[2], DrawEvent::Batch(_)));
+        assert!(matches!(&events[3], DrawEvent::ScissorPop));
     }
 
     #[test]
@@ -3393,6 +3397,21 @@ mod tests {
         // 无子：不发空 scissor Push/Pop
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
+    }
+
+    #[test]
+    fn auto_scissor_requires_clips_children() {
+        let mut b = DrawBatch::new();
+        b.clips_children = false;
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
+        let mut child = DrawBatch::new();
+        draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
+        b.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], DrawEvent::Batch(_)));
+        assert!(matches!(&events[1], DrawEvent::Batch(_)));
     }
 
     #[test]
