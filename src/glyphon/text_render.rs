@@ -443,10 +443,12 @@ impl TextRenderer {
             stencil_ref,
             None,
             None,
+            None,
             &[],
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_range_with_material(
         &self,
         atlas: &TextAtlas,
@@ -457,7 +459,8 @@ impl TextRenderer {
         vertex_count: u32,
         stencil_ref: Option<u32>,
         atlas_bind_group: Option<&BindGroup>,
-        material: Option<(&RenderPipeline, &BindGroup)>,
+        material_pipeline: Option<&RenderPipeline>,
+        material_bind_group: Option<&BindGroup>,
         material_offsets: &[u32],
     ) -> Result<(), RenderError> {
         if vertex_count == 0 {
@@ -465,14 +468,14 @@ impl TextRenderer {
         }
 
         let byte_offset = vertex_start as u64 * std::mem::size_of::<GlyphToRender>() as u64;
-        pass.set_pipeline(material.map_or(&self.pipeline, |(pipeline, _)| pipeline));
+        pass.set_pipeline(material_pipeline.unwrap_or(&self.pipeline));
         if let Some(r) = stencil_ref {
             pass.set_stencil_reference(r);
         }
         pass.set_bind_group(0, atlas_bind_group.unwrap_or(&atlas.bind_group), &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(2, transform_bind_group, &[]);
-        if let Some((_, bind_group)) = material {
+        if let Some(bind_group) = material_bind_group {
             pass.set_bind_group(3, bind_group, material_offsets);
         }
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(byte_offset..));

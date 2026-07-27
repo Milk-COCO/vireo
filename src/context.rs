@@ -1112,9 +1112,6 @@ impl Renderer {
                     // 否则部分后端会把 ref 重置为 0。
                     let material_bg = info.custom_material.as_ref()
                         .and_then(|m| m.ensure_bind_group(&self.gpu.device, &self.gpu.queue, &self.gpu.bind_group_pool));
-                    let material_render = info.custom_text_pipeline.as_deref().zip(
-                        material_bg.as_ref(),
-                    );
                     for segment in &info.text {
                         let _ = text_ctx.text_renderer.render_range_with_material(
                             &text_ctx.text_atlas,
@@ -1125,7 +1122,8 @@ impl Renderer {
                             segment.vertex_count,
                             if uses_stencil { Some(text_ref) } else { None },
                             segment.bind_group.as_ref(),
-                            material_render,
+                            info.custom_text_pipeline.as_deref(),
+                            material_bg.as_ref(),
                             &info.dynamic_offsets,
                         );
                     }
