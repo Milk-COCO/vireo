@@ -5,7 +5,7 @@ use vireo::prelude::*;
 
 const WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    // batch base texture from DrawBatch::set_texture (scene canvas)
+    // from DrawBatch::set_texture
     let src = vireo_base_sample(in.base_uv);
     let center = in.base_uv - vec2<f32>(0.5);
     let vignette = clamp(1.15 - dot(center, center) * 1.8, 0.35, 1.0);

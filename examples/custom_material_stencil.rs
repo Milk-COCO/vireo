@@ -1,7 +1,7 @@
 //! 自定义 Material + Stencil（clips_children）演示
 //!
 //! 父 batch 开 clips_children，子 batch 用 custom shader 画出界内容；
-//! 证明 stencil 路径下自定义 FS 仍生效（不再回退 builtin）。
+//! 证明 stencil 路径下自定义 FS 仍生效。
 
 use vireo::prelude::*;
 
@@ -20,8 +20,6 @@ struct Pulse {
     speed: f32,
     hue: f32,
 };
-
-@group(3) @binding(0) var<storage> u_pulse: Pulse;
 
 fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     let k = vec3<f32>(1.0, 2.0/3.0, 1.0/3.0);
@@ -48,7 +46,17 @@ fn main() {
         WindowDesc::new("Custom Material + Stencil", 640, 480),
         None::<fn()>,
     );
-    let mat = app.material(WGSL).expect("WGSL compile");
+    let mat = app.material_with_resources(WGSL, MaterialResources(&[
+        MaterialResource {
+            name: "u_pulse",
+            kind: MaterialResourceKind::Storage {
+                read_only: true,
+                size: std::mem::size_of::<PulseParams>() as u64,
+                type_name: "Pulse",
+                dynamic: false,
+            },
+        },
+    ])).expect("WGSL compile");
     let start = std::time::Instant::now();
 
     app.run(move |app| {
@@ -57,6 +65,7 @@ fn main() {
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
             &app.gpu.queue,
+            "u_pulse",
             &PulseParams {
                 time: t,
                 speed: 3.0,
@@ -65,7 +74,6 @@ fn main() {
             },
         );
 
-        // 父：clip 形状（圆角矩形区域）+ clips_children
         let mut parent = DrawBatch::new();
         parent.set_position(120.0, 100.0);
         parent.clips_children = true;
@@ -78,7 +86,6 @@ fn main() {
             Some(Color::new(0.12, 0.14, 0.2, 0.35)),
         );
 
-        // 子：custom material，故意画出 clip 区域外
         let mut child = DrawBatch::new();
         child.custom_material = Some(mat.clone());
         for i in 0..6 {
@@ -88,7 +95,6 @@ fn main() {
         }
         parent.push_child(child);
 
-        // 右侧：无 clip，同样 custom material
         let mut free = DrawBatch::new();
         free.custom_material = Some(mat.clone());
         for i in 0..3 {

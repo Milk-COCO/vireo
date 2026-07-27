@@ -15,18 +15,10 @@ struct Mix {
     mix: f32,
 };
 
-@group(3) @binding(0) var<storage> u_mix: Mix;
-@group(3) @binding(1) var tex0: texture_2d<f32>;
-@group(3) @binding(2) var samp0: sampler;
-@group(3) @binding(3) var tex1: texture_2d<f32>;
-@group(3) @binding(4) var samp1: sampler;
-
 fn material_main(in: MaterialInput) -> vec4<f32> {
-    // group 3 = Material 额外纹理槽（不是 batch set_texture）
-    // batch 基础贴图请用 vireo_base_sample(in.base_uv)
     let uv = in.base_uv;
-    let a = textureSample(tex0, samp0, uv);
-    let b = textureSample(tex1, samp1, uv);
+    let a = textureSample(tex0, tex0_samp, uv);
+    let b = textureSample(tex1, tex1_samp, uv);
     let w = 0.5 + 0.5 * sin(u_mix.time * 2.0 + uv.x * 6.2831);
     let t = clamp(u_mix.mix + w * 0.3, 0.0, 1.0);
     return mix(a, b, t);
@@ -59,7 +51,33 @@ fn main() {
         WindowDesc::new("Custom Material Multi-Texture", 560, 360),
         None::<fn()>,
     );
-    let mat = app.material(WGSL).expect("WGSL compile");
+
+    let mat = app.material_with_resources(WGSL, MaterialResources(&[
+        MaterialResource {
+            name: "u_mix",
+            kind: MaterialResourceKind::Storage {
+                read_only: true,
+                size: std::mem::size_of::<MixParams>() as u64,
+                type_name: "Mix",
+                dynamic: false,
+            },
+        },
+        MaterialResource {
+            name: "tex0",
+            kind: MaterialResourceKind::Texture {
+                view: TexKind::D2(TexSample::Float),
+                sampler: SampKind::Filtering,
+            },
+        },
+        MaterialResource {
+            name: "tex1",
+            kind: MaterialResourceKind::Texture {
+                view: TexKind::D2(TexSample::Float),
+                sampler: SampKind::Filtering,
+            },
+        },
+    ])).expect("WGSL compile");
+
     let tex0 = Texture::from_rgba(64, 64, &solid_rgba(64, 64, 40, 120, 255), &app.gpu);
     let tex1 = Texture::from_rgba(
         64,
@@ -67,10 +85,9 @@ fn main() {
         &checker_rgba(64, 64, [255, 80, 40], [40, 200, 120], 8),
         &app.gpu,
     );
-    mat.set_texture_slots(
-        &app.gpu.device,
-        &[Some(&tex0.view), Some(&tex1.view), None, None],
-    );
+    mat.set_texture(&app.gpu.device, "tex0", &tex0.view, &app.gpu.default_sampler);
+    mat.set_texture(&app.gpu.device, "tex1", &tex1.view, &app.gpu.default_sampler);
+
     let start = std::time::Instant::now();
 
     app.run(move |app| {
@@ -80,6 +97,7 @@ fn main() {
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
             &app.gpu.queue,
+            "u_mix",
             &MixParams {
                 time: t,
                 mix: 0.5,
@@ -97,7 +115,7 @@ fn main() {
         let mut title = DrawBatch::new();
         draw_text(
             &mut title.texts,
-            "tex0 + tex1 mix (group3 bindings 1-4)",
+            "tex0 + tex1 mix",
             Pos::new(16.0, 16.0),
             TextDef::default().font_size(14.0),
             TextOverride::from_color(WHITE),

@@ -443,6 +443,7 @@ impl TextRenderer {
             stencil_ref,
             None,
             None,
+            &[],
         )
     }
 
@@ -457,6 +458,7 @@ impl TextRenderer {
         stencil_ref: Option<u32>,
         atlas_bind_group: Option<&BindGroup>,
         material: Option<(&RenderPipeline, &BindGroup)>,
+        material_offsets: &[u32],
     ) -> Result<(), RenderError> {
         if vertex_count == 0 {
             return Ok(());
@@ -471,7 +473,7 @@ impl TextRenderer {
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(2, transform_bind_group, &[]);
         if let Some((_, bind_group)) = material {
-            pass.set_bind_group(3, bind_group, &[]);
+            pass.set_bind_group(3, bind_group, material_offsets);
         }
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(byte_offset..));
         pass.draw(0..4, 0..vertex_count);

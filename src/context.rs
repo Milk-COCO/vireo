@@ -381,6 +381,8 @@ impl Renderer {
             /// 自定义材质（`None` = 内置 shader）；shape/text 共用。
             custom_material: Option<Arc<Material>>,
             custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
+            /// Dynamic uniform/storage offsets for group 3 binding（来自 batch）。
+            dynamic_offsets: Vec<u32>,
         }
 
         let mut event_infos: Vec<EventInfo> = Vec::new();
@@ -483,6 +485,7 @@ impl Renderer {
                         scissor_pop: false,
                         custom_material: custom_mat,
                         custom_text_pipeline: None,
+                        dynamic_offsets: batch.dynamic_offsets.clone(),
                     });
                 }
                 DrawEvent::StencilPop => {
@@ -499,6 +502,7 @@ impl Renderer {
                         scissor_pop: false,
                         custom_material: None,
                         custom_text_pipeline: None,
+                        dynamic_offsets: Vec::new(),
                     });
                 }
                 DrawEvent::AreaOp { op, is_setup } => {
@@ -516,6 +520,7 @@ impl Renderer {
                         scissor_pop: false,
                         custom_material: None,
                         custom_text_pipeline: None,
+                        dynamic_offsets: Vec::new(),
                     });
                     if !is_setup {
                         if !prev_area_cleanup {
@@ -537,6 +542,7 @@ impl Renderer {
                         scissor_pop: false,
                         custom_material: None,
                         custom_text_pipeline: None,
+                        dynamic_offsets: Vec::new(),
                     });
                 }
                 DrawEvent::ScissorPop => {
@@ -550,6 +556,7 @@ impl Renderer {
                         scissor_pop: true,
                         custom_material: None,
                         custom_text_pipeline: None,
+                        dynamic_offsets: Vec::new(),
                     });
                 }
             }
@@ -947,6 +954,7 @@ impl Renderer {
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
             let mut last_custom_ptr: *const Material = std::ptr::null();
+            let mut last_dynamic_offsets: Vec<u32> = Vec::new();
             let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
             let mut scissor_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
@@ -996,7 +1004,8 @@ impl Renderer {
                     let need_rebind = !shapes_bound
                         || custom_ptr != last_custom_ptr
                         || (!use_custom && last_geometry != Some(shape.geometry))
-                        || (uses_stencil && pipe_op != last_stencil_op);
+                        || (uses_stencil && pipe_op != last_stencil_op)
+                        || info.dynamic_offsets != last_dynamic_offsets;
                     if need_rebind {
                         let tmp_pipe: wgpu::RenderPipeline;
                         let custom_pipe: Arc<wgpu::RenderPipeline>;
@@ -1047,8 +1056,9 @@ impl Renderer {
                         pass.set_bind_group(2, engine_bg, &[]);
                         if use_custom {
                             let mat = info.custom_material.as_ref().unwrap();
-                            let bg = mat.bind_group.borrow();
-                            pass.set_bind_group(3, &*bg, &[]);
+                            if let Some(bg) = mat.ensure_bind_group(&self.gpu.device, &self.gpu.queue, &self.gpu.bind_group_pool) {
+                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            }
                         }
                         if let Some(vb) = vbuf.as_ref() {
                             pass.set_vertex_buffer(0, vb.slice(..));
@@ -1060,6 +1070,7 @@ impl Renderer {
                         last_custom_ptr = custom_ptr;
                         last_geometry = Some(shape.geometry);
                         last_stencil_op = pipe_op;
+                        last_dynamic_offsets = info.dynamic_offsets.clone();
                     }
                     if uses_stencil {
                         pass.set_stencil_reference(info.stencil_ref);
@@ -1099,9 +1110,10 @@ impl Renderer {
                     };
                     // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
                     // 否则部分后端会把 ref 重置为 0。
-                    let material_bg = info.custom_material.as_ref().map(|m| m.bind_group.borrow());
+                    let material_bg = info.custom_material.as_ref()
+                        .and_then(|m| m.ensure_bind_group(&self.gpu.device, &self.gpu.queue, &self.gpu.bind_group_pool));
                     let material_render = info.custom_text_pipeline.as_deref().zip(
-                        material_bg.as_deref(),
+                        material_bg.as_ref(),
                     );
                     for segment in &info.text {
                         let _ = text_ctx.text_renderer.render_range_with_material(
@@ -1114,6 +1126,7 @@ impl Renderer {
                             if uses_stencil { Some(text_ref) } else { None },
                             segment.bind_group.as_ref(),
                             material_render,
+                            &info.dynamic_offsets,
                         );
                     }
                     shapes_bound = false;
@@ -1735,6 +1748,9 @@ pub struct DrawBatch {
     /// `None` = 内置。
     /// 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
     pub custom_material: Option<Arc<Material>>,
+    /// Dynamic uniform/storage offsets for group 3 binding（逐 draw 偏移，字节）。
+    /// 长度必须等于 BGL 中 `has_dynamic_offset` 的 binding 数量。
+    pub dynamic_offsets: Vec<u32>,
 }
 
 impl DrawBatch {
@@ -1767,6 +1783,7 @@ impl DrawBatch {
             scissor: None,
             text_clip: None,
             custom_material: None,
+            dynamic_offsets: Vec::new(),
         }
     }
 
@@ -1794,9 +1811,8 @@ impl DrawBatch {
         self.scissor = None;
         self.text_clip = None;
         self.custom_material = None;
+        self.dynamic_offsets.clear();
     }
-
-    /// 本 batch 填充几何 → Area 叶子（烘焙 transform；不含 children/text/outline 语义）。
     pub fn to_area(&self) -> Area {
         if self.vertices.is_empty() || self.indices.is_empty() {
             return Area::Empty;
@@ -2501,6 +2517,7 @@ impl DrawBatch {
             scissor: self.scissor,
             text_clip: self.text_clip,
             custom_material: self.custom_material.clone(),
+            dynamic_offsets: self.dynamic_offsets.clone(),
         }
     }
 

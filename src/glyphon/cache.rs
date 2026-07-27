@@ -299,7 +299,7 @@ impl Cache {
     pub(crate) fn create_material_pipeline(
         &self,
         device: &Device,
-        material_layout: &BindGroupLayout,
+        material_layout: Option<&BindGroupLayout>,
         fragment_source: &str,
         format: TextureFormat,
         multisample: MultisampleState,
@@ -309,14 +309,23 @@ impl Cache {
             label: Some("glyphon material fragment"),
             source: ShaderSource::Wgsl(Cow::Borrowed(fragment_source)),
         });
-        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("glyphon material pipeline layout"),
-            bind_group_layouts: &[
+        let bgls: Vec<Option<&BindGroupLayout>> = if material_layout.is_some() {
+            vec![
                 Some(&self.0.atlas_layout),
                 Some(&self.0.uniforms_layout),
                 Some(&self.0.engine_storage_layout),
-                Some(material_layout),
-            ],
+                material_layout,
+            ]
+        } else {
+            vec![
+                Some(&self.0.atlas_layout),
+                Some(&self.0.uniforms_layout),
+                Some(&self.0.engine_storage_layout),
+            ]
+        };
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("glyphon material pipeline layout"),
+            bind_group_layouts: &bgls,
             ..Default::default()
         });
         device.create_render_pipeline(&RenderPipelineDescriptor {

@@ -429,7 +429,7 @@ impl TextAtlas {
     pub(crate) fn create_material_pipeline(
         &self,
         device: &Device,
-        material_layout: &wgpu::BindGroupLayout,
+        material_layout: Option<&wgpu::BindGroupLayout>,
         fragment_source: &str,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,

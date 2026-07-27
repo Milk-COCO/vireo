@@ -47,6 +47,15 @@ pub mod prelude {
     pub use crate::material::Material;
     pub use crate::material::MATERIAL_TEX_SLOTS;
     pub use crate::material::MATERIAL_UNIFORM_SIZE;
+    pub use crate::material::MaterialResource;
+    pub use crate::material::MaterialResourceKind;
+    pub use crate::material::MaterialResources;
+    pub use crate::material::TexKind;
+    pub use crate::material::TexSample;
+    pub use crate::material::SampKind;
+    pub use crate::material::CachePolicy;
+    pub use crate::material::wgsl_snippets;
+    pub use crate::material::expand_includes;
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::Vertex;
     pub use crate::gpu::VIREO_TARGET_SHAPE;

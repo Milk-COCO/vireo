@@ -32,22 +32,26 @@ fn default_shape_vertex_wgsl(ssaa: bool) -> String {
     }
 }
 
-fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) -> String {
+/// 返回 (final_source, user_source_line_offset) 其中 offset 是用户代码起始行号（1-indexed）。
+fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) -> (String, u32) {
+    let line_count = |s: &str| s.split('\n').count() as u32;
     match target {
-        MaterialTarget::Shape => format!(
-            "{}\n{}\n{}\n{}\n{}",
-            if ssaa {
+        MaterialTarget::Shape => {
+            let vertex_out = if ssaa {
                 SHAPE_VERTEX_OUTPUT_WGSL.replace(
                     "@interpolate(linear) local_pos",
                     "@interpolate(linear, sample) local_pos",
                 )
             } else {
                 SHAPE_VERTEX_OUTPUT_WGSL.to_owned()
-            },
-            MATERIAL_INPUT_WGSL,
-            SHAPE_FRAGMENT_SUPPORT_WGSL,
-            source,
-            r#"
+            };
+            let offset = line_count(&vertex_out) + line_count(MATERIAL_INPUT_WGSL) + line_count(SHAPE_FRAGMENT_SUPPORT_WGSL);
+            (
+                format!(
+                    "{}\n{}\n{}\n{}\n{}",
+                    vertex_out, MATERIAL_INPUT_WGSL, SHAPE_FRAGMENT_SUPPORT_WGSL,
+                    source,
+                    r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let base = textureSample(vireo_base_texture, vireo_base_sampler, in.uv) * in.color;
@@ -60,12 +64,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vireo_apply_sdf(in, out_color);
 }
 "#
-        ),
-        MaterialTarget::Text => format!(
-            "{}\n{}\n{}\n{}",
-            TEXT_VERTEX_OUTPUT_WGSL,
-            MATERIAL_INPUT_WGSL,
-            r#"
+                ),
+                offset,
+            )
+        }
+        MaterialTarget::Text => {
+            let text_support = r#"
 @group(0) @binding(0) var vireo_color_atlas: texture_2d<f32>;
 @group(0) @binding(1) var vireo_mask_atlas: texture_2d<f32>;
 @group(0) @binding(2) var vireo_atlas_sampler: sampler;
@@ -83,11 +87,20 @@ fn vireo_base_color(in: MaterialInput) -> vec4<f32> {
 fn vireo_has_base_sample() -> bool { return true; }
 fn vireo_has_local_pos() -> bool { return false; }
 fn vireo_has_sdf_data() -> bool { return false; }
-"#,
-            format!(
-                "{}\n{}",
-                source,
-                r#"
+"#;
+            let offset = line_count(TEXT_VERTEX_OUTPUT_WGSL)
+                + line_count(MATERIAL_INPUT_WGSL)
+                + line_count(text_support);
+            (
+                format!(
+                    "{}\n{}\n{}{}",
+                    TEXT_VERTEX_OUTPUT_WGSL,
+                    MATERIAL_INPUT_WGSL,
+                    text_support,
+                    format!(
+                        "{}\n{}",
+                        source,
+                        r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base: vec4<f32>;
@@ -106,9 +119,60 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return out_color;
 }
 "#
+                    )
+                ),
+                offset,
             )
-        ),
+        }
     }
+}
+
+/// 解析 naga 错误字符串，将行号偏移回用户原始代码。
+/// `user_start` = 用户代码在最终 WGSL 里起始行（1-indexed）。
+/// `user_len` = 用户代码行数。
+fn offset_naga_error(msg: &str, user_start: u32, user_len: u32) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for line in msg.lines() {
+        // 匹配行如 "  42 │ var x: ..."
+        if let Some(rest) = line.trim_start().strip_suffix('│') {
+            let num_part = rest.trim();
+            if let Ok(n) = num_part.parse::<u32>() {
+                let adjusted = if n < user_start {
+                    n // engine boilerplate
+                } else if n < user_start + user_len {
+                    n - user_start + 1 // user code: 1-indexed
+                } else {
+                    n - user_start - user_len + 1 // injected/wrapper code
+                };
+                out.push_str(&format!("{:>4} │", adjusted));
+            } else {
+                out.push_str(line);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // Also adjust ── lines like "  ┌─ shader.wgsl:42:18"
+    if let Some(pos) = out.find("shader.wgsl:") {
+        let rest = out[pos + 12..].to_owned();
+        if let Some(col_pos) = rest.find(':') {
+            let num_str = &rest[..col_pos];
+            if let Ok(n) = num_str.parse::<u32>() {
+                let adjusted = if n < user_start {
+                    n
+                } else if n < user_start + user_len {
+                    n - user_start + 1
+                } else {
+                    n - user_start - user_len + 1
+                };
+                let before = &out[..pos + 12];
+                let after = &rest[col_pos..];
+                out = format!("{}{}{}", before, adjusted, after);
+            }
+        }
+    }
+    out
 }
 
 /// Material target discriminators (injected into WGSL as constants).
@@ -332,6 +396,8 @@ pub struct GpuContext {
     pub engine_storage_bind_group_layout: wgpu::BindGroupLayout,
     pub custom_material_bgl: wgpu::BindGroupLayout,
     pub default_sampler: wgpu::Sampler,
+    pub(crate) non_filtering_sampler: wgpu::Sampler,
+    pub(crate) comparison_sampler: wgpu::Sampler,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub white_bind_group: Arc<wgpu::BindGroup>,
@@ -340,6 +406,8 @@ pub struct GpuContext {
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: RefCell<TextContext>,
+    /// 跨材质 bind group 复用池。
+    pub(crate) bind_group_pool: crate::material::BindGroupPool,
     /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
     pub(crate) adapter: wgpu::Adapter,
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
@@ -473,6 +541,25 @@ impl GpuContext {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let non_filtering_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("non-filtering sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let comparison_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
 
@@ -699,6 +786,8 @@ impl GpuContext {
             engine_storage_bind_group_layout,
             custom_material_bgl,
             default_sampler,
+            non_filtering_sampler,
+            comparison_sampler,
             white_texture,
             white_texture_view,
             white_bind_group,
@@ -707,6 +796,7 @@ impl GpuContext {
             transform_dummy_buf,
             surface_format,
             text_ctx,
+            bind_group_pool: crate::material::BindGroupPool::new(),
             adapter,
             supported_sample_counts,
             pipelines: RefCell::new(pipelines),
@@ -1052,61 +1142,99 @@ impl GpuContext {
             .preheat(device, queue, physical_width, physical_height);
     }
 
-    /// Creates a material shared by shape and text targets.
+    /// Creates a material with no group 3 resources.
     ///
-    /// The source must define `fn material_main(in: MaterialInput) -> vec4<f32>`.
+    /// Pipeline layout has only groups 0–2. The source must define
+    /// `fn material_main(in: MaterialInput) -> vec4<f32>`. No `set_*` methods
+    /// are available on the returned material.
     ///
-    /// # `MaterialInput` contract (current; may still change)
-    ///
-    /// | field | always | shape | text |
-    /// |---|---|---|---|
-    /// | `uv` | yes | primitive texture UV | glyph atlas UV |
-    /// | `base_uv` | yes | batch base-texture UV | per-glyph-quad batch UV (**repeats**; not whole-line) |
-    /// | `color` | yes | base texture × vertex color (rgb) | glyph/mask × text color (rgb) |
-    /// | `local_pos` | present | valid | default `(0,0)` |
-    /// | `sdf_*` | present | valid when SDF | defaults / zero |
-    /// | `content_type` | present | `0` | glyph content kind |
-    /// | `target_type` | yes | [`VIREO_TARGET_SHAPE`] | [`VIREO_TARGET_TEXT`] |
-    ///
-    /// Prefer injected helpers over internal bind names:
-    /// - `vireo_base_sample(uv)` — sample batch base texture (`DrawBatch::set_texture`)
-    /// - `vireo_base_color(in)` — current default base color
-    /// - `vireo_has_base_sample()` / `vireo_has_local_pos()` / `vireo_has_sdf_data()`
-    ///
-    /// Shape path applies SDF clip/feather **after** `material_main`. Text starts from glyph atlas
-    /// color/mask. User-owned Material textures stay in group 3.
+    /// For group 3 resources, use [`create_material_with_resources`](Self::create_material_with_resources).
     pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, None)
+        self.create_material_inner(source, None, None)
     }
 
-    /// Creates a unified material with a custom shape vertex shader. Text targets still
-    /// use their engine vertex shaders.
+    /// Creates a material (no group 3) with a custom shape vertex shader.
+    /// Text targets still use the engine vertex shader.
     pub fn create_material_with_vertex_shader(
         &self,
         source: &str,
         vertex_source: &str,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, Some(vertex_source.to_owned()))
+        self.create_material_inner(source, Some(vertex_source.to_owned()), None)
+    }
+
+    /// Creates a material from resource descriptors (engine builds BGL, injects WGSL, AutoDefaults).
+    pub fn create_material_with_resources(
+        &self,
+        source: &str,
+        resources: crate::material::MaterialResources<'_>,
+    ) -> Result<Arc<Material>, String> {
+        self.create_material_inner(source, None, Some(resources))
+    }
+
+    /// Creates a material from resource descriptors with custom vertex shader.
+    pub fn create_material_with_resources_and_vertex_shader(
+        &self,
+        source: &str,
+        vertex_source: &str,
+        resources: crate::material::MaterialResources<'_>,
+    ) -> Result<Arc<Material>, String> {
+        self.create_material_inner(source, Some(vertex_source.to_owned()), Some(resources))
+    }
+
+    /// Creates a material with user-provided BGL (caller must install `set_bind_group_provider` before draw).
+    pub fn create_material_manual(
+        &self,
+        source: &str,
+        bgl: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<Material>, String> {
+        self.create_material_inner_manual(source, None, bgl)
+    }
+
+    /// Creates a material with user-provided BGL and custom vertex shader.
+    pub fn create_material_manual_with_vertex_shader(
+        &self,
+        source: &str,
+        vertex_source: &str,
+        bgl: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<Material>, String> {
+        self.create_material_inner_manual(source, Some(vertex_source.to_owned()), bgl)
     }
 
     fn create_material_inner(
         &self,
         source: &str,
         shape_vertex_source: Option<String>,
+        resources: Option<crate::material::MaterialResources<'_>>,
     ) -> Result<Arc<Material>, String> {
-        let uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("material uniform"),
-            size: crate::material::MATERIAL_UNIFORM_SIZE as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let white = &self.white_texture_view;
-        let samp = &self.default_sampler;
-        let init_bg = self.make_material_bind_group(&uniform_buf, white, samp);
+        let source = crate::material::expand_includes(source)?;
+
+        let raw_resources: Vec<crate::material::MaterialResource<'_>> = resources
+            .map(|r| r.0.to_vec())
+            .unwrap_or_default();
+
+        let has_resources = !raw_resources.is_empty();
+
+        // Build BGL from descriptors
+        let material_bgl = if has_resources {
+            crate::material::build_bgl_from_resources(&self.device, &raw_resources)?
+        } else {
+            None
+        };
+
+        // Inject WGSL at end
+        let final_source = if has_resources {
+            crate::material::inject_wgsl_resources(&source, &raw_resources)
+        } else {
+            source
+        };
+
+        // Validate pipelines compile
         let mut pipelines = FxHashMap::default();
+        let bgl_ref = material_bgl.as_ref();
         for target in [MaterialTarget::Shape, MaterialTarget::Text] {
             let pipeline = self.create_material_pipeline_raw(
-                source,
+                &final_source,
                 shape_vertex_source.as_deref(),
                 target,
                 1,
@@ -1114,99 +1242,78 @@ impl GpuContext {
                 false,
                 false,
                 0,
+                bgl_ref,
             )?;
             pipelines.insert(
                 material_pipeline_key(target, 1, false, false, false, 0),
                 Arc::new(pipeline),
             );
         }
-        Ok(Arc::new(Material::new(
-            self.custom_material_bgl.clone(),
-            uniform_buf,
-            init_bg,
-            pipelines,
+
+        if has_resources {
+            let bgl = material_bgl.unwrap();
+            let (slots, init_bg) = crate::material::build_auto_defaults(
+                &self.device,
+                &bgl,
+                &raw_resources,
+                &self.white_texture_view,
+                &self.default_sampler,
+                &self.non_filtering_sampler,
+                &self.comparison_sampler,
+            );
+            Ok(Arc::new(Material::new_a(
+                bgl,
+                slots,
+                init_bg,
+                crate::material::CachePolicy::Dirty,
+                final_source,
+                shape_vertex_source,
+                pipelines,
+                self.device.clone(),
+            )))
+        } else {
+            Ok(Arc::new(Material::new_zero_resource(
+                final_source,
+                shape_vertex_source,
+                pipelines,
+            )))
+        }
+    }
+
+    fn create_material_inner_manual(
+        &self,
+        source: &str,
+        shape_vertex_source: Option<String>,
+        bgl: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<Material>, String> {
+        let source = crate::material::expand_includes(source)?;
+        let mut pipelines = FxHashMap::default();
+        let bgl_ref = Some(bgl);
+        for target in [MaterialTarget::Shape, MaterialTarget::Text] {
+            let pipeline = self.create_material_pipeline_raw(
+                &source,
+                shape_vertex_source.as_deref(),
+                target,
+                1,
+                false,
+                false,
+                false,
+                0,
+                bgl_ref,
+            )?;
+            pipelines.insert(
+                material_pipeline_key(target, 1, false, false, false, 0),
+                Arc::new(pipeline),
+            );
+        }
+
+        Ok(Arc::new(Material::new_b(
+            bgl.clone(),
+            None,
             source.to_owned(),
             shape_vertex_source,
-            self.white_texture_view.clone(),
-            self.default_sampler.clone(),
+            pipelines,
         )))
-    }
-
-    fn make_material_bind_group(
-        &self,
-        uniform_buf: &wgpu::Buffer,
-        white: &wgpu::TextureView,
-        samp: &wgpu::Sampler,
-    ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("custom material bind group"),
-            layout: &self.custom_material_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(white),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(samp),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(white),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(samp),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(white),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(samp),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(white),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::Sampler(samp),
-                },
-            ],
-        })
-    }
-
-    /// 便捷：写 material uniform（不需手传 queue）。
-    pub fn material_set_uniform<T: bytemuck::Pod>(&self, mat: &Material, data: &T) {
-        mat.set_uniform(&self.queue, data);
-    }
-
-    pub fn material_set_uniform_bytes(&self, mat: &Material, data: &[u8]) {
-        mat.set_uniform_bytes(&self.queue, data);
-    }
-
-    pub fn material_set_texture(
-        &self,
-        mat: &Material,
-        tex_view: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
-    ) {
-        mat.set_texture(&self.device, tex_view, sampler);
-    }
-
-    pub fn material_set_texture_slot(
-        &self,
-        mat: &Material,
-        slot: usize,
-        tex_view: &wgpu::TextureView,
-    ) {
-        mat.set_texture_slot(&self.device, slot, tex_view);
     }
 
     pub(crate) fn ensure_material_pipeline(
@@ -1245,6 +1352,7 @@ impl GpuContext {
             ssaa,
             stencil_mode,
             stencil_op,
+            material.bgl(),
         ).expect("material WGSL was validated by create_material");
         let arc = Arc::new(pipeline);
         let mut pipes = material.pipelines.borrow_mut();
@@ -1261,12 +1369,14 @@ impl GpuContext {
         ssaa: bool,
         stencil_mode: bool,
         stencil_op: u32,
+        material_bgl: Option<&wgpu::BindGroupLayout>,
     ) -> Result<wgpu::RenderPipeline, String> {
         let ssaa = ssaa
             && target == MaterialTarget::Shape
             && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let fragment_source = material_fragment_source(source, target, ssaa);
+        let (fragment_source_str, user_offset) = material_fragment_source(source, target, ssaa);
+        let user_line_count = source.split('\n').count() as u32;
         let depth_stencil = if !stencil_mode {
             None
         } else if target == MaterialTarget::Text {
@@ -1320,7 +1430,7 @@ impl GpuContext {
         };
         let pipeline = match target {
             MaterialTarget::Shape => self.create_shape_material_pipeline(
-                &fragment_source,
+                &fragment_source_str,
                 shape_vertex_source
                     .map(str::to_owned)
                     .unwrap_or_else(|| default_shape_vertex_wgsl(ssaa))
@@ -1328,11 +1438,12 @@ impl GpuContext {
                 multisample,
                 depth_stencil,
                 stencil_op,
+                material_bgl,
             ),
             MaterialTarget::Text => self.text_ctx.borrow().text_atlas.create_material_pipeline(
                 &self.device,
-                &self.custom_material_bgl,
-                &fragment_source,
+                material_bgl,
+                &fragment_source_str,
                 multisample,
                 depth_stencil,
             ),
@@ -1340,7 +1451,8 @@ impl GpuContext {
 
         let err = pollster::block_on(_scope.pop());
         if let Some(e) = err {
-            return Err(format!("material {:?} pipeline error: {}", target, e));
+            let adjusted = offset_naga_error(&e.to_string(), user_offset, user_line_count);
+            return Err(format!("material {:?} pipeline error: {}", target, adjusted));
         }
         Ok(pipeline)
     }
@@ -1352,6 +1464,7 @@ impl GpuContext {
         multisample: wgpu::MultisampleState,
         depth_stencil: Option<wgpu::DepthStencilState>,
         stencil_op: u32,
+        material_bgl: Option<&wgpu::BindGroupLayout>,
     ) -> wgpu::RenderPipeline {
         let vertex = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("material shape vertex"), source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
@@ -1359,12 +1472,16 @@ impl GpuContext {
         let fragment = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("material shape fragment"), source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
         });
+        let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if material_bgl.is_some() {
+            vec![Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
+                 Some(&self.engine_storage_bind_group_layout), material_bgl]
+        } else {
+            vec![Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
+                 Some(&self.engine_storage_bind_group_layout)]
+        };
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("material shape layout"),
-            bind_group_layouts: &[
-                Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout), Some(&self.custom_material_bgl),
-            ],
+            bind_group_layouts: &bgls,
             immediate_size: 0,
         });
         self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1436,17 +1553,17 @@ mod custom_material_tests {
     #[test]
     fn material_shape_fragment_matches_ssaa_interpolation() {
         let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
-        assert!(material_fragment_source(shader, MaterialTarget::Shape, true)
+        assert!(material_fragment_source(shader, MaterialTarget::Shape, true).0
             .contains("@interpolate(linear, sample) local_pos"));
-        assert!(!material_fragment_source(shader, MaterialTarget::Shape, false)
+        assert!(!material_fragment_source(shader, MaterialTarget::Shape, false).0
             .contains("@interpolate(linear, sample) local_pos"));
     }
 
     #[test]
     fn material_helpers_exist_for_both_targets() {
         let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return vireo_base_color(in); }";
-        let shape = material_fragment_source(shader, MaterialTarget::Shape, false);
-        let text = material_fragment_source(shader, MaterialTarget::Text, false);
+        let shape = material_fragment_source(shader, MaterialTarget::Shape, false).0;
+        let text = material_fragment_source(shader, MaterialTarget::Text, false).0;
         for src in [shape, text] {
             assert!(src.contains("fn vireo_base_sample(uv: vec2<f32>) -> vec4<f32>"));
             assert!(src.contains("fn vireo_base_color(in: MaterialInput) -> vec4<f32>"));

@@ -1216,13 +1216,13 @@ impl WindowIndex {
 }
 
 impl App {
-    /// 创建统一 Material。可在 `run()` 之前调用；内部直接复用 App 的唯一 GPU。
+    /// 创建无 group 3 的材质（纯 shader，无额外 buffer/纹理绑定）。
+    /// pipeline layout 仅含 groups 0–2。
     pub fn material(&self, source: &str) -> Result<Arc<crate::material::Material>, String> {
         self.gpu.create_material(source)
     }
 
-    /// 创建带自定义 shape 顶点着色器的统一 Material。
-    /// text 仍使用引擎内置顶点着色器。
+    /// 创建无 group 3 的材质 + 自定义 shape 顶点着色器。
     pub fn material_with_vertex_shader(
         &self,
         source: &str,
@@ -1230,6 +1230,45 @@ impl App {
     ) -> Result<Arc<crate::material::Material>, String> {
         self.gpu
             .create_material_with_vertex_shader(source, vertex_source)
+    }
+
+    /// 带 group 3 资源的材质。引擎按描述符自动生成 BGL + 注入 WGSL + AutoDefaults。
+    pub fn material_with_resources(
+        &self,
+        source: &str,
+        resources: crate::material::MaterialResources<'_>,
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material_with_resources(source, resources)
+    }
+
+    /// 带 group 3 资源的材质 + 自定义 shape 顶点着色器。
+    pub fn material_with_resources_and_vertex_shader(
+        &self,
+        source: &str,
+        vertex_source: &str,
+        resources: crate::material::MaterialResources<'_>,
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material_with_resources_and_vertex_shader(source, vertex_source, resources)
+    }
+
+    /// 自定义 BGL 材质。用户自建 BGL + buffer + 每帧 `set_bind_group_provider`。
+    /// 见 `examples/custom_material_manual`。
+    pub fn material_manual(
+        &self,
+        source: &str,
+        bgl: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material_manual(source, bgl)
+    }
+
+    /// 自定义 BGL 材质 + 自定义 shape 顶点着色器。
+    pub fn material_manual_with_vertex_shader(
+        &self,
+        source: &str,
+        vertex_source: &str,
+        bgl: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material_manual_with_vertex_shader(source, vertex_source, bgl)
     }
 
     /// 根据索引获取窗口引用。返回 None 表示窗口已关闭或索引无效。
