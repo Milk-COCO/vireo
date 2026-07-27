@@ -3554,4 +3554,16 @@ mod tests {
         b.clear();
         assert!(b.custom_material.is_none());
     }
+
+    #[test]
+    fn draw_batch_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<DrawBatch>();
+    }
+
+    #[test]
+    fn draw_batch_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<DrawBatch>();
+    }
 }

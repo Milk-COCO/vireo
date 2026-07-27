@@ -1337,11 +1337,9 @@ impl GpuContext {
             stencil_mode,
             stencil_op,
         );
-        {
-            let pipes = material.pipelines.borrow();
-            if let Some(p) = pipes.get(&key) {
-                return p.clone();
-            }
+        let mut pipes = material.pipelines.lock().unwrap();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
         }
         let pipeline = self.create_material_pipeline_raw(
             &material.source,
@@ -1355,7 +1353,6 @@ impl GpuContext {
             material.bgl(),
         ).expect("material WGSL was validated by create_material");
         let arc = Arc::new(pipeline);
-        let mut pipes = material.pipelines.borrow_mut();
         pipes.entry(key).or_insert(arc).clone()
     }
 

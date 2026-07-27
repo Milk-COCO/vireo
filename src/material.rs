@@ -1,5 +1,6 @@
-use std::cell::{Cell, RefCell};
-use std::sync::Arc;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 
@@ -246,18 +247,18 @@ pub(crate) enum MaterialState {
     ZeroResource,
     A {
         bgl: wgpu::BindGroupLayout,
-        slots: RefCell<FxHashMap<String, ResourceSlot>>,
+        slots: Mutex<FxHashMap<String, ResourceSlot>>,
         cache_policy: CachePolicy,
-        bind_group: RefCell<wgpu::BindGroup>,
+        bind_group: Mutex<wgpu::BindGroup>,
         #[allow(dead_code)]
-        fingerprints: RefCell<FxHashMap<String, u64>>,
-        dirty: Cell<bool>,
+        fingerprints: Mutex<FxHashMap<String, u64>>,
+        dirty: AtomicBool,
         device: wgpu::Device,
     },
     B {
         bgl: wgpu::BindGroupLayout,
-        provider: RefCell<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
-        bind_group: RefCell<Option<wgpu::BindGroup>>,
+        provider: Mutex<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
+        bind_group: Mutex<Option<wgpu::BindGroup>>,
     },
 }
 
@@ -295,7 +296,7 @@ pub struct Material {
     pub(crate) source: String,
     pub(crate) shape_vertex_source: Option<String>,
     /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
-    pub(crate) pipelines: RefCell<FxHashMap<u64, Arc<wgpu::RenderPipeline>>>,
+    pub(crate) pipelines: Mutex<FxHashMap<u64, Arc<wgpu::RenderPipeline>>>,
 }
 
 impl Material {
@@ -308,7 +309,7 @@ impl Material {
             state: MaterialState::ZeroResource,
             source,
             shape_vertex_source,
-            pipelines: RefCell::new(pipelines),
+            pipelines: Mutex::new(pipelines),
         }
     }
 
@@ -322,21 +323,20 @@ impl Material {
         pipelines: FxHashMap<u64, Arc<wgpu::RenderPipeline>>,
         device: wgpu::Device,
     ) -> Self {
-        let mut fingerprints = FxHashMap::default();
-        fingerprints.reserve(slots.len());
+        let fingerprints = FxHashMap::default();
         Self {
             state: MaterialState::A {
                 bgl,
-                slots: RefCell::new(slots),
+                slots: Mutex::new(slots),
                 cache_policy,
-                bind_group: RefCell::new(init_bind_group),
-                fingerprints: RefCell::new(fingerprints),
-                dirty: Cell::new(false),
+                bind_group: Mutex::new(init_bind_group),
+                fingerprints: Mutex::new(fingerprints),
+                dirty: AtomicBool::new(false),
                 device,
             },
             source,
             shape_vertex_source,
-            pipelines: RefCell::new(pipelines),
+            pipelines: Mutex::new(pipelines),
         }
     }
 
@@ -350,12 +350,12 @@ impl Material {
         Self {
             state: MaterialState::B {
                 bgl,
-                provider: RefCell::new(None),
-                bind_group: RefCell::new(init_bind_group),
+                provider: Mutex::new(None),
+                bind_group: Mutex::new(init_bind_group),
             },
             source,
             shape_vertex_source,
-            pipelines: RefCell::new(pipelines),
+            pipelines: Mutex::new(pipelines),
         }
     }
 
@@ -392,26 +392,33 @@ impl Material {
                 dirty,
                 ..
             } => {
-                if *cache_policy == CachePolicy::AlwaysRebuild || dirty.get() {
-                    let slots_ref = slots.borrow();
-                    let new_bg = pool.resolve(bgl, &slots_ref, || {
-                        build_bind_group_from_slots(device, bgl, &slots_ref)
+                let mut bg_guard = bind_group.lock().unwrap();
+                if *cache_policy == CachePolicy::AlwaysRebuild || dirty.load(Ordering::Acquire) {
+                    let slots_guard = slots.lock().unwrap();
+                    let new_bg = pool.resolve(bgl, &slots_guard, || {
+                        build_bind_group_from_slots(device, bgl, &slots_guard)
                     });
-                    *bind_group.borrow_mut() = new_bg;
-                    dirty.set(false);
+                    drop(slots_guard);
+                    *bg_guard = new_bg;
+                    dirty.store(false, Ordering::Release);
                 }
-                Some(bind_group.borrow().clone())
+                Some(bg_guard.clone())
             }
             MaterialState::B {
                 provider,
                 bind_group,
                 ..
             } => {
-                if let Some(ref mut p) = *provider.borrow_mut() {
+                let mut bg_guard = bind_group.lock().unwrap();
+                let mut p_guard = provider.lock().unwrap();
+                if let Some(ref mut p) = *p_guard {
                     let new_bg = p(device, queue);
-                    *bind_group.borrow_mut() = Some(new_bg);
+                    drop(p_guard);
+                    *bg_guard = Some(new_bg);
+                } else {
+                    drop(p_guard);
                 }
-                bind_group.borrow().clone()
+                bg_guard.clone()
             }
         }
     }
@@ -420,7 +427,7 @@ impl Material {
     // Name-based set_* API (material_with_resources only)
     // -----------------------------------------------------------------------
 
-    fn a_state(&self) -> (&RefCell<FxHashMap<String, ResourceSlot>>, &Cell<bool>) {
+    fn a_state(&self) -> (&Mutex<FxHashMap<String, ResourceSlot>>, &AtomicBool) {
         match &self.state {
             MaterialState::A { slots, dirty, .. } => (slots, dirty),
             _ => panic!(
@@ -434,8 +441,8 @@ impl Material {
     pub fn set_uniform_bytes(&self, queue: &wgpu::Queue, name: &str, data: &[u8]) {
         match &self.state {
             MaterialState::A { slots, dirty, device, .. } => {
-                let mut slots = slots.borrow_mut();
-                let slot = slots.get_mut(name).expect("set_uniform_bytes: unknown resource name");
+                let mut slots_guard = slots.lock().unwrap();
+                let slot = slots_guard.get_mut(name).expect("set_uniform_bytes: unknown resource name");
                 match &mut slot.kind {
                     SlotKind::Uniform { buffer, min_size, dynamic: is_dynamic, .. } => {
                         if *is_dynamic && data.len() as u64 > buffer.size() {
@@ -463,7 +470,8 @@ impl Material {
                     }
                     _ => panic!("set_uniform_bytes: '{}' is not a Uniform or Storage resource", name),
                 }
-                dirty.set(true);
+                drop(slots_guard);
+                dirty.store(true, Ordering::Release);
             }
             _ => panic!(
                 "this material has no resource descriptors; \
@@ -491,8 +499,8 @@ impl Material {
         samp: &wgpu::Sampler,
     ) {
         let (slots, dirty) = self.a_state();
-        let mut slots_ref = slots.borrow_mut();
-        let slot = slots_ref.get_mut(name).expect("set_texture: unknown resource name");
+        let mut slots_guard = slots.lock().unwrap();
+        let slot = slots_guard.get_mut(name).expect("set_texture: unknown resource name");
         match &mut slot.kind {
             SlotKind::Texture { view: tex_view, sampler: samp_ref, .. } => {
                 *tex_view = view.clone();
@@ -500,21 +508,23 @@ impl Material {
             }
             _ => panic!("set_texture: '{}' is not a Texture resource", name),
         }
-        dirty.set(true);
+        drop(slots_guard);
+        dirty.store(true, Ordering::Release);
     }
 
     /// 设置 sampler（按名字查找）。保留原纹理不变。
     pub fn set_sampler(&self, _device: &wgpu::Device, name: &str, samp: &wgpu::Sampler) {
         let (slots, dirty) = self.a_state();
-        let mut slots_ref = slots.borrow_mut();
-        let slot = slots_ref.get_mut(name).expect("set_sampler: unknown resource name");
+        let mut slots_guard = slots.lock().unwrap();
+        let slot = slots_guard.get_mut(name).expect("set_sampler: unknown resource name");
         match &mut slot.kind {
             SlotKind::Texture { sampler: samp_ref, .. } => {
                 *samp_ref = samp.clone();
             }
             _ => panic!("set_sampler: '{}' is not a Texture resource", name),
         }
-        dirty.set(true);
+        drop(slots_guard);
+        dirty.store(true, Ordering::Release);
     }
 
     // -----------------------------------------------------------------------
@@ -529,7 +539,7 @@ impl Material {
     {
         match &self.state {
             MaterialState::B { provider, .. } => {
-                *provider.borrow_mut() = Some(Box::new(f));
+                *provider.lock().unwrap() = Some(Box::new(f));
             }
             MaterialState::ZeroResource => panic!(
                 "set_bind_group_provider: this material has no group 3; \
@@ -1040,5 +1050,22 @@ fn samp_kind_to_wgsl_wgsl(view: TexKind, s: SampKind) -> &'static str {
     match (view, s) {
         (TexKind::D2Depth | TexKind::D2DepthArray, SampKind::Comparison) => "sampler_comparison",
         _ => "sampler",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Material>();
+    }
+
+    #[test]
+    fn material_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<Material>();
     }
 }
