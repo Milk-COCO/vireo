@@ -111,7 +111,7 @@ impl RenderTarget {
 ///
 /// 内部维护 GPU buffer，支持在多 batch 间以偏移量追加写入。
 pub struct Renderer {
-    gpu: std::sync::Arc<GpuContext>,
+    pub(crate) gpu: std::sync::Arc<GpuContext>,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     vertex_buf: RefCell<Option<wgpu::Buffer>>,
@@ -814,11 +814,11 @@ impl Renderer {
 
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
         {
-            let mut tc = self.gpu.text_ctx.borrow_mut();
+            let mut tc = self.gpu.text_ctx.lock().unwrap();
             tc.ensure_sample_count(&self.gpu.device, self.sample_count);
             tc.ensure_text_ds(&self.gpu.device, uses_stencil);
         }
-        let mut text_ctx = self.gpu.text_ctx.borrow_mut();
+        let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
         text_ctx.text_renderer.clear();
         text_ctx.advance_frame();
         drop(text_ctx);
@@ -835,7 +835,7 @@ impl Renderer {
                         batch.text_clip,
                         batch.color,
                     );
-                    let text_ctx = self.gpu.text_ctx.borrow();
+                    let text_ctx = self.gpu.text_ctx.lock().unwrap();
                     event_infos[ei].text = prepared
                         .into_iter()
                         .map(|segment| TextRenderSegment {
@@ -948,7 +948,7 @@ impl Renderer {
 
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
-            let mut text_ctx = self.gpu.text_ctx.borrow_mut();
+            let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
             let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
@@ -1142,7 +1142,7 @@ impl Renderer {
     pub fn preheat(&self, target: &RenderTarget, clear_color: crate::color::Color) {
         // 1. 文字预热：cosmic_text shape + swash 光栅化 + atlas GPU 上传。
         // 首帧 ~33ms 的 text prepare 在这里完成。
-        self.gpu.text_ctx.borrow_mut().preheat(
+        self.gpu.text_ctx.lock().unwrap().preheat(
             &self.gpu.device,
             &self.gpu.queue,
             self.physical_width,
@@ -1683,6 +1683,7 @@ struct TextureSegment {
     bind_group: Option<wgpu::BindGroup>,
 }
 
+#[derive(Clone)]
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,

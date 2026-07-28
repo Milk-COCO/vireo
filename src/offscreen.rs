@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::context::{DrawBatch, Renderer};
 use crate::gpu::GpuContext;
 use crate::texture::Texture;
-use crate::window::AntiAliasing;
+use crate::window::{AntiAliasing, OffscreenIndex};
 
 /// 离屏画布 — 与 VireoWindow 对等，但不依赖 winit
 pub struct OffscreenCanvas {
@@ -13,6 +13,8 @@ pub struct OffscreenCanvas {
     renderer: Renderer,
     /// 该离屏画布初始化耗时（秒）：app.offscreen() 内的 AA 管线预热。
     pub init_duration: f64,
+    /// 在 `App.offscreens` 中的索引
+    pub(crate) index: OffscreenIndex,
 }
 
 impl OffscreenCanvas {
@@ -31,7 +33,12 @@ impl OffscreenCanvas {
         let texture = Texture::new(&gpu.device, width, height, gpu.surface_format,
             &gpu.texture_bind_group_layout, &gpu.default_sampler);
         let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa, 1.0);
-        Self { texture, renderer, init_duration }
+        Self { texture, renderer, init_duration, index: OffscreenIndex(0) }
+    }
+
+    /// 本画布在 `App.offscreens` 中的索引。
+    pub fn index(&self) -> OffscreenIndex {
+        self.index
     }
 
     /// 该离屏画布初始化耗时（秒）。

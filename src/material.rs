@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -84,12 +84,12 @@ pub fn expand_includes(source: &str) -> Result<String, String> {
 /// 跨材质 bind group 复用池。
 /// key = (BGL 指针 as u64, 按 binding 排序的 slot 指纹列表)。
 pub(crate) struct BindGroupPool {
-    inner: RefCell<FxHashMap<(u64, Vec<u64>), wgpu::BindGroup>>,
+    inner: std::sync::Mutex<FxHashMap<(u64, Vec<u64>), wgpu::BindGroup>>,
 }
 
 impl BindGroupPool {
     pub(crate) fn new() -> Self {
-        Self { inner: RefCell::new(FxHashMap::default()) }
+        Self { inner: std::sync::Mutex::new(FxHashMap::default()) }
     }
 
     pub(crate) fn resolve(
@@ -106,17 +106,20 @@ impl BindGroupPool {
         let fps: Vec<u64> = fps.into_iter().map(|(_, f)| f).collect();
         let key = (bgl_id, fps);
 
-        if let Some(bg) = self.inner.borrow().get(&key) {
-            return bg.clone();
+        {
+            let lock = self.inner.lock().unwrap();
+            if let Some(bg) = lock.get(&key) {
+                return bg.clone();
+            }
         }
         let bg = build();
-        self.inner.borrow_mut().insert(key, bg.clone());
+        self.inner.lock().unwrap().insert(key, bg.clone());
         bg
     }
 
     #[allow(dead_code)]
     pub fn clear(&self) {
-        self.inner.borrow_mut().clear();
+        self.inner.lock().unwrap().clear();
     }
 }
 

@@ -3,8 +3,7 @@
 //! 桌面无触摸屏时：用鼠标左键模拟（按住拖动 = 单指）。
 //! 触屏设备可多点；显示 id / phase / force。
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use vireo::prelude::*;
 
 struct TouchLog {
@@ -16,7 +15,7 @@ fn main() {
     let mut app = App::new();
     let idx = app.window(WindowDesc::new("Input Touch", 800, 560), None::<fn()>);
 
-    let log = Rc::new(RefCell::new(TouchLog {
+    let log = Arc::new(Mutex::new(TouchLog {
         last: None,
         count: 0,
     }));
@@ -29,9 +28,9 @@ fn main() {
 
         if !registered {
             registered = true;
-            let log_cb = Rc::clone(&log);
+            let log_cb = Arc::clone(&log);
             win.on_touch(move |ev| {
-                let mut g = log_cb.borrow_mut();
+                let mut g = log_cb.lock().unwrap();
                 g.count += 1;
                 g.last = Some(ev.clone());
             });
@@ -45,7 +44,7 @@ fn main() {
             if left && !mouse_touch_active {
                 mouse_touch_active = true;
                 touches.insert(sim_id, (mx, my, Some(0.5)));
-                let mut g = log.borrow_mut();
+                let mut g = log.lock().unwrap();
                 g.count += 1;
                 g.last = Some(TouchEvent {
                     id: sim_id,
@@ -56,7 +55,7 @@ fn main() {
                 });
             } else if left && mouse_touch_active {
                 touches.insert(sim_id, (mx, my, Some(0.5)));
-                let mut g = log.borrow_mut();
+                let mut g = log.lock().unwrap();
                 g.last = Some(TouchEvent {
                     id: sim_id,
                     phase: TouchPhase::Moved,
@@ -67,7 +66,7 @@ fn main() {
             } else if !left && mouse_touch_active {
                 mouse_touch_active = false;
                 touches.remove(&sim_id);
-                let mut g = log.borrow_mut();
+                let mut g = log.lock().unwrap();
                 g.count += 1;
                 g.last = Some(TouchEvent {
                     id: sim_id,
@@ -114,7 +113,7 @@ fn main() {
         }
 
         draw_rectangle(&mut batch, Pos::new(0.0, 480.0), 800.0, 80.0, Some(Color::new(0.08, 0.09, 0.12, 1.0)));
-        let g = log.borrow();
+        let g = log.lock().unwrap();
         let last_s = match &g.last {
             Some(e) => format!(
                 "last: id={} phase={:?} ({:.0},{:.0}) force={:?}",

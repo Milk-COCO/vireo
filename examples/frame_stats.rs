@@ -14,8 +14,7 @@
 //! 注意：旧版把 acquire 算进 draw，容易把 vsync 等纹理误判成 ENGINE。
 //! VIREO_QUIET=1 关闭 stderr spike 日志。
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use vireo::prelude::*;
 
@@ -102,10 +101,9 @@ fn main() {
     let mut show_text = true;
     let mut present_immediate = false;
     let mut was_focused = true;
-    let pending_aa: Rc<RefCell<Option<AntiAliasing>>> = Rc::new(RefCell::new(None));
-    let toggle_text: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
-    let toggle_present: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
-    let mut key_registered = false;
+    let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));
+    let toggle_text: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let toggle_present: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -118,61 +116,19 @@ fn main() {
         }
         was_focused = focused;
 
-        if !key_registered {
-            key_registered = true;
-            let pending = pending_aa.clone();
-            let t_text = toggle_text.clone();
-            let t_present = toggle_present.clone();
-            win.on_key_down(move |event| {
-                if !event.state.is_pressed() || event.repeat {
-                    return;
-                }
-                match event.key {
-                    KeyCode::Digit1 => {
-                        *pending.borrow_mut() = Some(AntiAliasing::None);
-                    }
-                    KeyCode::Digit2 if max_sc >= 4 => {
-                        *pending.borrow_mut() = Some(AntiAliasing::Msaa {
-                            samples: 4,
-                            alpha_to_coverage: false,
-                        });
-                    }
-                    KeyCode::Digit3 if max_sc >= 8 => {
-                        *pending.borrow_mut() = Some(AntiAliasing::Msaa {
-                            samples: 8,
-                            alpha_to_coverage: false,
-                        });
-                    }
-                    KeyCode::Digit4 if max_sc >= 4 => {
-                        *pending.borrow_mut() = Some(AntiAliasing::Ssaa {
-                            samples: 4,
-                            alpha_to_coverage: false,
-                        });
-                    }
-                    KeyCode::KeyT => {
-                        *t_text.borrow_mut() = true;
-                    }
-                    KeyCode::KeyV => {
-                        *t_present.borrow_mut() = true;
-                    }
-                    _ => {}
-                }
-            });
-        }
-
-        if let Some(aa) = pending_aa.borrow_mut().take() {
+        if let Some(aa) = pending_aa.lock().unwrap().take() {
             win.set_anti_aliasing(aa);
             current_aa = aa;
             history.clear();
         }
-        if std::mem::take(&mut *toggle_text.borrow_mut()) {
+        if std::mem::take(&mut *toggle_text.lock().unwrap()) {
             show_text = !show_text;
             history.clear();
             if !quiet {
                 eprintln!("[diag] text={}", show_text);
             }
         }
-        if std::mem::take(&mut *toggle_present.borrow_mut()) {
+        if std::mem::take(&mut *toggle_present.lock().unwrap()) {
             present_immediate = !present_immediate;
             let mode = if present_immediate {
                 PresentMode::Immediate

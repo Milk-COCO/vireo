@@ -114,7 +114,9 @@ pub struct TouchEvent {
 
 // ------ InputCallbacks ------
 
-/// 输入事件回调集合
+/// 输入事件回调集合（运行在 winit 线程，无需 +Send 约束）。
+/// `unsafe impl Send`：`App.callbacks` 在移到渲染线程前已被抽空，
+/// 不包含实际非 Send 数据。
 pub struct InputCallbacks {
     pub on_key_down: Vec<Box<dyn FnMut(&KeyEvent)>>,
     pub on_key_up: Vec<Box<dyn FnMut(&KeyEvent)>>,
@@ -128,6 +130,9 @@ pub struct InputCallbacks {
     pub on_focus_lost: Vec<Box<dyn FnOnce()>>,
     pub on_modifiers_changed: Vec<Box<dyn FnMut(Modifiers)>>,
 }
+
+// SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。
+unsafe impl Send for InputCallbacks {}
 
 impl Default for InputCallbacks {
     fn default() -> Self {
@@ -165,8 +170,6 @@ pub struct InputState {
     pub cursor_inside: RefCell<bool>,
     /// 活跃的触摸点: id -> (x, y, force)
     pub touches: RefCell<HashMap<u64, (f32, f32, Option<f64>)>>,
-    /// 事件回调列表
-    pub callbacks: RefCell<InputCallbacks>,
 }
 
 impl Default for InputState {
@@ -179,7 +182,6 @@ impl Default for InputState {
             focused: RefCell::new(false),
             cursor_inside: RefCell::new(false),
             touches: RefCell::new(HashMap::new()),
-            callbacks: RefCell::new(InputCallbacks::default()),
         }
     }
 }

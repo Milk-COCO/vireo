@@ -1469,6 +1469,7 @@ impl TextEntry {
 ///
 /// 内部维护文字画笔 [`TextTextureState`]：由 batch 的 `set_texture` / `set_uv`
 /// 更新，在每次 push 时冻结到条目。
+#[derive(Clone)]
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
     texture_state: TextTextureState,
@@ -1639,7 +1640,7 @@ impl TextEntryList {
             return Vec::new();
         }
 
-        let mut text_ctx = gpu.text_ctx.borrow_mut();
+        let mut text_ctx = gpu.text_ctx.lock().unwrap();
         text_ctx.begin_prepare_pins();
 
         text_ctx.viewport.update(
@@ -2072,7 +2073,7 @@ impl TextEntryList {
             None,
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
-        let text_ctx = gpu.text_ctx.borrow();
+        let text_ctx = gpu.text_ctx.lock().unwrap();
         text_ctx
             .text_renderer
             .render(

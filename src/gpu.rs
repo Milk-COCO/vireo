@@ -1,7 +1,6 @@
 //! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
 
-use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
@@ -405,7 +404,7 @@ pub struct GpuContext {
     pub(crate) polygon_dummy_buf: wgpu::Buffer,
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub surface_format: wgpu::TextureFormat,
-    pub text_ctx: RefCell<TextContext>,
+    pub text_ctx: Mutex<TextContext>,
     /// 跨材质 bind group 复用池。
     pub(crate) bind_group_pool: crate::material::BindGroupPool,
     /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
@@ -413,7 +412,7 @@ pub struct GpuContext {
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
-    pipelines: RefCell<FxHashMap<u32, wgpu::RenderPipeline>>,
+    pipelines: Mutex<FxHashMap<u32, wgpu::RenderPipeline>>,
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
@@ -748,7 +747,7 @@ impl GpuContext {
             cache: None,
         });
 
-        let text_ctx = RefCell::new(TextContext::new(
+        let text_ctx = Mutex::new(TextContext::new(
             &device,
             &queue,
             surface_format,
@@ -799,7 +798,7 @@ impl GpuContext {
             bind_group_pool: crate::material::BindGroupPool::new(),
             adapter,
             supported_sample_counts,
-            pipelines: RefCell::new(pipelines),
+            pipelines: Mutex::new(pipelines),
             shader,
             shader_ssaa,
             shader_geo,
@@ -839,7 +838,7 @@ impl GpuContext {
             | ((alpha_to_coverage as u32) << 16)
             | ((ssaa as u32) << 17)
             | ((geometry as u32) << 18);
-        let mut pipes = self.pipelines.borrow_mut();
+        let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
@@ -915,7 +914,7 @@ impl GpuContext {
             | ((geometry as u32) << 18)
             | (1u32 << 19)
             | (op << 20);
-        let mut pipes = self.pipelines.borrow_mut();
+        let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
@@ -1035,7 +1034,7 @@ impl GpuContext {
     pub fn measure_text(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
         use crate::glyphon::{Attrs, Buffer, Metrics, Shaping};
 
-        let mut text_ctx = self.text_ctx.borrow_mut();
+        let mut text_ctx = self.text_ctx.lock().unwrap();
         let line_height = options.font_size * 1.2;
         let metrics = Metrics::new(options.font_size, line_height);
         let mut buffer = Buffer::new(&mut text_ctx.font_system, metrics);
@@ -1069,58 +1068,58 @@ impl GpuContext {
 
     /// 加载自定义字体（TTF/OTF 字节数据），使该字体可用于 TextOptions::with_family
     pub fn load_font(&self, data: &[u8]) {
-        self.text_ctx.borrow_mut().font_system.db_mut().load_font_data(data.to_vec());
+        self.text_ctx.lock().unwrap().font_system.db_mut().load_font_data(data.to_vec());
     }
 
     /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
     /// - `Some(d)`：超过 d 未使用则过期
     /// - `None`：永不按时间自动回收
     pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
-        self.text_ctx.borrow_mut().set_shape_cache_ttl(ttl);
+        self.text_ctx.lock().unwrap().set_shape_cache_ttl(ttl);
     }
 
     /// 当前 shape 缓存 TTL（`None` = 不自动按时间回收）。
     pub fn shape_cache_ttl(&self) -> Option<std::time::Duration> {
-        self.text_ctx.borrow().shape_cache_ttl()
+        self.text_ctx.lock().unwrap().shape_cache_ttl()
     }
 
     /// 设置 shape 缓存最大条数。
     /// - `Some(n)`：最多 n 条不同文案键，满则 LRU
     /// - `None`：不限制条数
     pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
-        self.text_ctx.borrow_mut().set_shape_cache_max_entries(max);
+        self.text_ctx.lock().unwrap().set_shape_cache_max_entries(max);
     }
 
     /// 当前 shape 缓存最大条数（`None` = 不限制）。
     pub fn shape_cache_max_entries(&self) -> Option<usize> {
-        self.text_ctx.borrow().shape_cache_max_entries()
+        self.text_ctx.lock().unwrap().shape_cache_max_entries()
     }
 
     /// 立即清空文字 shape 缓存。
     pub fn clear_shape_cache(&self) {
-        self.text_ctx.borrow_mut().clear_shape_cache();
+        self.text_ctx.lock().unwrap().clear_shape_cache();
     }
 
     /// 当前 shape 缓存条目数。
     pub fn shape_cache_len(&self) -> usize {
-        self.text_ctx.borrow().shape_cache_len()
+        self.text_ctx.lock().unwrap().shape_cache_len()
     }
 
     /// 缓存中由 [`StableText`] 活跃持有的条目数。
     /// 这些槽不会被 TTL/LRU/`clear_shape_cache` 回收。
     /// O(n) 扫描（n = shape_slots.len()）。
     pub fn shape_cache_held_count(&self) -> usize {
-        self.text_ctx.borrow_mut().shape_cache_held_count()
+        self.text_ctx.lock().unwrap().shape_cache_held_count()
     }
 
     /// shape 缓存命中统计。
     pub fn shape_cache_stats(&self) -> crate::text::ShapeCacheStats {
-        self.text_ctx.borrow().shape_cache_stats()
+        self.text_ctx.lock().unwrap().shape_cache_stats()
     }
 
     /// 重置 shape 缓存命中统计。
     pub fn reset_shape_cache_stats(&self) {
-        self.text_ctx.borrow_mut().reset_shape_cache_stats();
+        self.text_ctx.lock().unwrap().reset_shape_cache_stats();
     }
 
     /// 从文本创建 [`StableText`]（预 shape，跨帧复用）。
@@ -1130,16 +1129,14 @@ impl GpuContext {
     /// （典型 ~5–30ms / 字符串）。建议在加载/初始化阶段预创建常用 handle，
     /// 或先调 [`GpuContext::preheat_text`] 触发字体/atlas lazy init。
     pub fn make_stable_text(&self, text: &str, options: &crate::text::TextDef) -> crate::text::StableText {
-        self.text_ctx.borrow_mut().make_stable(text, options)
+        self.text_ctx.lock().unwrap().make_stable(text, options)
     }
 
     /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
     /// 推荐在 `App` 启动后立即调用，避免首帧文字绘制卡顿。
     /// 调前需 `Renderer` 存在并已 `resize` 至少一次（让 `viewport` 知道物理尺寸）。
     pub fn preheat_text(&self, device: &wgpu::Device, queue: &wgpu::Queue, physical_width: u32, physical_height: u32) {
-        self.text_ctx
-            .borrow_mut()
-            .preheat(device, queue, physical_width, physical_height);
+        self.text_ctx.lock().unwrap().preheat(device, queue, physical_width, physical_height);
     }
 
     /// Creates a material with no group 3 resources.
@@ -1437,7 +1434,7 @@ impl GpuContext {
                 stencil_op,
                 material_bgl,
             ),
-            MaterialTarget::Text => self.text_ctx.borrow().text_atlas.create_material_pipeline(
+            MaterialTarget::Text => self.text_ctx.lock().unwrap().text_atlas.create_material_pipeline(
                 &self.device,
                 material_bgl,
                 &fragment_source_str,
