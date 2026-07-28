@@ -5,13 +5,14 @@
 //! - T: 开关文字（A/B：有字 vs 无字）
 //! - V: 切换 PresentMode AutoVsync ↔ Immediate
 //!
-//! Spike 阈值 20ms。分类（按主因，互斥）：
-//! - encode >= 4ms → ENGINE（合并/上传/pass/submit）
-//! - acquire >= 4ms → ACQUIRE（get_current_texture 等 swapchain）
-//! - build  >= 4ms → BUILD（CPU 构图，不含 GPU）
-//! - 否则 → OS/SCHED（事件循环/调度/present 后间隙）
+//! Spike 阈值 20ms。分类（按已测 CPU 阶段，互斥）：
+//! - build  >= 4ms → BUILD（CPU 构图）
+//! - gpu >= 4ms → GPU（queue submission completion，含 GPU/驱动排队）
+//! - encode >= 4ms → ENCODE（命令编码/资源更新；不等于 GPU 执行）
+//! - 否则 → WAIT/OS（present、swapchain 或线程调度等待）
 //!
-//! 注意：旧版把 acquire 算进 draw，容易把 vsync 等纹理误判成 ENGINE。
+//! 注意：当前 draw_timed 的 acquire 字段包含跨线程等待，不能单独证明是
+//! get_current_texture；GPU 忙时的驱动等待也不能直接归因于引擎负载。
 //! VIREO_QUIET=1 关闭 stderr spike 日志。
 
 use std::sync::{Arc, Mutex};
@@ -101,12 +102,53 @@ fn main() {
     let mut show_text = true;
     let mut present_immediate = false;
     let mut was_focused = true;
+    let mut last_gpu_ms: Option<f64> = None;
     let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));
     let toggle_text: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let toggle_present: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
+    let pending_aa_keys = Arc::clone(&pending_aa);
+    let toggle_text_keys = Arc::clone(&toggle_text);
+    let toggle_present_keys = Arc::clone(&toggle_present);
+    app.on_key_down(idx, move |event| {
+        if event.repeat {
+            return;
+        }
+        match event.key {
+            KeyCode::KeyT => {
+                *toggle_text_keys.lock().unwrap() = true;
+            }
+            KeyCode::KeyV => {
+                *toggle_present_keys.lock().unwrap() = true;
+            }
+            KeyCode::Digit1 => {
+                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::None);
+            }
+            KeyCode::Digit2 => {
+                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::Msaa {
+                    samples: 4,
+                    alpha_to_coverage: false,
+                });
+            }
+            KeyCode::Digit3 => {
+                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::Msaa {
+                    samples: 8,
+                    alpha_to_coverage: false,
+                });
+            }
+            KeyCode::Digit4 => {
+                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::Ssaa {
+                    samples: 4,
+                    alpha_to_coverage: false,
+                });
+            }
+            _ => {}
+        }
+    });
+
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
+        win.set_gpu_timing(true);
         let max_sc = win.gpu().max_sample_count();
         let win_init_ms = win.init_duration() * 1000.0;
 
@@ -162,6 +204,7 @@ fn main() {
         let info = format!(
             "FPS: {:.1}\n\
 Frame time: {:6.2}ms  avg {:5.2} / p50 {:5.2} / p95 {:5.2} / p99 {:5.2}\n\
+GPU queue:  {:>6}ms (previous completed submission)\n\
   min {:5.2} / max {:5.2} / stddev {:4.2}  (n={})\n\
 Spikes (>{:.0}ms): {} / {}\n\
 AA: {}  |  Present: {}  |  Text: {}\n\
@@ -173,6 +216,7 @@ Init: app {:.0}ms + win {:.0}ms",
             p50,
             p95,
             p99,
+            last_gpu_ms.map_or_else(|| "n/a".to_string(), |v| format!("{:6.2}", v)),
             lo,
             hi,
             stddev,
@@ -243,7 +287,7 @@ Init: app {:.0}ms + win {:.0}ms",
         if show_text {
             draw_text(
                 &mut batch.texts,
-                "spike: encode>=4=ENGINE acquire>=4=ACQUIRE build>=4=BUILD else OS/SCHED",
+                "spike: build>=4=BUILD encode>=4=ENCODE else WAIT/OS",
                 Pos::new(16.0, 228.0),
                 TextDef::default().font_size(11.0),
                 TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
@@ -254,31 +298,35 @@ Init: app {:.0}ms + win {:.0}ms",
         let timings = win.draw_timed(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
         let acq_ms = timings.acquire_secs * 1000.0;
         let enc_ms = timings.encode_secs * 1000.0;
+        let gpu_ms = timings.gpu_secs.map(|v| v * 1000.0);
 
         if !quiet && ft_ms > SPIKE_THRESHOLD_MS {
-            // 主因互斥：encode > acquire > build > OS
-            let kind = if enc_ms >= SEGMENT_MS {
-                "ENGINE"
-            } else if acq_ms >= SEGMENT_MS {
-                "ACQUIRE"
-            } else if build_ms >= SEGMENT_MS {
+            // build/encode are CPU-side measurements. The remaining frame
+            // interval includes present, driver and scheduler waits.
+            let kind = if build_ms >= SEGMENT_MS {
                 "BUILD"
+            } else if gpu_ms.is_some_and(|v| v >= SEGMENT_MS) {
+                "GPU"
+            } else if enc_ms >= SEGMENT_MS {
+                "ENCODE"
             } else {
-                "OS/SCHED"
+                "WAIT/OS"
             };
             eprintln!(
-                "[spike] F{} dt={:6.2}ms build={:5.2} acq={:5.2} enc={:5.2} kind={} focus={} text={} present={}",
+                "[spike] F{} dt={:6.2}ms build={:5.2} wait={:5.2} encode={:5.2} gpu={:>5} kind={} focus={} text={} present={}",
                 app.frame_count,
                 ft_ms,
                 build_ms,
                 acq_ms,
                 enc_ms,
+                gpu_ms.map_or_else(|| "  n/a".to_string(), |v| format!("{:5.2}", v)),
                 kind,
                 focused,
                 show_text,
                 present_label,
             );
         }
+        last_gpu_ms = gpu_ms;
         true
     });
 }

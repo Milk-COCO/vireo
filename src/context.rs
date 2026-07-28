@@ -100,9 +100,15 @@ impl RenderTarget {
         Self { view }
     }
 
-    /// 使用给定的 Renderer 渲染 batch 到此 target
-    pub fn draw(&self, renderer: &Renderer, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
-        renderer.draw(self, clear_color, batches);
+    /// 编码渲染命令到 `CommandBuffer`（**不** submit/present）。
+    /// 便捷包装：等价于 `renderer.draw(self, clear_color, batches)`。
+    pub fn draw(
+        &self,
+        renderer: &Renderer,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+    ) -> wgpu::CommandBuffer {
+        renderer.draw(self, clear_color, batches)
     }
 
 }
@@ -285,13 +291,25 @@ impl Renderer {
         *self.ds_tex.borrow_mut() = None;
     }
 
-    /// 渲染并提交
+    /// 编码渲染命令到 `CommandBuffer`，**不** submit/present。
+    ///
+    /// 调用方负责在 wgpu owner 线程（= 窗口 owner 线程）上：
+    /// ```ignore
+    /// queue.submit([cmd_buf]);
+    /// queue.present(surface_texture);
+    /// ```
+    ///
+    /// 返回的 `CommandBuffer` 持有对 `target.view` 的引用（`TextureView`），
+    /// 在 `submit` 之前 `target.view` 必须保持有效（即 `SurfaceTexture` 未被销毁）。
+    ///
+    /// 拆分 submit/present 到 winit 线程解决了"模态循环期间冻屏"：present 必须在
+    /// owner 线程，DWM 才接受。详见 VIREO_OPT_NOTES 第三十五轮。
     pub fn draw(
         &self,
         target: &RenderTarget,
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
-    ) {
+    ) -> wgpu::CommandBuffer {
         // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
         // 可见 = 祖先 stencil ∧ batch 自身有效 Area。
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
@@ -325,7 +343,11 @@ impl Renderer {
         let has_content = clear_color.is_some()
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
-            return;
+            // 无内容：返回空 cmd_buf（不创建 render pass 即可）
+            let empty_encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vireo empty encoder"),
+            });
+            return empty_encoder.finish();
         }
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1133,7 +1155,7 @@ impl Renderer {
             }
         }
 
-        self.gpu.queue.submit([encoder.finish()]);
+        encoder.finish()
     }
 
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。在 `resumed()` 创建窗口后调用。
