@@ -1,8 +1,8 @@
 use super::{
     custom_glyph::CustomGlyphCacheKey, ColorMode, ContentType, FontSystem, GlyphDetails,
     GlyphToRender, GpuCacheStatus, PrepareError, RasterizeCustomGlyphRequest,
-    RasterizedCustomGlyph, RenderError, State, SwashCache, SwashContent, TextArea, TextAtlas,
-    Viewport,
+    RasterizedCustomGlyph, RenderError, ResolvedGlyphArea, State, SwashCache, SwashContent,
+    TextArea, TextAtlas, Viewport,
 };
 use cosmic_text::{Color, SubpixelBin};
 use std::slice;
@@ -18,6 +18,7 @@ pub struct TextRenderer {
     vertex_buffer_size: u64,
     pipeline: RenderPipeline,
     glyph_vertices: Vec<GlyphToRender>,
+    defer_upload: bool,
 }
 
 impl TextRenderer {
@@ -43,6 +44,7 @@ impl TextRenderer {
             vertex_buffer_size,
             pipeline,
             glyph_vertices: Vec::new(),
+            defer_upload: false,
         }
     }
 
@@ -135,8 +137,6 @@ impl TextRenderer {
             RasterizeCustomGlyphRequest,
         ) -> Option<RasterizedCustomGlyph>,
     ) -> Result<(), PrepareError> {
-        let vertex_start = self.glyph_vertices.len();
-
         let state = State { device, queue };
         let mut system = GlyphSystem {
             atlas,
@@ -212,49 +212,23 @@ impl TextRenderer {
 
                 let color = glyph.color.unwrap_or(text_area.default_color);
 
-                if let Some(glyph_to_render) = prepare_glyph(
+                if let Some(glyph_to_render) = append_custom_glyph(
                     &state,
                     &mut system,
-                    GlyphMetadata {
-                        x,
-                        y,
-                        line_y: 0.0,
-                        scale_factor: text_area.scale,
-                        color,
-                        metadata: glyph.metadata,
-                        cache_key,
-                        transform_index: text_area.transform_index,
-                        base_uv_rect: text_area.base_uv_rect,
-                    },
+                    x,
+                    y,
+                    text_area.scale,
+                    width,
+                    height,
+                    x_bin,
+                    y_bin,
+                    color,
+                    glyph.metadata,
+                    cache_key,
+                    text_area.transform_index,
+                    text_area.base_uv_rect,
                     bounds,
-                    |_system, rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
-                        if width == 0 || height == 0 {
-                            return None;
-                        }
-
-                        let input = RasterizeCustomGlyphRequest {
-                            id: glyph.id,
-                            width,
-                            height,
-                            x_bin,
-                            y_bin,
-                            scale: text_area.scale,
-                        };
-
-                        let output = (rasterize_custom_glyph)(input)?;
-
-                        output.validate(&input, None);
-
-                        Some(GetGlyphImageResult {
-                            content_type: output.content_type,
-                            top: 0,
-                            left: 0,
-                            width,
-                            height,
-                            data: output.data,
-                        })
-                    },
-                    &mut metadata_to_depth,
+                    glyph.id,
                     &mut rasterize_custom_glyph,
                 )? {
                     self.glyph_vertices.push(glyph_to_render);
@@ -277,52 +251,18 @@ impl TextRenderer {
 
             for run in layout_runs {
                 for glyph in run.glyphs.iter() {
-                    let physical_glyph =
-                        glyph.physical((text_area.left, text_area.top), text_area.scale);
-
-                    let color = match glyph.color_opt {
-                        Some(some) => some,
-                        None => text_area.default_color,
-                    };
-
-                    if let Some(glyph_to_render) = prepare_glyph(
+                    if let Some(glyph_to_render) = append_text_glyph(
                         &state,
                         &mut system,
-                        GlyphMetadata {
-                            x: physical_glyph.x,
-                            y: physical_glyph.y,
-                            line_y: run.line_y,
-                            color,
-                            metadata: glyph.metadata,
-                            cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
-                            scale_factor: text_area.scale,
-                            transform_index: text_area.transform_index,
-                            base_uv_rect: text_area.base_uv_rect,
-                        },
+                        glyph,
+                        run.line_y,
+                        text_area.left,
+                        text_area.top,
+                        text_area.scale,
                         bounds,
-                        |system, _rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
-                            let image = system
-                                .cache
-                                .get_image_uncached(system.font_system, physical_glyph.cache_key)?;
-
-                            let content_type = match image.content {
-                                SwashContent::Color => ContentType::Color,
-                                SwashContent::Mask => ContentType::Mask,
-                                SwashContent::SubpixelMask => {
-                                    // Not implemented yet, but don't panic if this happens.
-                                    ContentType::Mask
-                                }
-                            };
-
-                            Some(GetGlyphImageResult {
-                                content_type,
-                                top: image.placement.top as i16,
-                                left: image.placement.left as i16,
-                                width: image.placement.width as u16,
-                                height: image.placement.height as u16,
-                                data: image.data,
-                            })
-                        },
+                        text_area.default_color,
+                        text_area.transform_index,
+                        text_area.base_uv_rect,
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
                     )? {
@@ -332,46 +272,100 @@ impl TextRenderer {
             }
         }
 
-        let will_render = self.glyph_vertices.len() > vertex_start;
-        if !will_render {
-            return Ok(());
+        if !self.defer_upload {
+            self.upload(device, queue);
+        }
+        Ok(())
+    }
+
+    /// Prepare already-shaped glyphs directly, bypassing `TextArea` and
+    /// `Buffer::layout_runs()`. Atlas lookup, rasterization, clipping and
+    /// physical/subpixel positioning remain identical to the normal path.
+    pub(crate) fn prepare_resolved_glyphs<'a>(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        atlas: &mut TextAtlas,
+        viewport: &Viewport,
+        glyphs: impl IntoIterator<Item = ResolvedGlyphArea<'a>>,
+        cache: &mut SwashCache,
+    ) -> Result<(), PrepareError> {
+        let state = State { device, queue };
+        let mut system = GlyphSystem { atlas, cache, font_system };
+        let resolution = viewport.resolution();
+
+        for area in glyphs {
+            let start_y = (area.top + area.line_top * area.scale) as i32;
+            let end_y = start_y + (area.line_height * area.scale) as i32;
+            if start_y > area.bounds.bottom || area.bounds.top > end_y {
+                continue;
+            }
+            let bounds = glyph_bounds(area.bounds, area.transform_index, resolution);
+            if let Some(glyph_to_render) = append_text_glyph(
+                &state,
+                &mut system,
+                area.glyph,
+                area.line_y,
+                area.left,
+                area.top,
+                area.scale,
+                bounds,
+                area.default_color,
+                area.transform_index,
+                area.base_uv_rect,
+                zero_depth,
+                |_| None,
+            )? {
+                self.glyph_vertices.push(glyph_to_render);
+            }
         }
 
-        let new_vertices = &self.glyph_vertices[vertex_start..];
-        let new_raw = unsafe {
+        if !self.defer_upload {
+            self.upload(device, queue);
+        }
+        Ok(())
+    }
+
+    /// Upload all instances accumulated since [`clear`](Self::clear) in one
+    /// write. Vireo prepares multiple interleaved text ranges per frame.
+    pub(crate) fn upload(&mut self, device: &Device, queue: &Queue) {
+        if self.glyph_vertices.is_empty() {
+            return;
+        }
+        let all_raw = unsafe {
             slice::from_raw_parts(
-                new_vertices as *const _ as *const u8,
-                std::mem::size_of_val(new_vertices),
+                self.glyph_vertices.as_ptr() as *const u8,
+                std::mem::size_of_val(self.glyph_vertices.as_slice()),
             )
         };
-        let byte_offset = vertex_start as u64 * std::mem::size_of::<GlyphToRender>() as u64;
-        let required_size = byte_offset + new_raw.len() as u64;
+        let required_size = all_raw.len() as u64;
 
         if self.vertex_buffer_size < required_size {
-            // Reallocate: copy all accumulated vertices into a new buffer
-            let all = self.glyph_vertices.as_slice();
-            let all_raw = unsafe {
-                slice::from_raw_parts(
-                    all as *const _ as *const u8,
-                    std::mem::size_of_val(all),
-                )
-            };
             self.vertex_buffer.destroy();
-
             let (buffer, buffer_size) = create_oversized_buffer(
                 device,
                 Some("glyphon vertices"),
                 all_raw,
                 BufferUsages::VERTEX | BufferUsages::COPY_DST,
             );
-
             self.vertex_buffer = buffer;
             self.vertex_buffer_size = buffer_size;
         } else {
-            queue.write_buffer(&self.vertex_buffer, byte_offset, new_raw);
+            queue.write_buffer(&self.vertex_buffer, 0, all_raw);
         }
+    }
 
-        Ok(())
+    /// Start Vireo's multi-range frame preparation. Instances are accumulated
+    /// without intermediate buffer writes until [`finish_frame`](Self::finish_frame).
+    pub(crate) fn begin_frame(&mut self) {
+        self.glyph_vertices.clear();
+        self.defer_upload = true;
+    }
+
+    pub(crate) fn finish_frame(&mut self, device: &Device, queue: &Queue) {
+        self.upload(device, queue);
+        self.defer_upload = false;
     }
 
     /// Clears all prepared glyph vertices. Call once per frame before the first `prepare()`.
@@ -754,4 +748,156 @@ where
         transform_index: metadata.transform_index,
         base_uv_rect: metadata.base_uv_rect,
     }))
+}
+
+fn glyph_bounds(
+    bounds: super::TextBounds,
+    transform_index: u32,
+    resolution: super::Resolution,
+) -> GlyphBounds {
+    if transform_index != 0 {
+        GlyphBounds {
+            x: Bounds { min: bounds.left, max: bounds.right },
+            y: Bounds { min: bounds.top, max: bounds.bottom },
+        }
+    } else {
+        let x_min = bounds.left.max(0);
+        let y_min = bounds.top.max(0);
+        GlyphBounds {
+            x: Bounds {
+                min: x_min,
+                max: bounds.right.min(resolution.width as i32).max(x_min),
+            },
+            y: Bounds {
+                min: y_min,
+                max: bounds.bottom.min(resolution.height as i32).max(y_min),
+            },
+        }
+    }
+}
+
+fn glyph_image(system: &mut GlyphSystem<'_>, key: cosmic_text::CacheKey) -> Option<GetGlyphImageResult> {
+    let image = system.cache.get_image_uncached(system.font_system, key)?;
+    let content_type = match image.content {
+        SwashContent::Color => ContentType::Color,
+        SwashContent::Mask | SwashContent::SubpixelMask => ContentType::Mask,
+    };
+    Some(GetGlyphImageResult {
+        content_type,
+        top: image.placement.top as i16,
+        left: image.placement.left as i16,
+        width: image.placement.width as u16,
+        height: image.placement.height as u16,
+        data: image.data,
+    })
+}
+
+fn append_text_glyph<R>(
+    state: &State,
+    system: &mut GlyphSystem,
+    glyph: &cosmic_text::LayoutGlyph,
+    line_y: f32,
+    left: f32,
+    top: f32,
+    scale: f32,
+    bounds: GlyphBounds,
+    default_color: Color,
+    transform_index: u32,
+    base_uv_rect: [f32; 4],
+    metadata_to_depth: impl FnMut(usize) -> f32,
+    rasterize_custom_glyph: R,
+) -> Result<Option<GlyphToRender>, PrepareError>
+where
+    R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
+{
+    let physical_glyph = glyph.physical((left, top), scale);
+    let color = glyph.color_opt.unwrap_or(default_color);
+    prepare_glyph(
+        state,
+        system,
+        GlyphMetadata {
+            x: physical_glyph.x,
+            y: physical_glyph.y,
+            line_y,
+            color,
+            metadata: glyph.metadata,
+            cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
+            scale_factor: scale,
+            transform_index,
+            base_uv_rect,
+        },
+        bounds,
+        |system, _| glyph_image(system, physical_glyph.cache_key),
+        metadata_to_depth,
+        rasterize_custom_glyph,
+    )
+}
+
+fn append_custom_glyph<R>(
+    state: &State,
+    system: &mut GlyphSystem,
+    x: i32,
+    y: i32,
+    scale: f32,
+    width: u16,
+    height: u16,
+    x_bin: SubpixelBin,
+    y_bin: SubpixelBin,
+    color: Color,
+    metadata: usize,
+    cache_key: GlyphonCacheKey,
+    transform_index: u32,
+    base_uv_rect: [f32; 4],
+    bounds: GlyphBounds,
+    custom_glyph_id: u16,
+    rasterize_custom_glyph: R,
+) -> Result<Option<GlyphToRender>, PrepareError>
+where
+    R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
+{
+    prepare_glyph(
+        state,
+        system,
+        GlyphMetadata {
+            x,
+            y,
+            line_y: 0.0,
+            scale_factor: scale,
+            color,
+            metadata,
+            cache_key,
+            transform_index,
+            base_uv_rect,
+        },
+        bounds,
+        move |_system, rasterize_custom_glyph_fn| -> Option<GetGlyphImageResult> {
+            if width == 0 || height == 0 {
+                return None;
+            }
+
+            let input = RasterizeCustomGlyphRequest {
+                id: custom_glyph_id,
+                width,
+                height,
+                x_bin,
+                y_bin,
+                scale,
+            };
+
+            let output = (rasterize_custom_glyph_fn)(input)?;
+
+            output.validate(&input, None);
+
+            Some(GetGlyphImageResult {
+                content_type: output.content_type,
+                top: 0,
+                left: 0,
+                width,
+                height,
+                data: output.data,
+            })
+        },
+        zero_depth,
+        rasterize_custom_glyph,
+    )
 }

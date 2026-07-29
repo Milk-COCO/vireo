@@ -136,6 +136,22 @@ pub struct TextArea<'a> {
     pub base_uv_rect: [f32; 4],
 }
 
+/// A pre-resolved glyph that bypasses `Buffer::layout_runs()` while retaining
+/// cosmic-text physical positioning and the normal atlas/clip path.
+pub(crate) struct ResolvedGlyphArea<'a> {
+    pub glyph: &'a LayoutGlyph,
+    pub line_y: f32,
+    pub line_top: f32,
+    pub line_height: f32,
+    pub left: f32,
+    pub top: f32,
+    pub scale: f32,
+    pub bounds: TextBounds,
+    pub default_color: Color,
+    pub transform_index: u32,
+    pub base_uv_rect: [f32; 4],
+}
+
 pub(crate) struct State<'a> {
     pub(crate) device: &'a Device,
     pub(crate) queue: &'a Queue,

@@ -118,9 +118,21 @@ pub struct TextContext {
     digit_step: f32,
     digit_metrics_bits: u32,
     digit_attrs: Option<AttrsOwned>,
+    /// HUD_DIGIT_TABLE 已解析的单字形，供 Digits 绕过 TextArea/layout_runs。
+    hud_glyphs: FxHashMap<char, Arc<ResolvedTextGlyph>>,
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
     stats: ShapeCacheStats,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ResolvedTextGlyph {
+    glyph: crate::glyphon::LayoutGlyph,
+    line_y: f32,
+    line_top: f32,
+    line_height: f32,
+    advance: f32,
 }
 
 /// 文字管线与 render pass DS attachment 的匹配方式。
@@ -654,14 +666,29 @@ impl TextContext {
         let liveness = self.mark_slot_live(slot);
         let line_width = self.slot_line_width(slot);
         let buffer = self.shape_slots[slot as usize].buffer.clone();
-        let line_count = buffer.layout_runs().count().max(1) as u32;
+        let mut line_count = 0u32;
+        let mut resolved_glyphs = Vec::new();
+        for run in buffer.layout_runs() {
+            line_count += 1;
+            resolved_glyphs.extend(run.glyphs.iter().cloned().map(|glyph| {
+                let advance = glyph.w;
+                Arc::new(ResolvedTextGlyph {
+                glyph,
+                line_y: run.line_y,
+                line_top: run.line_top,
+                line_height: run.line_height,
+                advance,
+            })
+            }));
+        }
         StableText {
             buffer,
+            resolved_glyphs: Arc::from(resolved_glyphs),
             line_width,
             font_size: opts.font_size,
             liveness,
             text: text.to_string(),
-            line_count,
+            line_count: line_count.max(1),
         }
     }
 
@@ -687,15 +714,6 @@ impl TextContext {
             || self.digit_metrics_bits != bits
             || self.digit_attrs != attrs;
         if !need {
-            // 仍 pin 住表项，防止本帧后续淘汰
-            let mut opts = options.clone();
-            opts.max_width = None;
-            opts.align = TextAlign::Left;
-            Self::add_tnum(&mut opts);
-            for ch in HUD_DIGIT_TABLE.chars() {
-                let s = ch.to_string();
-                let _ = self.get_or_shape_text(&s, &opts);
-            }
             return self.digit_step;
         }
         let mut opts = options.clone();
@@ -703,11 +721,29 @@ impl TextContext {
         opts.align = TextAlign::Left;
         Self::add_tnum(&mut opts);
         let mut max_w = 0.0f32;
+        self.hud_glyphs.clear();
         for ch in HUD_DIGIT_TABLE.chars() {
             let s = ch.to_string();
             let idx = self.get_or_shape_text(&s, &opts);
+            let advance = self.slot_line_width(idx);
             if ch.is_ascii_digit() {
-                max_w = max_w.max(self.slot_line_width(idx));
+                max_w = max_w.max(advance);
+            }
+            let resolved = self.shape_slots[idx as usize]
+                    .buffer
+                    .layout_runs()
+                    .next()
+                    .and_then(|run| {
+                        run.glyphs.first().cloned().map(|glyph| Arc::new(ResolvedTextGlyph {
+                            glyph,
+                            line_y: run.line_y,
+                            line_top: run.line_top,
+                            line_height: run.line_height,
+                            advance,
+                        }))
+                    });
+            if let Some(resolved) = resolved {
+                self.hud_glyphs.insert(ch, resolved);
             }
         }
         self.digit_table_ready = true;
@@ -717,14 +753,8 @@ impl TextContext {
         max_w
     }
 
-    fn digit_slot(&mut self, d: u32, options: &TextDef) -> u32 {
-        debug_assert!(d < 10);
-        let s = ((b'0' + d as u8) as char).to_string();
-        let mut opts = options.clone();
-        opts.max_width = None;
-        opts.align = TextAlign::Left;
-        Self::add_tnum(&mut opts);
-        self.get_or_shape_text(&s, &opts)
+    fn resolved_hud_glyph(&self, ch: char) -> Option<&Arc<ResolvedTextGlyph>> {
+        self.hud_glyphs.get(&ch)
     }
 
     /// 在 opts 的 attrs 上加 `tnum` OpenType feature（字体级等宽数字）。
@@ -734,13 +764,6 @@ impl TextContext {
         attrs.font_features.enable(FeatureTag::new(b"tnum"));
     }
 
-    fn glyph_slot_char(&mut self, ch: char, options: &TextDef) -> u32 {
-        let s = ch.to_string();
-        let mut opts = options.clone();
-        opts.max_width = None;
-        opts.align = TextAlign::Left;
-        self.get_or_shape_text(&s, &opts)
-    }
 }
 
 impl TextContext {
@@ -793,6 +816,7 @@ impl TextContext {
             digit_step: 0.0,
             digit_metrics_bits: 0,
             digit_attrs: None,
+            hud_glyphs: FxHashMap::default(),
             frame_pinned: Vec::with_capacity(32),
             stats: ShapeCacheStats::default(),
         }
@@ -950,10 +974,12 @@ fn is_hud_digit_char(ch: char) -> bool {
 
 /// 已 shape 的文字句柄，跨帧复用，与 `draw_text` 共享同一 cache。
 ///
-/// **线程安全**：`StableText: Send + Sync`（内部仅 `Arc` + 字符串 + `f32`），
+/// **线程安全**：`StableText: Send + Sync`（内部使用共享的 shape buffer 与 glyph 模板），
 /// 可跨线程传递（但 [`GpuContext`] 本身不是 `Send`，创建与使用应在同一线程）。
 /// ## 生命周期
 /// - **Buffer 内存**：由 `StableText` 内的 `Arc<Buffer>` 保活；`drop` 后回收。
+/// - **Glyph 模板**：创建时从已 shaping 的 Buffer 提取，绘制时直接 physicalize，
+///   保留连字、fallback、复杂脚本和多行布局，同时跳过重复的 layout-run 遍历。
 /// - **cache 槽**：[`GpuContext::make_stable_text`] 把对应槽标为「live」(`liveness: Arc<()>`)，
 ///   **直至所有 `StableText` clone 均 drop** 才会变为可淘汰。
 ///   同一文案的多次 `make_stable_text` 共享同一 liveness 标记（0→1 创建一次）。
@@ -973,7 +999,8 @@ fn is_hud_digit_char(ch: char) -> bool {
 /// - 当 `max_width: Some(w)`：文本在 w 逻辑像素处换行，**`align` 生效**（`Left` / `Center` / `Right`）。
 ///
 /// ## 限制
-/// - **不支持 `Digits` 切分**：整段是单 buffer，渲染时不走 `tnum` 加速。
+/// - **不支持 `Digits` 切分**：整段是单 buffer，仍不走 `tnum` 等宽数字语义；但其
+///   已 shaping glyph 模板会走 direct prepare。
 ///   需要等宽数字请用 [`TextPart::Digits`] 或 [`crate::text::HudLine`]。
 ///
 /// ## 绘制 API
@@ -987,6 +1014,7 @@ fn is_hud_digit_char(ch: char) -> bool {
 #[derive(Clone)]
 pub struct StableText {
     pub(crate) buffer: Arc<Buffer>,
+    pub(crate) resolved_glyphs: Arc<[Arc<ResolvedTextGlyph>]>,
     pub(crate) line_width: f32,
     /// 创建时 `TextDef.font_size`（culling 近似高度用）。
     pub(crate) font_size: f32,
@@ -1026,6 +1054,7 @@ impl std::fmt::Debug for StableText {
             .field("font_size", &self.font_size)
             .field("line_width", &self.line_width)
             .field("line_count", &self.line_count)
+            .field("resolved_glyph_count", &self.resolved_glyphs.len())
             .field("buffer_strong_count", &Arc::strong_count(&self.buffer))
             .field("live_handle_count", &Arc::strong_count(&self.liveness))
             .finish()
@@ -1352,6 +1381,8 @@ pub enum TextEntry {
         override_: TextOverride,
         transform_index: u32,
         buffer: Arc<Buffer>,
+        #[doc(hidden)]
+        resolved_glyphs: Arc<[Arc<ResolvedTextGlyph>]>,
         font_size: f32,
         line_width: f32,
         line_count: u32,
@@ -1563,6 +1594,7 @@ impl TextEntryList {
             override_: ov,
             transform_index,
             buffer: stable.buffer.clone(),
+            resolved_glyphs: stable.resolved_glyphs.clone(),
             font_size: stable.font_size,
             line_width: stable.line_width,
             line_count: stable.line_count,
@@ -1670,6 +1702,7 @@ impl TextEntryList {
         enum MetaBuf {
             Slot(u32),
             Stable(Arc<Buffer>),
+        Resolved(Arc<ResolvedTextGlyph>),
         }
 
         /// 读取 transform_table[ti] 的列，越界返 None。
@@ -1811,17 +1844,21 @@ impl TextEntryList {
             let top = entry.pos().y * scale;
 
             match entry {
-                TextEntry::Stable { pos, buffer, .. } => {
-                    metas.push(AreaMeta {
-                        buf: MetaBuf::Stable(buffer.clone()),
-                        left: pos.x * scale,
-                        top,
-                        color,
-                        bounds,
-                        transform_index: phys_idx,
-                        base_uv_rect: batch_base_uv,
-                        texture_state: texture_state.clone(),
-                    });
+                TextEntry::Stable { pos, .. } => {
+                    if let TextEntry::Stable { resolved_glyphs, .. } = entry {
+                        for glyph in resolved_glyphs.iter() {
+                            metas.push(AreaMeta {
+                                buf: MetaBuf::Resolved(glyph.clone()),
+                                left: pos.x * scale,
+                                top,
+                                color,
+                                bounds,
+                                transform_index: phys_idx,
+                                base_uv_rect: batch_base_uv,
+                                texture_state: texture_state.clone(),
+                            });
+                        }
+                    }
                 }
                 TextEntry::Parts { pos, def, parts, .. } => {
                     // HUD 多段：逻辑 x 横拼，再 * scale；每段可用 resolve_def 覆盖字号等
@@ -1905,16 +1942,18 @@ impl TextEntryList {
                                 cursor_x += w;
                             }
                             TextPart::Stable(h) => {
-                                metas.push(AreaMeta {
-                                    buf: MetaBuf::Stable(h.buffer.clone()),
-                                    left: cursor_x * scale,
-                                    top,
-                                    color,
-                                    bounds,
-                                    transform_index: phys_idx,
-                                    base_uv_rect: batch_base_uv,
-                                    texture_state: texture_state.clone(),
-                                });
+                                for glyph in h.resolved_glyphs.iter() {
+                                    metas.push(AreaMeta {
+                                            buf: MetaBuf::Resolved(glyph.clone()),
+                                        left: cursor_x * scale,
+                                        top,
+                                        color,
+                                        bounds,
+                                        transform_index: phys_idx,
+                                        base_uv_rect: batch_base_uv,
+                                        texture_state: texture_state.clone(),
+                                    });
+                                }
                                 cursor_x += h.line_width();
                             }
                             TextPart::Digits(s, _) => {
@@ -1925,10 +1964,10 @@ impl TextEntryList {
                                         cursor_x += step * 0.5;
                                         continue;
                                     }
-                                    if let Some(d) = ch.to_digit(10) {
-                                        let slot = text_ctx.digit_slot(d, pdef);
+                                    if let Some(glyph) = text_ctx.resolved_hud_glyph(ch) {
+                                        let buf = MetaBuf::Resolved(glyph.clone());
                                         metas.push(AreaMeta {
-                                            buf: MetaBuf::Slot(slot),
+                                            buf,
                                             left: cursor_x * scale,
                                             top,
                                             color,
@@ -1937,21 +1976,7 @@ impl TextEntryList {
                                             base_uv_rect: batch_base_uv,
                                             texture_state: texture_state.clone(),
                                         });
-                                        cursor_x += step;
-                                    } else if is_hud_digit_char(ch) {
-                                        let slot = text_ctx.glyph_slot_char(ch, pdef);
-                                        let w = text_ctx.slot_line_width(slot);
-                                        metas.push(AreaMeta {
-                                            buf: MetaBuf::Slot(slot),
-                                            left: cursor_x * scale,
-                                            top,
-                                            color,
-                                            bounds,
-                                            transform_index: phys_idx,
-                                            base_uv_rect: batch_base_uv,
-                                            texture_state: texture_state.clone(),
-                                        });
-                                        cursor_x += w;
+                                        cursor_x += if ch.is_ascii_digit() { step } else { glyph.advance };
                                     }
                                 }
                             }
@@ -1995,45 +2020,81 @@ impl TextEntryList {
                     end += 1;
                 }
 
-                let mut areas: Vec<TextArea> = Vec::with_capacity(end - first);
-                for meta in &metas[first..end] {
-                    let buf: &Buffer = match &meta.buf {
-                        MetaBuf::Stable(arc) => arc,
-                        MetaBuf::Slot(si) => {
-                            debug_assert!(
-                                (*si as usize) < shape_slots.len(),
-                                "shape slot {} out of bounds (len {})",
-                                si,
-                                shape_slots.len()
-                            );
-                            &*shape_slots[*si as usize].buffer
-                        }
-                    };
-                    areas.push(TextArea {
-                        buffer: buf,
-                        left: meta.left,
-                        top: meta.top,
-                        scale,
-                        bounds: meta.bounds,
-                        default_color: meta.color,
-                        custom_glyphs: &[],
-                        transform_index: meta.transform_index,
-                        base_uv_rect: meta.base_uv_rect,
-                    });
-                }
-
                 let vertex_start = text_renderer.glyph_vertex_count();
-                text_renderer
-                    .prepare(
-                        &gpu.device,
-                        &gpu.queue,
-                        font_system,
-                        text_atlas,
-                        viewport,
-                        areas,
-                        swash_cache,
-                    )
-                    .expect("glyphon prepare failed");
+                let mut run_start = first;
+                while run_start < end {
+                    let resolved = matches!(metas[run_start].buf, MetaBuf::Resolved(_));
+                    let mut run_end = run_start + 1;
+                    while run_end < end
+                        && matches!(metas[run_end].buf, MetaBuf::Resolved(_)) == resolved
+                    {
+                        run_end += 1;
+                    }
+
+                    if resolved {
+                        let glyphs = metas[run_start..run_end].iter().filter_map(|meta| {
+                            let MetaBuf::Resolved(resolved) = &meta.buf else { return None };
+                            Some(crate::glyphon::ResolvedGlyphArea {
+                                glyph: &resolved.glyph,
+                                line_y: resolved.line_y,
+                                line_top: resolved.line_top,
+                                line_height: resolved.line_height,
+                                left: meta.left,
+                                top: meta.top,
+                                scale,
+                                bounds: meta.bounds,
+                                default_color: meta.color,
+                                transform_index: meta.transform_index,
+                                base_uv_rect: meta.base_uv_rect,
+                            })
+                        });
+                        text_renderer
+                            .prepare_resolved_glyphs(
+                                &gpu.device,
+                                &gpu.queue,
+                                font_system,
+                                text_atlas,
+                                viewport,
+                                glyphs,
+                                swash_cache,
+                            )
+                            .expect("resolved glyph prepare failed");
+                    } else {
+                        let areas = metas[run_start..run_end].iter().filter_map(|meta| {
+                            let buf: &Buffer = match &meta.buf {
+                                MetaBuf::Stable(arc) => arc,
+                                MetaBuf::Slot(si) => {
+                                    debug_assert!((*si as usize) < shape_slots.len());
+                                    &*shape_slots[*si as usize].buffer
+                                }
+                                MetaBuf::Resolved(_) => return None,
+                            };
+                            Some(TextArea {
+                                buffer: buf,
+                                left: meta.left,
+                                top: meta.top,
+                                scale,
+                                bounds: meta.bounds,
+                                default_color: meta.color,
+                                custom_glyphs: &[],
+                                transform_index: meta.transform_index,
+                                base_uv_rect: meta.base_uv_rect,
+                            })
+                        });
+                        text_renderer
+                            .prepare(
+                                &gpu.device,
+                                &gpu.queue,
+                                font_system,
+                                text_atlas,
+                                viewport,
+                                areas,
+                                swash_cache,
+                            )
+                            .expect("glyphon prepare failed");
+                    }
+                    run_start = run_end;
+                }
                 let vertex_count = text_renderer.glyph_vertex_count() - vertex_start;
                 if vertex_count > 0 {
                     segments.push(PreparedTextSegment {
@@ -2518,6 +2579,97 @@ let entry = TextEntry::Parts {
         // GC scavenge 后 held_count 应归 0
         assert_eq!(gpu.shape_cache_held_count(), 0);
         assert_eq!(gpu.shape_cache_len(), 1); // 槽仍在，只是不再 held
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn digit_table_resolves_all_ascii_digits() {
+        let gpu = make_test_gpu();
+        let mut ctx = gpu.text_ctx.lock().unwrap();
+        let def = TextDef::default().font_size(20.0);
+        let step = ctx.ensure_digit_table(&def);
+        assert!(step > 0.0);
+        assert_eq!(ctx.hud_glyphs.len(), HUD_DIGIT_TABLE.chars().count());
+        assert!(HUD_DIGIT_TABLE.chars().all(|ch| ctx.hud_glyphs.contains_key(&ch)));
+
+        let before = ctx.shape_slots.len();
+        let second_step = ctx.ensure_digit_table(&def);
+        assert_eq!(step, second_step);
+        assert_eq!(ctx.shape_slots.len(), before);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn stable_text_caches_shaped_multilingual_glyphs() {
+        let gpu = make_test_gpu();
+        let stable = gpu.make_stable_text(
+            "office 中文 العربية",
+            &TextDef::default().font_size(20.0),
+        );
+        assert!(!stable.resolved_glyphs.is_empty());
+        assert!(stable.line_count() >= 1);
+        assert!(stable.resolved_glyphs.iter().any(|g| g.glyph.glyph_id != 0));
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn stable_text_direct_prepare_emits_instances() {
+        let gpu = make_test_gpu();
+        let stable = gpu.make_stable_text(
+            "Stable 123 中文",
+            &TextDef::default().font_size(20.0),
+        );
+        let mut list = TextEntryList::new();
+        list.push_stable(
+            &stable,
+            Pos::new(0.0, 0.0),
+            TextOverride::default(),
+        );
+        let segments = list.prepare_texts(
+            &gpu,
+            640,
+            480,
+            1.0,
+            &[],
+            &mut vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+            ],
+            None,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+        );
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].vertex_count > 0);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; run with --ignored"]
+    fn stable_text_part_direct_prepare_emits_instances() {
+        let gpu = make_test_gpu();
+        let stable = gpu.make_stable_text(
+            "Parts 中文 العربية",
+            &TextDef::default().font_size(20.0),
+        );
+        let mut list = TextEntryList::new();
+        list.push_parts(
+            &[TextPart::normal("prefix "), TextPart::stable(&stable)],
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::default(),
+        );
+        let segments = list.prepare_texts(
+            &gpu,
+            640,
+            480,
+            1.0,
+            &[],
+            &mut Vec::new(),
+            None,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+        );
+        assert!(!segments.is_empty());
+        assert!(segments.iter().map(|s| s.vertex_count).sum::<u32>() > 0);
     }
 
     #[test]

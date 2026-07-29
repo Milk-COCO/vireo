@@ -201,45 +201,58 @@ fn main() {
         } else {
             "AutoVsync"
         };
-        let info = format!(
-            "FPS: {:.1}\n\
-Frame time: {:6.2}ms  avg {:5.2} / p50 {:5.2} / p95 {:5.2} / p99 {:5.2}\n\
-GPU queue:  {:>6}ms (previous completed submission)\n\
-  min {:5.2} / max {:5.2} / stddev {:4.2}  (n={})\n\
-Spikes (>{:.0}ms): {} / {}\n\
-AA: {}  |  Present: {}  |  Text: {}\n\
-Focus: {}  |  Frames: {}\n\
-Init: app {:.0}ms + win {:.0}ms",
-            app.fps,
-            ft_ms,
-            avg,
-            p50,
-            p95,
-            p99,
-            last_gpu_ms.map_or_else(|| "n/a".to_string(), |v| format!("{:6.2}", v)),
-            lo,
-            hi,
-            stddev,
-            history.len(),
-            SPIKE_THRESHOLD_MS,
-            spike_count,
-            history.len(),
-            aa_label(current_aa),
-            present_label,
-            if show_text { "on" } else { "off" },
-            if focused { "yes" } else { "NO" },
-            app.frame_count,
-            app_init_ms,
-            win_init_ms,
-        );
         if show_text {
-            draw_text(
-                &mut batch.texts,
-                &info,
-                Pos::new(16.0, 12.0),
-                TextDef::default().font_size(12.0),
-                TextOverride::from_color(WHITE),
-            );
+            let def = TextDef::default().font_size(12.0);
+            let rows = [
+                (vec![TextPart::normal("FPS: "), TextPart::digits(format!("{:.1}", app.fps))], 12.0),
+                (vec![
+                    TextPart::normal("Frame time: "), TextPart::digits(format!("{:6.2}", ft_ms)),
+                    TextPart::normal("ms  avg "), TextPart::digits(format!("{:5.2}", avg)),
+                    TextPart::normal(" / p50 "), TextPart::digits(format!("{:5.2}", p50)),
+                    TextPart::normal(" / p95 "), TextPart::digits(format!("{:5.2}", p95)),
+                    TextPart::normal(" / p99 "), TextPart::digits(format!("{:5.2}", p99)),
+                ], 26.0),
+                (vec![
+                    TextPart::normal("GPU queue: "),
+                    last_gpu_ms.map_or_else(
+                        || TextPart::dynamic("n/a"),
+                        |v| TextPart::digits(format!("{:6.2}", v)),
+                    ),
+                    TextPart::normal("ms (previous completed submission)"),
+                ], 40.0),
+                (vec![
+                    TextPart::normal("min "), TextPart::digits(format!("{:5.2}", lo)),
+                    TextPart::normal(" / max "), TextPart::digits(format!("{:5.2}", hi)),
+                    TextPart::normal(" / stddev "), TextPart::digits(format!("{:4.2}", stddev)),
+                    TextPart::normal("  (n="), TextPart::digits(history.len().to_string()), TextPart::normal(")"),
+                ], 54.0),
+                (vec![
+                    TextPart::normal("Spikes (>"), TextPart::digits(format!("{:.0}", SPIKE_THRESHOLD_MS)),
+                    TextPart::normal("ms): "), TextPart::digits(spike_count.to_string()),
+                    TextPart::normal(" / "), TextPart::digits(history.len().to_string()),
+                ], 68.0),
+                (vec![
+                    TextPart::normal("AA: "), TextPart::dynamic(aa_label(current_aa)),
+                    TextPart::normal("  |  Present: "), TextPart::dynamic(present_label),
+                    TextPart::normal("  |  Text: "), TextPart::dynamic(if show_text { "on" } else { "off" }),
+                ], 82.0),
+                (vec![
+                    TextPart::normal("Focus: "), TextPart::dynamic(if focused { "yes" } else { "NO" }),
+                    TextPart::normal("  |  Frames: "), TextPart::digits(app.frame_count.to_string()),
+                ], 96.0),
+                (vec![
+                    TextPart::normal("Init: app "), TextPart::digits(format!("{:.0}", app_init_ms)),
+                    TextPart::normal("ms + win "), TextPart::digits(format!("{:.0}", win_init_ms)), TextPart::normal("ms"),
+                ], 110.0),
+            ];
+            for (row, y) in rows {
+                batch.text_parts(
+                    &row,
+                    Pos::new(16.0, y),
+                    def.clone(),
+                    TextOverride::from_color(WHITE),
+                );
+            }
         }
 
         let k_msaa8 = if max_sc >= 8 { " 3=MSAA8" } else { "" };

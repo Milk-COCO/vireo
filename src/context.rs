@@ -841,7 +841,7 @@ impl Renderer {
             tc.ensure_text_ds(&self.gpu.device, uses_stencil);
         }
         let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
-        text_ctx.text_renderer.clear();
+        text_ctx.text_renderer.begin_frame();
         text_ctx.advance_frame();
         drop(text_ctx);
         for (ei, event) in events.iter().enumerate() {
@@ -891,6 +891,12 @@ impl Renderer {
                 }
             }
         }
+        self.gpu
+            .text_ctx
+            .lock()
+            .unwrap()
+            .text_renderer
+            .finish_frame(&self.gpu.device, &self.gpu.queue);
 
         // ---- 上传 transform 数据 ----
         if !global_transforms.is_empty() {

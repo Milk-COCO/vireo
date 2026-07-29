@@ -1068,7 +1068,12 @@ impl GpuContext {
 
     /// 加载自定义字体（TTF/OTF 字节数据），使该字体可用于 TextOptions::with_family
     pub fn load_font(&self, data: &[u8]) {
-        self.text_ctx.lock().unwrap().font_system.db_mut().load_font_data(data.to_vec());
+        let mut text_ctx = self.text_ctx.lock().unwrap();
+        text_ctx.font_system.db_mut().load_font_data(data.to_vec());
+        // Font fallback may change, so cached shaping and resolved HUD glyphs
+        // must be rebuilt. Active StableText handles intentionally keep their
+        // already-shaped buffers.
+        text_ctx.clear_shape_cache();
     }
 
     /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
