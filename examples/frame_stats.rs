@@ -204,32 +204,32 @@ fn main() {
         if show_text {
             let def = TextDef::default().font_size(12.0);
             let rows = [
-                (vec![TextPart::normal("FPS: "), TextPart::digits(format!("{:.1}", app.fps))], 12.0),
+                (vec![TextPart::normal("FPS: "), TextPart::glyphs(format!("{:.1}", app.fps))], 12.0),
                 (vec![
-                    TextPart::normal("Frame time: "), TextPart::digits(format!("{:6.2}", ft_ms)),
-                    TextPart::normal("ms  avg "), TextPart::digits(format!("{:5.2}", avg)),
-                    TextPart::normal(" / p50 "), TextPart::digits(format!("{:5.2}", p50)),
-                    TextPart::normal(" / p95 "), TextPart::digits(format!("{:5.2}", p95)),
-                    TextPart::normal(" / p99 "), TextPart::digits(format!("{:5.2}", p99)),
+                    TextPart::normal("Frame time: "), TextPart::glyphs(format!("{:6.2}", ft_ms)),
+                    TextPart::normal("ms  avg "), TextPart::glyphs(format!("{:5.2}", avg)),
+                    TextPart::normal(" / p50 "), TextPart::glyphs(format!("{:5.2}", p50)),
+                    TextPart::normal(" / p95 "), TextPart::glyphs(format!("{:5.2}", p95)),
+                    TextPart::normal(" / p99 "), TextPart::glyphs(format!("{:5.2}", p99)),
                 ], 26.0),
                 (vec![
                     TextPart::normal("GPU queue: "),
                     last_gpu_ms.map_or_else(
                         || TextPart::dynamic("n/a"),
-                        |v| TextPart::digits(format!("{:6.2}", v)),
+                        |v| TextPart::glyphs(format!("{:6.2}", v)),
                     ),
                     TextPart::normal("ms (previous completed submission)"),
                 ], 40.0),
                 (vec![
-                    TextPart::normal("min "), TextPart::digits(format!("{:5.2}", lo)),
-                    TextPart::normal(" / max "), TextPart::digits(format!("{:5.2}", hi)),
-                    TextPart::normal(" / stddev "), TextPart::digits(format!("{:4.2}", stddev)),
-                    TextPart::normal("  (n="), TextPart::digits(history.len().to_string()), TextPart::normal(")"),
+                    TextPart::normal("min "), TextPart::glyphs(format!("{:5.2}", lo)),
+                    TextPart::normal(" / max "), TextPart::glyphs(format!("{:5.2}", hi)),
+                    TextPart::normal(" / stddev "), TextPart::glyphs(format!("{:4.2}", stddev)),
+                    TextPart::normal("  (n="), TextPart::glyphs(history.len().to_string()), TextPart::normal(")"),
                 ], 54.0),
                 (vec![
-                    TextPart::normal("Spikes (>"), TextPart::digits(format!("{:.0}", SPIKE_THRESHOLD_MS)),
-                    TextPart::normal("ms): "), TextPart::digits(spike_count.to_string()),
-                    TextPart::normal(" / "), TextPart::digits(history.len().to_string()),
+                    TextPart::normal("Spikes (>"), TextPart::glyphs(format!("{:.0}", SPIKE_THRESHOLD_MS)),
+                    TextPart::normal("ms): "), TextPart::glyphs(spike_count.to_string()),
+                    TextPart::normal(" / "), TextPart::glyphs(history.len().to_string()),
                 ], 68.0),
                 (vec![
                     TextPart::normal("AA: "), TextPart::dynamic(aa_label(current_aa)),
@@ -238,11 +238,11 @@ fn main() {
                 ], 82.0),
                 (vec![
                     TextPart::normal("Focus: "), TextPart::dynamic(if focused { "yes" } else { "NO" }),
-                    TextPart::normal("  |  Frames: "), TextPart::digits(app.frame_count.to_string()),
+                    TextPart::normal("  |  Frames: "), TextPart::glyphs(app.frame_count.to_string()),
                 ], 96.0),
                 (vec![
-                    TextPart::normal("Init: app "), TextPart::digits(format!("{:.0}", app_init_ms)),
-                    TextPart::normal("ms + win "), TextPart::digits(format!("{:.0}", win_init_ms)), TextPart::normal("ms"),
+                    TextPart::normal("Init: app "), TextPart::glyphs(format!("{:.0}", app_init_ms)),
+                    TextPart::normal("ms + win "), TextPart::glyphs(format!("{:.0}", win_init_ms)), TextPart::normal("ms"),
                 ], 110.0),
             ];
             for (row, y) in rows {

@@ -1070,7 +1070,7 @@ impl GpuContext {
     pub fn load_font(&self, data: &[u8]) {
         let mut text_ctx = self.text_ctx.lock().unwrap();
         text_ctx.font_system.db_mut().load_font_data(data.to_vec());
-        // Font fallback may change, so cached shaping and resolved HUD glyphs
+        // Font fallback may change, so cached shaping and resolved glyphs
         // must be rebuilt. Active StableText handles intentionally keep their
         // already-shaped buffers.
         text_ctx.clear_shape_cache();
@@ -1103,6 +1103,17 @@ impl GpuContext {
     /// 立即清空文字 shape 缓存。
     pub fn clear_shape_cache(&self) {
         self.text_ctx.lock().unwrap().clear_shape_cache();
+    }
+
+    /// 清空 `TextPart::Glyphs` 的 resolved glyph 元数据缓存。
+    /// 不清空 glyph atlas 中已经光栅化的位图。
+    pub fn clear_glyph_cache(&self) {
+        self.text_ctx.lock().unwrap().clear_glyph_cache();
+    }
+
+    /// 当前 `TextPart::Glyphs` resolved glyph 元数据缓存条目数。
+    pub fn glyph_cache_len(&self) -> usize {
+        self.text_ctx.lock().unwrap().glyph_cache_len()
     }
 
     /// 当前 shape 缓存条目数。

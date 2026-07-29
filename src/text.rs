@@ -113,13 +113,9 @@ pub struct TextContext {
     shape_ttl: Option<Duration>,
     /// `None` = 不限制缓存条数；`Some(n)` = 最多 n 条，满则 LRU 换槽。
     shape_max_entries: Option<usize>,
-    /// HUD 数字表是否已为当前字号/attrs 预热（不存 slot 下标，避免 LRU 后失效）
-    digit_table_ready: bool,
-    digit_step: f32,
-    digit_metrics_bits: u32,
-    digit_attrs: Option<AttrsOwned>,
-    /// HUD_DIGIT_TABLE 已解析的单字形，供 Digits 绕过 TextArea/layout_runs。
-    hud_glyphs: FxHashMap<char, Arc<ResolvedTextGlyph>>,
+    /// 按字符和完整 shape 样式缓存 resolved glyph 元数据。
+    /// 不缓存位图；光栅结果仍由 glyph atlas 管理。默认无 cap/TTL/LRU。
+    glyph_cache: FxHashMap<ShapeKey, Arc<ResolvedGlyphCluster>>,
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
     stats: ShapeCacheStats,
@@ -132,6 +128,11 @@ pub struct ResolvedTextGlyph {
     line_y: f32,
     line_top: f32,
     line_height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedGlyphCluster {
+    glyphs: Arc<[Arc<ResolvedTextGlyph>]>,
     advance: f32,
 }
 
@@ -385,10 +386,19 @@ impl TextContext {
             self.shape_map.insert(slot.key.clone(), new_i as u32);
         }
         self.shape_slots = new_slots;
-        self.digit_table_ready = false;
-        self.digit_step = 0.0;
+        self.glyph_cache.clear();
         self.frame_pinned.clear();
         self.stats = ShapeCacheStats::default();
+    }
+
+    /// 清空 `Glyphs` 的 resolved glyph 元数据缓存，不影响 glyph atlas 位图。
+    pub fn clear_glyph_cache(&mut self) {
+        self.glyph_cache.clear();
+    }
+
+    /// 当前 `Glyphs` resolved glyph 元数据缓存条目数。
+    pub fn glyph_cache_len(&self) -> usize {
+        self.glyph_cache.len()
     }
 
     fn pin_slot(&mut self, slot: u32) {
@@ -671,13 +681,11 @@ impl TextContext {
         for run in buffer.layout_runs() {
             line_count += 1;
             resolved_glyphs.extend(run.glyphs.iter().cloned().map(|glyph| {
-                let advance = glyph.w;
                 Arc::new(ResolvedTextGlyph {
                 glyph,
                 line_y: run.line_y,
                 line_top: run.line_top,
                 line_height: run.line_height,
-                advance,
             })
             }));
         }
@@ -706,62 +714,34 @@ impl TextContext {
         self.shape_slots[i].line_width
     }
 
-    /// 确保 0-9 + 常用数学符号已 shape；digit_step 取 0-9 最大宽（tabular）。
-    fn ensure_digit_table(&mut self, options: &TextDef) -> f32 {
-        let bits = options.font_size.to_bits();
-        let attrs = options.attrs.clone();
-        let need = !self.digit_table_ready
-            || self.digit_metrics_bits != bits
-            || self.digit_attrs != attrs;
-        if !need {
-            return self.digit_step;
-        }
+    /// 按需 shape 单个字符并缓存完整 resolved glyph cluster。
+    fn resolve_glyph(&mut self, ch: char, options: &TextDef) -> Arc<ResolvedGlyphCluster> {
         let mut opts = options.clone();
         opts.max_width = None;
         opts.align = TextAlign::Left;
-        Self::add_tnum(&mut opts);
-        let mut max_w = 0.0f32;
-        self.hud_glyphs.clear();
-        for ch in HUD_DIGIT_TABLE.chars() {
-            let s = ch.to_string();
-            let idx = self.get_or_shape_text(&s, &opts);
-            let advance = self.slot_line_width(idx);
-            if ch.is_ascii_digit() {
-                max_w = max_w.max(advance);
-            }
-            let resolved = self.shape_slots[idx as usize]
-                    .buffer
-                    .layout_runs()
-                    .next()
-                    .and_then(|run| {
-                        run.glyphs.first().cloned().map(|glyph| Arc::new(ResolvedTextGlyph {
-                            glyph,
-                            line_y: run.line_y,
-                            line_top: run.line_top,
-                            line_height: run.line_height,
-                            advance,
-                        }))
-                    });
-            if let Some(resolved) = resolved {
-                self.hud_glyphs.insert(ch, resolved);
-            }
+        let text = ch.to_string();
+        let key = ShapeKey::from_text(&text, &opts);
+        if let Some(glyph) = self.glyph_cache.get(&key) {
+            return glyph.clone();
         }
-        self.digit_table_ready = true;
-        self.digit_step = max_w;
-        self.digit_metrics_bits = bits;
-        self.digit_attrs = attrs;
-        max_w
-    }
-
-    fn resolved_hud_glyph(&self, ch: char) -> Option<&Arc<ResolvedTextGlyph>> {
-        self.hud_glyphs.get(&ch)
-    }
-
-    /// 在 opts 的 attrs 上加 `tnum` OpenType feature（字体级等宽数字）。
-    /// 仅影响支持 tnum 的字体；不支持的字体会忽略此 feature。
-    fn add_tnum(opts: &mut TextDef) {
-        let attrs = opts.attrs.get_or_insert_with(|| AttrsOwned::new(&Attrs::new()));
-        attrs.font_features.enable(FeatureTag::new(b"tnum"));
+        let idx = self.get_or_shape_text(&text, &opts);
+        let advance = self.slot_line_width(idx);
+        let buffer = &self.shape_slots[idx as usize].buffer;
+        let mut glyphs = Vec::new();
+        for run in buffer.layout_runs() {
+            glyphs.extend(run.glyphs.iter().cloned().map(|glyph| Arc::new(ResolvedTextGlyph {
+                glyph,
+                line_y: run.line_y,
+                line_top: run.line_top,
+                line_height: run.line_height,
+            })));
+        }
+        let resolved = Arc::new(ResolvedGlyphCluster {
+            glyphs: Arc::from(glyphs),
+            advance,
+        });
+        self.glyph_cache.insert(key, resolved.clone());
+        resolved
     }
 
 }
@@ -812,11 +792,7 @@ impl TextContext {
             last_gc: Instant::now(),
             shape_ttl: Some(DEFAULT_SHAPE_TTL),
             shape_max_entries: Some(DEFAULT_SHAPE_MAX_ENTRIES),
-            digit_table_ready: false,
-            digit_step: 0.0,
-            digit_metrics_bits: 0,
-            digit_attrs: None,
-            hud_glyphs: FxHashMap::default(),
+            glyph_cache: FxHashMap::default(),
             frame_pinned: Vec::with_capacity(32),
             stats: ShapeCacheStats::default(),
         }
@@ -954,14 +930,6 @@ impl TextDef {
     }
 }
 
-/// Digits 预 shape 表：`0-9` + 常用数学/HUD 符号（单字符各一条 ShapeKey）。
-/// 数字步进宽取 0-9 最大宽；符号用自身 glyph 宽。
-///
-/// **限制**：未在此表中的字符（如中文、emoji 等）会被 `Digits` 路径**静默丢弃**——
-/// 既不绘制也不占位（避免错误猜测宽度）。HUD 文本只适合数字 + ASCII 标点 + 少量拉丁字母（`e`/`E`）
-/// 的场景；非 ASCII 内容请用 `TextPart::normal` / `dynamic` 走完整 shape 路径。
-const HUD_DIGIT_TABLE: &str = "0123456789.,+-*/%=:()[]{}±×÷°−eE";
-
 #[inline]
 fn is_hud_digit_char(ch: char) -> bool {
     ch.is_ascii_digit()
@@ -999,9 +967,8 @@ fn is_hud_digit_char(ch: char) -> bool {
 /// - 当 `max_width: Some(w)`：文本在 w 逻辑像素处换行，**`align` 生效**（`Left` / `Center` / `Right`）。
 ///
 /// ## 限制
-/// - **不支持 `Digits` 切分**：整段是单 buffer，仍不走 `tnum` 等宽数字语义；但其
-///   已 shaping glyph 模板会走 direct prepare。
-///   需要等宽数字请用 [`TextPart::Digits`] 或 [`crate::text::HudLine`]。
+/// - **不支持 `Glyphs` 切分**：整段是单 buffer；但其已 shaping glyph 模板会走
+///   direct prepare。
 ///
 /// ## 绘制 API
 /// - [`DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `make_stable_text` 时定型。
@@ -1065,13 +1032,12 @@ impl std::fmt::Debug for StableText {
 ///
 /// 四种类型的差异：
 /// - [`TextPart::Normal`]：内容稳定，走整段 shape 缓存，同内容可命中。
-/// - [`TextPart::Dynamic`]：内容会变但仍需整段 shape，适合不能拆成 Digits 的短句。
-/// - [`TextPart::Digits`]：HUD 数字专用加速路径。**强制 `tnum`（等宽数字）**，
-///   每个字宽度 = 0-9 最大宽。代码内自带大字表，无需整段 reshape。
-///   若要比例数字，用 [`TextPart::Dynamic`] 或 [`TextPart::Normal`]。
+/// - [`TextPart::Dynamic`]：内容会变但仍需整段 shape，适合需要整段 shaping 的短句。
+/// - [`TextPart::Glyphs`]：任意字符的按字 direct path。每个字符首次遇到时单独 shape，
+///   后续复用 resolved glyph 元数据；间距使用字体自身 advance。
 /// - [`TextPart::Stable`]：预 shape 句柄，不走 cache 查询。详见 [`StableText`]。
 ///
-/// **`TextDef`**：`Normal` / `Dynamic` / `Digits` 的第二参数 `None` = 使用
+/// **`TextDef`**：`Normal` / `Dynamic` / `Glyphs` 的第二参数 `None` = 使用
 /// `draw_text_parts` / `push_parts` 的行级 `def`；`Some(def)` = 仅本段覆盖。
 /// [`TextPart::Stable`] 无此项（字号等已在 `make_stable_text` 时定型）。
 ///
@@ -1084,8 +1050,8 @@ pub enum TextPart {
     Normal(String, Option<TextDef>),
     /// 内容会变的任意文案。仍走整段 shape；字符串一变就 miss。
     Dynamic(String, Option<TextDef>),
-    /// 强制 `tnum` 等宽的 HUD 数字/符号。
-    Digits(String, Option<TextDef>),
+    /// 任意字符的按字 direct path；按需 shape，使用字体自身 advance。
+    Glyphs(String, Option<TextDef>),
     /// 预 shape 稳定文本；`TextDef` 已在创建时定型，不可在此覆盖。
     ///
     /// **与外层的关系**（`draw_text_parts` / `push_parts`）：
@@ -1115,15 +1081,15 @@ impl TextPart {
     pub fn dynamic_def(text: impl Into<String>, def: TextDef) -> Self {
         Self::Dynamic(text.into(), Some(def))
     }
-    /// 等宽数字，用行级 `TextDef`。
+    /// 按字 direct path，用行级 `TextDef`。
     #[inline]
-    pub fn digits(text: impl Into<String>) -> Self {
-        Self::Digits(text.into(), None)
+    pub fn glyphs(text: impl Into<String>) -> Self {
+        Self::Glyphs(text.into(), None)
     }
-    /// 等宽数字 + 本段 `TextDef`。
+    /// 按字 direct path + 本段 `TextDef`。
     #[inline]
-    pub fn digits_def(text: impl Into<String>, def: TextDef) -> Self {
-        Self::Digits(text.into(), Some(def))
+    pub fn glyphs_def(text: impl Into<String>, def: TextDef) -> Self {
+        Self::Glyphs(text.into(), Some(def))
     }
     /// 预 shape 句柄（clone `StableText`）。
     #[inline]
@@ -1134,8 +1100,8 @@ impl TextPart {
     #[inline]
     fn resolve_def<'a>(&'a self, row: &'a TextDef) -> &'a TextDef {
         match self {
-            Self::Normal(_, Some(d)) | Self::Dynamic(_, Some(d)) | Self::Digits(_, Some(d)) => d,
-            Self::Normal(_, None) | Self::Dynamic(_, None) | Self::Digits(_, None) => row,
+            Self::Normal(_, Some(d)) | Self::Dynamic(_, Some(d)) | Self::Glyphs(_, Some(d)) => d,
+            Self::Normal(_, None) | Self::Dynamic(_, None) | Self::Glyphs(_, None) => row,
             Self::Stable(_) => row,
         }
     }
@@ -1143,22 +1109,22 @@ impl TextPart {
     /// 段内字符串（Stable 返回原文案）。
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Normal(s, _) | Self::Dynamic(s, _) | Self::Digits(s, _) => s.as_str(),
+            Self::Normal(s, _) | Self::Dynamic(s, _) | Self::Glyphs(s, _) => s.as_str(),
             Self::Stable(h) => h.text(),
         }
     }
 }
 
-/// 薄 wrapper：跨帧持有 [`Vec<TextPart>`]，只改 Dynamic/Digits 槽。
+/// 薄 wrapper：跨帧持有 [`Vec<TextPart>`]，只改 Dynamic/Glyphs 槽。
 ///
 /// ```ignore
 /// let mut line = HudLine::new()
 ///     .text("分数: ")
-///     .digits("0")
+///     .glyphs("0")
 ///     .text("  模式: ")
 ///     .dynamic("Both");
 /// // 每帧
-/// line.set_digits(1, score.to_string());
+/// line.set_glyphs(1, score.to_string());
 /// line.draw(&mut batch.texts, pos, def, ov);
 /// ```
 #[derive(Clone, Debug, Default)]
@@ -1181,9 +1147,9 @@ impl HudLine {
         self
     }
 
-    /// 数字优化槽（见 [`TextPart::Digits`]）。
-    pub fn digits(mut self, s: impl Into<String>) -> Self {
-        self.parts.push(TextPart::digits(s));
+    /// 按字 direct path 槽（见 [`TextPart::Glyphs`]）。
+    pub fn glyphs(mut self, s: impl Into<String>) -> Self {
+        self.parts.push(TextPart::glyphs(s));
         self
     }
 
@@ -1205,20 +1171,20 @@ impl HudLine {
         self.parts[index] = TextPart::dynamic(s);
     }
 
-    pub fn set_digits(&mut self, index: usize, s: impl Into<String>) {
+    pub fn set_glyphs(&mut self, index: usize, s: impl Into<String>) {
         if index >= self.parts.len() {
             self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
         }
-        self.parts[index] = TextPart::digits(s);
+        self.parts[index] = TextPart::glyphs(s);
     }
 
-    /// 原地改 Normal/Dynamic/Digits 槽的字符串（不换变体；越界时自动扩充到该下标；Stable 槽忽略）。
+    /// 原地改 Normal/Dynamic/Glyphs 槽的字符串（不换变体；越界时自动扩充到该下标；Stable 槽忽略）。
     pub fn write_slot(&mut self, index: usize, s: &str) {
         if index >= self.parts.len() {
             self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
         }
         match &mut self.parts[index] {
-            TextPart::Normal(buf, _) | TextPart::Dynamic(buf, _) | TextPart::Digits(buf, _) => {
+            TextPart::Normal(buf, _) | TextPart::Dynamic(buf, _) | TextPart::Glyphs(buf, _) => {
                 buf.clear();
                 buf.push_str(s);
             }
@@ -1244,14 +1210,14 @@ impl HudLine {
     }
 }
 
-/// 将 HUD 字符串切成 Normal / Digits 段（启发式；Dynamic 需手写或 [`HudLine`]）。
+/// 将 HUD 字符串切成 Normal / Glyphs 段（启发式；Dynamic 需手写或 [`HudLine`]）。
 ///
 /// 规则：
-/// - 连续 `0-9` 与常用数学符号 → [`TextPart::Digits`]（优化）
-/// - 空格：已在 Digits 段内则并入；否则归 Normal
+/// - 连续 `0-9` 与常用数学符号 → [`TextPart::Glyphs`]（优化）
+/// - 空格：已在 Glyphs 段内则并入；否则归 Normal
 /// - 其余 → [`TextPart::Normal`]（假定标签稳定）
 ///
-/// 例：`"分数: 42"` → `Normal("分数")` + `Digits(": 42")`。
+/// 例：`"分数: 42"` → `Normal("分数")` + `Glyphs(": 42")`。
 ///
 /// 空串返回空 `Vec`。不保证与整段 `draw_text` 像素级一致。
 pub fn split_hud(s: &str) -> Vec<TextPart> {
@@ -1268,7 +1234,7 @@ pub fn split_hud(s: &str) -> Vec<TextPart> {
             return;
         }
         let part = match *cur_digits {
-            Some(true) => TextPart::digits(std::mem::take(cur)),
+            Some(true) => TextPart::glyphs(std::mem::take(cur)),
             _ => TextPart::normal(std::mem::take(cur)),
         };
         *cur_digits = None;
@@ -1432,7 +1398,7 @@ impl TextEntry {
             TextEntry::Normal { def, .. } => def.font_size,
             TextEntry::Parts { parts, def, .. } => parts.iter().fold(def.font_size, |max, part| {
                 let size = match part {
-                    TextPart::Normal(_, d) | TextPart::Dynamic(_, d) | TextPart::Digits(_, d) => {
+                    TextPart::Normal(_, d) | TextPart::Dynamic(_, d) | TextPart::Glyphs(_, d) => {
                         d.as_ref().map(|d| d.font_size).unwrap_or(def.font_size)
                     }
                     TextPart::Stable(stable) => stable.font_size(),
@@ -1459,7 +1425,7 @@ impl TextEntry {
                 let mut w = 0.0f32;
                 for p in parts {
                     match p {
-                        TextPart::Normal(s, d) | TextPart::Dynamic(s, d) | TextPart::Digits(s, d) => {
+                        TextPart::Normal(s, d) | TextPart::Dynamic(s, d) | TextPart::Glyphs(s, d) => {
                             let fs = d.as_ref().map(|x| x.font_size).unwrap_or(def.font_size);
                             w += s.chars().count() as f32 * fs * 0.6;
                         }
@@ -1956,18 +1922,13 @@ impl TextEntryList {
                                 }
                                 cursor_x += h.line_width();
                             }
-                            TextPart::Digits(s, _) => {
+                            TextPart::Glyphs(s, _) => {
                                 let pdef = part.resolve_def(def);
-                                let step = text_ctx.ensure_digit_table(pdef);
                                 for ch in s.chars() {
-                                    if ch == ' ' {
-                                        cursor_x += step * 0.5;
-                                        continue;
-                                    }
-                                    if let Some(glyph) = text_ctx.resolved_hud_glyph(ch) {
-                                        let buf = MetaBuf::Resolved(glyph.clone());
+                                    let cluster = text_ctx.resolve_glyph(ch, pdef);
+                                    for glyph in cluster.glyphs.iter() {
                                         metas.push(AreaMeta {
-                                            buf,
+                                            buf: MetaBuf::Resolved(glyph.clone()),
                                             left: cursor_x * scale,
                                             top,
                                             color,
@@ -1976,8 +1937,8 @@ impl TextEntryList {
                                             base_uv_rect: batch_base_uv,
                                             texture_state: texture_state.clone(),
                                         });
-                                        cursor_x += if ch.is_ascii_digit() { step } else { glyph.advance };
                                     }
+                                    cursor_x += cluster.advance;
                                 }
                             }
                         }
@@ -2177,16 +2138,16 @@ pub fn draw_text(list: &mut TextEntryList, text: &str, pos: Pos, def: TextDef, o
     list.push(text, pos, def, ov);
 }
 
-/// HUD 多段：Normal / Dynamic / Digits / Stable。单行 LTR，不保证与整段 `draw_text` 像素级一致。
+/// HUD 多段：Normal / Dynamic / Glyphs / Stable。单行 LTR，不保证与整段 `draw_text` 像素级一致。
 ///
 /// `parts` 为切片引用；引擎 clone 进 [`TextEntry::Parts`]。
 ///
 /// ```ignore
 /// draw_text_parts(&mut batch.texts, &[
 ///     TextPart::normal("分数: "),
-///     TextPart::digits("123"),
+///     TextPart::glyphs("123"),
 ///     // 本段更大字号：
-///     // TextPart::digits_def("99", TextDef::default().font_size(28.0)),
+///     // TextPart::glyphs_def("99", TextDef::default().font_size(28.0)),
 /// ], Pos::new(16.0, 16.0), TextDef::default().font_size(20.0), TextOverride::default());
 /// ```
 pub fn draw_text_parts(
@@ -2199,9 +2160,9 @@ pub fn draw_text_parts(
     list.push_parts(parts, pos, def, ov);
 }
 
-/// HUD 自动切分：`split_hud` → Normal + Digits（启发式）。
+/// HUD 自动切分：`split_hud` → Normal + Glyphs（启发式）。
 ///
-/// 更推荐跨帧 [`HudLine`]：语义上区分 Normal / Dynamic，Digits 仅数字槽。
+/// 更推荐跨帧 [`HudLine`]：语义上区分 Normal / Dynamic，Glyphs 走按字 direct path。
 ///
 /// ```ignore
 /// draw_text_hud(&mut batch.texts, "FPS: 60.5", Pos::new(16.0, 12.0), def, ov);
@@ -2332,7 +2293,7 @@ let entry = TextEntry::Parts {
             def: TextDef::default().font_size(16.0),
             parts: vec![
                 TextPart::normal("small"),
-                TextPart::digits_def("99", TextDef::default().font_size(48.0)),
+                TextPart::glyphs_def("99", TextDef::default().font_size(48.0)),
             ],
             override_: TextOverride::default(),
             transform_index: 0,
@@ -2366,7 +2327,7 @@ let entry = TextEntry::Parts {
         match p {
             TextPart::Normal(s, _) => ("normal", s.as_str()),
             TextPart::Dynamic(s, _) => ("dynamic", s.as_str()),
-            TextPart::Digits(s, _) => ("digits", s.as_str()),
+            TextPart::Glyphs(s, _) => ("glyphs", s.as_str()),
             TextPart::Stable(h) => ("stable", h.text()),
         }
     }
@@ -2421,8 +2382,8 @@ let entry = TextEntry::Parts {
             &mut list,
             &[
                 TextPart::normal("分数: "),
-                TextPart::digits("42"),
-                TextPart::digits_def("99", TextDef::default().font_size(28.0)),
+                TextPart::glyphs("42"),
+                TextPart::glyphs_def("99", TextDef::default().font_size(28.0)),
             ],
             Pos::new(0.0, 0.0),
             TextDef::default().font_size(16.0),
@@ -2438,15 +2399,15 @@ let entry = TextEntry::Parts {
                     _ => panic!("expected Normal(None)"),
                 }
                 match &parts[1] {
-                    TextPart::Digits(s, None) => assert_eq!(s, "42"),
-                    _ => panic!("expected Digits(None)"),
+                    TextPart::Glyphs(s, None) => assert_eq!(s, "42"),
+                    _ => panic!("expected Glyphs(None)"),
                 }
                 match &parts[2] {
-                    TextPart::Digits(s, Some(d)) => {
+                    TextPart::Glyphs(s, Some(d)) => {
                         assert_eq!(s, "99");
                         assert!((d.font_size - 28.0).abs() < 1e-5);
                     }
-                    _ => panic!("expected Digits(Some)"),
+                    _ => panic!("expected Glyphs(Some)"),
                 }
             }
             _ => panic!("expected Parts"),
@@ -2455,33 +2416,33 @@ let entry = TextEntry::Parts {
 
     #[test]
     fn split_hud_fps_and_score() {
-        // `:` `.` 属 Digits 表 → 与数字并成一段；标签 → Normal
+        // `:` `.` 属自动数值段字符 → 与数字并成一段；标签 → Normal
         let p = split_hud("FPS: 60.5");
         assert_eq!(p.len(), 2);
         assert_eq!(part_kind_str(&p[0]), ("normal", "FPS"));
-        assert_eq!(part_kind_str(&p[1]), ("digits", ": 60.5"));
+        assert_eq!(part_kind_str(&p[1]), ("glyphs", ": 60.5"));
 
         let p = split_hud("分数: 42");
         assert_eq!(p.len(), 2);
         assert_eq!(part_kind_str(&p[0]), ("normal", "分数"));
-        assert_eq!(part_kind_str(&p[1]), ("digits", ": 42"));
+        assert_eq!(part_kind_str(&p[1]), ("glyphs", ": 42"));
 
         assert!(split_hud("").is_empty());
 
         let p = split_hud("123");
         assert_eq!(p.len(), 1);
-        assert_eq!(part_kind_str(&p[0]), ("digits", "123"));
+        assert_eq!(part_kind_str(&p[0]), ("glyphs", "123"));
 
         let p = split_hud("-12.5%");
         assert_eq!(p.len(), 1);
-        assert_eq!(part_kind_str(&p[0]), ("digits", "-12.5%"));
+        assert_eq!(part_kind_str(&p[0]), ("glyphs", "-12.5%"));
 
         let p = split_hud("a+b=3");
         assert_eq!(p.len(), 4);
         assert_eq!(part_kind_str(&p[0]), ("normal", "a"));
-        assert_eq!(part_kind_str(&p[1]), ("digits", "+"));
+        assert_eq!(part_kind_str(&p[1]), ("glyphs", "+"));
         assert_eq!(part_kind_str(&p[2]), ("normal", "b"));
-        assert_eq!(part_kind_str(&p[3]), ("digits", "=3"));
+        assert_eq!(part_kind_str(&p[3]), ("glyphs", "=3"));
     }
 
     #[test]
@@ -2504,16 +2465,16 @@ let entry = TextEntry::Parts {
             _ => panic!("expected Normal"),
         }
         match &parts[1] {
-            TextPart::Digits(s, None) => assert_eq!(s, "=9"),
-            _ => panic!("expected Digits"),
+            TextPart::Glyphs(s, None) => assert_eq!(s, "=9"),
+            _ => panic!("expected Glyphs"),
         }
     }
 
     #[test]
-    fn hud_line_normal_dynamic_digits() {
+    fn hud_line_normal_dynamic_glyphs() {
         let mut line = HudLine::new()
             .text("分数: ")
-            .digits("0")
+            .glyphs("0")
             .text("  mode=")
             .dynamic("Both");
         line.write_slot(1, "42");
@@ -2521,7 +2482,7 @@ let entry = TextEntry::Parts {
         let parts = line.parts();
         assert_eq!(parts.len(), 4);
         assert_eq!(part_kind_str(&parts[0]), ("normal", "分数: "));
-        assert_eq!(part_kind_str(&parts[1]), ("digits", "42"));
+        assert_eq!(part_kind_str(&parts[1]), ("glyphs", "42"));
         assert_eq!(part_kind_str(&parts[2]), ("normal", "  mode="));
         assert_eq!(part_kind_str(&parts[3]), ("dynamic", "Parts"));
         let mut list = TextEntryList::new();
@@ -2555,7 +2516,7 @@ let entry = TextEntry::Parts {
         for (a, b) in via_macro.iter().zip(via_fn.iter()) {
             assert_eq!(part_kind_str(a), part_kind_str(b));
         }
-        assert!(via_macro.iter().any(|p| matches!(p, TextPart::Digits(_, _))));
+        assert!(via_macro.iter().any(|p| matches!(p, TextPart::Glyphs(_, _))));
     }
 
     // ---- StableText cache tests (require GPU) ----
@@ -2583,19 +2544,24 @@ let entry = TextEntry::Parts {
 
     #[test]
     #[ignore = "requires GPU; run with --ignored"]
-    fn digit_table_resolves_all_ascii_digits() {
+    fn glyph_cache_resolves_arbitrary_chars_on_demand() {
         let gpu = make_test_gpu();
         let mut ctx = gpu.text_ctx.lock().unwrap();
         let def = TextDef::default().font_size(20.0);
-        let step = ctx.ensure_digit_table(&def);
-        assert!(step > 0.0);
-        assert_eq!(ctx.hud_glyphs.len(), HUD_DIGIT_TABLE.chars().count());
-        assert!(HUD_DIGIT_TABLE.chars().all(|ch| ctx.hud_glyphs.contains_key(&ch)));
+        for ch in ['7', '中', '±', 'A', ' '] {
+            let cluster = ctx.resolve_glyph(ch, &def);
+            assert!(cluster.advance >= 0.0);
+        }
+        assert_eq!(ctx.glyph_cache.len(), 5);
 
-        let before = ctx.shape_slots.len();
-        let second_step = ctx.ensure_digit_table(&def);
-        assert_eq!(step, second_step);
-        assert_eq!(ctx.shape_slots.len(), before);
+        let slots_before = ctx.shape_slots.len();
+        let cached = ctx.resolve_glyph('中', &def);
+        assert!(cached.advance >= 0.0);
+        assert_eq!(ctx.glyph_cache.len(), 5);
+        assert_eq!(ctx.shape_slots.len(), slots_before);
+
+        ctx.resolve_glyph('中', &def.clone().font_size(24.0));
+        assert_eq!(ctx.glyph_cache.len(), 6);
     }
 
     #[test]

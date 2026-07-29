@@ -1,11 +1,11 @@
-//! HUD 分段：Normal / Dynamic / Digits + 自动切分。
+//! HUD 分段：Normal / Dynamic / Glyphs + 自动切分。
 //!
-//! **核心**：固定文案与会变内容分开；Digits 是数字串的可选加速。
+//! **核心**：固定文案与会变内容分开；Glyphs 是任意字符的按字 direct path。
 //!
 //! | API | 作用 |
 //! |-----|------|
 //! | `HudLine` | 跨帧 `Vec<TextPart>`，只改数字/动态槽 |
-//! | `draw_text_parts` | 一帧内手写 Normal/Dynamic/Digits（`&[TextPart]`） |
+//! | `draw_text_parts` | 一帧内手写 Normal/Dynamic/Glyphs（`&[TextPart]`） |
 //! | `draw_text_hud` / `draw_text_hud!` | `format!` 后 `split_hud` 自动切 |
 //!
 //! 键：`Space` 切换「自动切分」对照行开/关。
@@ -18,10 +18,10 @@ use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let idx = app.window(WindowDesc::new("text/hud — Normal · Dynamic · Digits", 720, 360), None::<fn()>);
+    let idx = app.window(WindowDesc::new("text/hud — Normal · Dynamic · Glyphs", 720, 360), None::<fn()>);
 
-    // 跨帧 HUD 行（Bevy span 思路）：标签 Normal，分数 Digits
-    let mut score_line = HudLine::new().text("分数: ").digits("0");
+    // 跨帧 HUD 行（Bevy span 思路）：标签 Normal，分数 Glyphs
+    let mut score_line = HudLine::new().text("分数: ").glyphs("0");
     let mode_line = HudLine::new().text("模式: ").dynamic("Parts");
 
     let mut score: u32 = 0;
@@ -46,7 +46,7 @@ fn main() {
         score_line.write_slot(1, &score_s);
 
         fps_s.clear();
-        // 一位小数：拆成 Digits 友好串（可选；也可用 format 后 draw_text_hud!）
+        // 一位小数：拆成 Glyphs 友好串（可选；也可用 format 后 draw_text_hud!）
         let fps = app.fps;
         let w = fps.floor() as i64;
         let f = ((fps - w as f64) * 10.0).round() as i64;
@@ -70,16 +70,16 @@ fn main() {
             ov(dim),
         );
 
-        // 1) HudLine：只改 Digits 槽
+        // 1) HudLine：只改 Glyphs 槽
         score_line.draw(&mut batch.texts, Pos::new(16.0, 48.0), def(22.0), ov(white));
         mode_line.draw(&mut batch.texts, Pos::new(16.0, 84.0), def(16.0), ov(Color::new(0.75, 0.85, 1.0, 1.0)));
 
-        // 2) 手写 parts：Normal + Digits（FPS）
+        // 2) 手写 parts：Normal + Glyphs（FPS）
         draw_text_parts(
             &mut batch.texts,
             &[
                 TextPart::normal("FPS "),
-                TextPart::digits(fps_s.clone()),
+                TextPart::glyphs(fps_s.clone()),
             ],
             Pos::new(16.0, 120.0),
             def(16.0),
@@ -106,7 +106,7 @@ fn main() {
             );
             draw_text(
                 &mut batch.texts,
-                "(split_hud → Normal 标签 + Digits 数字)",
+                "(split_hud → Normal 标签 + Glyphs 数值段)",
                 Pos::new(16.0, 224.0),
                 def(12.0),
                 ov(dim),
@@ -141,9 +141,9 @@ fn main() {
             &mut batch.texts,
             &[
                 TextPart::normal("shape hit~"),
-                TextPart::digits(format!("{hit:.0}")),
+                TextPart::glyphs(format!("{hit:.0}")),
                 TextPart::normal("%  entries "),
-                TextPart::digits(app.gpu.shape_cache_len().to_string()),
+                TextPart::glyphs(app.gpu.shape_cache_len().to_string()),
             ],
             Pos::new(16.0, 312.0),
             def(13.0),

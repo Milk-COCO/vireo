@@ -2639,7 +2639,7 @@ impl DrawBatch {
         self.texts.push_stable_indexed(stable, pos, ov, idx);
     }
 
-    /// HUD 多段（Normal / Dynamic / Digits / Stable），捕获当前 transform。
+    /// HUD 多段（Normal / Dynamic / Glyphs / Stable），捕获当前 transform。
     pub fn text_parts(
         &mut self,
         parts: &[crate::text::TextPart],
