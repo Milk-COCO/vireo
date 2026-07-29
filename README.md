@@ -158,3 +158,10 @@ cargo check
 cargo test --lib          # 推荐（跳过会开窗口的 doc-test）
 cargo build --examples
 ```
+
+## 许可证
+
+Vireo 采用双许可证，可任选以下任一许可证使用：
+
+- [Apache License 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)

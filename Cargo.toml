@@ -4,6 +4,8 @@ description = "Vault's rendering engine - or just a genus of bird ~"
 keywords = ["vault", "rendering", "graphics", "gui", "gamedev"]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Milk-COCO/vireo"
 autoexamples = true
 
 [dependencies]

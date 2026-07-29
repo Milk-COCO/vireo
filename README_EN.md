@@ -160,3 +160,10 @@ cargo check
 cargo test --lib          # preferred (skips window-opening doc-tests)
 cargo build --examples
 ```
+
+## License
+
+Vireo is dual-licensed under your choice of either:
+
+- [Apache License 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
