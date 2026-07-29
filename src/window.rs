@@ -2312,7 +2312,7 @@ mod present_state_tests {
 
         // 逻辑线程：等 view → 编码 → 放 cmd_buf
         let logic = thread::spawn(move || {
-            for i in 0..500 {
+            for _ in 0..500 {
                 // 等 view
                 let v = loop {
                     if let Some(v) = sm_logic.take_view() {
@@ -2320,7 +2320,7 @@ mod present_state_tests {
                     }
                     thread::yield_now();
                 };
-                // 编码（用 i 作为 cmd_buf 内容）
+                // 编码（用 view 值作为 cmd_buf 内容）
                 assert!(sm_logic.put_cmd_buf(v + 1000));
             }
         });
