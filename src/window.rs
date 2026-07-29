@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, mpsc};
+use std::cell::RefCell;
 use rustc_hash::FxHashMap;
 
 use crate::context::Renderer;
@@ -744,6 +745,32 @@ pub struct App {
     /// 最近若干帧的间隔，用于平滑 FPS。
     fps_samples: Vec<f64>,
     last_frame: std::time::Instant,
+    deferred_tasks: RefCell<Vec<DeferredTask>>,
+}
+
+/// 延迟执行的任务，由 [`App::after_frames`] / [`App::after_secs`] 注册。
+pub struct DeferredTask {
+    kind: DeferredTaskKind,
+    pub(crate) f: Box<dyn FnOnce() + Send>,
+}
+
+/// 在 `App::after_frames` / `App::after_secs` 内部使用。
+/// 用户不直接构造。
+#[doc(hidden)]
+pub struct DeferredTaskGuard;
+
+impl DeferredTask {
+    fn is_ready(&self, frame_count: u64) -> bool {
+        match self.kind {
+            DeferredTaskKind::AfterFrames(target) => frame_count >= target,
+            DeferredTaskKind::AfterSecs(wakeup) => std::time::Instant::now() >= wakeup,
+        }
+    }
+}
+
+enum DeferredTaskKind {
+    AfterFrames(u64),
+    AfterSecs(std::time::Instant),
 }
 
 impl App {
@@ -783,6 +810,7 @@ impl App {
             window_init_durations: Vec::new(),
             fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
             last_frame: std::time::Instant::now(),
+            deferred_tasks: RefCell::new(Vec::new()),
         }
     }
 
@@ -910,6 +938,26 @@ impl App {
         let h = handle.0;
         self.callbacks.entry(h).or_default().on_modifiers_changed.push(Box::new(callback));
         self
+    }
+
+    /// 注册一个延迟 `frames` 帧后执行的闭包。
+    /// frame 计数以 `render_on_frame` 循环的帧为单位，首次调用 `on_frame` 时 `frame_count` 为 1。
+    pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
+        let target = self.frame_count + frames;
+        self.deferred_tasks.borrow_mut().push(DeferredTask {
+            kind: DeferredTaskKind::AfterFrames(target),
+            f: Box::new(f),
+        });
+    }
+
+    /// 注册一个延迟 `secs` 秒后执行的闭包（墙钟时间）。
+    pub fn after_secs<F: FnOnce() + Send + 'static>(&self, secs: f64, f: F) {
+        self.deferred_tasks.borrow_mut().push(DeferredTask {
+            kind: DeferredTaskKind::AfterSecs(
+                std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
+            ),
+            f: Box::new(f),
+        });
     }
 
     /// 启动事件循环 + 渲染线程。
@@ -1653,6 +1701,26 @@ where F: FnMut(&App) -> bool + Send + 'static
                 if sum > 0.0 {
                     app.fps = app.fps_samples.len() as f64 / sum;
                 }
+            }
+        }
+
+        // 执行所有到期的延迟任务
+        {
+            let ready = {
+                let mut tasks = app.deferred_tasks.borrow_mut();
+                let mut ready = Vec::new();
+                let mut i = 0;
+                while i < tasks.len() {
+                    if tasks[i].is_ready(app.frame_count) {
+                        ready.push(tasks.swap_remove(i));
+                    } else {
+                        i += 1;
+                    }
+                }
+                ready
+            };
+            for task in ready {
+                (task.f)();
             }
         }
 
