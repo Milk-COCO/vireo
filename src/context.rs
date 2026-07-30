@@ -87,6 +87,37 @@ pub(crate) enum DrawEvent<'a> {
     ScissorPop,
 }
 
+struct ShapeSegment {
+    ndx_start: u32,
+    ndx_count: u32,
+    bind_group: wgpu::BindGroup,
+}
+
+struct ShapeInfo {
+    base_vertex: i32,
+    segments: Vec<ShapeSegment>,
+    geometry: bool,
+}
+
+struct TextRenderSegment {
+    vertex_start: u32,
+    vertex_count: u32,
+    bind_group: Option<wgpu::BindGroup>,
+}
+
+struct EventInfo {
+    shape: Option<ShapeInfo>,
+    text: Vec<TextRenderSegment>,
+    stencil_op: u32,
+    stencil_ref: u32,
+    area_op: Option<u32>,
+    scissor_push: Option<Rect>,
+    scissor_pop: bool,
+    custom_material: Option<Arc<Material>>,
+    custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
+    dynamic_offsets: Vec<u32>,
+}
+
 /// 渲染目标，封装用于 render pass 的 `TextureView`。
 ///
 /// 窗口和离屏纹理都通过此类型提交绘制。
@@ -144,6 +175,13 @@ pub struct Renderer {
     scratch_idata: RefCell<Vec<u8>>,
     scratch_transforms: RefCell<Vec<f32>>,
     scratch_poly_edges: RefCell<Vec<f32>>,
+    scratch_event_infos: RefCell<Vec<EventInfo>>,
+    scratch_aabb_map: RefCell<FxHashMap<usize, Option<Rect>>>,
+    scratch_ref_stack: RefCell<Vec<u32>>,
+    scratch_batch_transform_bases: RefCell<Vec<u32>>,
+    scratch_batch_poly_base: RefCell<Vec<u32>>,
+    scratch_last_dynamic_offsets: RefCell<Vec<u32>>,
+    scratch_scissor_stack: RefCell<Vec<(u32, u32, u32, u32)>>,
 }
 
 impl Renderer {
@@ -199,6 +237,13 @@ impl Renderer {
             scratch_idata: RefCell::new(Vec::new()),
             scratch_transforms: RefCell::new(Vec::new()),
             scratch_poly_edges: RefCell::new(Vec::new()),
+            scratch_event_infos: RefCell::new(Vec::new()),
+            scratch_aabb_map: RefCell::new(FxHashMap::default()),
+            scratch_ref_stack: RefCell::new(Vec::new()),
+            scratch_batch_transform_bases: RefCell::new(Vec::new()),
+            scratch_batch_poly_base: RefCell::new(Vec::new()),
+            scratch_last_dynamic_offsets: RefCell::new(Vec::new()),
+            scratch_scissor_stack: RefCell::new(Vec::new()),
             logical_width,
             logical_height,
         }
@@ -318,25 +363,25 @@ impl Renderer {
         let viewport = Rect::new(0.0, 0.0, self.logical_width as f32, self.logical_height as f32);
 
         // Pass 1: bottom-up 计算子树 AABB（供 culling 用）
-        let mut aabb_map: FxHashMap<usize, Option<Rect>> = FxHashMap::default();
-        for b in batches {
-            compute_subtree_aabb(b, &mut aabb_map);
+        {
+            let mut aabb_map = self.scratch_aabb_map.borrow_mut();
+            aabb_map.clear();
+            for b in batches {
+                compute_subtree_aabb(b, &mut aabb_map);
+            }
         }
 
         // Pass 2: flatten with culling
         let mut events: Vec<DrawEvent> = Vec::new();
         let mut uses_stencil = false;
-        for b in batches {
-            let mut tmp: Vec<DrawEvent> = Vec::new();
-            b.flatten_events(&mut tmp, 0, Some(viewport), &aabb_map);
-            for ev in tmp {
-                match &ev {
-                    DrawEvent::StencilPop | DrawEvent::AreaOp { .. } => {
-                        uses_stencil = true;
-                    }
-                    _ => {}
-                }
-                events.push(ev);
+        {
+            let aabb_map = self.scratch_aabb_map.borrow();
+            for b in batches {
+                let event_start = events.len();
+                b.flatten_events(&mut events, 0, Some(viewport), &aabb_map);
+                uses_stencil |= events[event_start..]
+                    .iter()
+                    .any(|ev| matches!(ev, DrawEvent::StencilPop | DrawEvent::AreaOp { .. }));
             }
         }
 
@@ -370,44 +415,8 @@ impl Renderer {
         let lh = self.physical_height as f32 / self.scale.max(1e-6);
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
-        struct ShapeSegment {
-            ndx_start: u32,
-            ndx_count: u32,
-            bind_group: wgpu::BindGroup,
-        }
-
-        struct ShapeInfo {
-            base_vertex: i32,
-            segments: Vec<ShapeSegment>,
-            geometry: bool,
-        }
-
-        struct TextRenderSegment {
-            vertex_start: u32,
-            vertex_count: u32,
-            bind_group: Option<wgpu::BindGroup>,
-        }
-
-        struct EventInfo {
-            shape: Option<ShapeInfo>,
-            text: Vec<TextRenderSegment>,
-            stencil_op: u32,
-            stencil_ref: u32,
-            /// Area 掩码事件专用：3 = Erase / 4 = Cover（来自 AreaStencilOp::stencil_pipeline_op）。
-            /// `None` 表示普通 batch 或 StencilPop（走 `stencil_op`）。
-            area_op: Option<u32>,
-            /// ScissorPush 事件：设置 scissor rect（逻辑坐标）。
-            scissor_push: Option<Rect>,
-            /// ScissorPop 事件：恢复前一级 scissor。
-            scissor_pop: bool,
-            /// 自定义材质（`None` = 内置 shader）；shape/text 共用。
-            custom_material: Option<Arc<Material>>,
-            custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
-            /// Dynamic uniform/storage offsets for group 3 binding（来自 batch）。
-            dynamic_offsets: Vec<u32>,
-        }
-
-        let mut event_infos: Vec<EventInfo> = Vec::new();
+        let mut event_infos = self.scratch_event_infos.borrow_mut();
+        event_infos.clear();
         let vertex_count: u32 = 0;
         let ndx_accum: u32 = 0;
 
@@ -458,7 +467,8 @@ impl Renderer {
             }
         }
 
-        let mut ref_stack: Vec<u32> = Vec::new();
+        let mut ref_stack = self.scratch_ref_stack.borrow_mut();
+        ref_stack.clear();
         let mut clip_depth: u32 = 0;
         let mut area_depth: u32 = 0;
         // 连续 cleanup AreaOp 只 -1 一次（compile_erase 可多 op）
@@ -490,7 +500,7 @@ impl Renderer {
                             (0u32, 0u32)
                         }
                     } else {
-                        compute_stencil_at_level(batch, content_level, &mut ref_stack)
+                        compute_stencil_at_level(batch, content_level, &mut *ref_stack)
                     };
                     if stencil_op == 1 {
                         // 只增加 clip 层，不含 Area（Area 已在 content_level 里）
@@ -585,8 +595,10 @@ impl Renderer {
         }
 
         // 收集 transform/poly 信息
-        let mut batch_transform_bases: Vec<u32> = Vec::new();
-        let mut batch_poly_base: Vec<u32> = Vec::new();
+        let mut batch_transform_bases = self.scratch_batch_transform_bases.borrow_mut();
+        batch_transform_bases.clear();
+        let mut batch_poly_base = self.scratch_batch_poly_base.borrow_mut();
+        batch_poly_base.clear();
         let mut total_vcount: u32 = 0;
         let mut total_icount: u32 = 0;
         let mut poly_offset: u32 = 0;
@@ -982,12 +994,14 @@ impl Renderer {
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
             let mut last_custom_ptr: *const Material = std::ptr::null();
-            let mut last_dynamic_offsets: Vec<u32> = Vec::new();
+            let mut last_dynamic_offsets = self.scratch_last_dynamic_offsets.borrow_mut();
+            last_dynamic_offsets.clear();
             let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
-            let mut scissor_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
+            let mut scissor_stack = self.scratch_scissor_stack.borrow_mut();
+            scissor_stack.clear();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
 
-            for info in &event_infos {
+            for info in event_infos.iter() {
                 // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
                 if let Some(scissor_rect) = info.scissor_push {
                     let sx = self.physical_width as f32 / self.logical_width.max(1) as f32;
@@ -1033,7 +1047,7 @@ impl Renderer {
                         || custom_ptr != last_custom_ptr
                         || (!use_custom && last_geometry != Some(shape.geometry))
                         || (uses_stencil && pipe_op != last_stencil_op)
-                        || info.dynamic_offsets != last_dynamic_offsets;
+                        || info.dynamic_offsets != *last_dynamic_offsets;
                     if need_rebind {
                         let tmp_pipe: wgpu::RenderPipeline;
                         let custom_pipe: Arc<wgpu::RenderPipeline>;
@@ -1098,7 +1112,7 @@ impl Renderer {
                         last_custom_ptr = custom_ptr;
                         last_geometry = Some(shape.geometry);
                         last_stencil_op = pipe_op;
-                        last_dynamic_offsets = info.dynamic_offsets.clone();
+                        last_dynamic_offsets.clone_from(&info.dynamic_offsets);
                     }
                     if uses_stencil {
                         pass.set_stencil_reference(info.stencil_ref);
