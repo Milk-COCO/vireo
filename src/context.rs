@@ -1735,6 +1735,7 @@ pub struct DrawBatch {
     texture_segments: Vec<TextureSegment>,
     pub(crate) transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
+    /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
     ///
     /// 注意：SDF 图形不受 MSAA 影响。
     pub sdf_feather: Option<f32>,
@@ -1807,7 +1808,7 @@ impl DrawBatch {
             text_texture_view: None,
             texture_segments: Vec::with_capacity(2),
             transform: None,
-            sdf_feather: None,
+            sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
@@ -1836,7 +1837,7 @@ impl DrawBatch {
         self.text_texture_view = None;
         self.texture_segments.clear();
         self.transform = None;
-        self.sdf_feather = None; // 与 new() 一致：几何路径
+        self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
         self.polygon_edges.clear();
@@ -2808,7 +2809,7 @@ mod tests {
         assert!(b.indices.capacity() >= cap_i);
         assert!(b.vertices.is_empty());
         assert!(!b.has_sdf);
-        assert!(b.sdf_feather.is_none()); // 与 new() 一致
+        assert_eq!(b.sdf_feather, Some(1.0)); // 与 new() 一致
     }
 
     #[test]
@@ -3418,6 +3419,7 @@ mod tests {
     #[test]
     fn auto_scissor_detects_single_rect() {
         let mut b = DrawBatch::new();
+        b.sdf_feather = None;
         b.clips_children = true;
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut child = DrawBatch::new();
@@ -3450,6 +3452,7 @@ mod tests {
     #[test]
     fn auto_scissor_no_children_skips_scissor_events() {
         let mut b = DrawBatch::new();
+        b.sdf_feather = None;
         b.clips_children = true;
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
@@ -3520,6 +3523,7 @@ mod tests {
     #[test]
     fn auto_scissor_uses_pos_world_rect() {
         let mut b = DrawBatch::new();
+        b.sdf_feather = None;
         b.clips_children = true;
         draw_rectangle(&mut b, Pos::new(50.0, 60.0), 100.0, 50.0, Some(WHITE));
         let mut child = DrawBatch::new();

@@ -1148,7 +1148,9 @@ mod tests {
     use crate::color::colors::{WHITE, RED, BLUE, GREEN};
 
     fn test_batch() -> DrawBatch {
-        DrawBatch::new()
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        batch
     }
 
     #[test]
@@ -1442,13 +1444,13 @@ mod tests {
     }
 
     #[test]
-    fn rect_default_mode_is_geometry() {
-        let mut batch = test_batch();
+    fn rect_default_mode_is_sdf() {
+        let mut batch = DrawBatch::new();
         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, Some(GREEN));
         assert_eq!(batch.vertices.len(), 4);
         assert_eq!(batch.indices.len(), 6);
         for v in &batch.vertices {
-            assert_eq!(v.sdf_type, 0);
+            assert_eq!(v.sdf_type, 2);
         }
     }
 
