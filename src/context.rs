@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
-use crate::gpu::GpuContext;
+use crate::gpu::{GpuContext, ShapeInstance};
 use crate::gpu::MaterialTarget;
 use crate::material::Material;
 use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
@@ -93,10 +93,17 @@ struct ShapeSegment {
     bind_group: wgpu::BindGroup,
 }
 
+struct InstanceSegment {
+    instance_start: u32,
+    instance_count: u32,
+    bind_group: wgpu::BindGroup,
+}
+
 struct ShapeInfo {
     base_vertex: i32,
     segments: Vec<ShapeSegment>,
     geometry: bool,
+    instances: Vec<InstanceSegment>,
 }
 
 struct TextRenderSegment {
@@ -155,6 +162,8 @@ pub struct Renderer {
     vertex_cap: RefCell<u64>,
     index_buf: RefCell<Option<wgpu::Buffer>>,
     index_cap: RefCell<u64>,
+    instance_buf: RefCell<Option<wgpu::Buffer>>,
+    instance_cap: RefCell<u64>,
     physical_width: u32,
     physical_height: u32,
     scale: f32,
@@ -182,6 +191,7 @@ pub struct Renderer {
     scratch_batch_poly_base: RefCell<Vec<u32>>,
     scratch_last_dynamic_offsets: RefCell<Vec<u32>>,
     scratch_scissor_stack: RefCell<Vec<(u32, u32, u32, u32)>>,
+    scratch_instances: RefCell<Vec<ShapeInstance>>,
 }
 
 impl Renderer {
@@ -221,6 +231,8 @@ impl Renderer {
             vertex_cap: RefCell::new(0),
             index_buf: RefCell::new(None),
             index_cap: RefCell::new(0),
+            instance_buf: RefCell::new(None),
+            instance_cap: RefCell::new(0),
             physical_width,
             physical_height,
             scale,
@@ -244,6 +256,7 @@ impl Renderer {
             scratch_batch_poly_base: RefCell::new(Vec::new()),
             scratch_last_dynamic_offsets: RefCell::new(Vec::new()),
             scratch_scissor_stack: RefCell::new(Vec::new()),
+            scratch_instances: RefCell::new(Vec::new()),
             logical_width,
             logical_height,
         }
@@ -386,7 +399,7 @@ impl Renderer {
         }
 
         let has_content = clear_color.is_some()
-            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.texts.entries.is_empty()));
+            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
             let empty_encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -441,7 +454,7 @@ impl Renderer {
             content_level: u32,
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
-            let has_geom = !batch.vertices.is_empty();
+            let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
             if batch.clips_children && (has_geom || batch.scissor.is_some()) {
                 // Push: Test content_level → Inc；ref_stack 存抬升后绝对值供 Pop
@@ -493,7 +506,7 @@ impl Renderer {
                     let use_scissor = batch.uses_scissor_path(has_own_area);
                     let (stencil_op, stencil_ref) = if use_scissor {
                         let has_draw =
-                            !batch.vertices.is_empty() || !batch.texts.entries.is_empty();
+                            !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.texts.entries.is_empty();
                         if content_level > 0 && batch.inherit.clipped && has_draw {
                             (2u32, content_level) // Test 祖先，不 Push
                         } else {
@@ -615,6 +628,10 @@ impl Renderer {
                 polygon_edges_global.extend_from_slice(&batch.polygon_edges);
                 total_vcount += batch.vertices.len() as u32;
                 total_icount += batch.indices.len() as u32;
+                if batch.custom_material.is_some() {
+                    total_vcount += batch.instances.len() as u32 * 4;
+                    total_icount += batch.instances.len() as u32 * 6;
+                }
             } else if let DrawEvent::StencilPop = event {
                 // Pop 事件：添加全屏四边形（2 三角，6 索引）
                 pop_screen_verts += 4;
@@ -655,8 +672,10 @@ impl Renderer {
         self.ensure_index_buffer(total_ibytes);
         let mut combined_vdata = self.scratch_vdata.borrow_mut();
         let mut combined_idata = self.scratch_idata.borrow_mut();
+        let mut combined_instances = self.scratch_instances.borrow_mut();
         combined_vdata.clear();
         combined_idata.clear();
+        combined_instances.clear();
         let cap_v = total_vbytes as usize;
         let cap_i = total_ibytes as usize;
         if combined_vdata.capacity() < cap_v {
@@ -673,7 +692,47 @@ impl Renderer {
             match event {
                 DrawEvent::Batch(batch) => {
                     let info_idx = ei;
-                    let shape = if !batch.vertices.is_empty() {
+                    let instance_start = combined_instances.len() as u32;
+                    let use_instances = !batch.instances.is_empty() && batch.custom_material.is_none();
+                    if use_instances {
+                        let transform_base = batch_transform_bases[info_idx];
+                        combined_instances.extend(batch.instances.iter().copied().map(|mut instance| {
+                            instance.transform_index += transform_base;
+                            if instance.sdf_type == 6 || instance.sdf_type == 7 {
+                                instance.sdf_params[0] += batch_poly_base[info_idx] as f32;
+                            }
+                            instance
+                        }));
+                    }
+                    let resolve_bg = |bg: Option<wgpu::BindGroup>| {
+                        bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
+                    };
+                    let instance_segments = if !use_instances {
+                        Vec::new()
+                    } else if batch.instance_texture_segments.is_empty() {
+                        vec![InstanceSegment {
+                            instance_start,
+                            instance_count: batch.instances.len() as u32,
+                            bind_group: resolve_bg(batch.bind_group.clone()),
+                        }]
+                    } else {
+                        let mut segments: Vec<InstanceSegment> = batch.instance_texture_segments.iter().map(|segment| InstanceSegment {
+                            instance_start: instance_start + segment.instance_start,
+                            instance_count: segment.instance_count,
+                            bind_group: resolve_bg(segment.bind_group.clone()),
+                        }).collect();
+                        let last_end = segments.last().map_or(instance_start, |s| s.instance_start + s.instance_count);
+                        let total_end = instance_start + batch.instances.len() as u32;
+                        if last_end < total_end {
+                            segments.push(InstanceSegment {
+                                instance_start: last_end,
+                                instance_count: total_end - last_end,
+                                bind_group: resolve_bg(batch.bind_group.clone()),
+                            });
+                        }
+                        segments
+                    };
+                    let shape = if !batch.vertices.is_empty() || !batch.instances.is_empty() {
                         let transform_base = batch_transform_bases[info_idx];
                         let poly_base = batch_poly_base[info_idx] as f32;
                         let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
@@ -692,13 +751,52 @@ impl Renderer {
                             }
                         }
                         combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
+                        let mut mesh_index_count = batch.indices.len() as u32;
+                        if !use_instances {
+                            for (instance_index, instance) in batch.instances.iter().enumerate() {
+                                let base = batch.vertices.len() as u32 + instance_index as u32 * 4;
+                                let [x0, y0, x1, y1] = instance.bounds;
+                                let [ux0, uy0, ux1, uy1] = instance.uv_bounds;
+                                let [u0, v0, u1, v1] = instance.uv_rect;
+                                let uv_at = |x: f32, y: f32| {
+                                    (
+                                        u0 + (x - ux0) / (ux1 - ux0) * (u1 - u0),
+                                        v0 + (y - uy0) / (uy1 - uy0) * (v1 - v0),
+                                    )
+                                };
+                                let (uv00, uv01) = uv_at(x0, y0);
+                                let (uv10, uv11) = uv_at(x1, y0);
+                                let (uv20, uv21) = uv_at(x1, y1);
+                                let (uv30, uv31) = uv_at(x0, y1);
+                                let color = crate::color::Color::new(
+                                    instance.color[0], instance.color[1], instance.color[2], instance.color[3],
+                                );
+                                let mut verts = [
+                                    Vertex::new_uv_xform(x0, y0, uv00, uv01, color, instance.transform_index + transform_base),
+                                    Vertex::new_uv_xform(x1, y0, uv10, uv11, color, instance.transform_index + transform_base),
+                                    Vertex::new_uv_xform(x1, y1, uv20, uv21, color, instance.transform_index + transform_base),
+                                    Vertex::new_uv_xform(x0, y1, uv30, uv31, color, instance.transform_index + transform_base),
+                                ];
+                                for vertex in &mut verts {
+                                    vertex.sdf_params = instance.sdf_params;
+                                    if vertex.sdf_type == 6 || vertex.sdf_type == 7 {
+                                        vertex.sdf_params[0] += poly_base;
+                                    }
+                                    vertex.sdf_extra = instance.sdf_extra;
+                                    vertex.sdf_type = instance.sdf_type;
+                                    vertex.sdf_feather = instance.sdf_feather;
+                                }
+                                combined_vdata.extend_from_slice(bytemuck::cast_slice(&verts));
+                                combined_idata.extend_from_slice(bytemuck::cast_slice(&[
+                                    base, base + 1, base + 2, base, base + 2, base + 3,
+                                ]));
+                                mesh_index_count += 6;
+                            }
+                        }
 
-                        let resolve_bg = |bg: Option<wgpu::BindGroup>| {
-                            bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
-                        };
                         let segs: Vec<ShapeSegment> = if batch.texture_segments.is_empty() {
                             let bg = resolve_bg(batch.bind_group.clone());
-                            vec![ShapeSegment { ndx_start: idx_offset, ndx_count: batch.indices.len() as u32, bind_group: bg }]
+                            vec![ShapeSegment { ndx_start: idx_offset, ndx_count: mesh_index_count, bind_group: bg }]
                         } else {
                             let mut v: Vec<ShapeSegment> = batch.texture_segments.iter().map(|s| ShapeSegment {
                                 ndx_start: idx_offset + s.ndx_start,
@@ -706,7 +804,7 @@ impl Renderer {
                                 bind_group: resolve_bg(s.bind_group.clone()),
                             }).collect();
                             let last_end = v.last().map(|s| s.ndx_start + s.ndx_count).unwrap_or(idx_offset);
-                            let total_end = idx_offset + batch.indices.len() as u32;
+                            let total_end = idx_offset + mesh_index_count;
                             if last_end < total_end {
                                 let bg = resolve_bg(batch.bind_group.clone());
                                 v.push(ShapeSegment { ndx_start: last_end, ndx_count: total_end - last_end, bind_group: bg });
@@ -717,10 +815,18 @@ impl Renderer {
                             base_vertex: v_offset as i32,
                             segments: segs,
                             geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
+                            instances: instance_segments,
                         };
                         v_offset += batch.vertices.len() as u32;
-                        idx_offset += batch.indices.len() as u32;
+                        idx_offset += mesh_index_count;
                         Some(info)
+                    } else if !instance_segments.is_empty() {
+                        Some(ShapeInfo {
+                            base_vertex: 0,
+                            segments: Vec::new(),
+                            geometry: false,
+                            instances: instance_segments,
+                        })
                     } else {
                         None
                     };
@@ -750,6 +856,7 @@ impl Renderer {
                         base_vertex: v_offset as i32,
                         segments: segs,
                         geometry: true,
+                        instances: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
                     v_offset += 4;
@@ -789,6 +896,7 @@ impl Renderer {
                             base_vertex: v_offset as i32,
                             segments: segs,
                             geometry: !geom.has_sdf && geom.sdf_feather.is_none(),
+                            instances: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
                         idx_offset += n;
@@ -815,6 +923,7 @@ impl Renderer {
                             base_vertex: v_offset as i32,
                             segments: segs,
                             geometry: true,
+                            instances: Vec::new(),
                         };
                         v_offset += 4;
                         idx_offset += 6;
@@ -833,6 +942,16 @@ impl Renderer {
         if !combined_idata.is_empty() {
             let ibuf = self.index_buf.borrow();
             self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), 0, &combined_idata);
+        }
+        if !combined_instances.is_empty() {
+            let size = (combined_instances.len() * size_of::<ShapeInstance>()) as u64;
+            self.ensure_instance_buffer(size);
+            let instance_buf = self.instance_buf.borrow();
+            self.gpu.queue.write_buffer(
+                instance_buf.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&combined_instances),
+            );
         }
 
         // ---- 上传多边形边数据 ----
@@ -988,6 +1107,7 @@ impl Renderer {
 
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
+            let instance_buf = self.instance_buf.borrow();
             let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
             let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
@@ -1125,6 +1245,38 @@ impl Renderer {
                             0..1,
                         );
                     }
+                    if !shape.instances.is_empty() {
+                        let instance_pipeline = self.gpu.ensure_instance_pipeline(
+                            self.sample_count,
+                            self.alpha_to_coverage,
+                            self.ssaa,
+                            uses_stencil,
+                            pipe_op,
+                        );
+                        pass.set_pipeline(&instance_pipeline);
+                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
+                        pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
+                        pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
+                        pass.set_index_buffer(
+                            self.gpu.instance_quad_index_buf.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        if uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        for segment in &shape.instances {
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                segment.instance_start
+                                    ..segment.instance_start + segment.instance_count,
+                            );
+                        }
+                        shapes_bound = false;
+                        last_geometry = None;
+                    }
                 }
 
                 if !info.text.is_empty() {
@@ -1227,6 +1379,21 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *self.vertex_buf.borrow_mut() = Some(buf);
+        *cap = new_cap;
+    }
+
+    fn ensure_instance_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let mut cap = self.instance_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo shape instance buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.instance_buf.borrow_mut() = Some(buffer);
         *cap = new_cap;
     }
 
@@ -1726,6 +1893,13 @@ struct TextureSegment {
 }
 
 #[derive(Clone)]
+struct InstanceTextureSegment {
+    instance_start: u32,
+    instance_count: u32,
+    bind_group: Option<wgpu::BindGroup>,
+}
+
+#[derive(Clone)]
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -1733,6 +1907,8 @@ pub struct DrawBatch {
     pub(crate) bind_group: Option<wgpu::BindGroup>,
     pub(crate) text_texture_view: Option<wgpu::TextureView>,
     texture_segments: Vec<TextureSegment>,
+    pub(crate) instances: Vec<ShapeInstance>,
+    instance_texture_segments: Vec<InstanceTextureSegment>,
     pub(crate) transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
@@ -1807,6 +1983,8 @@ impl DrawBatch {
             bind_group: None,
             text_texture_view: None,
             texture_segments: Vec::with_capacity(2),
+            instances: Vec::with_capacity(32),
+            instance_texture_segments: Vec::with_capacity(2),
             transform: None,
             sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
@@ -1836,6 +2014,8 @@ impl DrawBatch {
         self.bind_group = None;
         self.text_texture_view = None;
         self.texture_segments.clear();
+        self.instances.clear();
+        self.instance_texture_segments.clear();
         self.transform = None;
         self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
@@ -1856,12 +2036,38 @@ impl DrawBatch {
         self.dynamic_offsets.clear();
     }
     pub fn to_area(&self) -> Area {
-        if self.vertices.is_empty() || self.indices.is_empty() {
+        if (self.vertices.is_empty() || self.indices.is_empty()) && self.instances.is_empty() {
             return Area::Empty;
         }
+        let mut vertices = self.vertices.clone();
+        let mut indices = self.indices.clone();
+        for instance in &self.instances {
+            let base = vertices.len() as u32;
+            let [x0, y0, x1, y1] = instance.bounds;
+            let [ux0, uy0, ux1, uy1] = instance.uv_bounds;
+            let [u0, v0, u1, v1] = instance.uv_rect;
+            for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+                let u = u0 + (x - ux0) / (ux1 - ux0) * (u1 - u0);
+                let v = v0 + (y - uy0) / (uy1 - uy0) * (v1 - v0);
+                let mut vertex = Vertex::new_uv_xform(
+                    x,
+                    y,
+                    u,
+                    v,
+                    crate::color::Color::new(instance.color[0], instance.color[1], instance.color[2], instance.color[3]),
+                    instance.transform_index,
+                );
+                vertex.sdf_params = instance.sdf_params;
+                vertex.sdf_type = instance.sdf_type;
+                vertex.sdf_feather = instance.sdf_feather;
+                vertex.sdf_extra = instance.sdf_extra;
+                vertices.push(vertex);
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
         Area::geom(AreaGeom {
-            vertices: self.vertices.clone(),
-            indices: self.indices.clone(),
+            vertices,
+            indices,
             transform_table: self.transform_table.clone(),
             polygon_edges: self.polygon_edges.clone(),
             has_sdf: self.has_sdf,
@@ -1919,6 +2125,14 @@ impl DrawBatch {
                 v.position[1],
             );
             expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+        }
+        for instance in &self.instances {
+            any = true;
+            let [x0, y0, x1, y1] = instance.bounds;
+            for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+                let (wx, wy) = Self::world_xy(&self.transform_table, instance.transform_index, x, y);
+                expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+            }
         }
         // 文字：逻辑 pos + 近似行高/宽（未 shape 前保守估计，避免纯文字被误裁）
         for entry in &self.texts.entries {
@@ -2111,6 +2325,7 @@ impl DrawBatch {
     /// 本节点或任意子孙是否含形状/文字。
     pub fn has_drawable_content(&self) -> bool {
         !self.vertices.is_empty()
+            || !self.instances.is_empty()
             || !self.texts.entries.is_empty()
             || self.children.iter().any(Self::has_drawable_content)
     }
@@ -2184,7 +2399,7 @@ impl DrawBatch {
             }
         }
         out.push(DrawEvent::Batch(self));
-        let has_geom = !self.vertices.is_empty();
+        let has_geom = !self.vertices.is_empty() || !self.instances.is_empty();
         // 子树 stencil base（与 draw 的 content_level 抬升一致）：
         // Area cover → +1；clips_children 且走 stencil Push → 再 +1；scissor 不抬 stencil。
         let child_level = level
@@ -2540,6 +2755,8 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             text_texture_view: self.text_texture_view.clone(),
             texture_segments: self.texture_segments.clone(),
+            instances: self.instances.clone(),
+            instance_texture_segments: self.instance_texture_segments.clone(),
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             sdf_feather: self.sdf_feather,
@@ -2570,6 +2787,7 @@ impl DrawBatch {
     ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`set_texture`]。
     pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
         self.add_texture_segment(self.bind_group.clone());
+        self.add_instance_texture_segment(self.bind_group.clone());
         self.bind_group = bg;
         self.text_texture_view = None;
         self.texts.set_texture_state(None);
@@ -2597,6 +2815,7 @@ impl DrawBatch {
     /// 内部 shape 侧只存 `BindGroup`；文字侧另存 `TextureView` 供 glyphon base 绑定。
     pub fn set_texture(&mut self, texture: Option<&crate::texture::Texture>) {
         self.add_texture_segment(self.bind_group.clone());
+        self.add_instance_texture_segment(self.bind_group.clone());
         self.bind_group = texture.map(|t| t.bind_group.clone());
         self.text_texture_view = texture.map(|t| t.view.clone());
         self.texts.set_texture_state(self.text_texture_view.clone());
@@ -2613,6 +2832,578 @@ impl DrawBatch {
                 bind_group: bg,
             });
         }
+    }
+
+    fn add_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+        let start = self
+            .instance_texture_segments
+            .last()
+            .map_or(0, |s| s.instance_start + s.instance_count);
+        let end = self.instances.len() as u32;
+        if end > start {
+            self.instance_texture_segments.push(InstanceTextureSegment {
+                instance_start: start,
+                instance_count: end - start,
+                bind_group: bg,
+            });
+        }
+    }
+
+    fn push_sdf_instance(
+        &mut self,
+        pos: Pos,
+        bounds: [f32; 4],
+        uv_bounds: [f32; 4],
+        sdf_params: [f32; 4],
+        sdf_type: u32,
+        sdf_extra: [f32; 2],
+        color: Option<crate::color::Color>,
+    ) -> bool {
+        let Some(feather) = self.sdf_feather else {
+            return false;
+        };
+        // Custom vertex shaders consume the public Vertex ABI, not the instance ABI.
+        if self.custom_material.is_some() {
+            return false;
+        }
+        let color = color.unwrap_or(self.color);
+        if color.a == 0.0 || bounds[0] == bounds[2] || bounds[1] == bounds[3] {
+            return true;
+        }
+        let shape_transform = Transform::translation(pos.x, pos.y);
+        let composed = match self.transform {
+            Some(current) => current.then(&shape_transform),
+            None => shape_transform,
+        };
+        let saved_cache = self.cached_transform_index;
+        let (c0, c1, c2) = composed.to_cols();
+        let transform_index = self.register_transform(c0, c1, c2);
+        self.cached_transform_index = saved_cache;
+        self.instances.push(ShapeInstance {
+            bounds,
+            uv_bounds,
+            uv_rect: [self.uv.u0, self.uv.v0, self.uv.u1, self.uv.v1],
+            color: [color.r, color.g, color.b, color.a],
+            sdf_params,
+            sdf_extra,
+            sdf_type,
+            sdf_feather: feather,
+            transform_index,
+            _padding: 0,
+        });
+        self.note_sdf();
+        true
+    }
+
+    /// Add an instanced SDF rectangle.
+    ///
+    /// Instance shapes are rendered after ordinary shapes and before text in
+    /// this batch. Use separate child batches when exact interleaving matters.
+    /// Geometry mode and custom materials fall back to the ordinary path.
+    pub fn instance_rectangle(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        if !self.push_sdf_instance(pos, [0.0, 0.0, w, h], [0.0, 0.0, w, h], [w * 0.5, h * 0.5, w * 0.5, h * 0.5], 2, [0.0, 0.0], color) {
+            self.rectangle(pos, w, h, color);
+        }
+    }
+
+    /// Add an instanced SDF circle. See [`Self::instance_rectangle`] for ordering.
+    pub fn instance_circle(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        if !self.push_sdf_instance(pos, [-r, -r, r, r], [-r, -r, r, r], [0.0, 0.0, r, r], 1, [0.0, 0.0], color) {
+            self.circle(pos, r, color);
+        }
+    }
+
+    /// Add an instanced SDF ellipse. See [`Self::instance_rectangle`] for ordering.
+    pub fn instance_ellipse(
+        &mut self,
+        pos: Pos,
+        rx: f32,
+        ry: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        if !self.push_sdf_instance(pos, [-rx, -ry, rx, ry], [-rx, -ry, rx, ry], [0.0, 0.0, rx, ry], 1, [0.0, 0.0], color) {
+            self.ellipse(pos, rx, ry, color);
+        }
+    }
+
+    /// Add an instanced SDF rounded rectangle.
+    pub fn instance_rounded_rect(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        let feather = self.sdf_feather.unwrap_or(0.0);
+        let r = radius.min(w * 0.5).min(h * 0.5);
+        if !self.push_sdf_instance(
+            pos,
+            [-feather, -feather, w + feather, h + feather],
+            [0.0, 0.0, w, h],
+            [w * 0.5, h * 0.5, w * 0.5, h * 0.5],
+            2,
+            [r, 0.0],
+            color,
+        ) {
+            self.rounded_rect(pos, w, h, radius, color);
+        }
+    }
+
+    /// Add an instanced SDF line in the batch's local coordinate space.
+    pub fn instance_line(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        let half = thickness * 0.5;
+        let feather = self.sdf_feather.unwrap_or(0.0);
+        let pad = half + feather;
+        if !self.push_sdf_instance(
+            Pos::ZERO,
+            [x1.min(x2) - pad, y1.min(y2) - pad, x1.max(x2) + pad, y1.max(y2) + pad],
+            [x1.min(x2) - half, y1.min(y2) - half, x1.max(x2) + half, y1.max(y2) + half],
+            [x1, y1, x2, y2],
+            3,
+            [half, 0.0],
+            color,
+        ) {
+            self.line(x1, y1, x2, y2, thickness, color);
+        }
+    }
+
+    /// Add an instanced SDF triangle in the batch's local coordinate space.
+    pub fn instance_triangle(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        let feather = self.sdf_feather.unwrap_or(0.0);
+        if !self.push_sdf_instance(
+            Pos::ZERO,
+            [x1.min(x2).min(x3) - feather, y1.min(y2).min(y3) - feather, x1.max(x2).max(x3) + feather, y1.max(y2).max(y3) + feather],
+            [x1.min(x2).min(x3), y1.min(y2).min(y3), x1.max(x2).max(x3), y1.max(y2).max(y3)],
+            [x1, y1, x2, y2],
+            4,
+            [x3, y3],
+            color,
+        ) {
+            self.triangle(x1, y1, x2, y2, x3, y3, color);
+        }
+    }
+
+    /// Add an instanced SDF arc.
+    pub fn instance_arc(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        start_angle: f32,
+        end_angle: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        let feather = self.sdf_feather.unwrap_or(0.0);
+        let extent = r + feather;
+        if !self.push_sdf_instance(
+            pos,
+            [-extent, -extent, extent, extent],
+            [-r, -r, r, r],
+            [0.0, 0.0, r, 0.0],
+            5,
+            [start_angle, end_angle],
+            color,
+        ) {
+            self.arc(pos, r, start_angle, end_angle, color);
+        }
+    }
+
+    /// Add an instanced convex SDF polygon. Points must be counter-clockwise.
+    pub fn instance_polygon(
+        &mut self,
+        points: &[(f32, f32)],
+        color: Option<crate::color::Color>,
+    ) {
+        if self.sdf_feather.is_none() || self.custom_material.is_some() || points.len() < 3 {
+            self.polygon(points, color);
+            return;
+        }
+        if color.unwrap_or(self.color).a == 0.0 {
+            return;
+        }
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut edges = Vec::with_capacity(points.len() * 4);
+        for i in 0..points.len() {
+            let a = points[i];
+            let b = points[(i + 1) % points.len()];
+            min_x = min_x.min(a.0);
+            min_y = min_y.min(a.1);
+            max_x = max_x.max(a.0);
+            max_y = max_y.max(a.1);
+            let dx = b.0 - a.0;
+            let dy = b.1 - a.1;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 0.001 { continue; }
+            let nx = -dy / len;
+            let ny = dx / len;
+            edges.extend_from_slice(&[nx, ny, nx * a.0 + ny * a.1, 0.0]);
+        }
+        let count = (edges.len() / 4) as u32;
+        if count < 3 {
+            return;
+        }
+        let start = (self.polygon_edges.len() / 4) as f32;
+        self.polygon_edges.extend_from_slice(&edges);
+        let feather = self.sdf_feather.unwrap();
+        if !self.push_sdf_instance(
+            Pos::ZERO,
+            [min_x - feather, min_y - feather, max_x + feather, max_y + feather],
+            [min_x, min_y, max_x, max_y],
+            [start, count as f32, 0.0, 0.0],
+            6,
+            [0.0, 0.0],
+            color,
+        ) {
+            self.polygon_edges.truncate(start as usize * 4);
+            self.polygon(points, color);
+        }
+    }
+
+    /// Add an instanced SDF line chain. Consecutive duplicate points are ignored.
+    pub fn instance_line_chain(
+        &mut self,
+        points: &[(f32, f32)],
+        thickness: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        if self.sdf_feather.is_none() || self.custom_material.is_some() || points.len() < 2 || thickness == 0.0 {
+            self.line_chain(points, thickness, color);
+            return;
+        }
+        if color.unwrap_or(self.color).a == 0.0 {
+            return;
+        }
+        let closed = points.len() > 2
+            && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
+            && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
+        let vertex_count = if closed { points.len() - 1 } else { points.len() };
+        let segment_count = if closed { vertex_count } else { vertex_count - 1 };
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut edges = Vec::with_capacity(segment_count * 4);
+        for i in 0..vertex_count {
+            min_x = min_x.min(points[i].0);
+            min_y = min_y.min(points[i].1);
+            max_x = max_x.max(points[i].0);
+            max_y = max_y.max(points[i].1);
+        }
+        for i in 0..segment_count {
+            let a = points[i];
+            let b = points[if i + 1 < vertex_count { i + 1 } else { 0 }];
+            if (b.0 - a.0).abs() + (b.1 - a.1).abs() < 0.001 { continue; }
+            edges.extend_from_slice(&[a.0, a.1, b.0, b.1]);
+        }
+        let count = (edges.len() / 4) as u32;
+        if count == 0 { return; }
+        let start = (self.polygon_edges.len() / 4) as f32;
+        self.polygon_edges.extend_from_slice(&edges);
+        let half = thickness * 0.5;
+        let feather = self.sdf_feather.unwrap();
+        if !self.push_sdf_instance(
+            Pos::ZERO,
+            [min_x - half - feather, min_y - half - feather, max_x + half + feather, max_y + half + feather],
+            [min_x - half, min_y - half, max_x + half, max_y + half],
+            [start, count as f32, half, 0.0],
+            7,
+            [0.0, 0.0],
+            color,
+        ) {
+            self.polygon_edges.truncate(start as usize * 4);
+            self.line_chain(points, thickness, color);
+        }
+    }
+
+    /// Add an instanced rectangle outline.
+    pub fn instance_rect_outline(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        let half = thickness * 0.5;
+        let points = [
+            (half, half),
+            (w - half, half),
+            (w - half, h - half),
+            (half, h - half),
+            (half, half),
+        ];
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// Add an instanced circle outline.
+    pub fn instance_circle_outline(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+        segments: u32,
+    ) {
+        let n = segments.max(8) as usize;
+        let mut points = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            let angle = std::f32::consts::TAU * i as f32 / n as f32;
+            points.push((r * angle.cos(), r * angle.sin()));
+        }
+        points.push(points[0]);
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// Add an instanced ellipse outline.
+    pub fn instance_ellipse_outline(
+        &mut self,
+        pos: Pos,
+        rx: f32,
+        ry: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+        segments: u32,
+    ) {
+        let n = segments.max(16) as usize;
+        let mut points = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            let angle = std::f32::consts::TAU * i as f32 / n as f32;
+            points.push((rx * angle.cos(), ry * angle.sin()));
+        }
+        points.push(points[0]);
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// Add an instanced triangle outline.
+    pub fn instance_triangle_outline(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        self.instance_line_chain(&[(x1, y1), (x2, y2), (x3, y3), (x1, y1)], thickness, color);
+    }
+
+    /// Add an instanced polygon outline.
+    pub fn instance_polygon_outline(
+        &mut self,
+        points: &[(f32, f32)],
+        thickness: f32,
+        color: Option<crate::color::Color>,
+    ) {
+        if points.len() < 3 {
+            return;
+        }
+        let mut closed = Vec::with_capacity(points.len() + 1);
+        closed.extend_from_slice(points);
+        closed.push(points[0]);
+        self.instance_line_chain(&closed, thickness, color);
+    }
+
+    /// Add an instanced rounded rectangle outline.
+    pub fn instance_rounded_rect_outline(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        radius: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+        corner_segments: u32,
+    ) {
+        let r = radius.min(w * 0.5).min(h * 0.5);
+        if r <= 0.0 {
+            self.instance_rect_outline(pos, w, h, thickness, color);
+            return;
+        }
+        let half = thickness * 0.5;
+        let inner_radius = (r - half).max(0.0);
+        let segments = corner_segments.max(2);
+        let mut points = Vec::with_capacity((segments as usize + 1) * 4 + 1);
+        for (cx, cy, start, end) in [
+            (r, r, std::f32::consts::PI, std::f32::consts::PI * 1.5),
+            (w - r, r, std::f32::consts::PI * 1.5, std::f32::consts::TAU),
+            (w - r, h - r, 0.0, std::f32::consts::FRAC_PI_2),
+            (r, h - r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI),
+        ] {
+            if inner_radius > 0.0 {
+                for i in 0..=segments {
+                    let angle = start + (end - start) * i as f32 / segments as f32;
+                    points.push((cx + inner_radius * angle.cos(), cy + inner_radius * angle.sin()));
+                }
+            } else {
+                points.push((cx, cy));
+            }
+        }
+        points.push(points[0]);
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// Add an instanced arc outline.
+    pub fn instance_arc_outline(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        start_angle: f32,
+        end_angle: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+        segments: u32,
+    ) {
+        let n = segments.max(2);
+        let mut points = Vec::with_capacity(n as usize + 3);
+        points.push((0.0, 0.0));
+        for i in 0..=n {
+            let angle = start_angle + (end_angle - start_angle) * i as f32 / n as f32;
+            points.push((r * angle.cos(), r * angle.sin()));
+        }
+        points.push((0.0, 0.0));
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// Draw any [`crate::shapes::Shape`] through the instanced SDF path.
+    ///
+    /// This mirrors [`crate::shapes::draw_shape`]. In geometry mode or with a
+    /// custom material, individual calls fall back to the ordinary mesh path.
+    pub fn instance_shape(
+        &mut self,
+        shape: &crate::shapes::Shape<'_>,
+        opts: crate::shapes::ShapeOverride,
+    ) {
+        let saved_color = self.color;
+        let saved_feather = self.sdf_feather;
+        let saved_uv = self.uv;
+        let saved_transform = self.transform;
+        let saved_cache = self.cached_transform_index;
+        let saved_bg = self.bind_group.clone();
+        if let Some(color) = opts.color { self.color = color; }
+        if let Some(feather) = opts.sdf_feather { self.sdf_feather = feather; }
+        if let Some(uv) = opts.uv { self.uv = uv; }
+
+        let base = shape.position().map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        if shape.position().is_some() || opts.transform.is_some() {
+            let current = self.transform.take();
+            self.transform = Some(match (current, opts.transform) {
+                (Some(existing), Some(transform)) => existing.then(&base).then(&transform),
+                (Some(existing), None) => existing.then(&base),
+                (None, Some(transform)) => base.then(&transform),
+                (None, None) => base,
+            });
+            self.invalidate_transform_cache();
+        }
+        let texture_overridden = opts.bind_group.is_some();
+        if let Some(bind_group) = opts.bind_group {
+            self.add_texture_segment(self.bind_group.clone());
+            self.add_instance_texture_segment(self.bind_group.clone());
+            self.bind_group = bind_group;
+        }
+
+        let color = Some(self.color);
+        match shape {
+            crate::shapes::Shape::Rect { w, h, .. } => self.instance_rectangle(Pos::ZERO, *w, *h, color),
+            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => self.instance_rounded_rect(Pos::ZERO, *w, *h, *radius, color),
+            crate::shapes::Shape::Circle { r, .. } => self.instance_circle(Pos::ZERO, *r, color),
+            crate::shapes::Shape::Ellipse { rx, ry, .. } => self.instance_ellipse(Pos::ZERO, *rx, *ry, color),
+            crate::shapes::Shape::Line { x1, y1, x2, y2, thickness } => self.instance_line(*x1, *y1, *x2, *y2, *thickness, color),
+            crate::shapes::Shape::LineChain { points, thickness } => self.instance_line_chain(points, *thickness, color),
+            crate::shapes::Shape::Triangle { x1, y1, x2, y2, x3, y3 } => self.instance_triangle(*x1, *y1, *x2, *y2, *x3, *y3, color),
+            crate::shapes::Shape::Polygon { points } => self.instance_polygon(points, color),
+            crate::shapes::Shape::Arc { r, start, end, .. } => self.instance_arc(Pos::ZERO, *r, *start, *end, color),
+            crate::shapes::Shape::RectOutline { w, h, thickness, .. } => self.instance_rect_outline(Pos::ZERO, *w, *h, *thickness, color),
+            crate::shapes::Shape::CircleOutline { r, thickness, segments, .. } => self.instance_circle_outline(Pos::ZERO, *r, *thickness, color, *segments),
+            crate::shapes::Shape::EllipseOutline { rx, ry, thickness, segments, .. } => self.instance_ellipse_outline(Pos::ZERO, *rx, *ry, *thickness, color, *segments),
+            crate::shapes::Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => self.instance_rounded_rect_outline(Pos::ZERO, *w, *h, *radius, *thickness, color, *corner_segments),
+            crate::shapes::Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness } => self.instance_triangle_outline(*x1, *y1, *x2, *y2, *x3, *y3, *thickness, color),
+            crate::shapes::Shape::PolygonOutline { points, thickness } => self.instance_polygon_outline(points, *thickness, color),
+            crate::shapes::Shape::ArcOutline { r, start, end, thickness, segments, .. } => self.instance_arc_outline(Pos::ZERO, *r, *start, *end, *thickness, color, *segments),
+        }
+
+        if texture_overridden {
+            self.add_texture_segment(self.bind_group.clone());
+            self.add_instance_texture_segment(self.bind_group.clone());
+        }
+        self.bind_group = saved_bg;
+        self.transform = saved_transform;
+        self.cached_transform_index = saved_cache;
+        self.uv = saved_uv;
+        self.sdf_feather = saved_feather;
+        self.color = saved_color;
     }
 
     // ---- 形状委托（去 draw_ 前缀） ----
@@ -2813,6 +3604,118 @@ mod tests {
     }
 
     #[test]
+    fn sdf_instances_store_one_record_per_shape() {
+        let mut batch = DrawBatch::new();
+        for i in 0..1000 {
+            batch.instance_rectangle(Pos::new(i as f32, 0.0), 8.0, 4.0, Some(RED));
+        }
+        assert_eq!(batch.instances.len(), 1000);
+        assert!(batch.vertices.is_empty());
+        assert!(batch.indices.is_empty());
+        assert!(batch.has_sdf);
+    }
+
+    #[test]
+    fn instance_shapes_capture_transform_and_position() {
+        let mut batch = DrawBatch::new();
+        batch.set_position(10.0, 20.0);
+        batch.instance_circle(Pos::new(5.0, 6.0), 3.0, Some(WHITE));
+        let instance = batch.instances[0];
+        assert_ne!(instance.transform_index, 0);
+        let (_, _, translation) = DrawBatch::table_cols_at(
+            &batch.transform_table,
+            instance.transform_index,
+        );
+        assert!((translation[0] - 15.0).abs() < 1e-5);
+        assert!((translation[1] - 26.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn instance_geometry_mode_falls_back_to_vertices() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        batch.instance_circle(Pos::ZERO, 5.0, Some(WHITE));
+        assert!(batch.instances.is_empty());
+        assert!(!batch.vertices.is_empty());
+        assert!(!batch.indices.is_empty());
+    }
+
+    #[test]
+    fn clear_preserves_instance_capacity() {
+        let mut batch = DrawBatch::new();
+        for i in 0..64 {
+            batch.instance_ellipse(Pos::new(i as f32, 0.0), 2.0, 3.0, Some(BLUE));
+        }
+        let capacity = batch.instances.capacity();
+        batch.clear();
+        assert!(batch.instances.is_empty());
+        assert!(batch.instances.capacity() >= capacity);
+    }
+
+    #[test]
+    fn to_area_expands_instances_to_legacy_quads() {
+        let mut batch = DrawBatch::new();
+        batch.instance_rectangle(Pos::new(3.0, 4.0), 10.0, 20.0, Some(GREEN));
+        match batch.to_area() {
+            Area::Geom(geom) => {
+                assert_eq!(geom.vertices.len(), 4);
+                assert_eq!(geom.indices.len(), 6);
+                assert_eq!(geom.vertices[0].sdf_type, 2);
+            }
+            _ => panic!("expected Area::Geom"),
+        }
+    }
+
+    #[test]
+    fn extended_sdf_instances_do_not_expand_vertices() {
+        let mut batch = DrawBatch::new();
+        batch.instance_rounded_rect(Pos::new(1.0, 2.0), 20.0, 10.0, 3.0, Some(WHITE));
+        batch.instance_line(0.0, 0.0, 10.0, 5.0, 2.0, Some(WHITE));
+        batch.instance_triangle(0.0, 0.0, 10.0, 0.0, 5.0, 8.0, Some(WHITE));
+        batch.instance_arc(Pos::new(20.0, 20.0), 8.0, 0.0, std::f32::consts::PI, Some(WHITE));
+        batch.instance_polygon(&[(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)], Some(WHITE));
+        batch.instance_line_chain(&[(0.0, 0.0), (4.0, 2.0), (8.0, 0.0)], 2.0, Some(WHITE));
+        assert_eq!(batch.instances.len(), 6);
+        assert!(batch.vertices.is_empty());
+        assert_eq!(batch.instances[0].sdf_type, 2);
+        assert_eq!(batch.instances[1].sdf_type, 3);
+        assert_eq!(batch.instances[2].sdf_type, 4);
+        assert_eq!(batch.instances[3].sdf_type, 5);
+        assert_eq!(batch.instances[4].sdf_type, 6);
+        assert_eq!(batch.instances[5].sdf_type, 7);
+        assert!(!batch.polygon_edges.is_empty());
+    }
+
+    #[test]
+    fn instance_shape_covers_positioned_and_outline_variants() {
+        let mut batch = DrawBatch::new();
+        batch.instance_shape(
+            &crate::shapes::Shape::RoundedRect {
+                pos: Pos::new(20.0, 30.0),
+                w: 16.0,
+                h: 8.0,
+                radius: 2.0,
+            },
+            crate::shapes::ShapeOverride::default(),
+        );
+        batch.instance_shape(
+            &crate::shapes::Shape::PolygonOutline {
+                points: &[(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)],
+                thickness: 1.0,
+            },
+            crate::shapes::ShapeOverride::default(),
+        );
+        assert_eq!(batch.instances.len(), 2);
+        assert!(batch.vertices.is_empty());
+        let (_, _, translation) = DrawBatch::table_cols_at(
+            &batch.transform_table,
+            batch.instances[0].transform_index,
+        );
+        assert!((translation[0] - 20.0).abs() < 1e-5);
+        assert!((translation[1] - 30.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn walk_preorder_parent_before_children() {
         let mut parent = DrawBatch::new();
         draw_rectangle(&mut parent, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
@@ -2973,7 +3876,7 @@ mod tests {
         for item in &flat {
             match item {
                 Some(batch) => {
-                    let has_geom = !batch.vertices.is_empty();
+                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
                     let has_draw = has_geom || !batch.texts.entries.is_empty();
                     let (op, r) = if batch.clips_children && has_geom {
                         let push_ref = active.unwrap_or(0);
@@ -3285,7 +4188,7 @@ mod tests {
                         area_depth += 1;
                     }
                     let content = clip_depth + anc + (has_own as u32);
-                    let has_geom = !batch.vertices.is_empty();
+                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
                     if batch.clips_children && has_geom {
                         parent_push_ref = Some(content);
                         clip_depth += 1;

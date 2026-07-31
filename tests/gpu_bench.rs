@@ -140,6 +140,7 @@ fn material_shape_text_ssaa_paths() {
 fn material_main(in: MaterialInput) -> vec4<f32> {
     return vec4<f32>(in.color.rgb * vec3<f32>(0.8, 1.0, 0.9), in.color.a);
 }
+
 "#;
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -166,6 +167,44 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     );
 
     source.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn instanced_shape_and_stencil_paths() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 320, 180);
+
+    let mut parent = DrawBatch::new();
+    parent.clips_children = true;
+    parent.instance_circle(Pos::new(90.0, 90.0), 70.0, Some(WHITE));
+
+    let mut child = DrawBatch::new();
+    for i in 0..128 {
+        let x = 20.0 + (i % 16) as f32 * 18.0;
+        let y = 20.0 + (i / 16) as f32 * 18.0;
+        match i % 3 {
+            0 => child.instance_rectangle(Pos::new(x, y), 14.0, 10.0, Some(RED)),
+            1 => child.instance_circle(Pos::new(x, y), 6.0, Some(GREEN)),
+            _ => child.instance_ellipse(Pos::new(x, y), 7.0, 4.0, Some(BLUE)),
+        }
+    }
+    child.instance_rounded_rect(Pos::new(220.0, 24.0), 64.0, 30.0, 8.0, Some(WHITE));
+    child.instance_line(210.0, 72.0, 292.0, 98.0, 3.0, Some(RED));
+    child.instance_triangle(220.0, 110.0, 280.0, 110.0, 250.0, 150.0, Some(GREEN));
+    child.instance_arc(Pos::new(250.0, 142.0), 22.0, 0.0, std::f32::consts::PI, Some(BLUE));
+    child.instance_polygon(&[(210.0, 112.0), (232.0, 102.0), (246.0, 118.0), (230.0, 132.0)], Some(WHITE));
+    child.instance_line_chain(&[(262.0, 108.0), (280.0, 118.0), (266.0, 132.0), (286.0, 146.0)], 3.0, Some(RED));
+    child.instance_rect_outline(Pos::new(200.0, 4.0), 30.0, 14.0, 2.0, Some(WHITE));
+    child.instance_circle_outline(Pos::new(244.0, 12.0), 8.0, 2.0, Some(RED), 12);
+    child.instance_ellipse_outline(Pos::new(274.0, 12.0), 11.0, 6.0, 2.0, Some(GREEN), 16);
+    child.instance_rounded_rect_outline(Pos::new(200.0, 42.0), 30.0, 16.0, 4.0, 2.0, Some(BLUE), 4);
+    child.instance_triangle_outline(244.0, 42.0, 264.0, 58.0, 276.0, 42.0, 2.0, Some(WHITE));
+    child.instance_polygon_outline(&[(282.0, 42.0), (300.0, 42.0), (291.0, 58.0)], 2.0, Some(RED));
+    child.instance_arc_outline(Pos::new(290.0, 76.0), 12.0, 0.0, std::f32::consts::PI, 2.0, Some(GREEN), 8);
+    parent.push_child(child);
+    canvas.draw(Some(BLACK), &[&parent]);
 }
 
 fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {

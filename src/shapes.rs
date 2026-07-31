@@ -274,6 +274,14 @@ pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride)
     batch.color = saved_color;
 }
 
+/// 通过共享 unit quad + instance buffer 绘制 [`Shape`]。
+///
+/// 默认 SDF 模式下，所有填充和描边变体使用实例路径；几何模式与自定义材质
+/// 自动回退到普通 mesh 路径。实例 shape 在 batch 内位于普通 shape 之后、文字之前。
+pub fn draw_instance_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
+    batch.instance_shape(shape, opts);
+}
+
 /// 填充矩形。`color`: `None` = `batch.color`，`Some` = 仅本次。
 pub fn draw_rectangle(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, color: Option<Color>) {
     draw_shape(

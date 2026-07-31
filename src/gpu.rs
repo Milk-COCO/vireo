@@ -403,6 +403,8 @@ pub struct GpuContext {
     pub engine_storage_dummy_bind_group: wgpu::BindGroup,
     pub(crate) polygon_dummy_buf: wgpu::Buffer,
     pub(crate) transform_dummy_buf: wgpu::Buffer,
+    pub(crate) instance_quad_vertex_buf: wgpu::Buffer,
+    pub(crate) instance_quad_index_buf: wgpu::Buffer,
     pub surface_format: wgpu::TextureFormat,
     pub text_ctx: Mutex<TextContext>,
     /// 跨材质 bind group 复用池。
@@ -416,6 +418,28 @@ pub struct GpuContext {
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
+    shader_instance: wgpu::ShaderModule,
+    shader_instance_ssaa: wgpu::ShaderModule,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadVertex {
+    corner: [f32; 2],
+}
+
+impl QuadVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                format: wgpu::VertexFormat::Float32x2,
+                shader_location: 0,
+            }],
+        }
+    }
 }
 
 impl GpuContext {
@@ -709,6 +733,34 @@ impl GpuContext {
             label: Some("vireo shader (geometry)"),
             source: wgpu::ShaderSource::Wgsl(shader_geo_src.into()),
         });
+        let shader_instance_src = include_str!("shader_instance.wgsl");
+        let shader_instance_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo instance shader (SSAA)"),
+            source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
+        });
+        let shader_instance_src = shader_instance_src.replace(
+            "@interpolate(linear, sample)",
+            "@interpolate(linear)",
+        );
+        let shader_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo instance shader (MSAA)"),
+            source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
+        });
+        let instance_quad_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vireo instance unit quad vertices"),
+            contents: bytemuck::cast_slice(&[
+                QuadVertex { corner: [-1.0, -1.0] },
+                QuadVertex { corner: [1.0, -1.0] },
+                QuadVertex { corner: [1.0, 1.0] },
+                QuadVertex { corner: [-1.0, 1.0] },
+            ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let instance_quad_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vireo instance unit quad indices"),
+            contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+            usage: wgpu::BufferUsages::INDEX,
+        });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vireo pipeline"),
@@ -793,6 +845,8 @@ impl GpuContext {
             engine_storage_dummy_bind_group,
             polygon_dummy_buf,
             transform_dummy_buf,
+            instance_quad_vertex_buf,
+            instance_quad_index_buf,
             surface_format,
             text_ctx,
             bind_group_pool: crate::material::BindGroupPool::new(),
@@ -802,6 +856,8 @@ impl GpuContext {
             shader,
             shader_ssaa,
             shader_geo,
+            shader_instance,
+            shader_instance_ssaa,
         }
     }
 
@@ -1028,6 +1084,106 @@ impl GpuContext {
         });
         pipes.insert(key, p.clone());
         p
+    }
+
+    pub(crate) fn ensure_instance_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        ssaa: bool,
+        use_stencil: bool,
+        stencil_op: u32,
+    ) -> wgpu::RenderPipeline {
+        let op = stencil_op.min(2);
+        let key = sample_count
+            | ((alpha_to_coverage as u32) << 16)
+            | ((ssaa as u32) << 17)
+            | ((use_stencil as u32) << 19)
+            | (op << 20)
+            | (1u32 << 23);
+        let mut pipes = self.pipelines.lock().unwrap();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
+        }
+        let module = if ssaa {
+            &self.shader_instance_ssaa
+        } else {
+            &self.shader_instance
+        };
+        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vireo instance pipeline layout"),
+            bind_group_layouts: &[
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+        let depth_stencil = if use_stencil {
+            let face = match op {
+                1 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::IncrementClamp,
+                },
+                2 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                _ => wgpu::StencilFaceState::IGNORE,
+            };
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask: if op == 0 { 0 } else { 0xff },
+                    write_mask: if op == 1 { 0xff } else { 0 },
+                },
+                bias: Default::default(),
+            })
+        } else {
+            None
+        };
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vireo instance pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                alpha_to_coverage_enabled: alpha_to_coverage,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        pipes.insert(key, pipeline.clone());
+        pipeline
     }
 
     /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。
@@ -1629,6 +1785,42 @@ pub struct Vertex {
     /// 变换矩阵索引，指向 `transforms` storage buffer（group 2 binding 0）。
     /// 0 = 恒等矩阵（默认）。
     pub transform_index: u32,
+}
+
+/// SDF quad instance. A shared four-vertex quad supplies the corner coordinates.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShapeInstance {
+    pub bounds: [f32; 4],
+    pub uv_bounds: [f32; 4],
+    pub uv_rect: [f32; 4],
+    pub color: [f32; 4],
+    pub sdf_params: [f32; 4],
+    pub sdf_extra: [f32; 2],
+    pub sdf_type: u32,
+    pub sdf_feather: f32,
+    pub transform_index: u32,
+    pub _padding: u32,
+}
+
+impl ShapeInstance {
+    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x4, shader_location: 1 },
+                wgpu::VertexAttribute { offset: 16, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
+                wgpu::VertexAttribute { offset: 32, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
+                wgpu::VertexAttribute { offset: 48, format: wgpu::VertexFormat::Float32x4, shader_location: 4 },
+                wgpu::VertexAttribute { offset: 64, format: wgpu::VertexFormat::Float32x4, shader_location: 5 },
+                wgpu::VertexAttribute { offset: 80, format: wgpu::VertexFormat::Float32x2, shader_location: 6 },
+                wgpu::VertexAttribute { offset: 88, format: wgpu::VertexFormat::Uint32, shader_location: 7 },
+                wgpu::VertexAttribute { offset: 92, format: wgpu::VertexFormat::Float32, shader_location: 8 },
+                wgpu::VertexAttribute { offset: 96, format: wgpu::VertexFormat::Uint32, shader_location: 9 },
+            ],
+        }
+    }
 }
 
 impl Vertex {
