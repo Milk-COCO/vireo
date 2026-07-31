@@ -86,7 +86,7 @@ fn main() {
         {
             let (cx, cy) = centers[0];
             let mut parent = DrawBatch::new();
-            parent.sdf_feather = Some(2.0);
+            parent.set_sdf_feather(Some(2.0));
             parent.set_color(ORANGE);
             parent.set_position(cx, cy);
             parent.set_deg(angle);
@@ -101,7 +101,7 @@ fn main() {
             );
 
             let mut child = DrawBatch::new();
-            child.sdf_feather = Some(0.0);
+            child.set_sdf_feather(Some(0.0));
             child.set_color(SKYBLUE);
             child.set_position(cx, cy);
             child.inherit = InheritFromParent::NONE; // clipped=true
@@ -115,7 +115,7 @@ fn main() {
         {
             let (cx, cy) = centers[1];
             let mut parent = DrawBatch::new();
-            parent.sdf_feather = Some(2.0);
+            parent.set_sdf_feather(Some(2.0));
             parent.set_color(ORANGE);
             parent.set_position(cx, cy);
             parent.set_deg(angle + 20.0);
@@ -130,7 +130,7 @@ fn main() {
             );
 
             let mut child = DrawBatch::new();
-            child.sdf_feather = Some(0.0);
+            child.set_sdf_feather(Some(0.0));
             child.set_color(SKYBLUE);
             child.inherit = InheritFromParent::TRANSFORM;
             wobble_blocks(&mut child, t, 1.1, true);
@@ -143,7 +143,7 @@ fn main() {
         {
             let (cx, cy) = centers[2];
             let mut parent = DrawBatch::new();
-            parent.sdf_feather = Some(2.0);
+            parent.set_sdf_feather(Some(2.0));
             parent.set_color(ORANGE);
             parent.set_position(cx, cy);
             parent.set_deg(angle * 0.5);
@@ -159,7 +159,7 @@ fn main() {
 
             // 子 A：被裁
             let mut a = DrawBatch::new();
-            a.sdf_feather = Some(0.0);
+            a.set_sdf_feather(Some(0.0));
             a.set_color(SKYBLUE);
             a.set_position(cx, cy);
             a.inherit = InheritFromParent::NONE; // clipped
@@ -173,7 +173,7 @@ fn main() {
 
             // 子 B：不裁，粉红，可越界
             let mut b = DrawBatch::new();
-            b.sdf_feather = Some(0.0);
+            b.set_sdf_feather(Some(0.0));
             b.set_color(Color::new(1.0, 0.45, 0.55, 0.9));
             b.set_position(cx, cy);
             b.inherit = InheritFromParent::NONE.unclipped();
@@ -193,7 +193,7 @@ fn main() {
         {
             let (cx, cy) = centers[3];
             let mut parent = DrawBatch::new();
-            parent.sdf_feather = Some(2.0);
+            parent.set_sdf_feather(Some(2.0));
             parent.set_color(ORANGE);
             parent.set_position(cx, cy);
             parent.set_deg(angle + 40.0);
@@ -208,9 +208,9 @@ fn main() {
             );
 
             let mut a = DrawBatch::new();
-            a.sdf_feather = Some(0.0);
+            a.set_sdf_feather(Some(0.0));
             a.set_color(ORANGE);
-            a.sdf_feather = Some(2.0);
+            a.set_sdf_feather(Some(2.0));
             a.inherit = InheritFromParent::ALL; // transform + color + clipped
             for i in 0..5 {
                 let phase = t * 1.8 + i as f32;
@@ -221,7 +221,7 @@ fn main() {
             parent.push_child(a);
 
             let mut b = DrawBatch::new();
-            b.sdf_feather = Some(2.0);
+            b.set_sdf_feather(Some(2.0));
             b.set_color(Color::new(1.0, 0.9, 0.25, 0.95));
             // 跟父转，但不测 stencil
             b.inherit = InheritFromParent::TRANSFORM.unclipped();

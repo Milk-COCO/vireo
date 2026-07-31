@@ -52,7 +52,7 @@ fn scene_sdf(b: &mut DrawBatch) {
         let x = (i % 50) as f32 * 17.0 + 10.0;
         let y = (i / 50) as f32 * 17.0 + 10.0;
         b.set_position(x, y);
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         match i % 5 {
             0 => draw_rectangle(b, Pos::new(0.0, 0.0), 14.0, 14.0, Some(RED)),
             1 => draw_circle(b, Pos::new(7.0, 7.0), 6.0, Some(GREEN)),
@@ -64,7 +64,7 @@ fn scene_sdf(b: &mut DrawBatch) {
 }
 
 fn scene_geo(b: &mut DrawBatch) {
-    b.sdf_feather = None;
+    b.clear_sdf_feather();
     for i in 0..500 {
         let x = (i % 25) as f32 * 35.0 + 15.0;
         let y = (i / 25) as f32 * 35.0 + 15.0;
@@ -82,7 +82,7 @@ fn scene_geo(b: &mut DrawBatch) {
 }
 
 fn scene_transforms(b: &mut DrawBatch) {
-    b.sdf_feather = Some(0.5);
+    b.set_sdf_feather(Some(0.5));
     for i in 0..1000 {
         let x = (i % 40) as f32 * 22.0 + 15.0;
         let y = (i / 40) as f32 * 22.0 + 15.0;
@@ -95,7 +95,7 @@ fn scene_transforms(b: &mut DrawBatch) {
 }
 
 fn scene_polygons(b: &mut DrawBatch) {
-    b.sdf_feather = Some(1.0);
+    b.set_sdf_feather(Some(1.0));
     for i in 0..200 {
         let x = (i % 20) as f32 * 44.0 + 30.0;
         let y = (i / 20) as f32 * 50.0 + 30.0;
@@ -156,7 +156,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
     let mut batch = DrawBatch::new();
     batch.custom_material = Some(material.clone());
-    batch.sdf_feather = Some(1.0);
+    batch.set_sdf_feather(Some(1.0));
     draw_rounded_rect(&mut batch, Pos::new(20.0, 20.0), 280.0, 140.0, 20.0, Some(WHITE));
     draw_text(
         &mut batch.texts,
@@ -216,7 +216,7 @@ fn ordered_instance_mesh_instance_path() {
 
     let mut batch = DrawBatch::new();
     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
-    batch.sdf_feather = None;
+    batch.clear_sdf_feather();
     draw_triangle(
         &mut batch,
         20.0,
@@ -227,7 +227,7 @@ fn ordered_instance_mesh_instance_path() {
         100.0,
         Some(GREEN),
     );
-    batch.sdf_feather = Some(1.0);
+    batch.set_sdf_feather(Some(1.0));
     draw_circle(&mut batch, Pos::new(80.0, 60.0), 24.0, Some(BLUE));
 
     canvas.draw(Some(BLACK), &[&batch]);
@@ -294,7 +294,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         let canvas = OffscreenCanvas::new(&gpu, 256, 128);
         let mut batch = DrawBatch::new();
         batch.custom_material = Some(material.clone());
-        batch.sdf_feather = Some(1.0);
+        batch.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut batch, Pos::new(8.0, 8.0), 100.0, 48.0, Some(WHITE));
         draw_text(
             &mut batch.texts,
@@ -312,7 +312,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         let mut batch = DrawBatch::new();
         batch.custom_material = Some(material.clone());
         batch.set_texture(Some(&tex_red));
-        batch.sdf_feather = Some(1.0);
+        batch.set_sdf_feather(Some(1.0));
         draw_rounded_rect(&mut batch, Pos::new(16.0, 16.0), 200.0, 80.0, 12.0, Some(WHITE));
         draw_text(
             &mut batch.texts,
@@ -372,7 +372,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         let mut batch = DrawBatch::new();
         batch.custom_material = Some(material.clone());
         batch.set_texture(Some(&tex_red));
-        batch.sdf_feather = Some(1.0);
+        batch.set_sdf_feather(Some(1.0));
         draw_circle(&mut batch, Pos::new(60.0, 60.0), 40.0, Some(WHITE));
         draw_text(
             &mut batch.texts,
@@ -389,13 +389,13 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         let canvas = OffscreenCanvas::new(&gpu, 240, 160);
         let mut parent = DrawBatch::new();
         parent.clips_children = true;
-        parent.sdf_feather = Some(1.0);
+        parent.set_sdf_feather(Some(1.0));
         draw_rounded_rect(&mut parent, Pos::new(20.0, 20.0), 200.0, 120.0, 16.0, Some(WHITE));
 
         let mut child = DrawBatch::new();
         child.custom_material = Some(material.clone());
         child.set_texture(Some(&tex_blue));
-        child.sdf_feather = Some(1.0);
+        child.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut child, Pos::new(40.0, 40.0), 160.0, 80.0, Some(WHITE));
         child.text(
             "clip",

@@ -125,6 +125,91 @@ enum OrderedShapeSegment {
     Instances(InstanceSegment),
 }
 
+impl OrderedShapeSegment {
+    /// 排序键：`(0 = mesh, 1 = instances, geometry, bind group 身份)`。
+    /// 同类且同 bind group 的段会被排到一起以便合并。
+    #[inline]
+    fn sort_key(&self) -> (u8, u8, u64) {
+        match self {
+            OrderedShapeSegment::Mesh { bind_group, geometry, .. } => {
+                (0, *geometry as u8, bind_group_id(bind_group))
+            }
+            OrderedShapeSegment::Instances(s) => (1, 0, bind_group_id(&s.bind_group)),
+        }
+    }
+
+    /// 尝试把 `self`（前段）与 `other`（后段）合并为一段。
+    /// 仅当 pipeline 状态相同（bind group / geometry 一致）且范围连续时可合并，
+    /// 否则返回 `None`。不连续时合并会误画两段之间的内容，必须拒绝。
+    fn try_merge(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (
+                OrderedShapeSegment::Mesh { ndx_start, ndx_count, bind_group, geometry },
+                OrderedShapeSegment::Mesh {
+                    ndx_start: n2,
+                    ndx_count: n2_count,
+                    bind_group: b2,
+                    geometry: g2,
+                },
+            ) => {
+                let merged = merge_decision(
+                    geometry == g2 && bind_group == b2,
+                    *ndx_start,
+                    *ndx_count,
+                    *n2,
+                    *n2_count,
+                )?;
+                Some(OrderedShapeSegment::Mesh {
+                    ndx_start: merged.0,
+                    ndx_count: merged.1,
+                    bind_group: bind_group.clone(),
+                    geometry: *geometry,
+                })
+            }
+            (OrderedShapeSegment::Instances(s), OrderedShapeSegment::Instances(s2)) => {
+                let merged = merge_decision(
+                    s.bind_group == s2.bind_group,
+                    s.instance_start,
+                    s.instance_count,
+                    s2.instance_start,
+                    s2.instance_count,
+                )?;
+                Some(OrderedShapeSegment::Instances(InstanceSegment {
+                    instance_start: merged.0,
+                    instance_count: merged.1,
+                    bind_group: s.bind_group.clone(),
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 合并决策（纯函数）：`same_state` = pipeline 状态一致（bind group / geometry）。
+/// 仅当状态一致且范围连续（`start + count == next_start`）时返回合并后的 `(start, count)`。
+fn merge_decision(
+    same_state: bool,
+    start: u32,
+    count: u32,
+    next_start: u32,
+    next_count: u32,
+) -> Option<(u32, u32)> {
+    if same_state && start + count == next_start {
+        Some((start, count + next_count))
+    } else {
+        None
+    }
+}
+
+/// wgpu `BindGroup` 的稳定身份。`BindGroup` 实现 `Eq`/`Hash` 但无 `Ord`，
+/// 排序键需要标量；用 `FxHasher` 折叠 hash 得到 u64 即可（同 bind group 恒同值）。
+fn bind_group_id(bg: &wgpu::BindGroup) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = rustc_hash::FxBuildHasher::default().build_hasher();
+    bg.hash(&mut hasher);
+    hasher.finish()
+}
+
 struct ShapeInfo {
     base_vertex: i32,
     segments: Vec<ShapeSegment>,
@@ -882,6 +967,24 @@ impl Renderer {
                                         bind_group: resolve_bg(batch.bind_group.clone()),
                                         geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                                     });
+                                }
+                                if !batch.preserve_order {
+                                    // 允许重排：按（种类, geometry, bind group）稳定排序，
+                                    // 再把 pipeline 状态相同且范围连续的相邻段合并，
+                                    // 减少 pipeline 切换与 draw call。
+                                    ordered.sort_by_key(OrderedShapeSegment::sort_key);
+                                    let mut merged: Vec<OrderedShapeSegment> =
+                                        Vec::with_capacity(ordered.len());
+                                    for segment in ordered {
+                                        if let Some(last) = merged.last() {
+                                            if let Some(combined) = last.try_merge(&segment) {
+                                                *merged.last_mut().unwrap() = combined;
+                                                continue;
+                                            }
+                                        }
+                                        merged.push(segment);
+                                    }
+                                    ordered = merged;
                                 }
                                 ordered
                             },
@@ -2142,13 +2245,19 @@ pub struct DrawBatch {
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
     ///
+    /// 公开 API 走 [`Self::sdf_feather`] / [`Self::set_sdf_feather`] /
+    /// [`Self::clear_sdf_feather`]；字段私有，shape 内部可直接读写。
+    ///
     /// 注意：SDF 图形不受 MSAA 影响。
-    pub sdf_feather: Option<f32>,
+    pub(crate) sdf_feather: Option<f32>,
     /// 当前画笔颜色；`draw_*(…, None)` 使用此值。
-    pub color: crate::color::Color,
+    /// 公开 API 走 [`Self::color`] / [`Self::set_color`]。
+    pub(crate) color: crate::color::Color,
     /// 纹理坐标子区域：后续 shape 顶点 UV，以及之后 text 入队冻结的
     /// [`crate::text::TextTextureState::uv`]，均在此范围内映射。
-    pub uv: UvRect,
+    /// 公开 API 走 [`Self::uv`] / [`Self::set_uv`] / [`Self::clear_uv`]。
+    /// 字段私有赋值不会传播到 `texts.texture_state`（潜在 bug：必须用 `set_uv`）。
+    pub(crate) uv: UvRect,
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
@@ -2199,6 +2308,12 @@ pub struct DrawBatch {
     /// Dynamic uniform/storage offsets for group 3 binding（逐 draw 偏移，字节）。
     /// 长度必须等于 BGL 中 `has_dynamic_offset` 的 binding 数量。
     pub dynamic_offsets: Vec<u32>,
+    /// 是否保留 shape 调用顺序。
+    /// - `true`（默认）：按 `draw_*` 调用顺序绘制（保持 z 序）。
+    /// - `false`：允许 renderer 按（mesh/instance 种类、geometry 模式、bind group）
+    ///   重排并合并本 batch 的绘制命令，减少 pipeline 切换 / draw call。
+    ///   代价：混合 SDF/几何或不同贴图时绘制顺序不保证，可能改变视觉层叠。
+    pub preserve_order: bool,
 }
 
 impl DrawBatch {
@@ -2238,6 +2353,7 @@ impl DrawBatch {
             text_clip: None,
             custom_material: None,
             dynamic_offsets: Vec::new(),
+            preserve_order: true,
         }
     }
 
@@ -2272,6 +2388,7 @@ impl DrawBatch {
         self.text_clip = None;
         self.custom_material = None;
         self.dynamic_offsets.clear();
+        self.preserve_order = true;
     }
     pub fn to_area(&self) -> Area {
         if (self.vertices.is_empty() || self.indices.is_empty()) && self.instances.is_empty() {
@@ -2711,6 +2828,37 @@ impl DrawBatch {
     /// 设置画笔颜色（后续 `draw_*(…, None)` 使用）。
     pub fn set_color(&mut self, color: crate::color::Color) {
         self.color = color;
+    }
+
+    /// 当前画笔颜色。
+    #[inline]
+    pub fn color(&self) -> crate::color::Color {
+        self.color
+    }
+
+    /// 当前 SDF 柔边宽度。
+    #[inline]
+    pub fn sdf_feather(&self) -> Option<f32> {
+        self.sdf_feather
+    }
+
+    /// 设置 SDF 柔边宽度：`Some(f)` = SDF 路径（f 为柔边像素），`None` = 几何路径。
+    /// 内部纯赋值，shape 端无副作用。
+    #[inline]
+    pub fn set_sdf_feather(&mut self, value: Option<f32>) {
+        self.sdf_feather = value;
+    }
+
+    /// 清除 SDF 柔边（设为 `None`），走几何路径。
+    #[inline]
+    pub fn clear_sdf_feather(&mut self) {
+        self.sdf_feather = None;
+    }
+
+    /// 当前 UV 子区域。
+    #[inline]
+    pub fn uv(&self) -> UvRect {
+        self.uv
     }
 
     #[inline]
@@ -3281,6 +3429,7 @@ impl DrawBatch {
             text_clip: self.text_clip,
             custom_material: self.custom_material.clone(),
             dynamic_offsets: self.dynamic_offsets.clone(),
+            preserve_order: self.preserve_order,
         }
     }
 
@@ -4318,6 +4467,31 @@ mod tests {
     }
 
     #[test]
+    fn set_uv_propagates_to_text_entries() {
+        let mut batch = DrawBatch::new();
+        batch.set_uv(0.25, 0.25, 0.75, 0.75);
+        let expected = UvRect { u0: 0.25, v0: 0.25, u1: 0.75, v1: 0.75 };
+        assert_eq!((batch.uv.u0, batch.uv.u1), (expected.u0, expected.u1));
+        // set_uv 同步到 text 画笔；之后入队条目冻结该 uv
+        batch.texts.push(
+            "H",
+            Pos::ZERO,
+            Default::default(),
+            Default::default(),
+        );
+        let entries = batch.texts.entries.clone();
+        let frozen = entries[0].texture_state().uv;
+        assert_eq!(frozen.u0, 0.25);
+        assert_eq!(frozen.u1, 0.75);
+        // getter 与 setter 往返一致
+        let got = batch.uv();
+        assert_eq!((got.u0, got.v0, got.u1, got.v1), (0.25, 0.25, 0.75, 0.75));
+        batch.clear_uv();
+        let reset = batch.uv();
+        assert_eq!((reset.u0, reset.v0, reset.u1, reset.v1), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
     fn automatic_instances_merge_contiguous_commands() {
         let mut batch = DrawBatch::new();
         draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
@@ -4344,6 +4518,33 @@ mod tests {
         assert!(matches!(batch.shape_commands[0], BatchShapeCommand::Instances { .. }));
         assert!(matches!(batch.shape_commands[1], BatchShapeCommand::Mesh { .. }));
         assert!(matches!(batch.shape_commands[2], BatchShapeCommand::Instances { .. }));
+    }
+
+    #[test]
+    fn merge_decision_requires_same_state_and_contiguity() {
+        // 状态一致 + 连续 → 合并
+        let merged = merge_decision(true, 0, 6, 6, 6).unwrap();
+        assert_eq!(merged, (0, 12));
+        // 状态一致但中间有间隙 → 不合并
+        assert!(merge_decision(true, 0, 6, 10, 6).is_none());
+        // 状态不一致 → 不合并（即使连续）
+        assert!(merge_decision(false, 0, 6, 6, 6).is_none());
+        // 跨种类（mesh vs instances）→ 不合并
+        assert!(merge_decision(false, 0, 6, 6, 6).is_none());
+        // 三段连续合并
+        let m1 = merge_decision(true, 0, 6, 6, 6).unwrap();
+        let m2 = merge_decision(true, m1.0, m1.1, 12, 6).unwrap();
+        assert_eq!(m2, (0, 18));
+    }
+
+    #[test]
+    fn preserve_order_flag_defaults_and_resets() {
+        let batch = DrawBatch::new();
+        assert!(batch.preserve_order, "默认应保序");
+        let mut b2 = DrawBatch::new();
+        b2.preserve_order = false;
+        b2.clear();
+        assert!(b2.preserve_order, "clear() 应重置为默认 true");
     }
 
     #[test]

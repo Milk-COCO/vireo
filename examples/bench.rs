@@ -25,6 +25,7 @@ fn main() {
     let mut frame_times: Vec<f64> = Vec::new();
     let mut min_frame = f64::MAX;
     let mut max_frame = 0.0f64;
+    let mut preserve_order = true;
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -40,6 +41,9 @@ fn main() {
         else if win.key_down(KeyCode::Digit7) { Some(6) }
         else if win.key_down(KeyCode::Digit8) { Some(7) }
         else { None };
+        if win.key_down(KeyCode::KeyP) {
+            preserve_order = !preserve_order;
+        }
 
         if let Some(s) = next {
             scene = s;
@@ -51,6 +55,7 @@ fn main() {
         // ---- 绘制当前场景 ----
         let (name, func) = SCENES[scene];
         func(&mut batch);
+        batch.preserve_order = preserve_order;
 
         // ---- 帧时间统计 ----
         let ft_ms = app.frame_time * 1000.0;
@@ -75,7 +80,8 @@ fn main() {
              Total frames:{:>8}\n\
              Mesh V:      {:>8}\n\
              Instances:   {:>8}\n\
-             Commands:    {:>8}",
+             Commands:    {:>8}\n\
+             Order:       {:>8}",
             name,
             app.fps,
             ft_ms,
@@ -86,6 +92,7 @@ fn main() {
             stats.mesh_vertices,
             stats.instances,
             stats.draw_commands,
+            if preserve_order { "preserve" } else { "reorder" },
         );
         draw_text(
             &mut batch.texts,
@@ -97,7 +104,7 @@ fn main() {
         // 场景切换提示
         draw_text(
             &mut batch.texts,
-            "Press 1-8 to switch scene",
+            "Press 1-8 switch scene | P toggle preserve_order",
             Pos::new(12.0, 670.0),
             TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.4, 0.4, 0.5, 1.0)),
         );
@@ -118,7 +125,7 @@ fn scene_sdf_shapes(b: &mut DrawBatch) {
         let y = (i / 50) as f32 * 17.0 + 10.0;
         let c = COLORS[i % COLORS.len()];
         b.set_position(x, y);
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         match i % 5 {
             0 => draw_rectangle(b, Pos::new(0.0, 0.0), 14.0, 14.0, Some(c)),
             1 => draw_circle(b, Pos::new(7.0, 7.0), 6.0, Some(c)),
@@ -132,7 +139,7 @@ fn scene_sdf_shapes(b: &mut DrawBatch) {
 
 /// 几何路径形状 ×500（顶点膨胀，无 SDF）
 fn scene_geo_shapes(b: &mut DrawBatch) {
-    b.sdf_feather = None; // 强制几何模式
+    b.clear_sdf_feather(); // 强制几何模式
     for i in 0..500 {
         let x = (i % 25) as f32 * 35.0 + 15.0;
         let y = (i / 25) as f32 * 35.0 + 15.0;
@@ -159,10 +166,10 @@ fn scene_mixed(b: &mut DrawBatch) {
         let c = COLORS[i % COLORS.len()];
         b.set_position(x, y);
         if i % 2 == 0 {
-            b.sdf_feather = Some(0.8);
+            b.set_sdf_feather(Some(0.8));
             draw_rounded_rect(b, Pos::new(0.0, 0.0), 18.0, 18.0, 4.0, Some(c));
         } else {
-            b.sdf_feather = None;
+            b.clear_sdf_feather();
             draw_circle(b, Pos::new(9.0, 9.0), 8.0, Some(c));
         }
     }
@@ -210,7 +217,7 @@ fn scene_text_static(b: &mut DrawBatch) {
 
 /// 每形状独立变换 ×1000（压力测试 transform_map 去重）
 fn scene_transforms(b: &mut DrawBatch) {
-    b.sdf_feather = Some(0.5);
+    b.set_sdf_feather(Some(0.5));
     for i in 0..1000 {
         let x = (i % 40) as f32 * 22.0 + 15.0;
         let y = (i / 40) as f32 * 22.0 + 15.0;
@@ -225,7 +232,7 @@ fn scene_transforms(b: &mut DrawBatch) {
 
 /// SDF 多边形 ×200
 fn scene_polygons(b: &mut DrawBatch) {
-    b.sdf_feather = Some(1.0);
+    b.set_sdf_feather(Some(1.0));
     for i in 0..200 {
         let x = (i % 20) as f32 * 44.0 + 30.0;
         let y = (i / 20) as f32 * 50.0 + 30.0;

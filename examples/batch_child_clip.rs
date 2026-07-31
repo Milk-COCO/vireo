@@ -33,7 +33,7 @@ fn main() {
 
         // ===== 左侧：圆形裁切 =====
         let mut clip_batch = DrawBatch::new();
-        clip_batch.sdf_feather = Some(1.0);
+        clip_batch.set_sdf_feather(Some(1.0));
         clip_batch.clips_children = true;
 
         draw_circle(
@@ -72,7 +72,7 @@ fn main() {
 
         // ===== 右侧：不裁切（对照）=====
         let mut no_clip_batch = DrawBatch::new();
-        no_clip_batch.sdf_feather = Some(1.0);
+        no_clip_batch.set_sdf_feather(Some(1.0));
 
         draw_circle(
             &mut no_clip_batch,

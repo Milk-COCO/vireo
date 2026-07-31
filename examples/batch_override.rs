@@ -36,7 +36,7 @@ fn main() {
         t += 0.02;
 
         let mut batch = DrawBatch::new();
-        batch.sdf_feather = Some(1.0);
+        batch.set_sdf_feather(Some(1.0));
 
         // ---- 1) 笔刷色 + Option 颜色 ----
         label(&mut batch, "1) set_color + draw_*(None | Some)", 20.0, 16.0);

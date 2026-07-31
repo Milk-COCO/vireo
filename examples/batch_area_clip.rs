@@ -56,7 +56,7 @@ fn main() {
         }
         // 大圆描边（画在 include 之外）
         let mut ring = DrawBatch::new();
-        ring.sdf_feather = Some(1.0);
+        ring.set_sdf_feather(Some(1.0));
         draw_circle(&mut ring, Pos::new(cx1, cy1), r, Some(Color::new(0.9, 0.9, 1.0, 0.7)));
         p1.push_child(ring);
 
@@ -80,7 +80,7 @@ fn main() {
         }
         // 描边矩形 + 挖空小圆
         let mut ring = DrawBatch::new();
-        ring.sdf_feather = Some(1.0);
+        ring.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut ring, Pos::new(cx2 - rw * 0.5, cy2 - rh * 0.5), rw, rh, Some(Color::new(0.9, 0.9, 1.0, 0.5)));
         draw_circle(&mut ring, Pos::new(cx2 + 16.0, cy2 - 8.0), er, Some(Color::new(0.9, 0.5, 0.5, 0.6)));
         p2.push_child(ring);
@@ -103,7 +103,7 @@ fn main() {
         }
         // 两圆描边
         let mut ring = DrawBatch::new();
-        ring.sdf_feather = Some(1.0);
+        ring.set_sdf_feather(Some(1.0));
         draw_circle(&mut ring, Pos::new(cx3 - off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         draw_circle(&mut ring, Pos::new(cx3 + off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         p3.push_child(ring);
@@ -126,7 +126,7 @@ fn main() {
         }
         // 描边
         let mut ring = DrawBatch::new();
-        ring.sdf_feather = Some(1.0);
+        ring.set_sdf_feather(Some(1.0));
         draw_circle(&mut ring, Pos::new(cx4 - off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         draw_circle(&mut ring, Pos::new(cx4 + off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
         p4.push_child(ring);
@@ -162,14 +162,14 @@ fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {
 /// 用 `DrawBatch::to_area()` 烘焙一个圆盘 Area（中心 + 半径）。
 fn make_disk_area(cx: f32, cy: f32, r: f32) -> Area {
     let mut b = DrawBatch::new();
-    b.sdf_feather = Some(1.0);
+    b.set_sdf_feather(Some(1.0));
     draw_circle(&mut b, Pos::new(cx, cy), r, None);
     b.to_area()
 }
 
 fn make_rect_area(x: f32, y: f32, w: f32, h: f32) -> Area {
     let mut b = DrawBatch::new();
-    b.sdf_feather = Some(1.0);
+    b.set_sdf_feather(Some(1.0));
     draw_rectangle(&mut b, Pos::new(x, y), w, h, None);
     b.to_area()
 }

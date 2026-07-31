@@ -24,7 +24,7 @@ fn main() {
         s_was = s_down;
 
         let mut batch = DrawBatch::new();
-        batch.sdf_feather = if use_sdf { Some(1.0) } else { None };
+        batch.set_sdf_feather(if use_sdf { Some(1.0) } else { None });
 
         draw_text(
             &mut batch.texts,

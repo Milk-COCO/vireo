@@ -26,44 +26,44 @@ fn bench_shape_generation() {
 
     bench("SDF rect (4 vertices)", 50_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
     });
 
     bench("SDF rounded_rect", 50_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_rounded_rect(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, 4.0, Some(RED));
     });
 
     bench("SDF circle", 50_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_circle(&mut b, Pos::new(5.0, 5.0), 4.0, Some(RED));
     });
 
     bench("SDF triangle", 50_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_triangle(&mut b, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, Some(RED));
     });
 
     bench("SDF polygon (6 edges)", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         let pts = [(0.,0.),(10.,0.),(14.,5.),(10.,10.),(0.,10.),(-4.,5.)];
         draw_polygon(&mut b, &pts, Some(RED));
     });
 
     bench("geo rounded_rect (fan)", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = None;
+        b.clear_sdf_feather();
         draw_rounded_rect(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, 4.0, Some(RED));
     });
 
     bench("geo circle (fan, ~260 verts)", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = None;
+        b.clear_sdf_feather();
         draw_circle(&mut b, Pos::new(5.0, 5.0), 4.0, Some(RED));
     });
 }
@@ -74,7 +74,7 @@ fn bench_batch_lifecycle() {
 
     bench("new + 100 shapes + clear", 5_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         for i in 0..100 {
             b.set_position((i * 10) as f32, 0.0);
             draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(BLUE));
@@ -85,7 +85,7 @@ fn bench_batch_lifecycle() {
     bench("clear reuse x10 (100 each)", 5_000, || {
         let mut b = DrawBatch::new();
         for _ in 0..10 {
-            b.sdf_feather = Some(1.0);
+            b.set_sdf_feather(Some(1.0));
             for i in 0..100 {
                 draw_rectangle(&mut b, Pos::new(i as f32, 0.0), 8.0, 8.0, Some(BLUE));
             }
@@ -122,7 +122,7 @@ fn bench_transform_api() {
 
     bench("set_position + draw + clear", 100_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         b.set_position(100.0, 200.0);
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
         b.clear_transform();
@@ -136,7 +136,7 @@ fn bench_transform_dedup() {
     // 高命中率：全部相同 transform
     bench("identical xform (hit:100%)", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         b.set_position(100.0, 200.0);
         for _ in 0..100 {
             draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
@@ -146,7 +146,7 @@ fn bench_transform_dedup() {
     // 零命中率：每个形状不同 transform
     bench("unique xform (hit:0%)", 5_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         for i in 0..100 {
             b.set_position(i as f32, (i * 2) as f32);
             draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
@@ -156,7 +156,7 @@ fn bench_transform_dedup() {
     // 50% 命中率
     bench("mixed xform (hit:50%)", 5_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         for i in 0..100 {
             if i % 2 == 0 { b.set_position(10.0, 20.0); }
             else { b.set_position(i as f32, i as f32); }
@@ -193,7 +193,7 @@ fn bench_typical_frames() {
     // SDF 2000 shapes
     let (_, t1) = time_ms(|| {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         for i in 0..2000 {
             b.set_position((i % 50) as f32 * 15.0, (i / 50) as f32 * 15.0);
             match i % 5 {
@@ -212,7 +212,7 @@ fn bench_typical_frames() {
     // Geo 500 shapes
     let (_, t2) = time_ms(|| {
         let mut b = DrawBatch::new();
-        b.sdf_feather = None;
+        b.clear_sdf_feather();
         for i in 0..500 {
             b.set_position((i % 25) as f32 * 30.0, (i / 25) as f32 * 30.0);
             draw_rounded_rect(&mut b, Pos::new(0., 0.), 25., 25., 6., Some(RED));
@@ -223,7 +223,7 @@ fn bench_typical_frames() {
     // 1000 unique transforms
     let (_, t3) = time_ms(|| {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(0.5);
+        b.set_sdf_feather(Some(0.5));
         for i in 0..1000 {
             b.set_position((i % 40) as f32 * 20., (i / 40) as f32 * 20.);
             b.set_deg((i as f32) * 7.0);
@@ -253,7 +253,7 @@ fn bench_outline_and_chain() {
 
     bench("SDF line_chain 8pts", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         let pts = [
             (0., 0.), (10., 2.), (18., 8.), (20., 16.),
             (14., 22.), (6., 20.), (0., 12.), (0., 0.),
@@ -263,7 +263,7 @@ fn bench_outline_and_chain() {
 
     bench("geo line_chain 8pts", 5_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = None;
+        b.clear_sdf_feather();
         let pts = [
             (0., 0.), (10., 2.), (18., 8.), (20., 16.),
             (14., 22.), (6., 20.), (0., 12.), (0., 0.),
@@ -273,7 +273,7 @@ fn bench_outline_and_chain() {
 
     bench("SDF polygon 12 edges", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         let mut pts = [(0f32, 0f32); 12];
         for j in 0..12 {
             let a = std::f32::consts::TAU * j as f32 / 12.0;
@@ -284,13 +284,13 @@ fn bench_outline_and_chain() {
 
     bench("SDF rect_outline", 10_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_rect_outline(&mut b, Pos::new(0.0, 0.0), 20.0, 20.0, 2.0, Some(GREEN));
     });
 
     bench("SDF rounded_rect_outline", 5_000, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         draw_rounded_rect_outline(&mut b, Pos::new(0.0, 0.0), 30.0, 20.0, 6.0, 2.0, Some(WHITE), 8);
     });
 
@@ -312,7 +312,7 @@ fn bench_merge_path_cpu() {
     // 单 batch：append 顶点 + 读 has_sdf 标志路径（顶点扫描作为对照）
     bench("merge single batch 2000 SDF", 500, || {
         let mut b = DrawBatch::new();
-        b.sdf_feather = Some(1.0);
+        b.set_sdf_feather(Some(1.0));
         for i in 0..2000 {
             b.set_position((i % 50) as f32 * 15.0, (i / 50) as f32 * 15.0);
             draw_rectangle(&mut b, Pos::new(0., 0.), 12., 12., Some(RED));
@@ -328,7 +328,7 @@ fn bench_merge_path_cpu() {
         let mut batches = Vec::new();
         for bi in 0..4 {
             let mut b = DrawBatch::new();
-            b.sdf_feather = Some(1.0);
+            b.set_sdf_feather(Some(1.0));
             for i in 0..500 {
                 b.set_position((i % 25) as f32 * 15.0 + bi as f32, (i / 25) as f32 * 15.0);
                 if i % 10 == 0 {

@@ -69,7 +69,7 @@ fn three_level(
 ) -> DrawBatch {
     // ---- root：外圆 mask ----
     let mut root = DrawBatch::new();
-    root.sdf_feather = Some(1.5);
+    root.set_sdf_feather(Some(1.5));
     root.set_position(cx, cy);
     root.set_deg(t * 18.0);
     root.clips_children = root_clip;
@@ -89,7 +89,7 @@ fn three_level(
 
     // ---- mid：内圆角 mask（相对 root 平移 + 再转）----
     let mut mid = DrawBatch::new();
-    mid.sdf_feather = Some(1.2);
+    mid.set_sdf_feather(Some(1.2));
     mid.inherit = InheritFromParent::TRANSFORM;
     // 幅度要大：mid 半宽 ~72，root r=130 → 中心偏移 ~70+ 才会探出外圆
     mid.set_position((t * 1.1).sin() * 85.0, (t * 0.9).cos() * 75.0);
@@ -113,7 +113,7 @@ fn three_level(
 
     // ---- leaf：色块 + 文字（故意伸出 mid）----
     let mut leaf = DrawBatch::new();
-    leaf.sdf_feather = Some(1.0);
+    leaf.set_sdf_feather(Some(1.0));
     leaf.inherit = InheritFromParent::TRANSFORM;
 
     for i in 0..12 {

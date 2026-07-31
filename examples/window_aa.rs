@@ -11,7 +11,7 @@ use vireo::prelude::*;
 
 fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
     if sdf > 0.0 {
-        batch.sdf_feather = Some(sdf);
+        batch.set_sdf_feather(Some(sdf));
     }
     draw_rounded_rect(batch, Pos::new(160.0, 10.0), 140.0, 80.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
     draw_triangle(batch, 80.0, 180.0, 30.0, 130.0, 150.0, 130.0, Some(YELLOW));

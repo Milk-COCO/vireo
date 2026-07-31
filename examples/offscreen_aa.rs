@@ -8,7 +8,7 @@ use vireo::prelude::*;
 
 fn draw_off(batch: &mut DrawBatch, sdf: f32) {
     if sdf > 0.0 {
-        batch.sdf_feather = Some(sdf);
+        batch.set_sdf_feather(Some(sdf));
     }
     draw_circle(batch, Pos::new(150.0, 150.0), 90.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
     draw_triangle(batch, 150.0, 260.0, 60.0, 70.0, 240.0, 70.0, Some(ORANGE));

@@ -59,7 +59,7 @@ fn main() {
 
 fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatch {
     let mut parent = DrawBatch::new();
-    parent.sdf_feather = Some(1.5);
+    parent.set_sdf_feather(Some(1.5));
     parent.set_position(cx, cy);
     // 不旋转：避免和 Y 裁切问题混淆
     parent.clips_children = clip;
@@ -72,7 +72,7 @@ fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatc
     );
 
     let mut child = DrawBatch::new();
-    child.sdf_feather = Some(1.0);
+    child.set_sdf_feather(Some(1.0));
     child.inherit = InheritFromParent::TRANSFORM;
 
     let scroll = -400.0 + (t * 150.0) % 550.0;

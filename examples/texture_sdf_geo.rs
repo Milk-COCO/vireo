@@ -54,7 +54,7 @@ fn main() {
                 let mut sdf = DrawBatch::new();
                 sdf.set_position(0.0, 175.0);
                 sdf.set_texture(Some(t));
-                sdf.sdf_feather = Some(1.0);
+                sdf.set_sdf_feather(Some(1.0));
                 draw_shapes(&mut sdf);
                 draw_text(&mut sdf.texts, "SDF (sdf_feather = 1.0)",
                           Pos::new(10.0, 155.0), TextDef::default().font_size(14.0), TextOverride::from_color(label));

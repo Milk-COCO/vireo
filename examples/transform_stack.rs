@@ -16,7 +16,7 @@ fn main() {
         let win = app.window_ref(&idx).unwrap();
         t += 0.02;
         let mut batch = DrawBatch::new();
-        batch.sdf_feather = Some(1.0);
+        batch.set_sdf_feather(Some(1.0));
 
         draw_text(
             &mut batch.texts,

@@ -47,7 +47,7 @@ fn main() {
         let mut batch = DrawBatch::new();
         batch.custom_material = Some(material.clone());
         batch.set_texture(Some(&texture));
-        batch.sdf_feather = Some(1.5);
+        batch.set_sdf_feather(Some(1.5));
         draw_rounded_rect(
             &mut batch,
             Pos::new(100.0, 110.0),
