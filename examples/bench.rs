@@ -63,6 +63,7 @@ fn main() {
         };
 
         // ---- UI 叠加层 ----
+        let stats = batch.shape_stats();
         let overlay = format!(
             "{}\n\
              ─────────────────\n\
@@ -72,7 +73,9 @@ fn main() {
              Min:         {:>8.3} ms\n\
              Max:         {:>8.3} ms\n\
              Total frames:{:>8}\n\
-             Vertices:    {:>8}",
+             Mesh V:      {:>8}\n\
+             Instances:   {:>8}\n\
+             Commands:    {:>8}",
             name,
             app.fps,
             ft_ms,
@@ -80,7 +83,9 @@ fn main() {
             min_frame,
             max_frame,
             app.frame_count,
-            batch.vertices.len(),
+            stats.mesh_vertices,
+            stats.instances,
+            stats.draw_commands,
         );
         draw_text(
             &mut batch.texts,

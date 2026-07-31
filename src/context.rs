@@ -21,6 +21,22 @@ pub struct Rect {
     pub h: f32,
 }
 
+/// CPU / GPU 真实数据分布（诊断用）。
+///
+/// - `mesh_vertices`：CPU 推入的 mesh 顶点数（仅 mesh 路径使用）
+/// - `instances`：instance 参数数（仅 instance 路径使用）
+/// - `draw_commands`：合并后的 draw command 数（`shape_commands.len()`）
+///
+/// 注：GPU 端最终输出顶点数 ≠ 上述任一字段；
+/// instance 路径 GPU 输出 = `instances * 4`（每个 instance 1 个 unit quad）。
+/// 合并值见 [`DrawBatch::shape_vertex_count`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShapeStats {
+    pub mesh_vertices: usize,
+    pub instances: usize,
+    pub draw_commands: usize,
+}
+
 impl Rect {
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
@@ -99,11 +115,22 @@ struct InstanceSegment {
     bind_group: wgpu::BindGroup,
 }
 
+enum OrderedShapeSegment {
+    Mesh {
+        ndx_start: u32,
+        ndx_count: u32,
+        bind_group: wgpu::BindGroup,
+        geometry: bool,
+    },
+    Instances(InstanceSegment),
+}
+
 struct ShapeInfo {
     base_vertex: i32,
     segments: Vec<ShapeSegment>,
     geometry: bool,
     instances: Vec<InstanceSegment>,
+    ordered: Vec<OrderedShapeSegment>,
 }
 
 struct TextRenderSegment {
@@ -736,19 +763,19 @@ impl Renderer {
                         let transform_base = batch_transform_bases[info_idx];
                         let poly_base = batch_poly_base[info_idx] as f32;
                         let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
-                        let v_start = combined_vdata.len();
-                        combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
                         if needs_patch {
                             let has_poly = !batch.polygon_edges.is_empty();
-                            let verts: &mut [Vertex] = bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
-                            for v in verts.iter_mut() {
+                            for mut v in batch.vertices.iter().copied() {
                                 if transform_base > 0 {
                                     v.transform_index += transform_base;
                                 }
                                 if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
                                     v.sdf_params[0] += poly_base;
                                 }
+                                combined_vdata.extend_from_slice(bytemuck::bytes_of(&v));
                             }
+                        } else {
+                            combined_vdata.extend_from_slice(bytemuck::cast_slice(&batch.vertices));
                         }
                         combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
                         let mut mesh_index_count = batch.indices.len() as u32;
@@ -779,7 +806,7 @@ impl Renderer {
                                 ];
                                 for vertex in &mut verts {
                                     vertex.sdf_params = instance.sdf_params;
-                                    if vertex.sdf_type == 6 || vertex.sdf_type == 7 {
+                                    if instance.sdf_type == 6 || instance.sdf_type == 7 {
                                         vertex.sdf_params[0] += poly_base;
                                     }
                                     vertex.sdf_extra = instance.sdf_extra;
@@ -816,8 +843,51 @@ impl Renderer {
                             segments: segs,
                             geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                             instances: instance_segments,
+                            ordered: if batch.shape_commands.is_empty() || !batch.shape_commands_valid() {
+                                Vec::new()
+                            } else {
+                                let mut ordered = Vec::with_capacity(batch.shape_commands.len() + 1);
+                                for command in &batch.shape_commands {
+                                    match command {
+                                        BatchShapeCommand::Mesh { ndx_start, ndx_count, bind_group, geometry, .. } => {
+                                            ordered.push(OrderedShapeSegment::Mesh {
+                                                ndx_start: idx_offset + *ndx_start,
+                                                ndx_count: *ndx_count,
+                                                bind_group: resolve_bg(bind_group.clone()),
+                                                geometry: *geometry,
+                                            });
+                                        }
+                                        BatchShapeCommand::Instances { instance_start: local_start, instance_count, bind_group, .. } => {
+                                            if use_instances {
+                                                ordered.push(OrderedShapeSegment::Instances(InstanceSegment {
+                                                    instance_start: instance_start + *local_start,
+                                                    instance_count: *instance_count,
+                                                    bind_group: resolve_bg(bind_group.clone()),
+                                                }));
+                                            } else {
+                                                ordered.push(OrderedShapeSegment::Mesh {
+                                                    ndx_start: idx_offset + batch.indices.len() as u32 + *local_start * 6,
+                                                    ndx_count: *instance_count * 6,
+                                                    bind_group: resolve_bg(bind_group.clone()),
+                                                    geometry: false,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                if batch.shape_mesh_end < batch.indices.len() as u32 {
+                                    ordered.push(OrderedShapeSegment::Mesh {
+                                        ndx_start: idx_offset + batch.shape_mesh_end,
+                                        ndx_count: batch.indices.len() as u32 - batch.shape_mesh_end,
+                                        bind_group: resolve_bg(batch.bind_group.clone()),
+                                        geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
+                                    });
+                                }
+                                ordered
+                            },
                         };
-                        v_offset += batch.vertices.len() as u32;
+                        v_offset += batch.vertices.len() as u32
+                            + if use_instances { 0 } else { batch.instances.len() as u32 * 4 };
                         idx_offset += mesh_index_count;
                         Some(info)
                     } else if !instance_segments.is_empty() {
@@ -826,6 +896,7 @@ impl Renderer {
                             segments: Vec::new(),
                             geometry: false,
                             instances: instance_segments,
+                            ordered: Vec::new(),
                         })
                     } else {
                         None
@@ -857,6 +928,7 @@ impl Renderer {
                         segments: segs,
                         geometry: true,
                         instances: Vec::new(),
+                        ordered: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
                     v_offset += 4;
@@ -870,19 +942,19 @@ impl Renderer {
                     let poly_base = batch_poly_base[ei] as f32;
                     let si = if let Some(geom) = op.geom() {
                         let needs_patch = !geom.polygon_edges.is_empty() || transform_base > 0;
-                        let v_start = combined_vdata.len();
-                        combined_vdata.extend_from_slice(bytemuck::cast_slice(&geom.vertices));
                         if needs_patch {
                             let has_poly = !geom.polygon_edges.is_empty();
-                            let verts: &mut [Vertex] = bytemuck::cast_slice_mut(&mut combined_vdata[v_start..]);
-                            for v in verts.iter_mut() {
+                            for mut v in geom.vertices.iter().copied() {
                                 if transform_base > 0 {
                                     v.transform_index += transform_base;
                                 }
                                 if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
                                     v.sdf_params[0] += poly_base;
                                 }
+                                combined_vdata.extend_from_slice(bytemuck::bytes_of(&v));
                             }
+                        } else {
+                            combined_vdata.extend_from_slice(bytemuck::cast_slice(&geom.vertices));
                         }
                         combined_idata.extend_from_slice(bytemuck::cast_slice(&geom.indices));
                         let n = geom.indices.len() as u32;
@@ -897,6 +969,7 @@ impl Renderer {
                             segments: segs,
                             geometry: !geom.has_sdf && geom.sdf_feather.is_none(),
                             instances: Vec::new(),
+                            ordered: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
                         idx_offset += n;
@@ -924,6 +997,7 @@ impl Renderer {
                             segments: segs,
                             geometry: true,
                             instances: Vec::new(),
+                            ordered: Vec::new(),
                         };
                         v_offset += 4;
                         idx_offset += 6;
@@ -1163,6 +1237,126 @@ impl Renderer {
                         .as_ref()
                         .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
                     let use_custom = info.custom_material.is_some();
+                    if !shape.ordered.is_empty() {
+                        for segment in &shape.ordered {
+                            match segment {
+                                OrderedShapeSegment::Mesh {
+                                    ndx_start,
+                                    ndx_count,
+                                    bind_group,
+                                    geometry,
+                                } => {
+                                    let need_rebind = !shapes_bound
+                                        || custom_ptr != last_custom_ptr
+                                        || (!use_custom && last_geometry != Some(*geometry))
+                                        || (uses_stencil && pipe_op != last_stencil_op)
+                                        || info.dynamic_offsets != *last_dynamic_offsets;
+                                    if need_rebind {
+                                        let tmp_pipe: wgpu::RenderPipeline;
+                                        let custom_pipe: Arc<wgpu::RenderPipeline>;
+                                        let pipe: &wgpu::RenderPipeline = if use_custom {
+                                            let mat = info.custom_material.as_ref().unwrap();
+                                            custom_pipe = self.gpu.ensure_material_pipeline(
+                                                mat,
+                                                MaterialTarget::Shape,
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                uses_stencil,
+                                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                            );
+                                            &custom_pipe
+                                        } else if uses_stencil {
+                                            tmp_pipe = self.gpu.ensure_stencil_pipeline(
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                *geometry,
+                                                pipe_op.min(4),
+                                            );
+                                            &tmp_pipe
+                                        } else {
+                                            tmp_pipe = self.gpu.ensure_pipeline(
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                *geometry,
+                                            );
+                                            &tmp_pipe
+                                        };
+                                        pass.set_pipeline(pipe);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        if use_custom {
+                                            let mat = info.custom_material.as_ref().unwrap();
+                                            if let Some(bg) = mat.ensure_bind_group(
+                                                &self.gpu.device,
+                                                &self.gpu.queue,
+                                                &self.gpu.bind_group_pool,
+                                            ) {
+                                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                            }
+                                        }
+                                        pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
+                                        pass.set_index_buffer(
+                                            ibuf.as_ref().unwrap().slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        shapes_bound = true;
+                                        last_custom_ptr = custom_ptr;
+                                        last_geometry = Some(*geometry);
+                                        last_stencil_op = pipe_op;
+                                        last_dynamic_offsets.clone_from(&info.dynamic_offsets);
+                                    }
+                                    if uses_stencil {
+                                        pass.set_stencil_reference(info.stencil_ref);
+                                    }
+                                    pass.set_bind_group(1, bind_group, &[]);
+                                    pass.draw_indexed(
+                                        *ndx_start..*ndx_start + *ndx_count,
+                                        shape.base_vertex,
+                                        0..1,
+                                    );
+                                }
+                                OrderedShapeSegment::Instances(segment) => {
+                                    let instance_pipeline = self.gpu.ensure_instance_pipeline(
+                                        self.sample_count,
+                                        self.alpha_to_coverage,
+                                        self.ssaa,
+                                        uses_stencil,
+                                        pipe_op,
+                                    );
+                                    pass.set_pipeline(&instance_pipeline);
+                                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                    pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    pass.set_bind_group(2, engine_bg, &[]);
+                                    pass.set_vertex_buffer(
+                                        0,
+                                        self.gpu.instance_quad_vertex_buf.slice(..),
+                                    );
+                                    pass.set_vertex_buffer(
+                                        1,
+                                        instance_buf.as_ref().unwrap().slice(..),
+                                    );
+                                    pass.set_index_buffer(
+                                        self.gpu.instance_quad_index_buf.slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                    if uses_stencil {
+                                        pass.set_stencil_reference(info.stencil_ref);
+                                    }
+                                    pass.draw_indexed(
+                                        0..6,
+                                        0,
+                                        segment.instance_start
+                                            ..segment.instance_start + segment.instance_count,
+                                    );
+                                    shapes_bound = false;
+                                    last_geometry = None;
+                                }
+                            }
+                        }
+                    } else {
                     let need_rebind = !shapes_bound
                         || custom_ptr != last_custom_ptr
                         || (!use_custom && last_geometry != Some(shape.geometry))
@@ -1276,6 +1470,7 @@ impl Renderer {
                         }
                         shapes_bound = false;
                         last_geometry = None;
+                    }
                     }
                 }
 
@@ -1899,6 +2094,23 @@ struct InstanceTextureSegment {
     bind_group: Option<wgpu::BindGroup>,
 }
 
+#[derive(Clone)]
+enum BatchShapeCommand {
+    Mesh {
+        ndx_start: u32,
+        ndx_count: u32,
+        bind_group: Option<wgpu::BindGroup>,
+        texture_generation: u32,
+        geometry: bool,
+    },
+    Instances {
+        instance_start: u32,
+        instance_count: u32,
+        bind_group: Option<wgpu::BindGroup>,
+        texture_generation: u32,
+    },
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum EdgeTemplateKind {
     Polygon,
@@ -1923,6 +2135,9 @@ pub struct DrawBatch {
     texture_segments: Vec<TextureSegment>,
     pub(crate) instances: Vec<ShapeInstance>,
     instance_texture_segments: Vec<InstanceTextureSegment>,
+    shape_commands: Vec<BatchShapeCommand>,
+    shape_texture_generation: u32,
+    shape_mesh_end: u32,
     pub(crate) transform: Option<Transform>,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
@@ -2000,6 +2215,9 @@ impl DrawBatch {
             texture_segments: Vec::with_capacity(2),
             instances: Vec::with_capacity(32),
             instance_texture_segments: Vec::with_capacity(2),
+            shape_commands: Vec::with_capacity(8),
+            shape_texture_generation: 0,
+            shape_mesh_end: 0,
             transform: None,
             sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
@@ -2032,6 +2250,9 @@ impl DrawBatch {
         self.texture_segments.clear();
         self.instances.clear();
         self.instance_texture_segments.clear();
+        self.shape_commands.clear();
+        self.shape_texture_generation = 0;
+        self.shape_mesh_end = 0;
         self.transform = None;
         self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
@@ -2345,6 +2566,29 @@ impl DrawBatch {
             || !self.instances.is_empty()
             || !self.texts.entries.is_empty()
             || self.children.iter().any(Self::has_drawable_content)
+    }
+
+    /// 当前 batch 的等效 shape 顶点数（GPU 端最终输出），用于诊断和统计。
+    ///
+    /// = `mesh_vertices + instances * 4`
+    ///
+    /// - **mesh path**：每个 shape 推送 4 顶点 unit quad（CPU 端）。
+    /// - **instance path**：CPU 端只推送 1 个 `ShapeInstance`（约 80 字节），
+    ///   GPU 渲染时用 1 个共享 quad × N instances = `N * 4` 顶点。
+    ///
+    /// 不包含子 batch 与文字。如果想看 CPU 端实际推送量，调用
+    /// [`Self::shape_stats`]。
+    pub fn shape_vertex_count(&self) -> usize {
+        self.vertices.len() + self.instances.len() * 4
+    }
+
+    /// 三段式诊断：CPU mesh 顶点数 / instance 参数数 / 绘制命令数。
+    pub fn shape_stats(&self) -> ShapeStats {
+        ShapeStats {
+            mesh_vertices: self.vertices.len(),
+            instances: self.instances.len(),
+            draw_commands: self.shape_commands.len(),
+        }
     }
 
     /// 旧 API：返回 `Some(batch)` / `None`（Pop）。已由 [`Self::flatten_events`] 取代；
@@ -2764,6 +3008,114 @@ impl DrawBatch {
         self.vertices.push(Vertex::new_uv_xform(x, y, u, v, color, idx));
     }
 
+    pub(crate) fn record_mesh_command(&mut self, start: u32, geometry: bool) {
+        let end = self.indices.len() as u32;
+        if end <= start {
+            return;
+        }
+        if start > self.shape_mesh_end {
+            let gap_geometry = self.mesh_range_is_geometry(self.shape_mesh_end, start);
+            self.shape_commands.push(BatchShapeCommand::Mesh {
+                ndx_start: self.shape_mesh_end,
+                ndx_count: start - self.shape_mesh_end,
+                bind_group: self.bind_group.clone(),
+                texture_generation: self.shape_texture_generation,
+                geometry: gap_geometry,
+            });
+        }
+        if let Some(BatchShapeCommand::Mesh {
+            ndx_start,
+            ndx_count,
+            texture_generation,
+            geometry: last_geometry,
+            ..
+        }) = self.shape_commands.last_mut()
+        {
+            if *texture_generation == self.shape_texture_generation
+                && *last_geometry == geometry
+                && *ndx_start + *ndx_count == start
+            {
+                *ndx_count += end - start;
+                self.shape_mesh_end = end;
+                return;
+            }
+        }
+        self.shape_commands.push(BatchShapeCommand::Mesh {
+            ndx_start: start,
+            ndx_count: end - start,
+            bind_group: self.bind_group.clone(),
+            texture_generation: self.shape_texture_generation,
+            geometry,
+        });
+        self.shape_mesh_end = end;
+    }
+
+    pub(crate) fn record_pending_mesh_command(&mut self) {
+        let start = self.shape_mesh_end;
+        let end = self.indices.len() as u32;
+        if start >= end {
+            return;
+        }
+        let geometry = self.mesh_range_is_geometry(start, end);
+        self.record_mesh_command(start, geometry);
+    }
+
+    fn mesh_range_is_geometry(&self, start: u32, end: u32) -> bool {
+        self.indices[start as usize..end as usize]
+            .iter()
+            .all(|&index| self.vertices.get(index as usize).is_some_and(|v| v.sdf_type == 0))
+    }
+
+    fn shape_commands_valid(&self) -> bool {
+        if self.shape_mesh_end > self.indices.len() as u32 {
+            return false;
+        }
+        self.shape_commands.iter().all(|command| match command {
+            BatchShapeCommand::Mesh { ndx_start, ndx_count, .. } => {
+                let end = ndx_start.saturating_add(*ndx_count);
+                end <= self.indices.len() as u32
+                    && self.indices[*ndx_start as usize..end as usize]
+                        .iter()
+                        .all(|&index| index < self.vertices.len() as u32)
+            }
+            BatchShapeCommand::Instances { instance_start, instance_count, .. } => {
+                instance_start.saturating_add(*instance_count) <= self.instances.len() as u32
+            }
+        })
+    }
+
+    fn record_instance_command(&mut self, start: u32) {
+        self.record_pending_mesh_command();
+        let end = self.instances.len() as u32;
+        if end <= start {
+            return;
+        }
+        if let Some(BatchShapeCommand::Instances {
+            instance_start,
+            instance_count,
+            texture_generation,
+            ..
+        }) = self.shape_commands.last_mut()
+        {
+            if *texture_generation == self.shape_texture_generation
+                && *instance_start + *instance_count == start
+            {
+                *instance_count += end - start;
+                return;
+            }
+        }
+        self.shape_commands.push(BatchShapeCommand::Instances {
+            instance_start: start,
+            instance_count: end - start,
+            bind_group: self.bind_group.clone(),
+            texture_generation: self.shape_texture_generation,
+        });
+    }
+
+    pub(crate) fn advance_shape_texture_generation(&mut self) {
+        self.shape_texture_generation = self.shape_texture_generation.wrapping_add(1);
+    }
+
     fn edge_template_hash(kind: EdgeTemplateKind, points: &[(f32, f32)]) -> u64 {
         let mut hash: u64 = match kind {
             EdgeTemplateKind::Polygon => 0x9e37_79b9_7f4a_7c15,
@@ -2905,6 +3257,9 @@ impl DrawBatch {
             texture_segments: self.texture_segments.clone(),
             instances: self.instances.clone(),
             instance_texture_segments: self.instance_texture_segments.clone(),
+            shape_commands: self.shape_commands.clone(),
+            shape_texture_generation: self.shape_texture_generation,
+            shape_mesh_end: self.shape_mesh_end,
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             sdf_feather: self.sdf_feather,
@@ -2935,8 +3290,10 @@ impl DrawBatch {
     /// **文字**：无法从裸 bind group 取出 view，会清空文字画笔贴图
     ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`set_texture`]。
     pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
+        self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.advance_shape_texture_generation();
         self.bind_group = bg;
         self.text_texture_view = None;
         self.texts.set_texture_state(None);
@@ -2963,8 +3320,10 @@ impl DrawBatch {
     ///
     /// 内部 shape 侧只存 `BindGroup`；文字侧另存 `TextureView` 供 glyphon base 绑定。
     pub fn set_texture(&mut self, texture: Option<&crate::texture::Texture>) {
+        self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.advance_shape_texture_generation();
         self.bind_group = texture.map(|t| t.bind_group.clone());
         self.text_texture_view = texture.map(|t| t.view.clone());
         self.texts.set_texture_state(self.text_texture_view.clone());
@@ -3028,6 +3387,7 @@ impl DrawBatch {
         let (c0, c1, c2) = composed.to_cols();
         let transform_index = self.register_transform(c0, c1, c2);
         self.cached_transform_index = saved_cache;
+        let instance_start = self.instances.len() as u32;
         self.instances.push(ShapeInstance {
             bounds,
             uv_bounds,
@@ -3040,15 +3400,15 @@ impl DrawBatch {
             transform_index,
             _padding: 0,
         });
+        self.record_instance_command(instance_start);
         self.note_sdf();
         true
     }
 
     /// Add an instanced SDF rectangle.
     ///
-    /// Instance shapes are rendered after ordinary shapes and before text in
-    /// this batch. Use separate child batches when exact interleaving matters.
     /// Geometry mode and custom materials fall back to the ordinary path.
+    /// Mixed instance and mesh calls retain their original order.
     pub fn instance_rectangle(
         &mut self,
         pos: Pos,
@@ -3056,7 +3416,8 @@ impl DrawBatch {
         h: f32,
         color: Option<crate::color::Color>,
     ) {
-        if !self.push_sdf_instance(pos, [0.0, 0.0, w, h], [0.0, 0.0, w, h], [w * 0.5, h * 0.5, w * 0.5, h * 0.5], 2, [0.0, 0.0], color) {
+        let feather = self.sdf_feather.unwrap_or(0.0);
+        if !self.push_sdf_instance(pos, [-feather, -feather, w + feather, h + feather], [0.0, 0.0, w, h], [w * 0.5, h * 0.5, w * 0.5, h * 0.5], 2, [0.0, 0.0], color) {
             self.rectangle(pos, w, h, color);
         }
     }
@@ -3068,6 +3429,9 @@ impl DrawBatch {
         r: f32,
         color: Option<crate::color::Color>,
     ) {
+        if r == 0.0 {
+            return;
+        }
         if !self.push_sdf_instance(pos, [-r, -r, r, r], [-r, -r, r, r], [0.0, 0.0, r, r], 1, [0.0, 0.0], color) {
             self.circle(pos, r, color);
         }
@@ -3081,6 +3445,9 @@ impl DrawBatch {
         ry: f32,
         color: Option<crate::color::Color>,
     ) {
+        if rx == 0.0 || ry == 0.0 {
+            return;
+        }
         if !self.push_sdf_instance(pos, [-rx, -ry, rx, ry], [-rx, -ry, rx, ry], [0.0, 0.0, rx, ry], 1, [0.0, 0.0], color) {
             self.ellipse(pos, rx, ry, color);
         }
@@ -3095,6 +3462,9 @@ impl DrawBatch {
         radius: f32,
         color: Option<crate::color::Color>,
     ) {
+        if w == 0.0 || h == 0.0 {
+            return;
+        }
         let feather = self.sdf_feather.unwrap_or(0.0);
         let r = radius.min(w * 0.5).min(h * 0.5);
         if !self.push_sdf_instance(
@@ -3120,6 +3490,21 @@ impl DrawBatch {
         thickness: f32,
         color: Option<crate::color::Color>,
     ) {
+        if thickness == 0.0 {
+            return;
+        }
+        if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 {
+            let saved = self.transform;
+            self.transform = Some(match saved {
+                Some(transform) => transform.then(&Transform::translation(x1, y1)),
+                None => Transform::translation(x1, y1),
+            });
+            self.invalidate_transform_cache();
+            self.instance_circle(Pos::ZERO, thickness * 0.5, color);
+            self.transform = saved;
+            self.invalidate_transform_cache();
+            return;
+        }
         let half = thickness * 0.5;
         let feather = self.sdf_feather.unwrap_or(0.0);
         let pad = half + feather;
@@ -3147,6 +3532,19 @@ impl DrawBatch {
         y3: f32,
         color: Option<crate::color::Color>,
     ) {
+        let abx = x2 - x1;
+        let aby = y2 - y1;
+        let bcx = x3 - x2;
+        let bcy = y3 - y2;
+        let cax = x1 - x3;
+        let cay = y1 - y3;
+        if abx * abx + aby * aby < 0.000001
+            || bcx * bcx + bcy * bcy < 0.000001
+            || cax * cax + cay * cay < 0.000001
+            || (abx * bcy - aby * bcx).abs() < 0.0001
+        {
+            return;
+        }
         let feather = self.sdf_feather.unwrap_or(0.0);
         if !self.push_sdf_instance(
             Pos::ZERO,
@@ -3170,6 +3568,9 @@ impl DrawBatch {
         end_angle: f32,
         color: Option<crate::color::Color>,
     ) {
+        if r == 0.0 || (end_angle - start_angle).abs() < 0.001 {
+            return;
+        }
         let feather = self.sdf_feather.unwrap_or(0.0);
         let extent = r + feather;
         if !self.push_sdf_instance(
@@ -3469,6 +3870,7 @@ impl DrawBatch {
         shape: &crate::shapes::Shape<'_>,
         opts: crate::shapes::ShapeOverride,
     ) {
+        self.record_pending_mesh_command();
         let saved_color = self.color;
         let saved_feather = self.sdf_feather;
         let saved_uv = self.uv;
@@ -3494,6 +3896,7 @@ impl DrawBatch {
         if let Some(bind_group) = opts.bind_group {
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
             self.bind_group = bind_group;
         }
 
@@ -3520,6 +3923,7 @@ impl DrawBatch {
         if texture_overridden {
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
         }
         self.bind_group = saved_bg;
         self.transform = saved_transform;
@@ -3626,7 +4030,7 @@ mod tests {
         b.set_position(10.0, 20.0);
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
         draw_circle(&mut b, Pos::new(0.0, 0.0), 3.0, Some(BLUE));
-        let idxs: Vec<u32> = b.vertices.iter().map(|v| v.transform_index).collect();
+        let idxs: Vec<u32> = b.instances.iter().map(|v| v.transform_index).collect();
         assert!(idxs.iter().all(|&i| i == idxs[0]));
         // 槽 0 = 单位阵 + 1 个平移
         assert_eq!(b.transform_table.len() / 12, 2);
@@ -3639,8 +4043,8 @@ mod tests {
         // 不同 Pos 应产生不同 transform entry
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
         draw_rectangle(&mut b, Pos::new(100.0, 0.0), 5.0, 5.0, Some(BLUE));
-        let i0 = b.vertices[0].transform_index;
-        let i1 = b.vertices[4].transform_index;
+        let i0 = b.instances[0].transform_index;
+        let i1 = b.instances[1].transform_index;
         assert_ne!(i0, i1);
         // 槽 0 = 单位阵 + 2 个不同平移（Pos(0,0) 复用槽 0）
         assert_eq!(b.transform_table.len() / 12, 2);
@@ -3658,7 +4062,7 @@ mod tests {
         assert_eq!(t0[5], 1.0);
         assert_eq!(t0[8], 0.0);
         assert_eq!(t0[9], 0.0);
-        assert_eq!(b.vertices[0].transform_index, 1);
+        assert_eq!(b.instances[0].transform_index, 1);
         let t1 = &b.transform_table[12..24];
         assert!((t1[8] - 100.0).abs() < 1e-4);
         assert!((t1[9] - 200.0).abs() < 1e-4);
@@ -3685,11 +4089,11 @@ mod tests {
         let mut b1 = DrawBatch::new();
         b1.sdf_feather = Some(1.0);
         draw_polygon(&mut b1, &pts, Some(BLUE));
-        let start_local = b1.vertices[0].sdf_params[0];
+        let start_local = b1.instances[0].sdf_params[0];
         assert_eq!(start_local, 0.0);
 
         let poly_base = edges0 as f32;
-        let mut patched = b1.vertices.clone();
+        let mut patched = b1.instances.clone();
         for v in &mut patched {
             if v.sdf_type == 6 || v.sdf_type == 7 {
                 v.sdf_params[0] += poly_base;
@@ -3890,6 +4294,107 @@ mod tests {
     }
 
     #[test]
+    fn shape_stats_separates_mesh_vertices_and_instances() {
+        let mut batch = DrawBatch::new();
+        // mesh 路径
+        batch.sdf_feather = None;
+        draw_circle(&mut batch, Pos::new(5.0, 5.0), 4.0, Some(RED));
+        let geo_stats = batch.shape_stats();
+        assert!(geo_stats.mesh_vertices > 0, "geo 路径应推送 mesh 顶点");
+        assert_eq!(geo_stats.instances, 0, "geo 路径不应有 instance");
+        assert_eq!(geo_stats.draw_commands, 1);
+
+        // instance 路径
+        let mut batch2 = DrawBatch::new();
+        batch2.sdf_feather = Some(1.0);
+        draw_rectangle(&mut batch2, Pos::ZERO, 8.0, 8.0, Some(RED));
+        draw_circle(&mut batch2, Pos::new(20.0, 0.0), 4.0, Some(BLUE));
+        let sdf_stats = batch2.shape_stats();
+        assert_eq!(sdf_stats.mesh_vertices, 0, "instance 路径不应推 mesh 顶点");
+        assert_eq!(sdf_stats.instances, 2);
+        assert_eq!(sdf_stats.draw_commands, 1);
+        // shape_vertex_count 仍是 4-顶点等价
+        assert_eq!(sdf_stats.instances * 4, batch2.shape_vertex_count());
+    }
+
+    #[test]
+    fn automatic_instances_merge_contiguous_commands() {
+        let mut batch = DrawBatch::new();
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(10.0, 0.0), 4.0, Some(BLUE));
+
+        assert_eq!(batch.instances.len(), 2);
+        assert_eq!(batch.shape_commands.len(), 1);
+        assert!(matches!(
+            batch.shape_commands[0],
+            BatchShapeCommand::Instances { instance_start: 0, instance_count: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn ordered_commands_preserve_instance_mesh_instance_order() {
+        let mut batch = DrawBatch::new();
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        batch.sdf_feather = None;
+        draw_rectangle(&mut batch, Pos::new(2.0, 2.0), 8.0, 8.0, Some(GREEN));
+        batch.sdf_feather = Some(1.0);
+        draw_circle(&mut batch, Pos::new(10.0, 0.0), 4.0, Some(BLUE));
+
+        assert_eq!(batch.shape_commands.len(), 3);
+        assert!(matches!(batch.shape_commands[0], BatchShapeCommand::Instances { .. }));
+        assert!(matches!(batch.shape_commands[1], BatchShapeCommand::Mesh { .. }));
+        assert!(matches!(batch.shape_commands[2], BatchShapeCommand::Instances { .. }));
+    }
+
+    #[test]
+    fn texture_generation_splits_instance_commands() {
+        let mut batch = DrawBatch::new();
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        batch.advance_shape_texture_generation();
+        draw_circle(&mut batch, Pos::new(10.0, 0.0), 4.0, Some(BLUE));
+
+        assert_eq!(batch.shape_commands.len(), 2);
+        assert!(matches!(batch.shape_commands[0], BatchShapeCommand::Instances { .. }));
+        assert!(matches!(batch.shape_commands[1], BatchShapeCommand::Instances { .. }));
+    }
+
+    #[test]
+    fn automatic_rectangle_bounds_include_feather() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = Some(2.0);
+        draw_rectangle(&mut batch, Pos::ZERO, 10.0, 20.0, Some(WHITE));
+
+        assert_eq!(batch.instances[0].bounds, [-2.0, -2.0, 12.0, 22.0]);
+        assert_eq!(batch.instances[0].uv_bounds, [0.0, 0.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn stale_commands_fall_back_after_public_indices_clear() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch.shape_commands_valid());
+
+        batch.indices.clear();
+        assert!(!batch.shape_commands_valid());
+    }
+
+    #[test]
+    fn clear_resets_and_rebuilds_ordered_commands() {
+        let mut batch = DrawBatch::new();
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        batch.sdf_feather = None;
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(BLUE));
+        assert_eq!(batch.shape_commands.len(), 2);
+
+        batch.clear();
+        assert!(batch.shape_commands.is_empty());
+        draw_circle(&mut batch, Pos::ZERO, 4.0, Some(GREEN));
+        assert_eq!(batch.shape_commands.len(), 1);
+        assert!(batch.shape_commands_valid());
+    }
+
+    #[test]
     fn walk_preorder_parent_before_children() {
         let mut parent = DrawBatch::new();
         draw_rectangle(&mut parent, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
@@ -3902,9 +4407,9 @@ mod tests {
         let mut flat = Vec::new();
         parent.walk_preorder(&mut flat);
         assert_eq!(flat.len(), 3);
-        assert_eq!(flat[0].vertices.len(), 4); // parent rect
-        assert_eq!(flat[1].vertices.len() > 0, true); // child circle
-        assert_eq!(flat[2].vertices.len(), 4); // child rect
+        assert_eq!(flat[0].instances.len(), 1); // parent rect
+        assert_eq!(flat[1].instances.len(), 1); // child circle
+        assert_eq!(flat[2].instances.len(), 1); // child rect
         assert!(parent.has_drawable_content());
     }
 
@@ -3929,7 +4434,7 @@ mod tests {
         child.sdf_feather = Some(1.0);
         child.inherit = InheritFromParent::TRANSFORM;
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
-        let idx = child.vertices[0].transform_index as usize;
+        let idx = child.instances[0].transform_index as usize;
         let base = idx * 12;
         // 继承前局部表为恒等
         assert_eq!(child.transform_table[base], 1.0);
@@ -4147,7 +4652,7 @@ mod tests {
         // --- root ---
         assert_eq!(root.texts.entries.len(), 1);
         let rti = root.texts.entries[0].transform_index();
-        let rvi = root.vertices[0].transform_index;
+        let rvi = root.instances[0].transform_index;
         assert_eq!(rti, rvi, "root text/shape index");
         let (_, _, _, _, rtx, rty) = mat6(&root.transform_table, rti);
         assert!((rtx - 230.0).abs() < 1e-3, "root tx={rtx}");
@@ -4157,7 +4662,7 @@ mod tests {
         let mid = &root.children[0];
         assert_eq!(mid.texts.entries.len(), 1);
         let mti = mid.texts.entries[0].transform_index();
-        let mvi = mid.vertices[0].transform_index;
+        let mvi = mid.instances[0].transform_index;
         assert_eq!(mti, mvi, "mid text/shape index");
         let (_, _, _, _, mtx, mty) = mat6(&mid.transform_table, mti);
         assert!(
@@ -4169,7 +4674,7 @@ mod tests {
         let leaf = &root.children[0].children[0];
         assert_eq!(leaf.texts.entries.len(), 1);
         let lti = leaf.texts.entries[0].transform_index();
-        let lvi = leaf.vertices[0].transform_index;
+        let lvi = leaf.instances[0].transform_index;
         assert_eq!(lti, lvi, "leaf text/shape index");
         let (_, _, _, _, ltx, lty) = mat6(&leaf.transform_table, lti);
         assert!(
@@ -4233,7 +4738,7 @@ mod tests {
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(RED));
         assert_eq!(
             b.texts.entries[0].transform_index(),
-            b.vertices[0].transform_index
+            b.instances[0].transform_index
         );
         let (_, _, _, _, tx, ty) = mat6(&b.transform_table, b.texts.entries[0].transform_index());
         assert!((tx - 12.0).abs() < 1e-4 && (ty - 34.0).abs() < 1e-4);

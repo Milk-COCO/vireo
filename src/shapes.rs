@@ -222,6 +222,14 @@ impl<'a> Shape<'a> {
 /// 覆盖项仅作用于本次，结束后恢复 batch 状态。
 /// 有 `position()` 的形状在 batch transform 中设置平移，其余保留 batch 当前变换。
 pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
+    batch.record_pending_mesh_command();
+    let effective_feather = opts.sdf_feather.unwrap_or(batch.sdf_feather);
+    if effective_feather.is_some() && batch.custom_material.is_none() {
+        batch.instance_shape(shape, opts);
+        return;
+    }
+
+    let index_start = batch.indices.len() as u32;
     let saved_color = batch.color;
     let saved_feather = batch.sdf_feather;
     let saved_uv = batch.uv;
@@ -258,13 +266,16 @@ pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride)
 
     if let Some(bg) = opts.bind_group {
         batch.add_texture_segment(batch.bind_group.clone());
+        batch.advance_shape_texture_generation();
         batch.bind_group = bg;
     }
 
     shape.append(batch, batch.color);
+    batch.record_mesh_command(index_start, batch.sdf_feather.is_none());
 
     if tex_overridden {
         batch.add_texture_segment(batch.bind_group.clone());
+        batch.advance_shape_texture_generation();
         batch.bind_group = saved_bg;
     }
     batch.transform = saved_xform;
@@ -277,7 +288,7 @@ pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride)
 /// 通过共享 unit quad + instance buffer 绘制 [`Shape`]。
 ///
 /// 默认 SDF 模式下，所有填充和描边变体使用实例路径；几何模式与自定义材质
-/// 自动回退到普通 mesh 路径。实例 shape 在 batch 内位于普通 shape 之后、文字之前。
+/// 自动回退到普通 mesh 路径。普通 [`draw_shape`] 会自动选择相同路径。
 pub fn draw_instance_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
     batch.instance_shape(shape, opts);
 }
@@ -1202,11 +1213,11 @@ mod tests {
         );
         assert_eq!(batch.sdf_feather, None);
         assert_eq!(batch.color, WHITE);
-        assert_eq!(batch.vertices[0].sdf_type, 1);
-        assert_eq!(batch.vertices[0].color, [RED.r, RED.g, RED.b, RED.a]);
+        assert_eq!(batch.instances[0].sdf_type, 1);
+        assert_eq!(batch.instances[0].color, [RED.r, RED.g, RED.b, RED.a]);
         // 覆盖后的 shape 与 batch 后续 draw 应使用不同 transform_index
         draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 1.0, 1.0, Some(BLUE));
-        let idx_override = batch.vertices[0].transform_index;
+        let idx_override = batch.instances[0].transform_index;
         let idx_restored = batch.vertices.last().unwrap().transform_index;
         assert_ne!(idx_override, idx_restored);
     }
@@ -1223,13 +1234,9 @@ mod tests {
             &Shape::Circle { pos: Pos::new(50.0, 60.0), r: 20.0 },
             ShapeOverride::from_color(Some(RED)),
         );
-        assert_eq!(a.vertices.len(), b.vertices.len());
-        assert_eq!(a.indices, b.indices);
-        for (va, vb) in a.vertices.iter().zip(b.vertices.iter()) {
-            assert_eq!(va.sdf_type, vb.sdf_type);
-            assert_eq!(va.sdf_type, 1);
-            assert_eq!(va.sdf_params, vb.sdf_params);
-        }
+        assert_eq!(a.instances.len(), b.instances.len());
+        assert_eq!(a.instances[0].sdf_type, 1);
+        assert_eq!(a.instances[0].sdf_params, b.instances[0].sdf_params);
     }
 
     #[test]
@@ -1253,8 +1260,8 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
         draw_circle(&mut batch, Pos::new(100.0, 100.0), 50.0, Some(RED));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 1);
     }
 
     #[test]
@@ -1269,8 +1276,7 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
         draw_circle(&mut batch, Pos::new(0.0, 0.0), 10.0, Some(RED));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
     }
 
     #[test]
@@ -1289,8 +1295,8 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
         draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 2.0, Some(WHITE));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 3);
     }
 
     #[test]
@@ -1298,6 +1304,13 @@ mod tests {
         let mut batch = test_batch();
         draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 0.0, Some(WHITE));
         assert!(batch.vertices.is_empty());
+    }
+
+    #[test]
+    fn line_zero_thickness_skipped_in_default_sdf_mode() {
+        let mut batch = DrawBatch::new();
+        draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 0.0, Some(WHITE));
+        assert!(batch.instances.is_empty());
     }
 
     #[test]
@@ -1324,8 +1337,8 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
         draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 30.0, 20.0, Some(BLUE));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 1);
     }
 
     #[test]
@@ -1352,8 +1365,8 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
         draw_rounded_rect(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, 10.0, Some(GREEN));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 2);
     }
 
     #[test]
@@ -1379,8 +1392,15 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
         draw_triangle(&mut batch, 0.0, 0.0, 100.0, 0.0, 50.0, 100.0, Some(RED));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 4);
+    }
+
+    #[test]
+    fn degenerate_triangle_skipped_in_default_sdf_mode() {
+        let mut batch = DrawBatch::new();
+        draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 20.0, 0.0, Some(RED));
+        assert!(batch.instances.is_empty());
     }
 
     #[test]
@@ -1401,8 +1421,8 @@ mod tests {
         batch.sdf_feather = Some(1.0);
         let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
         draw_polygon(&mut batch, &pts, Some(WHITE));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 6);
     }
 
     #[test]
@@ -1428,8 +1448,8 @@ mod tests {
         let mut batch = test_batch();
         batch.sdf_feather = Some(1.0);
         draw_arc(&mut batch, Pos::new(0.0, 0.0), 50.0, 0.0, std::f32::consts::PI, Some(RED));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 5);
     }
 
     #[test]
@@ -1440,6 +1460,14 @@ mod tests {
     }
 
     #[test]
+    fn arc_zero_radius_and_span_skipped_in_default_sdf_mode() {
+        let mut batch = DrawBatch::new();
+        draw_arc(&mut batch, Pos::ZERO, 0.0, 0.0, 1.0, Some(RED));
+        draw_arc(&mut batch, Pos::ZERO, 10.0, 1.0, 1.0, Some(RED));
+        assert!(batch.instances.is_empty());
+    }
+
+    #[test]
     fn multiple_shapes_in_one_batch() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);
@@ -1447,19 +1475,17 @@ mod tests {
         draw_circle(&mut batch, Pos::new(100.0, 100.0), 5.0, Some(BLUE));
         draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, Some(GREEN));
 
-        assert_eq!(batch.vertices.len(), 4 + 4 + 4);
-        assert_eq!(batch.indices.len(), 6 + 6 + 6);
+        assert_eq!(batch.instances.len(), 3);
+        assert!(batch.vertices.is_empty());
+        assert!(batch.indices.is_empty());
     }
 
     #[test]
     fn rect_default_mode_is_sdf() {
         let mut batch = DrawBatch::new();
         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, Some(GREEN));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
-        for v in &batch.vertices {
-            assert_eq!(v.sdf_type, 2);
-        }
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 2);
     }
 
     #[test]
@@ -1521,7 +1547,7 @@ mod tests {
         batch.sdf_feather = Some(1.0);
         let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
         draw_line_chain(&mut batch, &pts, 2.0, Some(WHITE));
-        assert_eq!(batch.vertices.len(), 4);
-        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.instances.len(), 1);
+        assert_eq!(batch.instances[0].sdf_type, 7);
     }
 }

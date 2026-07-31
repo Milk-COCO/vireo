@@ -41,6 +41,7 @@ pub mod prelude {
     pub use crate::context::Rect;
     pub use crate::context::RenderTarget;
     pub use crate::context::Renderer;
+    pub use crate::context::ShapeStats;
     pub use crate::context::Transform;
     pub use crate::context::UvRect;
     pub use crate::texture::Texture;

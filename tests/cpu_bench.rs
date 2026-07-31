@@ -206,8 +206,8 @@ fn bench_typical_frames() {
             }
         }
     });
-    println!("  SDF 2000 shapes:           {:.3} ms  ({} vtx, {} idx)",
-        t1, 2000 * 4, 2000 * 6);
+    println!("  SDF 2000 shapes:           {:.3} ms  ({} instances)",
+        t1, 2000);
 
     // Geo 500 shapes
     let (_, t2) = time_ms(|| {

@@ -25,14 +25,14 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     }
 
     let mut times = Vec::with_capacity(frames as usize);
-    let mut verts = 0usize;
+    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, instances: 0, draw_commands: 0 };
     for _ in 0..frames {
         let mut b = DrawBatch::new();
         let t = time_ms(|| {
             build(&mut b);
             canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
         });
-        verts = b.vertices.len();
+        stats = b.shape_stats();
         times.push(t);
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -42,8 +42,8 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     let p50 = times[times.len() / 2];
     let fps = 1000.0 / avg;
     println!(
-        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  vtx {}",
-        name, avg, p50, min, max, fps, verts
+        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  inst {:>6}  cmd {:>4}",
+        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.instances, stats.draw_commands
     );
 }
 
@@ -205,6 +205,58 @@ fn instanced_shape_and_stencil_paths() {
     child.instance_arc_outline(Pos::new(290.0, 76.0), 12.0, 0.0, std::f32::consts::PI, 2.0, Some(GREEN), 8);
     parent.push_child(child);
     canvas.draw(Some(BLACK), &[&parent]);
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn ordered_instance_mesh_instance_path() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 160, 120);
+
+    let mut batch = DrawBatch::new();
+    draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
+    batch.sdf_feather = None;
+    draw_triangle(
+        &mut batch,
+        20.0,
+        100.0,
+        80.0,
+        20.0,
+        140.0,
+        100.0,
+        Some(GREEN),
+    );
+    batch.sdf_feather = Some(1.0);
+    draw_circle(&mut batch, Pos::new(80.0, 60.0), 24.0, Some(BLUE));
+
+    canvas.draw(Some(BLACK), &[&batch]);
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn automatic_instance_custom_fallback_then_batch() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+"#;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 160, 120);
+    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipeline");
+
+    let mut first = DrawBatch::new();
+    draw_polygon(
+        &mut first,
+        &[(10.0, 10.0), (70.0, 10.0), (40.0, 70.0)],
+        Some(RED),
+    );
+    first.custom_material = Some(material);
+
+    let mut second = DrawBatch::new();
+    draw_rectangle(&mut second, Pos::new(80.0, 20.0), 60.0, 80.0, Some(BLUE));
+    canvas.draw(Some(BLACK), &[&first, &second]);
 }
 
 fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
