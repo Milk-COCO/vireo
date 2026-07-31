@@ -588,6 +588,12 @@ impl VireoWindow {
         );
     }
 
+    /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
+    /// `preserve_order=false` 重排合并后此值下降（如 bench 场景 3 混合 1000→2）。
+    pub fn last_draw_calls(&self) -> u32 {
+        self.shared_present.renderer.lock().unwrap().last_draw_calls()
+    }
+
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。
     /// 旧版：直接 acquire + present。
     /// 新版：删除 preheat（首帧 PSO 编译卡一次可接受，避免跨线程 surface 持有）。

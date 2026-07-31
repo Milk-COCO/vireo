@@ -80,7 +80,7 @@ fn main() {
              Total frames:{:>8}\n\
              Mesh V:      {:>8}\n\
              Instances:   {:>8}\n\
-             Commands:    {:>8}\n\
+             Draw calls:  {:>8}\n\
              Order:       {:>8}",
             name,
             app.fps,
@@ -91,7 +91,7 @@ fn main() {
             app.frame_count,
             stats.mesh_vertices,
             stats.instances,
-            stats.draw_commands,
+            win.last_draw_calls(),
             if preserve_order { "preserve" } else { "reorder" },
         );
         draw_text(

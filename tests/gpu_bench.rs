@@ -25,7 +25,8 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     }
 
     let mut times = Vec::with_capacity(frames as usize);
-    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, instances: 0, draw_commands: 0 };
+    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, instances: 0 };
+    let mut draw_calls: u32 = 0;
     for _ in 0..frames {
         let mut b = DrawBatch::new();
         let t = time_ms(|| {
@@ -33,6 +34,7 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
             canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
         });
         stats = b.shape_stats();
+        draw_calls = canvas.last_draw_calls();
         times.push(t);
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -42,8 +44,8 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     let p50 = times[times.len() / 2];
     let fps = 1000.0 / avg;
     println!(
-        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  inst {:>6}  cmd {:>4}",
-        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.instances, stats.draw_commands
+        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  inst {:>6}  drawCalls {:>4}",
+        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.instances, draw_calls
     );
 }
 
@@ -116,6 +118,23 @@ fn scene_full(b: &mut DrawBatch) {
     scene_transforms(b);
 }
 
+/// SDF + 几何混合 ×1000（交替）：`preserve_order=true` 时 1000 个 draw call，
+/// `false` 时排序合并为 2 个。
+fn scene_mixed(b: &mut DrawBatch) {
+    for i in 0..1000 {
+        let x = (i % 40) as f32 * 22.0 + 10.0;
+        let y = (i / 40) as f32 * 22.0 + 10.0;
+        b.set_position(x, y);
+        if i % 2 == 0 {
+            b.set_sdf_feather(Some(0.8));
+            draw_rounded_rect(b, Pos::new(0.0, 0.0), 18.0, 18.0, 4.0, Some(RED));
+        } else {
+            b.clear_sdf_feather();
+            draw_circle(b, Pos::new(9.0, 9.0), 8.0, Some(BLUE));
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn gpu_bench_scenes() {
@@ -131,6 +150,38 @@ fn gpu_bench_scenes() {
     measure_scene("Unique transforms x1000", &canvas, scene_transforms, FRAMES);
     measure_scene("Polygons x200", &canvas, scene_polygons, FRAMES);
     measure_scene("Full SDF+xform", &canvas, scene_full, FRAMES);
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn preserve_order_reduces_draw_calls() {
+    println!("\n=== preserve_order draw call 对比 (Mixed x1000) ===");
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    // 保序：1000 个 draw call
+    {
+        let mut b = DrawBatch::new();
+        scene_mixed(&mut b);
+        assert!(b.preserve_order, "默认应保序");
+        canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+        let preserved = canvas.last_draw_calls();
+        println!("  preserve_order=true  draw calls = {preserved}");
+        assert_eq!(preserved, 1000, "保序时混合场景应为 1000 个 draw call");
+    }
+
+    // 重排：合并为 2 个 draw call
+    {
+        let mut b = DrawBatch::new();
+        b.preserve_order = false;
+        scene_mixed(&mut b);
+        canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+        let reordered = canvas.last_draw_calls();
+        println!("  preserve_order=false draw calls = {reordered}");
+        assert_eq!(reordered, 2, "重排合并后混合场景应为 2 个 draw call");
+    }
 }
 
 #[test]

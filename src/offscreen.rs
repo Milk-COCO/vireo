@@ -52,6 +52,11 @@ impl OffscreenCanvas {
         target.draw(&self.renderer, clear_color, batches);
     }
 
+    /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
+    pub fn last_draw_calls(&self) -> u32 {
+        self.renderer.last_draw_calls()
+    }
+
     /// 获取纹理视图（用于贴到窗口等）
     pub fn view(&self) -> &wgpu::TextureView {
         &self.texture.view

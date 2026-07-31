@@ -21,20 +21,22 @@ pub struct Rect {
     pub h: f32,
 }
 
-/// CPU / GPU 真实数据分布（诊断用）。
+/// CPU 真实数据分布（诊断用）。
 ///
 /// - `mesh_vertices`：CPU 推入的 mesh 顶点数（仅 mesh 路径使用）
 /// - `instances`：instance 参数数（仅 instance 路径使用）
-/// - `draw_commands`：合并后的 draw command 数（`shape_commands.len()`）
 ///
 /// 注：GPU 端最终输出顶点数 ≠ 上述任一字段；
 /// instance 路径 GPU 输出 = `instances * 4`（每个 instance 1 个 unit quad）。
 /// 合并值见 [`DrawBatch::shape_vertex_count`].
+///
+/// **draw call 数不在本结构**：真实 draw call 由渲染器统计（
+/// [`crate::context::Renderer::last_draw_calls`]，经 [`crate::window::VireoWindow::last_draw_calls`]
+/// 获取），而非 batch 侧 `shape_commands.len()` 的估算值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeStats {
     pub mesh_vertices: usize,
     pub instances: usize,
-    pub draw_commands: usize,
 }
 
 impl Rect {
@@ -304,6 +306,9 @@ pub struct Renderer {
     scratch_last_dynamic_offsets: RefCell<Vec<u32>>,
     scratch_scissor_stack: RefCell<Vec<(u32, u32, u32, u32)>>,
     scratch_instances: RefCell<Vec<ShapeInstance>>,
+    /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
+    /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
+    last_draw_calls: std::cell::Cell<u32>,
 }
 
 impl Renderer {
@@ -369,9 +374,16 @@ impl Renderer {
             scratch_last_dynamic_offsets: RefCell::new(Vec::new()),
             scratch_scissor_stack: RefCell::new(Vec::new()),
             scratch_instances: RefCell::new(Vec::new()),
+            last_draw_calls: std::cell::Cell::new(0),
             logical_width,
             logical_height,
         }
+    }
+
+    /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数。
+    /// 由 [`Self::draw`] 在每帧统计；未 draw 时为 0。
+    pub fn last_draw_calls(&self) -> u32 {
+        self.last_draw_calls.get()
     }
 
     /// 更新抗锯齿设置。
@@ -514,6 +526,7 @@ impl Renderer {
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
+            self.last_draw_calls.set(0);
             let empty_encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("vireo empty encoder"),
             });
@@ -1244,6 +1257,7 @@ impl Renderer {
         // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
         let has_any_content = event_infos.iter().any(|e| e.shape.is_some() || !e.text.is_empty());
         // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
+        let mut shape_draw_calls: u32 = 0;
         if has_any_content || clear_color.is_some() {
             let msaa_view = self.msaa_view(self.gpu.surface_format);
             let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) = match &msaa_view {
@@ -1420,6 +1434,7 @@ impl Renderer {
                                         shape.base_vertex,
                                         0..1,
                                     );
+                                    shape_draw_calls += 1;
                                 }
                                 OrderedShapeSegment::Instances(segment) => {
                                     let instance_pipeline = self.gpu.ensure_instance_pipeline(
@@ -1454,6 +1469,7 @@ impl Renderer {
                                         segment.instance_start
                                             ..segment.instance_start + segment.instance_count,
                                     );
+                                    shape_draw_calls += 1;
                                     shapes_bound = false;
                                     last_geometry = None;
                                 }
@@ -1541,6 +1557,7 @@ impl Renderer {
                             shape.base_vertex,
                             0..1,
                         );
+                        shape_draw_calls += 1;
                     }
                     if !shape.instances.is_empty() {
                         let instance_pipeline = self.gpu.ensure_instance_pipeline(
@@ -1570,6 +1587,7 @@ impl Renderer {
                                 segment.instance_start
                                     ..segment.instance_start + segment.instance_count,
                             );
+                            shape_draw_calls += 1;
                         }
                         shapes_bound = false;
                         last_geometry = None;
@@ -1625,6 +1643,7 @@ impl Renderer {
             }
         }
 
+        self.last_draw_calls.set(shape_draw_calls);
         encoder.finish()
     }
 
@@ -2699,12 +2718,12 @@ impl DrawBatch {
         self.vertices.len() + self.instances.len() * 4
     }
 
-    /// 三段式诊断：CPU mesh 顶点数 / instance 参数数 / 绘制命令数。
+    /// 两段式诊断：CPU mesh 顶点数 / instance 参数数。
+    /// draw call 数见渲染器 [`Renderer::last_draw_calls`]。
     pub fn shape_stats(&self) -> ShapeStats {
         ShapeStats {
             mesh_vertices: self.vertices.len(),
             instances: self.instances.len(),
-            draw_commands: self.shape_commands.len(),
         }
     }
 
@@ -4451,7 +4470,7 @@ mod tests {
         let geo_stats = batch.shape_stats();
         assert!(geo_stats.mesh_vertices > 0, "geo 路径应推送 mesh 顶点");
         assert_eq!(geo_stats.instances, 0, "geo 路径不应有 instance");
-        assert_eq!(geo_stats.draw_commands, 1);
+        assert_eq!(geo_stats.mesh_vertices, batch.shape_vertex_count());
 
         // instance 路径
         let mut batch2 = DrawBatch::new();
@@ -4461,7 +4480,6 @@ mod tests {
         let sdf_stats = batch2.shape_stats();
         assert_eq!(sdf_stats.mesh_vertices, 0, "instance 路径不应推 mesh 顶点");
         assert_eq!(sdf_stats.instances, 2);
-        assert_eq!(sdf_stats.draw_commands, 1);
         // shape_vertex_count 仍是 4-顶点等价
         assert_eq!(sdf_stats.instances * 4, batch2.shape_vertex_count());
     }
