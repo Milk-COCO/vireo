@@ -293,6 +293,16 @@ fn bench_outline_and_chain() {
         b.sdf_feather = Some(1.0);
         draw_rounded_rect_outline(&mut b, Pos::new(0.0, 0.0), 30.0, 20.0, 6.0, 2.0, Some(WHITE), 8);
     });
+
+    bench("instance polygon repeated x1000", 500, || {
+        let mut b = DrawBatch::new();
+        let pts = [(0., 0.), (12., 0.), (16., 8.), (8., 16.), (0., 8.)];
+        for i in 0..1000 {
+            b.set_position((i % 50) as f32 * 18.0, (i / 50) as f32 * 18.0);
+            b.instance_polygon(&pts, Some(BLUE));
+        }
+        std::hint::black_box(b.polygon_edges.len());
+    });
 }
 
 #[test]

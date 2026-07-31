@@ -1899,6 +1899,20 @@ struct InstanceTextureSegment {
     bind_group: Option<wgpu::BindGroup>,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum EdgeTemplateKind {
+    Polygon,
+    LineChain,
+}
+
+#[derive(Clone)]
+struct EdgeTemplate {
+    kind: EdgeTemplateKind,
+    point_bits: Box<[u32]>,
+    edges: Box<[f32]>,
+    start: u32,
+}
+
 #[derive(Clone)]
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
@@ -1923,6 +1937,7 @@ pub struct DrawBatch {
     /// 多边形的边数据：每条边 4 个 f32 (nx, ny, dot(vi,n), 0)
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
+    edge_templates: FxHashMap<u64, Vec<EdgeTemplate>>,
     /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
     ///
     /// **槽 0 固定为单位矩阵**（`new`/`clear` 时写入，形状从 1 起占用）：
@@ -1990,6 +2005,7 @@ impl DrawBatch {
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
+            edge_templates: FxHashMap::default(),
             transform_table,
             transform_map,
             has_sdf: false,
@@ -2021,6 +2037,7 @@ impl DrawBatch {
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
         self.polygon_edges.clear();
+        self.edge_templates.clear();
         seed_identity_transform_table(&mut self.transform_table, &mut self.transform_map);
         self.has_sdf = false;
         self.cached_transform_index = None;
@@ -2747,6 +2764,137 @@ impl DrawBatch {
         self.vertices.push(Vertex::new_uv_xform(x, y, u, v, color, idx));
     }
 
+    fn edge_template_hash(kind: EdgeTemplateKind, points: &[(f32, f32)]) -> u64 {
+        let mut hash: u64 = match kind {
+            EdgeTemplateKind::Polygon => 0x9e37_79b9_7f4a_7c15,
+            EdgeTemplateKind::LineChain => 0xc2b2_ae3d_27d4_eb4f,
+        };
+        for &(x, y) in points {
+            for bits in [x.to_bits(), y.to_bits()] {
+                hash ^= bits as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+                hash ^= hash >> 32;
+            }
+        }
+        hash ^ points.len() as u64
+    }
+
+    fn edge_template_matches(template: &EdgeTemplate, kind: EdgeTemplateKind, points: &[(f32, f32)]) -> bool {
+        template.kind == kind
+            && template.point_bits.len() == points.len() * 2
+            && template
+                .point_bits
+                .chunks_exact(2)
+                .zip(points)
+                .all(|(bits, &(x, y))| bits[0] == x.to_bits() && bits[1] == y.to_bits())
+    }
+
+    fn reuse_edge_template(
+        &mut self,
+        hash: u64,
+        kind: EdgeTemplateKind,
+        points: &[(f32, f32)],
+    ) -> Option<(u32, u32)> {
+        let (template_index, start, count, valid) = {
+            let templates = self.edge_templates.get(&hash)?;
+            let (index, template) = templates
+                .iter()
+                .enumerate()
+                .find(|(_, template)| Self::edge_template_matches(template, kind, points))?;
+            let count = (template.edges.len() / 4) as u32;
+            let range = template.start as usize * 4..(template.start + count) as usize * 4;
+            (
+                index,
+                template.start,
+                count,
+                self.polygon_edges.get(range) == Some(template.edges.as_ref()),
+            )
+        };
+        if valid {
+            return Some((start, count));
+        }
+
+        let edges = self.edge_templates[&hash][template_index].edges.clone();
+        let start = (self.polygon_edges.len() / 4) as u32;
+        self.polygon_edges.extend_from_slice(&edges);
+        self.edge_templates.get_mut(&hash).unwrap()[template_index].start = start;
+        Some((start, count))
+    }
+
+    fn insert_edge_template(
+        &mut self,
+        hash: u64,
+        kind: EdgeTemplateKind,
+        points: &[(f32, f32)],
+        edges: Vec<f32>,
+    ) -> (u32, u32) {
+        let start = (self.polygon_edges.len() / 4) as u32;
+        let count = (edges.len() / 4) as u32;
+        self.polygon_edges.extend_from_slice(&edges);
+        let point_bits = points
+            .iter()
+            .flat_map(|&(x, y)| [x.to_bits(), y.to_bits()])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        self.edge_templates.entry(hash).or_default().push(EdgeTemplate {
+            kind,
+            point_bits,
+            edges: edges.into_boxed_slice(),
+            start,
+        });
+        (start, count)
+    }
+
+    fn intern_polygon_edges(&mut self, points: &[(f32, f32)]) -> Option<(u32, u32)> {
+        let hash = Self::edge_template_hash(EdgeTemplateKind::Polygon, points);
+        if let Some(range) = self.reuse_edge_template(hash, EdgeTemplateKind::Polygon, points) {
+            return Some(range);
+        }
+        let mut edges = Vec::with_capacity(points.len() * 4);
+        for i in 0..points.len() {
+            let a = points[i];
+            let b = points[(i + 1) % points.len()];
+            let dx = b.0 - a.0;
+            let dy = b.1 - a.1;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 0.001 {
+                continue;
+            }
+            let nx = -dy / len;
+            let ny = dx / len;
+            edges.extend_from_slice(&[nx, ny, nx * a.0 + ny * a.1, 0.0]);
+        }
+        if edges.len() < 12 {
+            return None;
+        }
+        Some(self.insert_edge_template(hash, EdgeTemplateKind::Polygon, points, edges))
+    }
+
+    fn intern_line_chain_edges(&mut self, points: &[(f32, f32)]) -> Option<(u32, u32)> {
+        let hash = Self::edge_template_hash(EdgeTemplateKind::LineChain, points);
+        if let Some(range) = self.reuse_edge_template(hash, EdgeTemplateKind::LineChain, points) {
+            return Some(range);
+        }
+        let closed = points.len() > 2
+            && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
+            && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
+        let vertex_count = if closed { points.len() - 1 } else { points.len() };
+        let segment_count = if closed { vertex_count } else { vertex_count.saturating_sub(1) };
+        let mut edges = Vec::with_capacity(segment_count * 4);
+        for i in 0..segment_count {
+            let a = points[i];
+            let b = points[if i + 1 < vertex_count { i + 1 } else { 0 }];
+            if (b.0 - a.0).abs() + (b.1 - a.1).abs() < 0.001 {
+                continue;
+            }
+            edges.extend_from_slice(&[a.0, a.1, b.0, b.1]);
+        }
+        if edges.is_empty() {
+            return None;
+        }
+        Some(self.insert_edge_template(hash, EdgeTemplateKind::LineChain, points, edges))
+    }
+
     /// 克隆 batch（vertices、indices、texts 完全复制，rasterizer 清空）
     pub fn clone_batch(&self) -> Self {
         Self {
@@ -2763,6 +2911,7 @@ impl DrawBatch {
             color: self.color,
             uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
+            edge_templates: self.edge_templates.clone(),
             transform_table: self.transform_table.clone(),
             transform_map: self.transform_map.clone(),
             has_sdf: self.has_sdf,
@@ -3053,39 +3202,25 @@ impl DrawBatch {
         let mut min_y = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
-        let mut edges = Vec::with_capacity(points.len() * 4);
-        for i in 0..points.len() {
-            let a = points[i];
-            let b = points[(i + 1) % points.len()];
+        for &a in points {
             min_x = min_x.min(a.0);
             min_y = min_y.min(a.1);
             max_x = max_x.max(a.0);
             max_y = max_y.max(a.1);
-            let dx = b.0 - a.0;
-            let dy = b.1 - a.1;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 0.001 { continue; }
-            let nx = -dy / len;
-            let ny = dx / len;
-            edges.extend_from_slice(&[nx, ny, nx * a.0 + ny * a.1, 0.0]);
         }
-        let count = (edges.len() / 4) as u32;
-        if count < 3 {
+        let Some((start, count)) = self.intern_polygon_edges(points) else {
             return;
-        }
-        let start = (self.polygon_edges.len() / 4) as f32;
-        self.polygon_edges.extend_from_slice(&edges);
+        };
         let feather = self.sdf_feather.unwrap();
         if !self.push_sdf_instance(
             Pos::ZERO,
             [min_x - feather, min_y - feather, max_x + feather, max_y + feather],
             [min_x, min_y, max_x, max_y],
-            [start, count as f32, 0.0, 0.0],
+            [start as f32, count as f32, 0.0, 0.0],
             6,
             [0.0, 0.0],
             color,
         ) {
-            self.polygon_edges.truncate(start as usize * 4);
             self.polygon(points, color);
         }
     }
@@ -3108,40 +3243,28 @@ impl DrawBatch {
             && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
             && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
         let vertex_count = if closed { points.len() - 1 } else { points.len() };
-        let segment_count = if closed { vertex_count } else { vertex_count - 1 };
         let mut min_x = f32::INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
-        let mut edges = Vec::with_capacity(segment_count * 4);
         for i in 0..vertex_count {
             min_x = min_x.min(points[i].0);
             min_y = min_y.min(points[i].1);
             max_x = max_x.max(points[i].0);
             max_y = max_y.max(points[i].1);
         }
-        for i in 0..segment_count {
-            let a = points[i];
-            let b = points[if i + 1 < vertex_count { i + 1 } else { 0 }];
-            if (b.0 - a.0).abs() + (b.1 - a.1).abs() < 0.001 { continue; }
-            edges.extend_from_slice(&[a.0, a.1, b.0, b.1]);
-        }
-        let count = (edges.len() / 4) as u32;
-        if count == 0 { return; }
-        let start = (self.polygon_edges.len() / 4) as f32;
-        self.polygon_edges.extend_from_slice(&edges);
+        let Some((start, count)) = self.intern_line_chain_edges(points) else { return; };
         let half = thickness * 0.5;
         let feather = self.sdf_feather.unwrap();
         if !self.push_sdf_instance(
             Pos::ZERO,
             [min_x - half - feather, min_y - half - feather, max_x + half + feather, max_y + half + feather],
             [min_x - half, min_y - half, max_x + half, max_y + half],
-            [start, count as f32, half, 0.0],
+            [start as f32, count as f32, half, 0.0],
             7,
             [0.0, 0.0],
             color,
         ) {
-            self.polygon_edges.truncate(start as usize * 4);
             self.line_chain(points, thickness, color);
         }
     }
@@ -3684,6 +3807,57 @@ mod tests {
         assert_eq!(batch.instances[4].sdf_type, 6);
         assert_eq!(batch.instances[5].sdf_type, 7);
         assert!(!batch.polygon_edges.is_empty());
+    }
+
+    #[test]
+    fn repeated_instance_polygon_reuses_edges() {
+        let points = [(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)];
+        let mut batch = DrawBatch::new();
+        batch.instance_polygon(&points, Some(WHITE));
+        batch.instance_polygon(&points, Some(WHITE));
+
+        assert_eq!(batch.polygon_edges.len(), points.len() * 4);
+        assert_eq!(batch.instances[0].sdf_params[0], 0.0);
+        assert_eq!(batch.instances[1].sdf_params[0], 0.0);
+    }
+
+    #[test]
+    fn polygon_and_line_chain_edges_use_distinct_templates() {
+        let points = [(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)];
+        let mut batch = DrawBatch::new();
+        batch.instance_polygon(&points, Some(WHITE));
+        batch.instance_line_chain(&points, 2.0, Some(WHITE));
+
+        assert_eq!(batch.instances[0].sdf_params[0], 0.0);
+        assert_eq!(batch.instances[1].sdf_params[0], 3.0);
+        assert_eq!(batch.polygon_edges.len(), (3 + 2) * 4);
+    }
+
+    #[test]
+    fn repeated_instance_line_chain_reuses_edges() {
+        let points = [(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)];
+        let mut batch = DrawBatch::new();
+        batch.instance_line_chain(&points, 2.0, Some(WHITE));
+        batch.instance_line_chain(&points, 4.0, Some(RED));
+
+        assert_eq!(batch.polygon_edges.len(), 2 * 4);
+        assert_eq!(batch.instances[0].sdf_params[0], 0.0);
+        assert_eq!(batch.instances[1].sdf_params[0], 0.0);
+        assert_eq!(batch.instances[1].sdf_params[2], 2.0);
+    }
+
+    #[test]
+    fn edge_template_recovers_after_public_edge_buffer_mutation() {
+        let points = [(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)];
+        let mut batch = DrawBatch::new();
+        batch.instance_polygon(&points, Some(WHITE));
+        let expected = batch.polygon_edges.clone();
+
+        batch.polygon_edges.clear();
+        batch.instance_polygon(&points, Some(WHITE));
+
+        assert_eq!(batch.polygon_edges, expected);
+        assert_eq!(batch.instances[1].sdf_params[0], 0.0);
     }
 
     #[test]
