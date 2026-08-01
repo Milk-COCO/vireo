@@ -911,6 +911,8 @@ impl Renderer {
         // 合并数据 + 为 Pop 事件添加全屏顶点
         let mut v_offset = vertex_count;
         let mut idx_offset = ndx_accum;
+        // merge_geo 排序后每实例的 texture segment 索引（None = 本轮未启用重排）
+        let mut geo_merge_sorted_seg: Option<Vec<u32>> = None;
         for (ei, event) in events.iter().enumerate() {
             match event {
                 DrawEvent::Batch(batch) => {
@@ -930,32 +932,43 @@ impl Renderer {
                     let geo_instance_start = combined_geo_instances.len() as u32;
                     let use_geo = !batch.geo_instances.is_empty() && batch.custom_material.is_none();
                     // merge_geo_templates：把同模板实例重排到连续范围以便合并 draw call。
-                    // 仅在单一 bind group（无 texture segment）时可用——重排会破坏
-                    // texture segment 到实例范围的绑定关系。
-                    let merge_geo = use_geo
-                        && batch.merge_geo_templates
-                        && batch.geo_instance_texture_segments.is_empty();
+                    // 按（texture segment, 模板）分组重排，多纹理 batch 也可合并——
+                    // 每个 texture segment 内部按模板聚拢，段间仍保持各自 bind group。
+                    let merge_geo = use_geo && batch.merge_geo_templates;
                     if use_geo {
                         let transform_base = batch_transform_bases[info_idx];
                         let gv_base = batch_geo_vertex_base[info_idx];
                         let gi_base = batch_geo_index_base[info_idx];
                         if merge_geo {
-                            let mut perm: Vec<u32> = (0..batch.geo_instances.len() as u32).collect();
-                            perm.sort_by_key(|&i| {
+                            // 每实例原始下标 → texture segment 索引（超出段尾 → segments.len()，走 batch.bind_group）
+                            let seg_count = batch.geo_instance_texture_segments.len() as u32;
+                            let mut per_inst_seg: Vec<u32> = vec![seg_count; batch.geo_instances.len()];
+                            for (si, seg) in batch.geo_instance_texture_segments.iter().enumerate() {
+                                for k in seg.instance_start..seg.instance_start + seg.instance_count {
+                                    per_inst_seg[k as usize] = si as u32;
+                                }
+                            }
+                            let mut order: Vec<u32> = (0..batch.geo_instances.len() as u32).collect();
+                            order.sort_by_key(|&i| {
                                 let g = &batch.geo_instances[i as usize];
                                 (
+                                    per_inst_seg[i as usize],
                                     g.template_vertex_start,
                                     g.template_index_start,
                                     g.index_count,
                                 )
                             });
-                            combined_geo_instances.extend(perm.into_iter().map(|i| {
+                            let mut sorted_seg: Vec<u32> = Vec::with_capacity(order.len());
+                            combined_geo_instances.extend(order.into_iter().map(|i| {
+                                sorted_seg.push(per_inst_seg[i as usize]);
                                 let mut instance = batch.geo_instances[i as usize];
                                 instance.template_vertex_start += gv_base;
                                 instance.template_index_start += gi_base;
                                 instance.transform_index += transform_base;
                                 instance
                             }));
+                            // 保存排序后每实例的 segment 索引，供 geo_segments 分组合并时取 bind group
+                            geo_merge_sorted_seg = Some(sorted_seg);
                         } else {
                             combined_geo_instances.extend(batch.geo_instances.iter().copied().map(|mut instance| {
                                 instance.template_vertex_start += gv_base;
@@ -996,9 +1009,9 @@ impl Renderer {
                     let geo_segments = if !use_geo {
                         Vec::new()
                     } else if merge_geo {
-                        // 实例已按模板重排：扫描排序后的连续范围，每模板一段。
+                        // 实例已按（texture segment, 模板）重排：扫描排序后的连续范围，
+                        // 每个 (segment, 模板) 组合一段，段用对应 segment 的 bind group。
                         let total = batch.geo_instances.len() as u32;
-                        let bg = resolve_bg(batch.bind_group.clone());
                         let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
                             let tpl = combined_geo_instances[start as usize];
                             GeoInstanceSegment {
@@ -1010,10 +1023,20 @@ impl Renderer {
                                 bind_group: bg,
                             }
                         };
+                        let seg_count = batch.geo_instance_texture_segments.len() as u32;
+                        let sorted_seg = geo_merge_sorted_seg.as_deref().unwrap_or(&[]);
+                        let resolve_seg_bg = |si: u32| -> wgpu::BindGroup {
+                            if si < seg_count {
+                                resolve_bg(batch.geo_instance_texture_segments[si as usize].bind_group.clone())
+                            } else {
+                                resolve_bg(batch.bind_group.clone())
+                            }
+                        };
                         let mut segments: Vec<GeoInstanceSegment> = Vec::new();
                         let mut i = 0u32;
                         while i < total {
                             let tpl_start = geo_instance_start + i;
+                            let seg_i = sorted_seg.get(i as usize).copied().unwrap_or(seg_count);
                             let key = (
                                 combined_geo_instances[tpl_start as usize].template_vertex_start,
                                 combined_geo_instances[tpl_start as usize].template_index_start,
@@ -1021,13 +1044,16 @@ impl Renderer {
                             );
                             let mut j = i + 1;
                             while j < total {
+                                let seg_j = sorted_seg.get(j as usize).copied().unwrap_or(seg_count);
                                 let g = &combined_geo_instances[(geo_instance_start + j) as usize];
-                                if (g.template_vertex_start, g.template_index_start, g.index_count) != key {
+                                if seg_j != seg_i
+                                    || (g.template_vertex_start, g.template_index_start, g.index_count) != key
+                                {
                                     break;
                                 }
                                 j += 1;
                             }
-                            segments.push(mk_seg(tpl_start, j - i, bg.clone()));
+                            segments.push(mk_seg(tpl_start, j - i, resolve_seg_bg(seg_i)));
                             i = j;
                         }
                         segments

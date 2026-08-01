@@ -253,6 +253,49 @@ fn merge_geo_templates_groups_interleaved_instances() {
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
+fn merge_geo_templates_with_texture_segments() {
+    println!("\n=== merge_geo_templates + 多纹理段 ===");
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let tex_blue = Texture::from_rgba(16, 16, &solid_rgba(16, 16, 40, 80, 220), &gpu);
+
+    // 交替绘制圆/圆角矩形 + 每 50 个切一次纹理 → 同模板实例同时被不同纹理段分割
+    let mut b = DrawBatch::new();
+    b.clear_sdf_feather();
+    for i in 0..200 {
+        let x = (i % 20) as f32 * 44.0 + 10.0;
+        let y = (i / 20) as f32 * 44.0 + 10.0;
+        b.set_position(x, y);
+        if i == 50 {
+            b.set_texture(Some(&tex_blue));
+        }
+        if i % 2 == 0 {
+            draw_circle(&mut b, Pos::new(16.0, 16.0), 14.0, Some(RED));
+        } else {
+            draw_rounded_rect(&mut b, Pos::ZERO, 28.0, 28.0, 6.0, Some(BLUE));
+        }
+    }
+    let stats = b.shape_stats();
+    assert_eq!(stats.geo_instances, 200);
+    assert_eq!(stats.geo_templates, 2, "2 种形状各 1 个模板");
+
+    // 不开 merge：实例各一段 → 200 draw calls
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+    let normal_calls = canvas.last_draw_calls();
+    println!("  多纹理交替 draw calls = {normal_calls}");
+    assert_eq!(normal_calls, 200, "默认每实例一段");
+
+    // 开 merge：按 (texture segment, 模板) 分组 → 2 段纹理 × 2 模板 = 4 draw calls
+    b.merge_geo_templates = true;
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+    let merged_calls = canvas.last_draw_calls();
+    println!("  merge + 多纹理 draw calls = {merged_calls}");
+    assert_eq!(merged_calls, 4, "每 (纹理段, 模板) 组合 1 个 draw call");
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
 fn preserve_order_reduces_draw_calls() {
     println!("\n=== preserve_order draw call 对比 (Mixed x1000) ===");
 
