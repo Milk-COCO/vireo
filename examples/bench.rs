@@ -79,7 +79,10 @@ fn main() {
              Max:         {:>8.3} ms\n\
              Total frames:{:>8}\n\
              Mesh V:      {:>8}\n\
-             Instances:   {:>8}\n\
+             SDF Inst:    {:>8}\n\
+             Geo Inst:    {:>8}\n\
+             Geo Tmpl:    {:>8}\n\
+             Geo Tmpl V:  {:>8}\n\
              Draw calls:  {:>8}\n\
              Order:       {:>8}",
             name,
@@ -90,7 +93,10 @@ fn main() {
             max_frame,
             app.frame_count,
             stats.mesh_vertices,
-            stats.instances,
+            stats.sdf_instances,
+            stats.geo_instances,
+            stats.geo_templates,
+            stats.geo_template_vertices,
             win.last_draw_calls(),
             if preserve_order { "preserve" } else { "reorder" },
         );

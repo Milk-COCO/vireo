@@ -25,7 +25,7 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     }
 
     let mut times = Vec::with_capacity(frames as usize);
-    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, instances: 0 };
+    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, sdf_instances: 0, geo_instances: 0, geo_templates: 0, geo_template_vertices: 0 };
     let mut draw_calls: u32 = 0;
     for _ in 0..frames {
         let mut b = DrawBatch::new();
@@ -44,8 +44,8 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     let p50 = times[times.len() / 2];
     let fps = 1000.0 / avg;
     println!(
-        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  inst {:>6}  drawCalls {:>4}",
-        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.instances, draw_calls
+        "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  sdfInst {:>6}  geoInst {:>6}  geoTmpl {:>4}  geoTmplV {:>6}  drawCalls {:>4}",
+        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.sdf_instances, stats.geo_instances, stats.geo_templates, stats.geo_template_vertices, draw_calls
     );
 }
 
@@ -150,6 +150,61 @@ fn gpu_bench_scenes() {
     measure_scene("Unique transforms x1000", &canvas, scene_transforms, FRAMES);
     measure_scene("Polygons x200", &canvas, scene_polygons, FRAMES);
     measure_scene("Full SDF+xform", &canvas, scene_full, FRAMES);
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn geo_instance_template_dedup_and_draw_calls() {
+    println!("\n=== geo-instance 模板去重 + draw call (同参数几何 ×1000) ===");
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    let mut b = DrawBatch::new();
+    b.clear_sdf_feather();
+    for i in 0..1000 {
+        let x = (i % 40) as f32 * 22.0 + 10.0;
+        let y = (i / 40) as f32 * 22.0 + 10.0;
+        b.set_position(x, y);
+        draw_circle(&mut b, Pos::new(8.0, 8.0), 7.0, Some(RED));
+    }
+    let stats = b.shape_stats();
+    assert_eq!(stats.geo_instances, 1000, "同参数圆应为 1000 个 geo instance");
+    assert_eq!(stats.geo_templates, 1, "同参数圆应共享 1 个模板");
+    assert!(
+        b.shape_vertex_count() < 1000 * 258,
+        "模板应复用：shape_vertex_count = {}",
+        b.shape_vertex_count()
+    );
+
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  geo-instance x1000 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 1, "同参数几何实例应合并为 1 个 draw call");
+
+    // 不同参数 → 各自模板；同模板连续绘制时命令合并
+    let mut c = DrawBatch::new();
+    c.clear_sdf_feather();
+    for i in 0..50 {
+        let x = (i % 25) as f32 * 36.0 + 10.0;
+        let y = (i / 25) as f32 * 36.0 + 10.0;
+        c.set_position(x, y);
+        draw_circle(&mut c, Pos::new(8.0, 8.0), 8.0, Some(RED));
+    }
+    for i in 0..50 {
+        let x = (i % 25) as f32 * 36.0 + 20.0;
+        let y = (i / 25) as f32 * 36.0 + 20.0;
+        c.set_position(x, y);
+        draw_rounded_rect(&mut c, Pos::ZERO, 20.0, 16.0, 4.0, Some(BLUE));
+    }
+    let cstats = c.shape_stats();
+    assert_eq!(cstats.geo_instances, 100, "两种形状各 50 实例");
+    assert_eq!(cstats.geo_templates, 2, "两种形状应各 1 个模板");
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&c]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  2 模板各 50 连续 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 2, "同模板连续段应各自合并为 1 个 draw call");
 }
 
 #[test]

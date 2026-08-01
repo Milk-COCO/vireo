@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
-use crate::gpu::{GpuContext, ShapeInstance};
+use crate::gpu::{GpuContext, GeoInstance, GeoVertex, ShapeInstance};
 use crate::gpu::MaterialTarget;
 use crate::material::Material;
 use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
@@ -24,10 +24,16 @@ pub struct Rect {
 /// CPU 真实数据分布（诊断用）。
 ///
 /// - `mesh_vertices`：CPU 推入的 mesh 顶点数（仅 mesh 路径使用）
-/// - `instances`：instance 参数数（仅 instance 路径使用）
+/// - `sdf_instances`：SDF instance 参数数（SDF 实例路径）
+/// - `geo_instances`：几何模板实例参数数（几何模板实例路径，含重复引用）
+/// - `geo_templates`：几何模板**条数**（去重后，`geo_templates.len()`）；
+///   同参数形状共享同一模板，反映模板复用后的实际几何种类数
+/// - `geo_template_vertices`：几何模板顶点总量（模板共享后的实际顶点量；
+///   各 geo 实例引用其中一段，通常远小于各实例展开顶点数之和）
 ///
 /// 注：GPU 端最终输出顶点数 ≠ 上述任一字段；
-/// instance 路径 GPU 输出 = `instances * 4`（每个 instance 1 个 unit quad）。
+/// instance 路径 GPU 输出 = `sdf_instances * 4`（每个 instance 1 个 unit quad）；
+/// geo instance 路径 GPU 输出 = `sum(geo_instances[i].template_vertex_count)`。
 /// 合并值见 [`DrawBatch::shape_vertex_count`].
 ///
 /// **draw call 数不在本结构**：真实 draw call 由渲染器统计（
@@ -36,7 +42,10 @@ pub struct Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeStats {
     pub mesh_vertices: usize,
-    pub instances: usize,
+    pub sdf_instances: usize,
+    pub geo_instances: usize,
+    pub geo_templates: usize,
+    pub geo_template_vertices: usize,
 }
 
 impl Rect {
@@ -117,6 +126,25 @@ struct InstanceSegment {
     bind_group: wgpu::BindGroup,
 }
 
+struct GeoInstanceSegment {
+    geo_instance_start: u32,
+    geo_instance_count: u32,
+    template_vertex_start: u32,
+    template_index_start: u32,
+    index_count: u32,
+    bind_group: wgpu::BindGroup,
+}
+
+/// 几何模板：batch 内 `geo_template_vertices` / `geo_template_indices` 的一段。
+/// 模板数据与 color/transform 无关，可被多个 `GeoInstance` 共享。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GeoTemplate {
+    vertex_start: u32,
+    index_start: u32,
+    index_count: u32,
+    vertex_count: u32,
+}
+
 enum OrderedShapeSegment {
     Mesh {
         ndx_start: u32,
@@ -125,10 +153,11 @@ enum OrderedShapeSegment {
         geometry: bool,
     },
     Instances(InstanceSegment),
+    GeoInstances(GeoInstanceSegment),
 }
 
 impl OrderedShapeSegment {
-    /// 排序键：`(0 = mesh, 1 = instances, geometry, bind group 身份)`。
+    /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, geometry/bg)`。
     /// 同类且同 bind group 的段会被排到一起以便合并。
     #[inline]
     fn sort_key(&self) -> (u8, u8, u64) {
@@ -137,11 +166,12 @@ impl OrderedShapeSegment {
                 (0, *geometry as u8, bind_group_id(bind_group))
             }
             OrderedShapeSegment::Instances(s) => (1, 0, bind_group_id(&s.bind_group)),
+            OrderedShapeSegment::GeoInstances(s) => (2, 0, bind_group_id(&s.bind_group)),
         }
     }
 
     /// 尝试把 `self`（前段）与 `other`（后段）合并为一段。
-    /// 仅当 pipeline 状态相同（bind group / geometry 一致）且范围连续时可合并，
+    /// 仅当 pipeline 状态相同（bind group / geometry / 模板）且范围连续时可合并，
     /// 否则返回 `None`。不连续时合并会误画两段之间的内容，必须拒绝。
     fn try_merge(&self, other: &Self) -> Option<Self> {
         match (self, other) {
@@ -182,6 +212,29 @@ impl OrderedShapeSegment {
                     bind_group: s.bind_group.clone(),
                 }))
             }
+            (
+                OrderedShapeSegment::GeoInstances(s),
+                OrderedShapeSegment::GeoInstances(s2),
+            ) => {
+                let merged = merge_decision(
+                    s.bind_group == s2.bind_group
+                        && s.template_vertex_start == s2.template_vertex_start
+                        && s.template_index_start == s2.template_index_start
+                        && s.index_count == s2.index_count,
+                    s.geo_instance_start,
+                    s.geo_instance_count,
+                    s2.geo_instance_start,
+                    s2.geo_instance_count,
+                )?;
+                Some(OrderedShapeSegment::GeoInstances(GeoInstanceSegment {
+                    geo_instance_start: merged.0,
+                    geo_instance_count: merged.1,
+                    template_vertex_start: s.template_vertex_start,
+                    template_index_start: s.template_index_start,
+                    index_count: s.index_count,
+                    bind_group: s.bind_group.clone(),
+                }))
+            }
             _ => None,
         }
     }
@@ -217,6 +270,7 @@ struct ShapeInfo {
     segments: Vec<ShapeSegment>,
     geometry: bool,
     instances: Vec<InstanceSegment>,
+    geo_instances: Vec<GeoInstanceSegment>,
     ordered: Vec<OrderedShapeSegment>,
 }
 
@@ -278,6 +332,12 @@ pub struct Renderer {
     index_cap: RefCell<u64>,
     instance_buf: RefCell<Option<wgpu::Buffer>>,
     instance_cap: RefCell<u64>,
+    geo_instance_buf: RefCell<Option<wgpu::Buffer>>,
+    geo_instance_cap: RefCell<u64>,
+    geo_template_vertex_buf: RefCell<Option<wgpu::Buffer>>,
+    geo_template_vertex_cap: RefCell<u64>,
+    geo_template_index_buf: RefCell<Option<wgpu::Buffer>>,
+    geo_template_index_cap: RefCell<u64>,
     physical_width: u32,
     physical_height: u32,
     scale: f32,
@@ -303,9 +363,14 @@ pub struct Renderer {
     scratch_ref_stack: RefCell<Vec<u32>>,
     scratch_batch_transform_bases: RefCell<Vec<u32>>,
     scratch_batch_poly_base: RefCell<Vec<u32>>,
+    scratch_batch_geo_vertex_base: RefCell<Vec<u32>>,
+    scratch_batch_geo_index_base: RefCell<Vec<u32>>,
     scratch_last_dynamic_offsets: RefCell<Vec<u32>>,
     scratch_scissor_stack: RefCell<Vec<(u32, u32, u32, u32)>>,
     scratch_instances: RefCell<Vec<ShapeInstance>>,
+    scratch_geo_instances: RefCell<Vec<GeoInstance>>,
+    scratch_geo_vertices: RefCell<Vec<GeoVertex>>,
+    scratch_geo_indices: RefCell<Vec<u32>>,
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
     /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
     last_draw_calls: std::cell::Cell<u32>,
@@ -350,6 +415,12 @@ impl Renderer {
             index_cap: RefCell::new(0),
             instance_buf: RefCell::new(None),
             instance_cap: RefCell::new(0),
+            geo_instance_buf: RefCell::new(None),
+            geo_instance_cap: RefCell::new(0),
+            geo_template_vertex_buf: RefCell::new(None),
+            geo_template_vertex_cap: RefCell::new(0),
+            geo_template_index_buf: RefCell::new(None),
+            geo_template_index_cap: RefCell::new(0),
             physical_width,
             physical_height,
             scale,
@@ -371,9 +442,14 @@ impl Renderer {
             scratch_ref_stack: RefCell::new(Vec::new()),
             scratch_batch_transform_bases: RefCell::new(Vec::new()),
             scratch_batch_poly_base: RefCell::new(Vec::new()),
+            scratch_batch_geo_vertex_base: RefCell::new(Vec::new()),
+            scratch_batch_geo_index_base: RefCell::new(Vec::new()),
             scratch_last_dynamic_offsets: RefCell::new(Vec::new()),
             scratch_scissor_stack: RefCell::new(Vec::new()),
             scratch_instances: RefCell::new(Vec::new()),
+            scratch_geo_instances: RefCell::new(Vec::new()),
+            scratch_geo_vertices: RefCell::new(Vec::new()),
+            scratch_geo_indices: RefCell::new(Vec::new()),
             last_draw_calls: std::cell::Cell::new(0),
             logical_width,
             logical_height,
@@ -523,7 +599,7 @@ impl Renderer {
         }
 
         let has_content = clear_color.is_some()
-            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.texts.entries.is_empty()));
+            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
             self.last_draw_calls.set(0);
@@ -579,7 +655,7 @@ impl Renderer {
             content_level: u32,
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
-            let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
+            let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.geo_instances.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
             if batch.clips_children && (has_geom || batch.scissor.is_some()) {
                 // Push: Test content_level → Inc；ref_stack 存抬升后绝对值供 Pop
@@ -631,7 +707,7 @@ impl Renderer {
                     let use_scissor = batch.uses_scissor_path(has_own_area);
                     let (stencil_op, stencil_ref) = if use_scissor {
                         let has_draw =
-                            !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.texts.entries.is_empty();
+                            !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.geo_instances.is_empty() || !batch.texts.entries.is_empty();
                         if content_level > 0 && batch.inherit.clipped && has_draw {
                             (2u32, content_level) // Test 祖先，不 Push
                         } else {
@@ -743,6 +819,15 @@ impl Renderer {
         let mut pop_screen_verts: u32 = 0; // 全屏 Pop 顶点数
         let mut pop_screen_idx: u32 = 0;
 
+        let mut combined_geo_vertices = self.scratch_geo_vertices.borrow_mut();
+        let mut combined_geo_indices = self.scratch_geo_indices.borrow_mut();
+        combined_geo_vertices.clear();
+        combined_geo_indices.clear();
+        let mut batch_geo_vertex_base = self.scratch_batch_geo_vertex_base.borrow_mut();
+        let mut batch_geo_index_base = self.scratch_batch_geo_index_base.borrow_mut();
+        batch_geo_vertex_base.clear();
+        batch_geo_index_base.clear();
+
         for (ei, event) in events.iter().enumerate() {
             if let DrawEvent::Batch(batch) = event {
                 let _e = &mut event_infos[ei];
@@ -757,16 +842,24 @@ impl Renderer {
                     total_vcount += batch.instances.len() as u32 * 4;
                     total_icount += batch.instances.len() as u32 * 6;
                 }
+                batch_geo_vertex_base.push(combined_geo_vertices.len() as u32);
+                batch_geo_index_base.push(combined_geo_indices.len() as u32);
+                combined_geo_vertices.extend_from_slice(&batch.geo_template_vertices);
+                combined_geo_indices.extend_from_slice(&batch.geo_template_indices);
             } else if let DrawEvent::StencilPop = event {
                 // Pop 事件：添加全屏四边形（2 三角，6 索引）
                 pop_screen_verts += 4;
                 pop_screen_idx += 6;
                 batch_transform_bases.push(0);
                 batch_poly_base.push(poly_offset);
+                batch_geo_vertex_base.push(0);
+                batch_geo_index_base.push(0);
             } else if let DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop = event {
                 // Scissor 事件不需要 transform/poly，但保留索引对齐
                 batch_transform_bases.push(0);
                 batch_poly_base.push(poly_offset);
+                batch_geo_vertex_base.push(0);
+                batch_geo_index_base.push(0);
             } else if let DrawEvent::AreaOp { op, .. } = event {
                 // Area 事件：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
                 if let Some(geom) = op.geom() {
@@ -788,6 +881,8 @@ impl Renderer {
                     batch_transform_bases.push(0);
                     batch_poly_base.push(poly_offset);
                 }
+                batch_geo_vertex_base.push(0);
+                batch_geo_index_base.push(0);
             }
         }
 
@@ -798,9 +893,11 @@ impl Renderer {
         let mut combined_vdata = self.scratch_vdata.borrow_mut();
         let mut combined_idata = self.scratch_idata.borrow_mut();
         let mut combined_instances = self.scratch_instances.borrow_mut();
+        let mut combined_geo_instances = self.scratch_geo_instances.borrow_mut();
         combined_vdata.clear();
         combined_idata.clear();
         combined_instances.clear();
+        combined_geo_instances.clear();
         let cap_v = total_vbytes as usize;
         let cap_i = total_ibytes as usize;
         if combined_vdata.capacity() < cap_v {
@@ -826,6 +923,19 @@ impl Renderer {
                             if instance.sdf_type == 6 || instance.sdf_type == 7 {
                                 instance.sdf_params[0] += batch_poly_base[info_idx] as f32;
                             }
+                            instance
+                        }));
+                    }
+                    let geo_instance_start = combined_geo_instances.len() as u32;
+                    let use_geo = !batch.geo_instances.is_empty() && batch.custom_material.is_none();
+                    if use_geo {
+                        let transform_base = batch_transform_bases[info_idx];
+                        let gv_base = batch_geo_vertex_base[info_idx];
+                        let gi_base = batch_geo_index_base[info_idx];
+                        combined_geo_instances.extend(batch.geo_instances.iter().copied().map(|mut instance| {
+                            instance.template_vertex_start += gv_base;
+                            instance.template_index_start += gi_base;
+                            instance.transform_index += transform_base;
                             instance
                         }));
                     }
@@ -857,7 +967,38 @@ impl Renderer {
                         }
                         segments
                     };
-                    let shape = if !batch.vertices.is_empty() || !batch.instances.is_empty() {
+                    let geo_segments = if !use_geo {
+                        Vec::new()
+                    } else {
+                        let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
+                            let tpl = combined_geo_instances[start as usize];
+                            GeoInstanceSegment {
+                                geo_instance_start: start,
+                                geo_instance_count: count,
+                                template_vertex_start: tpl.template_vertex_start,
+                                template_index_start: tpl.template_index_start,
+                                index_count: tpl.index_count,
+                                bind_group: bg,
+                            }
+                        };
+                        if batch.geo_instance_texture_segments.is_empty() {
+                            vec![mk_seg(geo_instance_start, batch.geo_instances.len() as u32, resolve_bg(batch.bind_group.clone()))]
+                        } else {
+                            let mut segments: Vec<GeoInstanceSegment> = batch.geo_instance_texture_segments.iter().map(|segment| {
+                                mk_seg(geo_instance_start + segment.instance_start, segment.instance_count, resolve_bg(segment.bind_group.clone()))
+                            }).collect();
+                            let last_end = segments.last().map_or(geo_instance_start, |s| s.geo_instance_start + s.geo_instance_count);
+                            let total_end = geo_instance_start + batch.geo_instances.len() as u32;
+                            if last_end < total_end {
+                                segments.push(mk_seg(last_end, total_end - last_end, resolve_bg(batch.bind_group.clone())));
+                            }
+                            segments
+                        }
+                    };
+                    let shape = if !batch.vertices.is_empty()
+                        || !batch.instances.is_empty()
+                        || !batch.geo_instances.is_empty()
+                    {
                         let transform_base = batch_transform_bases[info_idx];
                         let poly_base = batch_poly_base[info_idx] as f32;
                         let needs_patch = !batch.polygon_edges.is_empty() || transform_base > 0;
@@ -941,6 +1082,7 @@ impl Renderer {
                             segments: segs,
                             geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                             instances: instance_segments,
+                            geo_instances: geo_segments,
                             ordered: if batch.shape_commands.is_empty() || !batch.shape_commands_valid() {
                                 Vec::new()
                             } else {
@@ -969,6 +1111,19 @@ impl Renderer {
                                                     bind_group: resolve_bg(bind_group.clone()),
                                                     geometry: false,
                                                 });
+                                            }
+                                        }
+                                        BatchShapeCommand::GeoInstances { geo_instance_start: local_start, geo_instance_count, bind_group, .. } => {
+                                            if use_geo {
+                                                let tpl = combined_geo_instances[(geo_instance_start + *local_start) as usize];
+                                                ordered.push(OrderedShapeSegment::GeoInstances(GeoInstanceSegment {
+                                                    geo_instance_start: geo_instance_start + *local_start,
+                                                    geo_instance_count: *geo_instance_count,
+                                                    template_vertex_start: tpl.template_vertex_start,
+                                                    template_index_start: tpl.template_index_start,
+                                                    index_count: tpl.index_count,
+                                                    bind_group: resolve_bg(bind_group.clone()),
+                                                }));
                                             }
                                         }
                                     }
@@ -1006,12 +1161,13 @@ impl Renderer {
                             + if use_instances { 0 } else { batch.instances.len() as u32 * 4 };
                         idx_offset += mesh_index_count;
                         Some(info)
-                    } else if !instance_segments.is_empty() {
+                    } else if !instance_segments.is_empty() || !geo_segments.is_empty() {
                         Some(ShapeInfo {
                             base_vertex: 0,
                             segments: Vec::new(),
                             geometry: false,
                             instances: instance_segments,
+                            geo_instances: geo_segments,
                             ordered: Vec::new(),
                         })
                     } else {
@@ -1044,6 +1200,7 @@ impl Renderer {
                         segments: segs,
                         geometry: true,
                         instances: Vec::new(),
+                        geo_instances: Vec::new(),
                         ordered: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
@@ -1085,6 +1242,7 @@ impl Renderer {
                             segments: segs,
                             geometry: !geom.has_sdf && geom.sdf_feather.is_none(),
                             instances: Vec::new(),
+                            geo_instances: Vec::new(),
                             ordered: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
@@ -1113,6 +1271,7 @@ impl Renderer {
                             segments: segs,
                             geometry: true,
                             instances: Vec::new(),
+                            geo_instances: Vec::new(),
                             ordered: Vec::new(),
                         };
                         v_offset += 4;
@@ -1142,6 +1301,28 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&combined_instances),
             );
+        }
+
+        // ---- 上传几何模板顶点/索引 ----
+        if !combined_geo_vertices.is_empty() {
+            let size = (combined_geo_vertices.len() * size_of::<GeoVertex>()) as u64;
+            self.ensure_geo_template_vertex_buffer(size);
+            let buf = self.geo_template_vertex_buf.borrow();
+            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_vertices));
+        }
+        if !combined_geo_indices.is_empty() {
+            let size = (combined_geo_indices.len() * 4) as u64;
+            self.ensure_geo_template_index_buffer(size);
+            let buf = self.geo_template_index_buf.borrow();
+            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_indices));
+        }
+
+        // ---- 上传几何实例 ----
+        if !combined_geo_instances.is_empty() {
+            let size = (combined_geo_instances.len() * size_of::<GeoInstance>()) as u64;
+            self.ensure_geo_instance_buffer(size);
+            let buf = self.geo_instance_buf.borrow();
+            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_instances));
         }
 
         // ---- 上传多边形边数据 ----
@@ -1299,6 +1480,9 @@ impl Renderer {
             let vbuf = self.vertex_buf.borrow();
             let ibuf = self.index_buf.borrow();
             let instance_buf = self.instance_buf.borrow();
+            let geo_template_vbuf = self.geo_template_vertex_buf.borrow();
+            let geo_template_ibuf = self.geo_template_index_buf.borrow();
+            let geo_instance_buf = self.geo_instance_buf.borrow();
             let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
             let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
@@ -1473,6 +1657,44 @@ impl Renderer {
                                     shapes_bound = false;
                                     last_geometry = None;
                                 }
+                                OrderedShapeSegment::GeoInstances(segment) => {
+                                    let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
+                                        self.sample_count,
+                                        self.alpha_to_coverage,
+                                        self.ssaa,
+                                        uses_stencil,
+                                        pipe_op,
+                                    );
+                                    pass.set_pipeline(&geo_pipeline);
+                                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                    pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    pass.set_bind_group(2, engine_bg, &[]);
+                                    pass.set_vertex_buffer(
+                                        0,
+                                        geo_template_vbuf.as_ref().unwrap().slice(..),
+                                    );
+                                    pass.set_vertex_buffer(
+                                        1,
+                                        geo_instance_buf.as_ref().unwrap().slice(..),
+                                    );
+                                    pass.set_index_buffer(
+                                        geo_template_ibuf.as_ref().unwrap().slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                    if uses_stencil {
+                                        pass.set_stencil_reference(info.stencil_ref);
+                                    }
+                                    pass.draw_indexed(
+                                        segment.template_index_start
+                                            ..segment.template_index_start + segment.index_count,
+                                        segment.template_vertex_start as i32,
+                                        segment.geo_instance_start
+                                            ..segment.geo_instance_start + segment.geo_instance_count,
+                                    );
+                                    shape_draw_calls += 1;
+                                    shapes_bound = false;
+                                    last_geometry = None;
+                                }
                             }
                         }
                     } else {
@@ -1586,6 +1808,40 @@ impl Renderer {
                                 0,
                                 segment.instance_start
                                     ..segment.instance_start + segment.instance_count,
+                            );
+                            shape_draw_calls += 1;
+                        }
+                        shapes_bound = false;
+                        last_geometry = None;
+                    }
+                    if !shape.geo_instances.is_empty() {
+                        let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
+                            self.sample_count,
+                            self.alpha_to_coverage,
+                            self.ssaa,
+                            uses_stencil,
+                            pipe_op,
+                        );
+                        pass.set_pipeline(&geo_pipeline);
+                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
+                        pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
+                        pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
+                        pass.set_index_buffer(
+                            geo_template_ibuf.as_ref().unwrap().slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        if uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        for segment in &shape.geo_instances {
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.draw_indexed(
+                                segment.template_index_start
+                                    ..segment.template_index_start + segment.index_count,
+                                segment.template_vertex_start as i32,
+                                segment.geo_instance_start
+                                    ..segment.geo_instance_start + segment.geo_instance_count,
                             );
                             shape_draw_calls += 1;
                         }
@@ -1711,6 +1967,51 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *self.instance_buf.borrow_mut() = Some(buffer);
+        *cap = new_cap;
+    }
+
+    fn ensure_geo_instance_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let mut cap = self.geo_instance_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo geo instance buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.geo_instance_buf.borrow_mut() = Some(buffer);
+        *cap = new_cap;
+    }
+
+    fn ensure_geo_template_vertex_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let mut cap = self.geo_template_vertex_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo geo template vertex buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.geo_template_vertex_buf.borrow_mut() = Some(buffer);
+        *cap = new_cap;
+    }
+
+    fn ensure_geo_template_index_buffer(&self, size: u64) {
+        if size == 0 { return; }
+        let mut cap = self.geo_template_index_cap.borrow_mut();
+        if *cap >= size { return; }
+        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo geo template index buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.geo_template_index_buf.borrow_mut() = Some(buffer);
         *cap = new_cap;
     }
 
@@ -2231,6 +2532,15 @@ enum BatchShapeCommand {
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
     },
+    GeoInstances {
+        geo_instance_start: u32,
+        geo_instance_count: u32,
+        template_vertex_start: u32,
+        template_index_start: u32,
+        index_count: u32,
+        bind_group: Option<wgpu::BindGroup>,
+        texture_generation: u32,
+    },
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2257,6 +2567,12 @@ pub struct DrawBatch {
     texture_segments: Vec<TextureSegment>,
     pub(crate) instances: Vec<ShapeInstance>,
     instance_texture_segments: Vec<InstanceTextureSegment>,
+    pub(crate) geo_instances: Vec<GeoInstance>,
+    geo_instance_texture_segments: Vec<InstanceTextureSegment>,
+    pub(crate) geo_templates: Vec<GeoTemplate>,
+    pub(crate) geo_template_vertices: Vec<GeoVertex>,
+    pub(crate) geo_template_indices: Vec<u32>,
+    geo_template_map: FxHashMap<u64, u32>,
     shape_commands: Vec<BatchShapeCommand>,
     shape_texture_generation: u32,
     shape_mesh_end: u32,
@@ -2349,6 +2665,12 @@ impl DrawBatch {
             texture_segments: Vec::with_capacity(2),
             instances: Vec::with_capacity(32),
             instance_texture_segments: Vec::with_capacity(2),
+            geo_instances: Vec::with_capacity(32),
+            geo_instance_texture_segments: Vec::with_capacity(2),
+            geo_templates: Vec::with_capacity(8),
+            geo_template_vertices: Vec::with_capacity(64),
+            geo_template_indices: Vec::with_capacity(96),
+            geo_template_map: FxHashMap::default(),
             shape_commands: Vec::with_capacity(8),
             shape_texture_generation: 0,
             shape_mesh_end: 0,
@@ -2385,6 +2707,12 @@ impl DrawBatch {
         self.texture_segments.clear();
         self.instances.clear();
         self.instance_texture_segments.clear();
+        self.geo_instances.clear();
+        self.geo_instance_texture_segments.clear();
+        self.geo_templates.clear();
+        self.geo_template_vertices.clear();
+        self.geo_template_indices.clear();
+        self.geo_template_map.clear();
         self.shape_commands.clear();
         self.shape_texture_generation = 0;
         self.shape_mesh_end = 0;
@@ -2410,7 +2738,10 @@ impl DrawBatch {
         self.preserve_order = true;
     }
     pub fn to_area(&self) -> Area {
-        if (self.vertices.is_empty() || self.indices.is_empty()) && self.instances.is_empty() {
+        if (self.vertices.is_empty() || self.indices.is_empty())
+            && self.instances.is_empty()
+            && self.geo_instances.is_empty()
+        {
             return Area::Empty;
         }
         let mut vertices = self.vertices.clone();
@@ -2438,6 +2769,33 @@ impl DrawBatch {
                 vertices.push(vertex);
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        for instance in &self.geo_instances {
+            if let Some(template) = self
+                .geo_templates
+                .iter()
+                .find(|t| t.vertex_start == instance.template_vertex_start)
+            {
+                let base = vertices.len() as u32;
+                let tvs = template.vertex_start as usize;
+                let color = crate::color::Color::new(
+                    instance.color[0], instance.color[1], instance.color[2], instance.color[3],
+                );
+                for gv in &self.geo_template_vertices[tvs..tvs + template.vertex_count as usize] {
+                    vertices.push(Vertex::new_uv_xform(
+                        gv.position[0],
+                        gv.position[1],
+                        gv.uv[0],
+                        gv.uv[1],
+                        color,
+                        instance.transform_index,
+                    ));
+                }
+                let tis = template.index_start as usize;
+                for &idx in &self.geo_template_indices[tis..tis + template.index_count as usize] {
+                    indices.push(base + (idx - template.vertex_start));
+                }
+            }
         }
         Area::geom(AreaGeom {
             vertices,
@@ -2508,6 +2866,20 @@ impl DrawBatch {
                 expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
             }
         }
+        for instance in &self.geo_instances {
+            if let Some(template) = self
+                .geo_templates
+                .iter()
+                .find(|t| t.vertex_start == instance.template_vertex_start)
+            {
+                any = true;
+                let tvs = template.vertex_start as usize;
+                for gv in &self.geo_template_vertices[tvs..tvs + template.vertex_count as usize] {
+                    let (wx, wy) = Self::world_xy(&self.transform_table, instance.transform_index, gv.position[0], gv.position[1]);
+                    expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+                }
+            }
+        }
         // 文字：逻辑 pos + 近似行高/宽（未 shape 前保守估计，避免纯文字被误裁）
         for entry in &self.texts.entries {
             any = true;
@@ -2559,10 +2931,14 @@ impl DrawBatch {
     /// 检测 batch 自身是否只含一个**几何**轴对齐矩形（4 顶点 + 无旋转）。
     /// SDF 四顶点 AABB 不走 scissor（圆/圆角等须 stencil）。
     /// 世界位置来自顶点 `transform_index`（非画笔）。
+    /// 同时支持 geo-instance 模板路径（`sdf_feather=None` 时 4v/6i 矩形模板）。
     fn auto_scissor(&self) -> Option<Rect> {
         // SDF 填充也是 4v/6i 外接框 → 禁止 auto-scissor，否则圆裁成方
         if self.has_sdf || self.sdf_feather.is_some() {
             return None;
+        }
+        if !self.geo_instances.is_empty() {
+            return self.auto_scissor_geo();
         }
         if self.vertices.len() != 4 || self.indices.len() != 6 {
             return None;
@@ -2593,6 +2969,55 @@ impl DrawBatch {
         let w_min_y = worlds.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
         let w_max_y = worlds.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
         // 四角应对应轴对齐 AABB 的四个角
+        let corners = [
+            (w_min_x, w_min_y),
+            (w_max_x, w_min_y),
+            (w_max_x, w_max_y),
+            (w_min_x, w_max_y),
+        ];
+        let mut found = [false; 4];
+        for &(wx, wy) in &worlds {
+            let matched = corners.iter().position(|&(cx, cy)| {
+                (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4
+            });
+            match matched {
+                Some(i) => found[i] = true,
+                None => return None,
+            }
+        }
+        if !found.iter().all(|&x| x) {
+            return None;
+        }
+        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
+    }
+
+    /// geo-instance 模板路径的 auto-scissor：单个实例 + 4v/6i 矩形模板 + 无旋转。
+    fn auto_scissor_geo(&self) -> Option<Rect> {
+        if self.geo_instances.len() != 1 {
+            return None;
+        }
+        let instance = &self.geo_instances[0];
+        let template = self
+            .geo_templates
+            .iter()
+            .find(|t| t.vertex_start == instance.template_vertex_start)?;
+        if template.vertex_count != 4 || template.index_count != 6 {
+            return None;
+        }
+        let tvs = template.vertex_start as usize;
+        let ti = instance.transform_index;
+        let (c0, c1, _c2) = Self::table_cols_at(&self.transform_table, ti);
+        if c1[0].abs() > 1e-6 || c0[1].abs() > 1e-6 {
+            return None;
+        }
+        let mut worlds: [(f32, f32); 4] = [(0.0, 0.0); 4];
+        for (i, gv) in self.geo_template_vertices[tvs..tvs + 4].iter().enumerate() {
+            worlds[i] = Self::world_xy(&self.transform_table, ti, gv.position[0], gv.position[1]);
+        }
+        let w_min_x = worlds.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let w_max_x = worlds.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let w_min_y = worlds.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let w_max_y = worlds.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
         let corners = [
             (w_min_x, w_min_y),
             (w_max_x, w_min_y),
@@ -2700,30 +3125,46 @@ impl DrawBatch {
     pub fn has_drawable_content(&self) -> bool {
         !self.vertices.is_empty()
             || !self.instances.is_empty()
+            || !self.geo_instances.is_empty()
             || !self.texts.entries.is_empty()
             || self.children.iter().any(Self::has_drawable_content)
     }
 
     /// 当前 batch 的等效 shape 顶点数（GPU 端最终输出），用于诊断和统计。
     ///
-    /// = `mesh_vertices + instances * 4`
+    /// = `mesh_vertices + instances * 4 + Σ geo 模板顶点数`
     ///
     /// - **mesh path**：每个 shape 推送 4 顶点 unit quad（CPU 端）。
     /// - **instance path**：CPU 端只推送 1 个 `ShapeInstance`（约 80 字节），
     ///   GPU 渲染时用 1 个共享 quad × N instances = `N * 4` 顶点。
+    /// - **geo-instance path**：CPU 端只推送 1 个 `GeoInstance` + 共享模板顶点，
+    ///   每个实例渲染模板的全部顶点；模板顶点数按实例重复计数。
     ///
     /// 不包含子 batch 与文字。如果想看 CPU 端实际推送量，调用
     /// [`Self::shape_stats`]。
     pub fn shape_vertex_count(&self) -> usize {
-        self.vertices.len() + self.instances.len() * 4
+        let mut count = self.vertices.len() + self.instances.len() * 4;
+        for instance in &self.geo_instances {
+            if let Some(template) = self
+                .geo_templates
+                .iter()
+                .find(|t| t.vertex_start == instance.template_vertex_start)
+            {
+                count += template.vertex_count as usize;
+            }
+        }
+        count
     }
 
-    /// 两段式诊断：CPU mesh 顶点数 / instance 参数数。
+    /// 两段式诊断：CPU mesh 顶点数 / instance 参数数 / geo-instance 参数数。
     /// draw call 数见渲染器 [`Renderer::last_draw_calls`]。
     pub fn shape_stats(&self) -> ShapeStats {
         ShapeStats {
             mesh_vertices: self.vertices.len(),
-            instances: self.instances.len(),
+            sdf_instances: self.instances.len(),
+            geo_instances: self.geo_instances.len(),
+            geo_templates: self.geo_templates.len(),
+            geo_template_vertices: self.geo_template_vertices.len(),
         }
     }
 
@@ -3248,6 +3689,19 @@ impl DrawBatch {
             BatchShapeCommand::Instances { instance_start, instance_count, .. } => {
                 instance_start.saturating_add(*instance_count) <= self.instances.len() as u32
             }
+            BatchShapeCommand::GeoInstances { geo_instance_start, geo_instance_count, .. } => {
+                if geo_instance_start.saturating_add(*geo_instance_count) > self.geo_instances.len() as u32 {
+                    return false;
+                }
+                // 校验引用的模板索引仍在 geo_template_indices 内
+                self.geo_instances[*geo_instance_start as usize
+                    ..(geo_instance_start + geo_instance_count) as usize]
+                    .iter()
+                    .all(|g| {
+                        let s = g.template_index_start as usize;
+                        s + g.index_count as usize <= self.geo_template_indices.len()
+                    })
+            }
         })
     }
 
@@ -3274,6 +3728,120 @@ impl DrawBatch {
         self.shape_commands.push(BatchShapeCommand::Instances {
             instance_start: start,
             instance_count: end - start,
+            bind_group: self.bind_group.clone(),
+            texture_generation: self.shape_texture_generation,
+        });
+    }
+
+    /// 几何模板去重：key 命中返回已存模板，否则追加并登记。
+    /// 返回模板（顶点/索引在 batch 模板表内的偏移 + 数量）。
+    pub(crate) fn ensure_geo_template(
+        &mut self,
+        key: u64,
+        vertices: Vec<GeoVertex>,
+        indices: Vec<u32>,
+    ) -> GeoTemplate {
+        if let Some(&index) = self.geo_template_map.get(&key) {
+            return self.geo_templates[index as usize];
+        }
+        let vertex_start = self.geo_template_vertices.len() as u32;
+        let index_start = self.geo_template_indices.len() as u32;
+        let index_count = indices.len() as u32;
+        let vertex_count = vertices.len() as u32;
+        self.geo_template_vertices.extend_from_slice(&vertices);
+        self.geo_template_indices.extend_from_slice(&indices);
+        let template = GeoTemplate { vertex_start, index_start, index_count, vertex_count };
+        let slot = self.geo_templates.len() as u32;
+        self.geo_templates.push(template);
+        self.geo_template_map.insert(key, slot);
+        template
+    }
+
+    /// 追加几何实例：引用模板 + 每实例 color/transform。
+    pub(crate) fn push_geo_instance(&mut self, template: GeoTemplate, color: crate::color::Color, transform_index: u32) {
+        let start = self.geo_instances.len() as u32;
+        self.geo_instances.push(GeoInstance {
+            template_vertex_start: template.vertex_start,
+            template_index_start: template.index_start,
+            index_count: template.index_count,
+            color: [color.r, color.g, color.b, color.a],
+            transform_index,
+        });
+        self.record_geo_instance_command(start);
+    }
+
+    /// 几何模板生成 + 实例化（`draw_shape` 几何模式热路径）。
+    ///
+    /// `key` 已含形状参数 + uv 位（由 shapes 层计算）。命中缓存：跳过整个
+    /// 网格生成，仅推一个实例（CPU 节省的核心）。未命中：暂时接管
+    /// `vertices`/`indices`，运行原 mesh 发射器捕获几何，再剥掉 color/transform
+    /// 转成模板登记。
+    ///
+    /// 复用原 mesh 发射器意味着模板与 mesh 路径几何**逐位一致**，无分叉。
+    pub(crate) fn geo_emit_template(
+        &mut self,
+        key: u64,
+        emit: impl FnOnce(&mut Self),
+        color: crate::color::Color,
+    ) {
+        if let Some(&slot) = self.geo_template_map.get(&key) {
+            let template = self.geo_templates[slot as usize];
+            let transform_index = self.current_transform_index();
+            self.push_geo_instance(template, color, transform_index);
+            return;
+        }
+        let saved_vertices = std::mem::take(&mut self.vertices);
+        let saved_indices = std::mem::take(&mut self.indices);
+        emit(self);
+        let captured_vertices = std::mem::replace(&mut self.vertices, saved_vertices);
+        let captured_indices = std::mem::replace(&mut self.indices, saved_indices);
+        if captured_vertices.is_empty() || captured_indices.is_empty() {
+            return;
+        }
+        // 发射器内部已调用 `current_transform_index()` 并缓存；此处复用。
+        let transform_index = self.current_transform_index();
+        let mut geo_vertices = Vec::with_capacity(captured_vertices.len());
+        for v in captured_vertices {
+            geo_vertices.push(GeoVertex { position: v.position, uv: v.uv });
+        }
+        let template = self.ensure_geo_template(key, geo_vertices, captured_indices);
+        self.push_geo_instance(template, color, transform_index);
+    }
+
+    fn record_geo_instance_command(&mut self, start: u32) {
+        self.record_pending_mesh_command();
+        let end = self.geo_instances.len() as u32;
+        if end <= start {
+            return;
+        }
+        if let Some(BatchShapeCommand::GeoInstances {
+            geo_instance_start,
+            geo_instance_count,
+            template_vertex_start,
+            template_index_start,
+            index_count,
+            texture_generation,
+            ..
+        }) = self.shape_commands.last_mut()
+        {
+            let cur = self.geo_instances[start as usize];
+            if *texture_generation == self.shape_texture_generation
+                && *geo_instance_start + *geo_instance_count == start
+                && *template_vertex_start == cur.template_vertex_start
+                && *template_index_start == cur.template_index_start
+                && *index_count == cur.index_count
+            {
+                *geo_instance_count += end - start;
+                return;
+            }
+        }
+        let cur = self.geo_instances[start as usize];
+        self.shape_commands.push(BatchShapeCommand::GeoInstances {
+            geo_instance_start: start,
+            geo_instance_count: end - start,
+            template_vertex_start: cur.template_vertex_start,
+            template_index_start: cur.template_index_start,
+            index_count: cur.index_count,
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
         });
@@ -3424,6 +3992,12 @@ impl DrawBatch {
             texture_segments: self.texture_segments.clone(),
             instances: self.instances.clone(),
             instance_texture_segments: self.instance_texture_segments.clone(),
+            geo_instances: self.geo_instances.clone(),
+            geo_instance_texture_segments: self.geo_instance_texture_segments.clone(),
+            geo_templates: self.geo_templates.clone(),
+            geo_template_vertices: self.geo_template_vertices.clone(),
+            geo_template_indices: self.geo_template_indices.clone(),
+            geo_template_map: self.geo_template_map.clone(),
             shape_commands: self.shape_commands.clone(),
             shape_texture_generation: self.shape_texture_generation,
             shape_mesh_end: self.shape_mesh_end,
@@ -3461,6 +4035,7 @@ impl DrawBatch {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.add_geo_instance_texture_segment(self.bind_group.clone());
         self.advance_shape_texture_generation();
         self.bind_group = bg;
         self.text_texture_view = None;
@@ -3491,6 +4066,7 @@ impl DrawBatch {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.add_geo_instance_texture_segment(self.bind_group.clone());
         self.advance_shape_texture_generation();
         self.bind_group = texture.map(|t| t.bind_group.clone());
         self.text_texture_view = texture.map(|t| t.view.clone());
@@ -3518,6 +4094,21 @@ impl DrawBatch {
         let end = self.instances.len() as u32;
         if end > start {
             self.instance_texture_segments.push(InstanceTextureSegment {
+                instance_start: start,
+                instance_count: end - start,
+                bind_group: bg,
+            });
+        }
+    }
+
+    fn add_geo_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+        let start = self
+            .geo_instance_texture_segments
+            .last()
+            .map_or(0, |s| s.instance_start + s.instance_count);
+        let end = self.geo_instances.len() as u32;
+        if end > start {
+            self.geo_instance_texture_segments.push(InstanceTextureSegment {
                 instance_start: start,
                 instance_count: end - start,
                 bind_group: bg,
@@ -4101,6 +4692,79 @@ impl DrawBatch {
         self.color = saved_color;
     }
 
+    /// 几何模板实例化路径（`draw_shape` 几何模式热路径）。
+    ///
+    /// 与 [`Self::instance_shape`]（SDF 实例路径）平行的几何版本：位置进 transform，
+    /// 几何本体（模板）只生成一次并复用，实例只携带 color/transform。
+    /// 纹理/材质处理语义与 instance_shape 一致。
+    pub(crate) fn geo_instance_shape(
+        &mut self,
+        shape: &crate::shapes::Shape<'_>,
+        opts: crate::shapes::ShapeOverride,
+    ) {
+        self.record_pending_mesh_command();
+        let saved_color = self.color;
+        let saved_feather = self.sdf_feather;
+        let saved_uv = self.uv;
+        let saved_transform = self.transform;
+        let saved_cache = self.cached_transform_index;
+        let saved_bg = self.bind_group.clone();
+        if let Some(color) = opts.color { self.color = color; }
+        if let Some(feather) = opts.sdf_feather { self.sdf_feather = feather; }
+        if let Some(uv) = opts.uv { self.uv = uv; }
+
+        let base = shape.position().map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        if shape.position().is_some() || opts.transform.is_some() {
+            let current = self.transform.take();
+            self.transform = Some(match (current, opts.transform) {
+                (Some(existing), Some(transform)) => existing.then(&base).then(&transform),
+                (Some(existing), None) => existing.then(&base),
+                (None, Some(transform)) => base.then(&transform),
+                (None, None) => base,
+            });
+            self.invalidate_transform_cache();
+        }
+        let texture_overridden = opts.bind_group.is_some();
+        if let Some(bind_group) = opts.bind_group {
+            self.add_texture_segment(self.bind_group.clone());
+            self.add_geo_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
+            self.bind_group = bind_group;
+        }
+
+        let color = self.color;
+        match shape {
+            crate::shapes::Shape::Rect { w, h, .. } => crate::shapes::geo_emit_rectangle(self, *w, *h, color),
+            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => crate::shapes::geo_emit_rounded_rect(self, *w, *h, *radius, color),
+            crate::shapes::Shape::Circle { r, .. } => crate::shapes::geo_emit_circle(self, *r, color),
+            crate::shapes::Shape::Ellipse { rx, ry, .. } => crate::shapes::geo_emit_ellipse(self, *rx, *ry, color),
+            crate::shapes::Shape::Line { x1, y1, x2, y2, thickness } => crate::shapes::geo_emit_line(self, *x1, *y1, *x2, *y2, *thickness, color),
+            crate::shapes::Shape::LineChain { points, thickness } => crate::shapes::geo_emit_line_chain(self, points, *thickness, color),
+            crate::shapes::Shape::Triangle { x1, y1, x2, y2, x3, y3 } => crate::shapes::geo_emit_triangle(self, *x1, *y1, *x2, *y2, *x3, *y3, color),
+            crate::shapes::Shape::Polygon { points } => crate::shapes::geo_emit_polygon(self, points, color),
+            crate::shapes::Shape::Arc { r, start, end, .. } => crate::shapes::geo_emit_arc(self, *r, *start, *end, color),
+            crate::shapes::Shape::RectOutline { w, h, thickness, .. } => crate::shapes::geo_emit_rect_outline(self, *w, *h, *thickness, color),
+            crate::shapes::Shape::CircleOutline { r, thickness, segments, .. } => crate::shapes::geo_emit_circle_outline(self, *r, *thickness, color, *segments),
+            crate::shapes::Shape::EllipseOutline { rx, ry, thickness, segments, .. } => crate::shapes::geo_emit_ellipse_outline(self, *rx, *ry, *thickness, color, *segments),
+            crate::shapes::Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => crate::shapes::geo_emit_rounded_rect_outline(self, *w, *h, *radius, *thickness, color, *corner_segments),
+            crate::shapes::Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness } => crate::shapes::geo_emit_triangle_outline(self, *x1, *y1, *x2, *y2, *x3, *y3, *thickness, color),
+            crate::shapes::Shape::PolygonOutline { points, thickness } => crate::shapes::geo_emit_polygon_outline(self, points, *thickness, color),
+            crate::shapes::Shape::ArcOutline { r, start, end, thickness, segments, .. } => crate::shapes::geo_emit_arc_outline(self, *r, *start, *end, *thickness, color, *segments),
+        }
+
+        if texture_overridden {
+            self.add_texture_segment(self.bind_group.clone());
+            self.add_geo_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
+        }
+        self.bind_group = saved_bg;
+        self.transform = saved_transform;
+        self.cached_transform_index = saved_cache;
+        self.uv = saved_uv;
+        self.sdf_feather = saved_feather;
+        self.color = saved_color;
+    }
+
     // ---- 形状委托（去 draw_ 前缀） ----
 
     pub fn rectangle(&mut self, pos: Pos, w: f32, h: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rectangle(self, pos, w, h, c); }
@@ -4331,8 +4995,9 @@ mod tests {
         batch.sdf_feather = None;
         batch.instance_circle(Pos::ZERO, 5.0, Some(WHITE));
         assert!(batch.instances.is_empty());
-        assert!(!batch.vertices.is_empty());
-        assert!(!batch.indices.is_empty());
+        assert!(!batch.geo_instances.is_empty());
+        assert!(!batch.geo_template_vertices.is_empty());
+        assert!(!batch.geo_template_indices.is_empty());
     }
 
     #[test]
@@ -4464,13 +5129,21 @@ mod tests {
     #[test]
     fn shape_stats_separates_mesh_vertices_and_instances() {
         let mut batch = DrawBatch::new();
-        // mesh 路径
+        // geo-instance 路径（sdf_feather=None）
         batch.sdf_feather = None;
         draw_circle(&mut batch, Pos::new(5.0, 5.0), 4.0, Some(RED));
         let geo_stats = batch.shape_stats();
-        assert!(geo_stats.mesh_vertices > 0, "geo 路径应推送 mesh 顶点");
-        assert_eq!(geo_stats.instances, 0, "geo 路径不应有 instance");
-        assert_eq!(geo_stats.mesh_vertices, batch.shape_vertex_count());
+        assert_eq!(geo_stats.mesh_vertices, 0, "geo 路径不应推 mesh 顶点");
+        assert_eq!(geo_stats.sdf_instances, 0, "geo 路径不应有 SDF instance");
+        assert!(geo_stats.geo_instances > 0, "geo 路径应推送 geo instance");
+        assert_eq!(geo_stats.geo_instances, batch.geo_instances.len());
+        assert!(geo_stats.geo_templates > 0, "geo 路径应有模板");
+        assert_eq!(geo_stats.geo_templates, batch.geo_templates.len());
+        assert!(geo_stats.geo_template_vertices > 0, "geo 路径应有模板顶点");
+        assert_eq!(
+            geo_stats.geo_template_vertices,
+            batch.geo_template_vertices.len()
+        );
 
         // instance 路径
         let mut batch2 = DrawBatch::new();
@@ -4479,9 +5152,12 @@ mod tests {
         draw_circle(&mut batch2, Pos::new(20.0, 0.0), 4.0, Some(BLUE));
         let sdf_stats = batch2.shape_stats();
         assert_eq!(sdf_stats.mesh_vertices, 0, "instance 路径不应推 mesh 顶点");
-        assert_eq!(sdf_stats.instances, 2);
+        assert_eq!(sdf_stats.sdf_instances, 2);
+        assert_eq!(sdf_stats.geo_instances, 0);
+        assert_eq!(sdf_stats.geo_templates, 0);
+        assert_eq!(sdf_stats.geo_template_vertices, 0);
         // shape_vertex_count 仍是 4-顶点等价
-        assert_eq!(sdf_stats.instances * 4, batch2.shape_vertex_count());
+        assert_eq!(sdf_stats.sdf_instances * 4, batch2.shape_vertex_count());
     }
 
     #[test]
@@ -4534,7 +5210,7 @@ mod tests {
 
         assert_eq!(batch.shape_commands.len(), 3);
         assert!(matches!(batch.shape_commands[0], BatchShapeCommand::Instances { .. }));
-        assert!(matches!(batch.shape_commands[1], BatchShapeCommand::Mesh { .. }));
+        assert!(matches!(batch.shape_commands[1], BatchShapeCommand::GeoInstances { .. }));
         assert!(matches!(batch.shape_commands[2], BatchShapeCommand::Instances { .. }));
     }
 
@@ -4588,13 +5264,59 @@ mod tests {
     }
 
     #[test]
+    fn geo_same_params_share_single_template() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        for i in 0..50u32 {
+            batch.set_position(i as f32 * 2.0, 0.0);
+            draw_circle(&mut batch, Pos::new(8.0, 8.0), 8.0, Some(RED));
+        }
+        for i in 0..50u32 {
+            batch.set_position(i as f32 * 2.0, 40.0);
+            draw_rounded_rect(&mut batch, Pos::ZERO, 20.0, 16.0, 4.0, Some(BLUE));
+        }
+        // 同模板圆合并为 1 个命令；圆角矩形独立模板 → 第 2 个命令
+        assert_eq!(batch.shape_commands.len(), 2, "两个模板应各一个命令");
+        assert!(matches!(batch.shape_commands[0], BatchShapeCommand::GeoInstances { geo_instance_count: 50, .. }));
+        assert!(matches!(batch.shape_commands[1], BatchShapeCommand::GeoInstances { geo_instance_count: 50, .. }));
+    }
+
+    #[test]
     fn stale_commands_fall_back_after_public_indices_clear() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        batch.custom_material = Some(Arc::new(crate::material::Material::new_zero_resource(
+            "fn material_main(in: crate_material_never) -> vec4<f32> { return vec4<f32>(1.0); }"
+                .to_string(),
+            None,
+            rustc_hash::FxHashMap::default(),
+        )));
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch.shape_commands_valid());
+
+        batch.indices.clear();
+        assert!(!batch.shape_commands_valid());
+    }
+
+    #[test]
+    fn stale_commands_fall_back_after_geo_template_clear() {
         let mut batch = DrawBatch::new();
         batch.sdf_feather = None;
         draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
         assert!(batch.shape_commands_valid());
 
-        batch.indices.clear();
+        batch.geo_template_indices.clear();
+        assert!(!batch.shape_commands_valid());
+    }
+
+    #[test]
+    fn stale_commands_fall_back_after_geo_instance_clear() {
+        let mut batch = DrawBatch::new();
+        batch.sdf_feather = None;
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch.shape_commands_valid());
+
+        batch.geo_instances.clear();
         assert!(!batch.shape_commands_valid());
     }
 
@@ -4774,7 +5496,7 @@ mod tests {
         for item in &flat {
             match item {
                 Some(batch) => {
-                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
+                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.geo_instances.is_empty();
                     let has_draw = has_geom || !batch.texts.entries.is_empty();
                     let (op, r) = if batch.clips_children && has_geom {
                         let push_ref = active.unwrap_or(0);
@@ -5086,7 +5808,7 @@ mod tests {
                         area_depth += 1;
                     }
                     let content = clip_depth + anc + (has_own as u32);
-                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty();
+                    let has_geom = !batch.vertices.is_empty() || !batch.instances.is_empty() || !batch.geo_instances.is_empty();
                     if batch.clips_children && has_geom {
                         parent_push_ref = Some(content);
                         clip_depth += 1;

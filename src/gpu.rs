@@ -418,6 +418,7 @@ pub struct GpuContext {
     shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
+    shader_geo_instance: wgpu::ShaderModule, // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
     shader_instance_ssaa: wgpu::ShaderModule,
 }
@@ -438,6 +439,53 @@ impl QuadVertex {
                 format: wgpu::VertexFormat::Float32x2,
                 shader_location: 0,
             }],
+        }
+    }
+}
+
+/// 几何模板顶点：位置 + 已烘 UV（不包含 color/transform，由实例提供）。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GeoVertex {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+impl GeoVertex {
+    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x2, shader_location: 0 },
+                wgpu::VertexAttribute { offset: 8, format: wgpu::VertexFormat::Float32x2, shader_location: 1 },
+            ],
+        }
+    }
+}
+
+/// 几何实例：引用 batch 内模板顶点/索引段 + 每实例 color/transform。
+/// 渲染时 `draw_indexed(idx_start..+index_count, base_vertex, instance_range)`，
+/// 其中 `base_vertex = template_vertex_start`（全局模板顶点表），索引为模板内局部索引。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GeoInstance {
+    pub template_vertex_start: u32,
+    pub template_index_start: u32,
+    pub index_count: u32,
+    pub color: [f32; 4],
+    pub transform_index: u32,
+}
+
+impl GeoInstance {
+    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute { offset: 12, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
+                wgpu::VertexAttribute { offset: 28, format: wgpu::VertexFormat::Uint32, shader_location: 3 },
+            ],
         }
     }
 }
@@ -733,6 +781,11 @@ impl GpuContext {
             label: Some("vireo shader (geometry)"),
             source: wgpu::ShaderSource::Wgsl(shader_geo_src.into()),
         });
+        // 几何模板实例化 shader：无 SDF 分支，无 per-sample 插值
+        let shader_geo_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo shader (geometry instance)"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_geo_instance.wgsl").into()),
+        });
         let shader_instance_src = include_str!("shader_instance.wgsl");
         let shader_instance_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo instance shader (SSAA)"),
@@ -856,6 +909,7 @@ impl GpuContext {
             shader,
             shader_ssaa,
             shader_geo,
+            shader_geo_instance,
             shader_instance,
             shader_instance_ssaa,
         }
@@ -1157,6 +1211,104 @@ impl GpuContext {
                 module,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                alpha_to_coverage_enabled: alpha_to_coverage,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        pipes.insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// 几何模板实例化管线：共享模板顶点/索引 buffer + per-instance color/transform。
+    /// 无 SDF 分支；无 per-sample 插值（单模块，MSAA/SSAA 同源）。
+    pub(crate) fn ensure_geo_instance_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        ssaa: bool,
+        use_stencil: bool,
+        stencil_op: u32,
+    ) -> wgpu::RenderPipeline {
+        let op = stencil_op.min(2);
+        let key = sample_count
+            | ((alpha_to_coverage as u32) << 16)
+            | ((ssaa as u32) << 17)
+            | ((use_stencil as u32) << 19)
+            | (op << 20)
+            | (2u32 << 23);
+        let mut pipes = self.pipelines.lock().unwrap();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
+        }
+        let module = &self.shader_geo_instance;
+        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vireo geo instance pipeline layout"),
+            bind_group_layouts: &[
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+        let depth_stencil = if use_stencil {
+            let face = match op {
+                1 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::IncrementClamp,
+                },
+                2 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                _ => wgpu::StencilFaceState::IGNORE,
+            };
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask: if op == 0 { 0 } else { 0xff },
+                    write_mask: if op == 1 { 0xff } else { 0 },
+                },
+                bias: Default::default(),
+            })
+        } else {
+            None
+        };
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vireo geo instance pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(GeoVertex::desc()), Some(GeoInstance::desc())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
