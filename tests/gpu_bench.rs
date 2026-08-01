@@ -209,6 +209,50 @@ fn geo_instance_template_dedup_and_draw_calls() {
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
+fn merge_geo_templates_groups_interleaved_instances() {
+    println!("\n=== merge_geo_templates 交替实例按模板分组合并 ===");
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    // 交替绘制：圆/圆角矩形轮着画 → 同模板实例物理不连续
+    let mut b = DrawBatch::new();
+    b.clear_sdf_feather();
+    for i in 0..500 {
+        let x = (i % 25) as f32 * 35.0 + 15.0;
+        let y = (i / 25) as f32 * 35.0 + 15.0;
+        b.set_position(x, y);
+        match i % 4 {
+            0 => draw_circle(&mut b, Pos::new(14.0, 14.0), 12.0, Some(RED)),
+            1 => draw_ellipse(&mut b, Pos::new(14.0, 14.0), 12.0, 8.0, Some(GREEN)),
+            2 => draw_rounded_rect(&mut b, Pos::ZERO, 28.0, 28.0, 6.0, Some(BLUE)),
+            3 => {
+                let pts = [(0.0, 0.0), (28.0, 4.0), (24.0, 28.0), (4.0, 22.0)];
+                draw_polygon(&mut b, &pts, Some(YELLOW));
+            }
+            _ => {}
+        }
+    }
+    let stats = b.shape_stats();
+    assert_eq!(stats.geo_instances, 500);
+    assert_eq!(stats.geo_templates, 4, "4 种形状各 1 个模板");
+
+    // 不开 merge：交替实例不连续 → 每实例一段（500 draw calls）
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+    let normal_calls = canvas.last_draw_calls();
+    println!("  preserve_order 交替 draw calls = {normal_calls}");
+    assert_eq!(normal_calls, 500, "默认保序 + 不合并，交替实例各一段");
+
+    // 开 merge_geo_templates：同模板实例按模板分组 → 4 个 draw call
+    b.merge_geo_templates = true;
+    canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+    let merged_calls = canvas.last_draw_calls();
+    println!("  merge_geo_templates draw calls = {merged_calls}");
+    assert_eq!(merged_calls, 4, "同模板实例应合并，每模板 1 个 draw call");
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
 fn preserve_order_reduces_draw_calls() {
     println!("\n=== preserve_order draw call 对比 (Mixed x1000) ===");
 

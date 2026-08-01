@@ -126,6 +126,7 @@ struct InstanceSegment {
     bind_group: wgpu::BindGroup,
 }
 
+#[derive(Clone)]
 struct GeoInstanceSegment {
     geo_instance_start: u32,
     geo_instance_count: u32,
@@ -928,16 +929,41 @@ impl Renderer {
                     }
                     let geo_instance_start = combined_geo_instances.len() as u32;
                     let use_geo = !batch.geo_instances.is_empty() && batch.custom_material.is_none();
+                    // merge_geo_templates：把同模板实例重排到连续范围以便合并 draw call。
+                    // 仅在单一 bind group（无 texture segment）时可用——重排会破坏
+                    // texture segment 到实例范围的绑定关系。
+                    let merge_geo = use_geo
+                        && batch.merge_geo_templates
+                        && batch.geo_instance_texture_segments.is_empty();
                     if use_geo {
                         let transform_base = batch_transform_bases[info_idx];
                         let gv_base = batch_geo_vertex_base[info_idx];
                         let gi_base = batch_geo_index_base[info_idx];
-                        combined_geo_instances.extend(batch.geo_instances.iter().copied().map(|mut instance| {
-                            instance.template_vertex_start += gv_base;
-                            instance.template_index_start += gi_base;
-                            instance.transform_index += transform_base;
-                            instance
-                        }));
+                        if merge_geo {
+                            let mut perm: Vec<u32> = (0..batch.geo_instances.len() as u32).collect();
+                            perm.sort_by_key(|&i| {
+                                let g = &batch.geo_instances[i as usize];
+                                (
+                                    g.template_vertex_start,
+                                    g.template_index_start,
+                                    g.index_count,
+                                )
+                            });
+                            combined_geo_instances.extend(perm.into_iter().map(|i| {
+                                let mut instance = batch.geo_instances[i as usize];
+                                instance.template_vertex_start += gv_base;
+                                instance.template_index_start += gi_base;
+                                instance.transform_index += transform_base;
+                                instance
+                            }));
+                        } else {
+                            combined_geo_instances.extend(batch.geo_instances.iter().copied().map(|mut instance| {
+                                instance.template_vertex_start += gv_base;
+                                instance.template_index_start += gi_base;
+                                instance.transform_index += transform_base;
+                                instance
+                            }));
+                        }
                     }
                     let resolve_bg = |bg: Option<wgpu::BindGroup>| {
                         bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
@@ -969,6 +995,42 @@ impl Renderer {
                     };
                     let geo_segments = if !use_geo {
                         Vec::new()
+                    } else if merge_geo {
+                        // 实例已按模板重排：扫描排序后的连续范围，每模板一段。
+                        let total = batch.geo_instances.len() as u32;
+                        let bg = resolve_bg(batch.bind_group.clone());
+                        let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
+                            let tpl = combined_geo_instances[start as usize];
+                            GeoInstanceSegment {
+                                geo_instance_start: start,
+                                geo_instance_count: count,
+                                template_vertex_start: tpl.template_vertex_start,
+                                template_index_start: tpl.template_index_start,
+                                index_count: tpl.index_count,
+                                bind_group: bg,
+                            }
+                        };
+                        let mut segments: Vec<GeoInstanceSegment> = Vec::new();
+                        let mut i = 0u32;
+                        while i < total {
+                            let tpl_start = geo_instance_start + i;
+                            let key = (
+                                combined_geo_instances[tpl_start as usize].template_vertex_start,
+                                combined_geo_instances[tpl_start as usize].template_index_start,
+                                combined_geo_instances[tpl_start as usize].index_count,
+                            );
+                            let mut j = i + 1;
+                            while j < total {
+                                let g = &combined_geo_instances[(geo_instance_start + j) as usize];
+                                if (g.template_vertex_start, g.template_index_start, g.index_count) != key {
+                                    break;
+                                }
+                                j += 1;
+                            }
+                            segments.push(mk_seg(tpl_start, j - i, bg.clone()));
+                            i = j;
+                        }
+                        segments
                     } else {
                         let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
                             let tpl = combined_geo_instances[start as usize];
@@ -1077,6 +1139,8 @@ impl Renderer {
                             }
                             v
                         };
+                        // merge_geo 时 ordered 路径需要 geo_segments 的克隆（原值移入 ShapeInfo）
+                        let geo_segments_for_ordered = merge_geo.then(|| geo_segments.clone());
                         let info = ShapeInfo {
                             base_vertex: v_offset as i32,
                             segments: segs,
@@ -1087,6 +1151,10 @@ impl Renderer {
                                 Vec::new()
                             } else {
                                 let mut ordered = Vec::with_capacity(batch.shape_commands.len() + 1);
+                                // merge_geo：shape_commands 的 GeoInstances 用原始局部偏移，
+                                // 重排后失效 → 改用 `geo_segments` 的分组段（已在合并 buffer 上按模板分组）。
+                                let geo_merged = merge_geo;
+                                let mut geo_pushed = false;
                                 for command in &batch.shape_commands {
                                     match command {
                                         BatchShapeCommand::Mesh { ndx_start, ndx_count, bind_group, geometry, .. } => {
@@ -1115,15 +1183,24 @@ impl Renderer {
                                         }
                                         BatchShapeCommand::GeoInstances { geo_instance_start: local_start, geo_instance_count, bind_group, .. } => {
                                             if use_geo {
-                                                let tpl = combined_geo_instances[(geo_instance_start + *local_start) as usize];
-                                                ordered.push(OrderedShapeSegment::GeoInstances(GeoInstanceSegment {
-                                                    geo_instance_start: geo_instance_start + *local_start,
-                                                    geo_instance_count: *geo_instance_count,
-                                                    template_vertex_start: tpl.template_vertex_start,
-                                                    template_index_start: tpl.template_index_start,
-                                                    index_count: tpl.index_count,
-                                                    bind_group: resolve_bg(bind_group.clone()),
-                                                }));
+                                                if geo_merged {
+                                                    if !geo_pushed {
+                                                        ordered.extend(geo_segments_for_ordered.as_deref().unwrap_or(&[]).iter().map(|s| {
+                                                            OrderedShapeSegment::GeoInstances(s.clone())
+                                                        }));
+                                                        geo_pushed = true;
+                                                    }
+                                                } else {
+                                                    let tpl = combined_geo_instances[(geo_instance_start + *local_start) as usize];
+                                                    ordered.push(OrderedShapeSegment::GeoInstances(GeoInstanceSegment {
+                                                        geo_instance_start: geo_instance_start + *local_start,
+                                                        geo_instance_count: *geo_instance_count,
+                                                        template_vertex_start: tpl.template_vertex_start,
+                                                        template_index_start: tpl.template_index_start,
+                                                        index_count: tpl.index_count,
+                                                        bind_group: resolve_bg(bind_group.clone()),
+                                                    }));
+                                                }
                                             }
                                         }
                                     }
@@ -2649,6 +2726,15 @@ pub struct DrawBatch {
     ///   重排并合并本 batch 的绘制命令，减少 pipeline 切换 / draw call。
     ///   代价：混合 SDF/几何或不同贴图时绘制顺序不保证，可能改变视觉层叠。
     pub preserve_order: bool,
+    /// 是否把本 batch 的 geo 实例按模板分组（`sdf_feather=None` 的几何路径）。
+    /// - `true`：draw 阶段把同模板的 geo 实例重排到连续范围并合并，整个 batch
+    ///   同模板实例只占 1 个 draw call（draw call 数 = 模板种类数）。
+    ///   代价：geo 实例间的相对顺序（z 序）不再保留，相同模板的实例一起绘制。
+    /// - `false`（默认）：保持 `draw_*` 调用顺序，仅相邻且范围连续的实例合并。
+    ///
+    /// 与 [`Self::preserve_order`] 独立：此属性只作用于 geo 实例路径；
+    /// `preserve_order` 控制的是重排后的段是否按 sort_key 再排序合并。
+    pub merge_geo_templates: bool,
 }
 
 impl DrawBatch {
@@ -2695,6 +2781,7 @@ impl DrawBatch {
             custom_material: None,
             dynamic_offsets: Vec::new(),
             preserve_order: true,
+            merge_geo_templates: false,
         }
     }
 
@@ -2736,6 +2823,7 @@ impl DrawBatch {
         self.custom_material = None;
         self.dynamic_offsets.clear();
         self.preserve_order = true;
+        self.merge_geo_templates = false;
     }
     pub fn to_area(&self) -> Area {
         if (self.vertices.is_empty() || self.indices.is_empty())
@@ -4023,6 +4111,7 @@ impl DrawBatch {
             custom_material: self.custom_material.clone(),
             dynamic_offsets: self.dynamic_offsets.clone(),
             preserve_order: self.preserve_order,
+            merge_geo_templates: self.merge_geo_templates,
         }
     }
 
@@ -5240,6 +5329,21 @@ mod tests {
         b2.clear();
         assert!(b2.preserve_order, "clear() 应重置为默认 true");
     }
+
+    #[test]
+    fn merge_geo_templates_flag_defaults_and_resets() {
+        let batch = DrawBatch::new();
+        assert!(!batch.merge_geo_templates, "默认不合并 geo 模板");
+        let mut b2 = DrawBatch::new();
+        b2.merge_geo_templates = true;
+        b2.clear();
+        assert!(!b2.merge_geo_templates, "clear() 应重置为默认 false");
+        let mut b3 = DrawBatch::new();
+        b3.merge_geo_templates = true;
+        let cloned = b3.clone_batch();
+        assert!(cloned.merge_geo_templates, "clone_batch 应携带该字段");
+    }
+
 
     #[test]
     fn texture_generation_splits_instance_commands() {
