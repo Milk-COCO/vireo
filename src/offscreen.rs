@@ -49,7 +49,8 @@ impl OffscreenCanvas {
     /// 渲染并提交
     pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
         let target = self.texture.target();
-        target.draw(&self.renderer, clear_color, batches);
+        let cmd_buf = target.draw(&self.renderer, clear_color, batches);
+        self.renderer.gpu().queue.submit(Some(cmd_buf));
     }
 
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
@@ -65,6 +66,68 @@ impl OffscreenCanvas {
     /// 获取纹理 bind group（用于贴回窗口）。
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.texture.bind_group
+    }
+
+    /// 像素回读（用于 GPU 回归测试断言）。
+    ///
+    /// 阻塞到当前 GPU 队列清空后从内部纹理拷回 RGBA8 字节。
+    /// 调用方负责保证此前已 `draw` 过。
+    pub fn read_pixels(&self) -> Vec<u8> {
+        let gpu = self.renderer.gpu();
+        let (w, h) = (self.texture.width, self.texture.height);
+        let bytes_per_row = w * 4;
+        let padded = (bytes_per_row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+            & !(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+        let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("offscreen readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        // 阻塞等 map 完成：loop 调 device.poll 直到 callback 触发
+        loop {
+            if rx.try_recv().is_ok() {
+                break;
+            }
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+        }
+        let data = slice.get_mapped_range().expect("readback map").to_vec();
+        buf.unmap();
+        if padded == bytes_per_row {
+            data
+        } else {
+            let mut out = Vec::with_capacity((bytes_per_row * h) as usize);
+            for y in 0..h as usize {
+                out.extend_from_slice(&data[y * padded as usize..y * padded as usize + bytes_per_row as usize]);
+            }
+            out
+        }
     }
 
 }

@@ -378,6 +378,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// 访问 GPU context（用于离屏像素回读等需要 device/queue 的场景）。
+    pub fn gpu(&self) -> &std::sync::Arc<GpuContext> {
+        &self.gpu
+    }
     pub fn new(
         gpu: std::sync::Arc<GpuContext>,
         logical_width: u32,
@@ -918,7 +922,14 @@ impl Renderer {
                 DrawEvent::Batch(batch) => {
                     let info_idx = ei;
                     let instance_start = combined_instances.len() as u32;
-                    let use_instances = !batch.instances.is_empty() && batch.custom_material.is_none();
+                    // fragment-only custom material（无 custom VS）可走 SDF instance path；
+                    // 带 custom VS 的 Material 必须落回 mesh（VS 与 instance 字段契约不一致）。
+                    let fragment_only = batch
+                        .custom_material
+                        .as_ref()
+                        .map(|m| !m.has_custom_vertex_shader())
+                        .unwrap_or(true);
+                    let use_instances = !batch.instances.is_empty() && fragment_only;
                     if use_instances {
                         let transform_base = batch_transform_bases[info_idx];
                         combined_instances.extend(batch.instances.iter().copied().map(|mut instance| {
@@ -930,7 +941,7 @@ impl Renderer {
                         }));
                     }
                     let geo_instance_start = combined_geo_instances.len() as u32;
-                    let use_geo = !batch.geo_instances.is_empty() && batch.custom_material.is_none();
+                    let use_geo = !batch.geo_instances.is_empty() && fragment_only;
                     // merge_geo_templates：把同模板实例重排到连续范围以便合并 draw call。
                     // 按（texture segment, 模板）分组重排，多纹理 batch 也可合并——
                     // 每个 texture segment 内部按模板聚拢，段间仍保持各自 bind group。
@@ -1490,6 +1501,7 @@ impl Renderer {
                                 false,
                                 uses_stencil,
                                 if text_tests_stencil { 2 } else { 0 },
+                                crate::gpu::ShapeVertexLayout::Mesh,
                             ),
                         );
                     }
@@ -1641,6 +1653,14 @@ impl Renderer {
                         .as_ref()
                         .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
                     let use_custom = info.custom_material.is_some();
+                    let has_custom_vs = info
+                        .custom_material
+                        .as_ref()
+                        .map(|m| m.has_custom_vertex_shader())
+                        .unwrap_or(false);
+                    // instance 段仅在 fragment-only material 时可走对应 layout pipeline；
+                    // custom VS 必须 mesh。
+                    let use_custom_instance = use_custom && !has_custom_vs;
                     if !shape.ordered.is_empty() {
                         for segment in &shape.ordered {
                             match segment {
@@ -1668,6 +1688,7 @@ impl Renderer {
                                                 self.ssaa,
                                                 uses_stencil,
                                                 if uses_stencil { pipe_op.min(4) } else { 0 },
+                                                crate::gpu::ShapeVertexLayout::Mesh,
                                             );
                                             &custom_pipe
                                         } else if uses_stencil {
@@ -1724,77 +1745,172 @@ impl Renderer {
                                     shape_draw_calls += 1;
                                 }
                                 OrderedShapeSegment::Instances(segment) => {
-                                    let instance_pipeline = self.gpu.ensure_instance_pipeline(
-                                        self.sample_count,
-                                        self.alpha_to_coverage,
-                                        self.ssaa,
-                                        uses_stencil,
-                                        pipe_op,
-                                    );
-                                    pass.set_pipeline(&instance_pipeline);
-                                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                                    pass.set_bind_group(1, &segment.bind_group, &[]);
-                                    pass.set_bind_group(2, engine_bg, &[]);
-                                    pass.set_vertex_buffer(
-                                        0,
-                                        self.gpu.instance_quad_vertex_buf.slice(..),
-                                    );
-                                    pass.set_vertex_buffer(
-                                        1,
-                                        instance_buf.as_ref().unwrap().slice(..),
-                                    );
-                                    pass.set_index_buffer(
-                                        self.gpu.instance_quad_index_buf.slice(..),
-                                        wgpu::IndexFormat::Uint32,
-                                    );
-                                    if uses_stencil {
-                                        pass.set_stencil_reference(info.stencil_ref);
+                                    if use_custom_instance {
+                                        let mat = info.custom_material.as_ref().unwrap();
+                                        let custom_pipe = self.gpu.ensure_material_pipeline(
+                                            mat,
+                                            MaterialTarget::Shape,
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            if uses_stencil { pipe_op.min(4) } else { 0 },
+                                            crate::gpu::ShapeVertexLayout::SdfInstance,
+                                        );
+                                        pass.set_pipeline(&custom_pipe);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        if let Some(bg) = mat.ensure_bind_group(
+                                            &self.gpu.device,
+                                            &self.gpu.queue,
+                                            &self.gpu.bind_group_pool,
+                                        ) {
+                                            pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                        }
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            self.gpu.instance_quad_vertex_buf.slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            instance_buf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            self.gpu.instance_quad_index_buf.slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            0..6,
+                                            0,
+                                            segment.instance_start
+                                                ..segment.instance_start + segment.instance_count,
+                                        );
+                                        shape_draw_calls += 1;
+                                    } else {
+                                        let instance_pipeline = self.gpu.ensure_instance_pipeline(
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            pipe_op,
+                                        );
+                                        pass.set_pipeline(&instance_pipeline);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            self.gpu.instance_quad_vertex_buf.slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            instance_buf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            self.gpu.instance_quad_index_buf.slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            0..6,
+                                            0,
+                                            segment.instance_start
+                                                ..segment.instance_start + segment.instance_count,
+                                        );
+                                        shape_draw_calls += 1;
                                     }
-                                    pass.draw_indexed(
-                                        0..6,
-                                        0,
-                                        segment.instance_start
-                                            ..segment.instance_start + segment.instance_count,
-                                    );
-                                    shape_draw_calls += 1;
                                     shapes_bound = false;
                                     last_geometry = None;
                                 }
                                 OrderedShapeSegment::GeoInstances(segment) => {
-                                    let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
-                                        self.sample_count,
-                                        self.alpha_to_coverage,
-                                        self.ssaa,
-                                        uses_stencil,
-                                        pipe_op,
-                                    );
-                                    pass.set_pipeline(&geo_pipeline);
-                                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                                    pass.set_bind_group(1, &segment.bind_group, &[]);
-                                    pass.set_bind_group(2, engine_bg, &[]);
-                                    pass.set_vertex_buffer(
-                                        0,
-                                        geo_template_vbuf.as_ref().unwrap().slice(..),
-                                    );
-                                    pass.set_vertex_buffer(
-                                        1,
-                                        geo_instance_buf.as_ref().unwrap().slice(..),
-                                    );
-                                    pass.set_index_buffer(
-                                        geo_template_ibuf.as_ref().unwrap().slice(..),
-                                        wgpu::IndexFormat::Uint32,
-                                    );
-                                    if uses_stencil {
-                                        pass.set_stencil_reference(info.stencil_ref);
+                                    if use_custom_instance {
+                                        let mat = info.custom_material.as_ref().unwrap();
+                                        let custom_pipe = self.gpu.ensure_material_pipeline(
+                                            mat,
+                                            MaterialTarget::Shape,
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            if uses_stencil { pipe_op.min(4) } else { 0 },
+                                            crate::gpu::ShapeVertexLayout::GeoInstance,
+                                        );
+                                        pass.set_pipeline(&custom_pipe);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        if let Some(bg) = mat.ensure_bind_group(
+                                            &self.gpu.device,
+                                            &self.gpu.queue,
+                                            &self.gpu.bind_group_pool,
+                                        ) {
+                                            pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                        }
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            geo_template_vbuf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            geo_instance_buf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            geo_template_ibuf.as_ref().unwrap().slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            segment.template_index_start
+                                                ..segment.template_index_start + segment.index_count,
+                                            segment.template_vertex_start as i32,
+                                            segment.geo_instance_start
+                                                ..segment.geo_instance_start + segment.geo_instance_count,
+                                        );
+                                        shape_draw_calls += 1;
+                                    } else {
+                                        let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            pipe_op,
+                                        );
+                                        pass.set_pipeline(&geo_pipeline);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            geo_template_vbuf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            geo_instance_buf.as_ref().unwrap().slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            geo_template_ibuf.as_ref().unwrap().slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            segment.template_index_start
+                                                ..segment.template_index_start + segment.index_count,
+                                            segment.template_vertex_start as i32,
+                                            segment.geo_instance_start
+                                                ..segment.geo_instance_start + segment.geo_instance_count,
+                                        );
+                                        shape_draw_calls += 1;
                                     }
-                                    pass.draw_indexed(
-                                        segment.template_index_start
-                                            ..segment.template_index_start + segment.index_count,
-                                        segment.template_vertex_start as i32,
-                                        segment.geo_instance_start
-                                            ..segment.geo_instance_start + segment.geo_instance_count,
-                                    );
-                                    shape_draw_calls += 1;
                                     shapes_bound = false;
                                     last_geometry = None;
                                 }
@@ -1820,6 +1936,7 @@ impl Renderer {
                                     self.ssaa,
                                     true,
                                     pipe_op.min(4),
+                                    crate::gpu::ShapeVertexLayout::Mesh,
                                 );
                             } else {
                                 custom_pipe = self.gpu.ensure_material_pipeline(
@@ -1830,6 +1947,7 @@ impl Renderer {
                                     self.ssaa,
                                     false,
                                     0,
+                                    crate::gpu::ShapeVertexLayout::Mesh,
                                 );
                             }
                             &custom_pipe
@@ -1885,68 +2003,155 @@ impl Renderer {
                         shape_draw_calls += 1;
                     }
                     if !shape.instances.is_empty() {
-                        let instance_pipeline = self.gpu.ensure_instance_pipeline(
-                            self.sample_count,
-                            self.alpha_to_coverage,
-                            self.ssaa,
-                            uses_stencil,
-                            pipe_op,
-                        );
-                        pass.set_pipeline(&instance_pipeline);
-                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                        pass.set_bind_group(2, engine_bg, &[]);
-                        pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
-                        pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
-                        pass.set_index_buffer(
-                            self.gpu.instance_quad_index_buf.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        if uses_stencil {
-                            pass.set_stencil_reference(info.stencil_ref);
-                        }
-                        for segment in &shape.instances {
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.draw_indexed(
-                                0..6,
-                                0,
-                                segment.instance_start
-                                    ..segment.instance_start + segment.instance_count,
+                        if use_custom_instance {
+                            let mat = info.custom_material.as_ref().unwrap();
+                            let custom_pipe = self.gpu.ensure_material_pipeline(
+                                mat,
+                                MaterialTarget::Shape,
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                uses_stencil,
+                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                crate::gpu::ShapeVertexLayout::SdfInstance,
                             );
-                            shape_draw_calls += 1;
+                            pass.set_pipeline(&custom_pipe);
+                            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if let Some(bg) = mat.ensure_bind_group(
+                                &self.gpu.device,
+                                &self.gpu.queue,
+                                &self.gpu.bind_group_pool,
+                            ) {
+                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
+                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_index_buffer(
+                                self.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+                            for segment in &shape.instances {
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.draw_indexed(
+                                    0..6,
+                                    0,
+                                    segment.instance_start
+                                        ..segment.instance_start + segment.instance_count,
+                                );
+                                shape_draw_calls += 1;
+                            }
+                        } else {
+                            let instance_pipeline = self.gpu.ensure_instance_pipeline(
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                uses_stencil,
+                                pipe_op,
+                            );
+                            pass.set_pipeline(&instance_pipeline);
+                            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
+                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_index_buffer(
+                                self.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+                            for segment in &shape.instances {
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.draw_indexed(
+                                    0..6,
+                                    0,
+                                    segment.instance_start
+                                        ..segment.instance_start + segment.instance_count,
+                                );
+                                shape_draw_calls += 1;
+                            }
                         }
                         shapes_bound = false;
                         last_geometry = None;
                     }
                     if !shape.geo_instances.is_empty() {
-                        let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
-                            self.sample_count,
-                            self.alpha_to_coverage,
-                            self.ssaa,
-                            uses_stencil,
-                            pipe_op,
-                        );
-                        pass.set_pipeline(&geo_pipeline);
-                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                        pass.set_bind_group(2, engine_bg, &[]);
-                        pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
-                        pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
-                        pass.set_index_buffer(
-                            geo_template_ibuf.as_ref().unwrap().slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        if uses_stencil {
-                            pass.set_stencil_reference(info.stencil_ref);
-                        }
-                        for segment in &shape.geo_instances {
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.draw_indexed(
-                                segment.template_index_start
-                                    ..segment.template_index_start + segment.index_count,
-                                segment.template_vertex_start as i32,
-                                segment.geo_instance_start
-                                    ..segment.geo_instance_start + segment.geo_instance_count,
+                        if use_custom_instance {
+                            let mat = info.custom_material.as_ref().unwrap();
+                            let custom_pipe = self.gpu.ensure_material_pipeline(
+                                mat,
+                                MaterialTarget::Shape,
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                uses_stencil,
+                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                crate::gpu::ShapeVertexLayout::GeoInstance,
                             );
-                            shape_draw_calls += 1;
+                            pass.set_pipeline(&custom_pipe);
+                            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if let Some(bg) = mat.ensure_bind_group(
+                                &self.gpu.device,
+                                &self.gpu.queue,
+                                &self.gpu.bind_group_pool,
+                            ) {
+                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_index_buffer(
+                                geo_template_ibuf.as_ref().unwrap().slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+                            for segment in &shape.geo_instances {
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.draw_indexed(
+                                    segment.template_index_start
+                                        ..segment.template_index_start + segment.index_count,
+                                    segment.template_vertex_start as i32,
+                                    segment.geo_instance_start
+                                        ..segment.geo_instance_start + segment.geo_instance_count,
+                                );
+                                shape_draw_calls += 1;
+                            }
+                        } else {
+                            let geo_pipeline = self.gpu.ensure_geo_instance_pipeline(
+                                self.sample_count,
+                                self.alpha_to_coverage,
+                                self.ssaa,
+                                uses_stencil,
+                                pipe_op,
+                            );
+                            pass.set_pipeline(&geo_pipeline);
+                            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_index_buffer(
+                                geo_template_ibuf.as_ref().unwrap().slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+                            for segment in &shape.geo_instances {
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.draw_indexed(
+                                    segment.template_index_start
+                                        ..segment.template_index_start + segment.index_count,
+                                    segment.template_vertex_start as i32,
+                                    segment.geo_instance_start
+                                        ..segment.geo_instance_start + segment.geo_instance_count,
+                                );
+                                shape_draw_calls += 1;
+                            }
                         }
                         shapes_bound = false;
                         last_geometry = None;
@@ -4245,7 +4450,13 @@ impl DrawBatch {
             return false;
         };
         // Custom vertex shaders consume the public Vertex ABI, not the instance ABI.
-        if self.custom_material.is_some() {
+        // fragment-only material（无 custom VS）可走 instance path。
+        if self
+            .custom_material
+            .as_ref()
+            .map(|m| m.has_custom_vertex_shader())
+            .unwrap_or(false)
+        {
             return false;
         }
         let color = color.unwrap_or(self.color);
@@ -4466,7 +4677,14 @@ impl DrawBatch {
         points: &[(f32, f32)],
         color: Option<crate::color::Color>,
     ) {
-        if self.sdf_feather.is_none() || self.custom_material.is_some() || points.len() < 3 {
+        if self.sdf_feather.is_none()
+            || self
+                .custom_material
+                .as_ref()
+                .map(|m| m.has_custom_vertex_shader())
+                .unwrap_or(false)
+            || points.len() < 3
+        {
             self.polygon(points, color);
             return;
         }
@@ -4507,7 +4725,15 @@ impl DrawBatch {
         thickness: f32,
         color: Option<crate::color::Color>,
     ) {
-        if self.sdf_feather.is_none() || self.custom_material.is_some() || points.len() < 2 || thickness == 0.0 {
+        if self.sdf_feather.is_none()
+            || self
+                .custom_material
+                .as_ref()
+                .map(|m| m.has_custom_vertex_shader())
+                .unwrap_or(false)
+            || points.len() < 2
+            || thickness == 0.0
+        {
             self.line_chain(points, thickness, color);
             return;
         }
@@ -5424,7 +5650,9 @@ mod tests {
         draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
         assert!(batch.shape_commands_valid());
 
-        batch.indices.clear();
+        // fragment-only custom material + sdf_feather=None 走 geo_instance path，
+        // 数据在 geo_template_indices / geo_instances（不在 indices）。
+        batch.geo_template_indices.clear();
         assert!(!batch.shape_commands_valid());
     }
 

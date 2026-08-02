@@ -224,11 +224,18 @@ impl<'a> Shape<'a> {
 pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
     batch.record_pending_mesh_command();
     let effective_feather = opts.sdf_feather.unwrap_or(batch.sdf_feather);
-    if effective_feather.is_some() && batch.custom_material.is_none() {
+    // fragment-only custom material（无 custom VS）允许走 instance/geo instance 路径，
+    // 性能与无 material 相同（1 dc 跨参数合并）。custom VS 仍走 mesh。
+    let fragment_only = batch
+        .custom_material
+        .as_ref()
+        .map(|m| !m.has_custom_vertex_shader())
+        .unwrap_or(true);
+    if effective_feather.is_some() && fragment_only {
         batch.instance_shape(shape, opts);
         return;
     }
-    if effective_feather.is_none() && batch.custom_material.is_none() {
+    if effective_feather.is_none() && fragment_only {
         batch.geo_instance_shape(shape, opts);
         return;
     }

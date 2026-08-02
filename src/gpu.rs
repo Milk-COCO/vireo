@@ -31,6 +31,31 @@ fn default_shape_vertex_wgsl(ssaa: bool) -> String {
     }
 }
 
+/// 默认 SDF instance VS（`shader_instance.wgsl`），按 `ssaa` 同步 local_pos 插值。
+/// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致：
+///   - ssaa=true：  VS/FS 双方 `@interpolate(linear, sample)`
+///   - ssaa=false： VS/FS 双方 `@interpolate(linear)`
+fn default_sdf_instance_vertex_wgsl(ssaa: bool) -> String {
+    let source = include_str!("shader_instance.wgsl");
+    if ssaa {
+        source.to_owned()
+    } else {
+        source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+    }
+}
+
+/// 默认 Geo instance VS（`shader_geo_instance.wgsl`），按 `ssaa` 同步 local_pos 插值。
+/// geo shape 本无 SDF 字段，VS 输出 local_pos 仅为 material FS 可读参考。
+fn default_geo_instance_vertex_wgsl(ssaa: bool) -> String {
+    let source = include_str!("shader_geo_instance.wgsl");
+    if ssaa {
+        // geo VS 当前用 `@interpolate(linear)`（per-pixel），提升为 per-sample 与 FS 对齐
+        source.replace("@interpolate(linear) local_pos", "@interpolate(linear, sample) local_pos")
+    } else {
+        source.to_owned()
+    }
+}
+
 /// 返回 (final_source, user_source_line_offset) 其中 offset 是用户代码起始行号（1-indexed）。
 fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) -> (String, u32) {
     let line_count = |s: &str| s.split('\n').count() as u32;
@@ -368,6 +393,26 @@ pub(crate) enum MaterialTarget {
     Text = 1,
 }
 
+/// Shape Material 的顶点布局。同一 Material FS 可绑定不同顶点布局，
+/// 按 batch 类型自动选最优路径（mesh / SDF instance / Geo instance）。
+///
+/// - `Mesh`：单 buffer `[Vertex]`（68B），用于 `DrawBatch.vertices` / Area 全屏 quad
+///   / custom VS Material 路径。
+/// - `SdfInstance`：双 buffer `[QuadVertex, ShapeInstance]`（8B + 104B），
+///   共享 unit quad + 每实例 SDF 参数；1 dc 跨参数合并（round-38+ 父提交基线）。
+///   **仅 fragment-only Material 可用**（custom VS 路径需走 Mesh layout）。
+/// - `GeoInstance`：双 buffer `[GeoVertex, GeoInstance]`（16B + 32B），
+///   共享模板 + 每实例 color/transform；支持 `merge_geo_templates` 合并。
+///   **仅 fragment-only Material 可用**。
+///
+/// `material_pipeline_key` 加 layout bit（bit 6-7）区分。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShapeVertexLayout {
+    Mesh = 0,
+    SdfInstance = 1,
+    GeoInstance = 2,
+}
+
 fn material_pipeline_key(
     target: MaterialTarget,
     sample_count: u32,
@@ -375,14 +420,21 @@ fn material_pipeline_key(
     ssaa: bool,
     stencil_mode: bool,
     stencil_op: u32,
+    shape_layout: ShapeVertexLayout,
 ) -> u64 {
     let ssaa = ssaa && target == MaterialTarget::Shape;
+    let layout_bits = if target == MaterialTarget::Shape {
+        shape_layout as u64
+    } else {
+        0
+    };
     target as u64
         | ((sample_count as u64) << 4)
         | ((alpha_to_coverage as u64) << 12)
         | ((stencil_mode as u64) << 13)
         | ((ssaa as u64) << 14)
         | ((stencil_op.min(4) as u64) << 16)
+        | (layout_bits << 6)
 }
 
 /// 共享 GPU 资源 —— 多个窗口/离屏纹理共用同一套 device/queue/pipeline
@@ -1554,6 +1606,10 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         let bgl_ref = material_bgl.as_ref();
         for target in [MaterialTarget::Shape, MaterialTarget::Text] {
+            let layout = match target {
+                MaterialTarget::Shape => ShapeVertexLayout::Mesh,
+                MaterialTarget::Text => ShapeVertexLayout::Mesh,
+            };
             let pipeline = self.create_material_pipeline_raw(
                 &final_source,
                 shape_vertex_source.as_deref(),
@@ -1564,9 +1620,10 @@ impl GpuContext {
                 false,
                 0,
                 bgl_ref,
+                layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0),
+                material_pipeline_key(target, 1, false, false, false, 0, layout),
                 Arc::new(pipeline),
             );
         }
@@ -1611,6 +1668,10 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         let bgl_ref = Some(bgl);
         for target in [MaterialTarget::Shape, MaterialTarget::Text] {
+            let layout = match target {
+                MaterialTarget::Shape => ShapeVertexLayout::Mesh,
+                MaterialTarget::Text => ShapeVertexLayout::Mesh,
+            };
             let pipeline = self.create_material_pipeline_raw(
                 &source,
                 shape_vertex_source.as_deref(),
@@ -1621,9 +1682,10 @@ impl GpuContext {
                 false,
                 0,
                 bgl_ref,
+                layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0),
+                material_pipeline_key(target, 1, false, false, false, 0, layout),
                 Arc::new(pipeline),
             );
         }
@@ -1646,6 +1708,7 @@ impl GpuContext {
         ssaa: bool,
         stencil_mode: bool,
         stencil_op: u32,
+        shape_layout: ShapeVertexLayout,
     ) -> Arc<wgpu::RenderPipeline> {
         let ssaa = ssaa
             && target == MaterialTarget::Shape
@@ -1657,6 +1720,7 @@ impl GpuContext {
             ssaa,
             stencil_mode,
             stencil_op,
+            shape_layout,
         );
         let mut pipes = material.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
@@ -1672,6 +1736,7 @@ impl GpuContext {
             stencil_mode,
             stencil_op,
             material.bgl(),
+            shape_layout,
         ).expect("material WGSL was validated by create_material");
         let arc = Arc::new(pipeline);
         pipes.entry(key).or_insert(arc).clone()
@@ -1688,6 +1753,7 @@ impl GpuContext {
         stencil_mode: bool,
         stencil_op: u32,
         material_bgl: Option<&wgpu::BindGroupLayout>,
+        shape_layout: ShapeVertexLayout,
     ) -> Result<wgpu::RenderPipeline, String> {
         let ssaa = ssaa
             && target == MaterialTarget::Shape
@@ -1747,17 +1813,39 @@ impl GpuContext {
             ..Default::default()
         };
         let pipeline = match target {
-            MaterialTarget::Shape => self.create_shape_material_pipeline(
-                &fragment_source_str,
-                shape_vertex_source
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| default_shape_vertex_wgsl(ssaa))
-                    .as_str(),
-                multisample,
-                depth_stencil,
-                stencil_op,
-                material_bgl,
-            ),
+            MaterialTarget::Shape => {
+                // layout 决定默认 VS：Mesh 用 default_shape，instance path 用各自 VS。
+                // instance path 不允许 custom VS（VS 与 instance 字段契约不一致）。
+                let default_vs = match shape_layout {
+                    ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa),
+                    ShapeVertexLayout::SdfInstance => default_sdf_instance_vertex_wgsl(ssaa),
+                    ShapeVertexLayout::GeoInstance => default_geo_instance_vertex_wgsl(ssaa),
+                };
+                let vs_source = match shape_layout {
+                    ShapeVertexLayout::Mesh => shape_vertex_source
+                        .map(str::to_owned)
+                        .unwrap_or(default_vs),
+                    ShapeVertexLayout::SdfInstance | ShapeVertexLayout::GeoInstance => {
+                        if shape_vertex_source.is_some() {
+                            return Err(format!(
+                                "material: custom vertex shader is not supported with \
+                                 {:?} layout; use a fragment-only material or fall back to mesh",
+                                shape_layout
+                            ));
+                        }
+                        default_vs
+                    }
+                };
+                self.create_shape_material_pipeline(
+                    &fragment_source_str,
+                    vs_source.as_str(),
+                    multisample,
+                    depth_stencil,
+                    stencil_op,
+                    material_bgl,
+                    shape_layout,
+                )
+            }
             MaterialTarget::Text => self.text_ctx.lock().unwrap().text_atlas.create_material_pipeline(
                 &self.device,
                 material_bgl,
@@ -1783,6 +1871,7 @@ impl GpuContext {
         depth_stencil: Option<wgpu::DepthStencilState>,
         stencil_op: u32,
         material_bgl: Option<&wgpu::BindGroupLayout>,
+        shape_layout: ShapeVertexLayout,
     ) -> wgpu::RenderPipeline {
         let vertex = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("material shape vertex"), source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
@@ -1802,9 +1891,14 @@ impl GpuContext {
             bind_group_layouts: &bgls,
             immediate_size: 0,
         });
+        let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> = match shape_layout {
+            ShapeVertexLayout::Mesh => vec![Some(Vertex::desc())],
+            ShapeVertexLayout::SdfInstance => vec![Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
+            ShapeVertexLayout::GeoInstance => vec![Some(GeoVertex::desc()), Some(GeoInstance::desc())],
+        };
         self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("material shape pipeline"), layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &vertex, entry_point: Some("vs_main"), buffers: &[Some(Vertex::desc())], compilation_options: Default::default() },
+            vertex: wgpu::VertexState { module: &vertex, entry_point: Some("vs_main"), buffers: &buffers, compilation_options: Default::default() },
             fragment: Some(wgpu::FragmentState { module: &fragment, entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState {
                 format: self.surface_format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -1823,8 +1917,8 @@ mod custom_material_tests {
 
     #[test]
     fn target_pipeline_keys_are_distinct() {
-        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0);
-        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0);
+        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh);
+        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh);
         assert_ne!(shape, text);
     }
 
@@ -1832,33 +1926,49 @@ mod custom_material_tests {
     fn material_stencil_key_ignores_unused_flags() {
         // 同 sample/atc/op 必须同 key
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2),
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2)
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2, ShapeVertexLayout::Mesh)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1)
+            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh)
         );
         // 不同 target 必须不同 key
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1),
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1, ShapeVertexLayout::Mesh)
         );
     }
 
     #[test]
     fn material_shape_ssaa_pipeline_key_is_distinct() {
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0, ShapeVertexLayout::Mesh),
         );
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0),
-            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0),
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0, ShapeVertexLayout::Mesh),
+        );
+    }
+
+    #[test]
+    fn material_shape_layout_pipeline_keys_are_distinct() {
+        // Mesh / SdfInstance / GeoInstance 必须产生不同 key（shape target）
+        let mesh = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh);
+        let sdf = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance);
+        let geo = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::GeoInstance);
+        assert_ne!(mesh, sdf);
+        assert_ne!(mesh, geo);
+        assert_ne!(sdf, geo);
+        // Text target 不受 layout 影响
+        assert_eq!(
+            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance),
         );
     }
 

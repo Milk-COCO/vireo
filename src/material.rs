@@ -377,6 +377,14 @@ impl Material {
         matches!(self.state, MaterialState::ZeroResource)
     }
 
+    /// 是否带自定义 vertex shader。
+    /// 决定 shape path 走 mesh（[Vertex]）还是 instance layout（[QuadVertex, ShapeInstance] /
+    /// [GeoVertex, GeoInstance]）。Fragment-only material 在 SDF/Geo batch 上可走 instance 路径；
+    /// 带 custom VS 时必须走 mesh（VS 与 instance 字段契约不一致）。
+    pub fn has_custom_vertex_shader(&self) -> bool {
+        self.shape_vertex_source.is_some()
+    }
+
     /// 确保 bind group 就绪（Dirty 检测/手动 provider），返回当前 bind group。
     /// 0 资源材质返回 `None`。
     pub(crate) fn ensure_bind_group(

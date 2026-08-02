@@ -600,3 +600,194 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         canvas.draw(Some(Color::new(0.04, 0.05, 0.07, 1.0)), &[&parent]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round 44：Custom Material 走 SDF/Geo instance layout 的 GPU 回归
+// ---------------------------------------------------------------------------
+
+/// 像素回读 helper：判断指定区域是否非背景色（任何 RGBA8 != 0）。
+fn region_has_color(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y * w + x) * 4) as usize;
+            // 检查 RGB 任一通道 > 0（alpha 可能被 clear 颜色置 255 而不可靠）
+            if pixels[idx] > 0 || pixels[idx + 1] > 0 || pixels[idx + 2] > 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Fragment-only Custom Material + SDF instance path：
+/// - 2000 个交替参数 SDF instance 应合并为 1 个 draw call
+/// - 像素回读：material 修改颜色后矩形区域非空
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_fragment_only_sdf_instance_path() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    // 把颜色乘 0.5 让效果可见（与原 in.color 区分）
+    return vec4<f32>(in.color.rgb * 0.5, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material);
+    b.set_sdf_feather(Some(1.0));
+    for i in 0..2000 {
+        let x = (i % 50) as f32 * 17.0 + 10.0;
+        let y = (i / 50) as f32 * 17.0 + 10.0;
+        b.set_position(x, y);
+        match i % 5 {
+            0 => draw_rectangle(&mut b, Pos::new(0.0, 0.0), 14.0, 14.0, Some(RED)),
+            1 => draw_circle(&mut b, Pos::new(7.0, 7.0), 6.0, Some(GREEN)),
+            2 => draw_rounded_rect(&mut b, Pos::new(0.0, 0.0), 14.0, 14.0, 3.0, Some(BLUE)),
+            3 => draw_ellipse(&mut b, Pos::new(7.0, 7.0), 6.0, 4.0, Some(YELLOW)),
+            _ => draw_triangle(&mut b, 0.0, 0.0, 14.0, 0.0, 7.0, 14.0, Some(MAGENTA)),
+        }
+    }
+    let stats = b.shape_stats();
+    assert_eq!(stats.sdf_instances, 2000, "fragment-only material 应仍走 SDF instance 路径");
+    assert_eq!(stats.mesh_vertices, 0, "fragment-only material 不应 mesh 展开");
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  fragment-only Material + SDF x2000 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 1, "fragment-only Material 应走 SDF instance pipeline，1 dc");
+
+    // 像素回读：第一个矩形位置 (10, 10) ~ (24, 24) 应有 material 修改后的非背景色
+    let pixels = canvas.read_pixels();
+    assert!(region_has_color(&pixels, 900, 12, 12, 22, 22), "SDF instance material 像素应可见");
+}
+
+/// Fragment-only Custom Material + Geo instance path：
+/// - 500 个 geo instance 应合并为 1 个 draw call
+/// - 像素回读：material 修改颜色后圆形区域非空
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_fragment_only_geo_instance_path() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * 0.5, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material);
+    b.clear_sdf_feather();
+    for i in 0..500 {
+        let x = (i % 25) as f32 * 35.0 + 15.0;
+        let y = (i / 25) as f32 * 35.0 + 15.0;
+        b.set_position(x, y);
+        draw_circle(&mut b, Pos::new(14.0, 14.0), 12.0, Some(RED));
+    }
+    let stats = b.shape_stats();
+    assert_eq!(stats.geo_instances, 500);
+    assert_eq!(stats.geo_templates, 1, "同参数圆应共享 1 个模板");
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  fragment-only Material + Geo x500 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 1, "fragment-only Material 应走 Geo instance pipeline，1 dc");
+
+    let pixels = canvas.read_pixels();
+    // 第一个圆位置 (15, 15) ~ (39, 39)
+    assert!(region_has_color(&pixels, 900, 17, 17, 37, 37), "Geo instance material 像素应可见");
+}
+
+/// 带 custom vertex shader 的 Material + SDF instance：
+/// 应回退到 mesh 路径（draw call 数 = SDF instance 数，2000 dc），但仍正确绘制。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_custom_vs_sdf_falls_back_to_mesh() {
+    const VERTEX_WGSL: &str = r#"
+struct Camera {
+    projection: mat4x4<f32>,
+    dpi_scale: f32,
+};
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) sdf_params: vec4<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+    @location(7) @interpolate(flat) transform_index: u32,
+};
+
+// 必须提供完整 VertexOutput（auto-generated material FS 契约）
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) sdf_params: vec4<f32>,
+    @location(3) @interpolate(linear) local_pos: vec2<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world_pos = transforms[in.transform_index] * vec3<f32>(in.position, 1.0);
+    out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    out.sdf_params = in.sdf_params;
+    out.local_pos = in.position;
+    out.sdf_type = in.sdf_type;
+    out.sdf_feather = in.sdf_feather;
+    out.sdf_extra = in.sdf_extra;
+    return out;
+}
+"#;
+    const FRAGMENT_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * 0.3, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 320, 180);
+    let material = gpu
+        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .expect("material with custom VS");
+
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material);
+    b.set_sdf_feather(Some(1.0));
+    for i in 0..20 {
+        let x = (i % 5) as f32 * 60.0 + 20.0;
+        let y = (i / 5) as f32 * 60.0 + 20.0;
+        b.set_position(x, y);
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 40.0, 40.0, Some(WHITE));
+    }
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  custom VS Material + SDF x20 draw calls = {draw_calls}");
+    // custom VS 必须 mesh 路径 → 全部 mesh 段在 ordered path 合并为 1 个 draw call
+    assert_eq!(draw_calls, 1, "custom VS Material 应 mesh fallback（ordered 合并为 1 dc）");
+
+    let pixels = canvas.read_pixels();
+    // 第一个矩形 (20, 20) ~ (60, 60)
+    assert!(region_has_color(&pixels, 320, 22, 22, 58, 58), "custom VS Material mesh fallback 像素应可见");
+}
