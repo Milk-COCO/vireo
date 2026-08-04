@@ -372,6 +372,9 @@ pub struct Renderer {
     scratch_geo_instances: RefCell<Vec<GeoInstance>>,
     scratch_geo_vertices: RefCell<Vec<GeoVertex>>,
     scratch_geo_indices: RefCell<Vec<u32>>,
+    scratch_geo_merge_per_inst_seg: RefCell<Vec<u32>>,
+    scratch_geo_merge_order: RefCell<Vec<u32>>,
+    scratch_geo_merge_sorted: RefCell<Option<Vec<u32>>>,
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
     /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
     last_draw_calls: std::cell::Cell<u32>,
@@ -455,6 +458,9 @@ impl Renderer {
             scratch_geo_instances: RefCell::new(Vec::new()),
             scratch_geo_vertices: RefCell::new(Vec::new()),
             scratch_geo_indices: RefCell::new(Vec::new()),
+            scratch_geo_merge_per_inst_seg: RefCell::new(Vec::new()),
+            scratch_geo_merge_order: RefCell::new(Vec::new()),
+            scratch_geo_merge_sorted: RefCell::new(None),
             last_draw_calls: std::cell::Cell::new(0),
             logical_width,
             logical_height,
@@ -916,7 +922,7 @@ impl Renderer {
         let mut v_offset = vertex_count;
         let mut idx_offset = ndx_accum;
         // merge_geo 排序后每实例的 texture segment 索引（None = 本轮未启用重排）
-        let mut geo_merge_sorted_seg: Option<Vec<u32>> = None;
+        let mut geo_merge_sorted_seg = self.scratch_geo_merge_sorted.borrow_mut();
         for (ei, event) in events.iter().enumerate() {
             match event {
                 DrawEvent::Batch(batch) => {
@@ -953,13 +959,17 @@ impl Renderer {
                         if merge_geo {
                             // 每实例原始下标 → texture segment 索引（超出段尾 → segments.len()，走 batch.bind_group）
                             let seg_count = batch.geo_instance_texture_segments.len() as u32;
-                            let mut per_inst_seg: Vec<u32> = vec![seg_count; batch.geo_instances.len()];
+                            let mut per_inst_seg = self.scratch_geo_merge_per_inst_seg.borrow_mut();
+                            per_inst_seg.clear();
+                            per_inst_seg.resize(batch.geo_instances.len(), seg_count);
                             for (si, seg) in batch.geo_instance_texture_segments.iter().enumerate() {
                                 for k in seg.instance_start..seg.instance_start + seg.instance_count {
                                     per_inst_seg[k as usize] = si as u32;
                                 }
                             }
-                            let mut order: Vec<u32> = (0..batch.geo_instances.len() as u32).collect();
+                            let mut order = self.scratch_geo_merge_order.borrow_mut();
+                            order.clear();
+                            order.extend(0..batch.geo_instances.len() as u32);
                             order.sort_by_key(|&i| {
                                 let g = &batch.geo_instances[i as usize];
                                 (
@@ -969,8 +979,9 @@ impl Renderer {
                                     g.index_count,
                                 )
                             });
-                            let mut sorted_seg: Vec<u32> = Vec::with_capacity(order.len());
-                            combined_geo_instances.extend(order.into_iter().map(|i| {
+                            let sorted_seg = geo_merge_sorted_seg.get_or_insert_with(Vec::new);
+                            sorted_seg.clear();
+                            combined_geo_instances.extend(order.iter().copied().map(|i| {
                                 sorted_seg.push(per_inst_seg[i as usize]);
                                 let mut instance = batch.geo_instances[i as usize];
                                 instance.template_vertex_start += gv_base;
@@ -978,8 +989,6 @@ impl Renderer {
                                 instance.transform_index += transform_base;
                                 instance
                             }));
-                            // 保存排序后每实例的 segment 索引，供 geo_segments 分组合并时取 bind group
-                            geo_merge_sorted_seg = Some(sorted_seg);
                         } else {
                             combined_geo_instances.extend(batch.geo_instances.iter().copied().map(|mut instance| {
                                 instance.template_vertex_start += gv_base;
