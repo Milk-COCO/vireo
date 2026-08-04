@@ -2943,10 +2943,17 @@ pub struct DrawBatch {
     /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
     /// 可通过 `TextOverride.clip` 单条覆盖。
     pub text_clip: Option<crate::glyphon::TextBounds>,
-    /// 自定义材质。`Some` 时该 batch 的 shape/text 都走自定义材质 fragment shader。
-    /// shape 仍用对应顶点管线；text 仍走 glyphon 顶点管线。
-    /// `None` = 内置。
-    /// 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
+    /// 自定义材质（**整 batch 属性，不是画笔状态机**）。
+    ///
+    /// - `Some` 时该 batch 的 shape/text 都走自定义材质 fragment shader；
+    ///   shape 仍用对应顶点管线；text 仍走 glyphon 顶点管线。
+    /// - `None` = 内置。
+    /// - 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
+    ///
+    /// **约定**：一次设置全程有效，**禁止批内切换**。材质在 record 阶段逐形状路由
+    /// （fragment-only → instance / custom VS → mesh），但渲染时整 batch 统一取
+    /// flatten 时的最终值选 pipeline；批内 `Some → None` 切换会使已画形状静默
+    /// 走内置管线（材质丢失）。需要多个材质请拆分 batch（child / multi-batch）。
     pub custom_material: Option<Arc<Material>>,
     /// Dynamic uniform/storage offsets for group 3 binding（逐 draw 偏移，字节）。
     /// 长度必须等于 BGL 中 `has_dynamic_offset` 的 binding 数量。
