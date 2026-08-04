@@ -791,3 +791,90 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     // 第一个矩形 (20, 20) ~ (60, 60)
     assert!(region_has_color(&pixels, 320, 22, 22, 58, 58), "custom VS Material mesh fallback 像素应可见");
 }
+
+/// 带 custom vertex shader 的 Material + Geo（sdf_feather=None）：
+/// 走 mesh fallback 路径时应正常绘制（不静默丢弃），draw call 与 mesh 段合并一致。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_custom_vs_geo_falls_back_to_mesh() {
+    const VERTEX_WGSL: &str = r#"
+struct Camera {
+    projection: mat4x4<f32>,
+    dpi_scale: f32,
+};
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) sdf_params: vec4<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+    @location(7) @interpolate(flat) transform_index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) sdf_params: vec4<f32>,
+    @location(3) @interpolate(linear) local_pos: vec2<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world_pos = transforms[in.transform_index] * vec3<f32>(in.position, 1.0);
+    out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    out.sdf_params = in.sdf_params;
+    out.local_pos = in.position;
+    out.sdf_type = in.sdf_type;
+    out.sdf_feather = in.sdf_feather;
+    out.sdf_extra = in.sdf_extra;
+    return out;
+}
+"#;
+    const FRAGMENT_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * 0.3, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 320, 180);
+    let material = gpu
+        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .expect("material with custom VS");
+
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material);
+    for i in 0..20 {
+        let x = (i % 5) as f32 * 60.0 + 20.0;
+        let y = (i / 5) as f32 * 60.0 + 20.0;
+        b.set_position(x, y);
+        draw_circle(&mut b, Pos::new(20.0, 20.0), 20.0, Some(WHITE));
+    }
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let stats = b.shape_stats();
+    println!("  custom VS Material + Geo stats = {stats:?}");
+    assert_eq!(stats.geo_instances, 0, "custom VS Material 不应走 geo instance 路径");
+    assert!(stats.mesh_vertices > 0, "custom VS Material 应 mesh 展开（geo 网格顶点）");
+
+    let draw_calls = canvas.last_draw_calls();
+    println!("  custom VS Material + Geo x20 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 1, "custom VS Material geo 应 mesh fallback（ordered 合并为 1 dc）");
+
+    let pixels = canvas.read_pixels();
+    assert!(region_has_color(&pixels, 320, 42, 42, 78, 78), "custom VS Material geo mesh fallback 像素应可见");
+}
