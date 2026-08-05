@@ -531,6 +531,8 @@ pub struct VireoWindow {
     /// 上一份已完成提交的 GPU queue latency（由 `on_submitted_work_done` 写回）
     last_gpu_secs: Arc<Mutex<Option<f64>>>,
     pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
+    /// Outcome recorded by this window's draw call in the current update iteration.
+    last_draw_outcome: std::cell::Cell<Option<DrawOutcome>>,
 }
 
 impl VireoWindow {
@@ -596,6 +598,7 @@ impl VireoWindow {
             gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
             last_gpu_secs: Arc::new(Mutex::new(None)),
             pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            last_draw_outcome: std::cell::Cell::new(None),
         }
     }
 
@@ -647,6 +650,16 @@ impl VireoWindow {
     ///
     /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
     pub fn draw(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+    ) -> DrawReport {
+        let report = self.draw_frame(clear_color, batches);
+        self.last_draw_outcome.set(Some(report.outcome));
+        report
+    }
+
+    fn draw_frame(
         &self,
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
@@ -2010,10 +2023,18 @@ where F: FnMut(&App) -> bool + Send + 'static
 
         // 等所有窗口创建完才开始调用用户代码
         if created_windows >= expected_windows {
+            for win in app.windows.iter().flatten() {
+                win.last_draw_outcome.set(None);
+            }
             if !(on_frame)(&app) {
                 // 用户请求退出：通知 winit 线程 exit，本线程返回。
                 request_exit();
                 break;
+            }
+            if should_backoff_after_draws(
+                app.windows.iter().flatten().map(|win| win.last_draw_outcome.get()),
+            ) {
+                std::thread::sleep(std::time::Duration::from_millis(16));
             }
             if device_lost.load(std::sync::atomic::Ordering::Acquire) {
                 eprintln!("vireo: GPU device lost — terminating");
@@ -2024,6 +2045,27 @@ where F: FnMut(&App) -> bool + Send + 'static
             std::thread::yield_now();
         }
     }
+}
+
+fn should_backoff_after_draws(
+    outcomes: impl IntoIterator<Item = Option<DrawOutcome>>,
+) -> bool {
+    let mut any = false;
+    for outcome in outcomes {
+        any = true;
+        if !matches!(
+            outcome,
+            Some(DrawOutcome::Skipped(
+                DrawSkipReason::ZeroSized
+                    | DrawSkipReason::Timeout
+                    | DrawSkipReason::Occluded
+                    | DrawSkipReason::Closing
+            ))
+        ) {
+            return false;
+        }
+    }
+    any
 }
 
 /// 窗口索引 —— 用于在 run() 闭包中引用窗口。稳定 handle：关窗后该索引失效（`window_ref` 返回 None），
@@ -2786,6 +2828,27 @@ mod metrics_tests {
     //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
     use super::{logical_size, skip_report, DrawOutcome, DrawSkipReason};
+
+    #[test]
+    fn draw_backoff_requires_every_active_window_to_skip() {
+        assert!(super::should_backoff_after_draws([
+            Some(DrawOutcome::Skipped(DrawSkipReason::ZeroSized)),
+            Some(DrawOutcome::Skipped(DrawSkipReason::Occluded)),
+        ]));
+        assert!(!super::should_backoff_after_draws([
+            Some(DrawOutcome::Skipped(DrawSkipReason::ZeroSized)),
+            Some(DrawOutcome::Presented { suboptimal: false }),
+        ]));
+    }
+
+    #[test]
+    fn draw_backoff_does_not_throttle_undrawn_or_empty_windows() {
+        assert!(!super::should_backoff_after_draws([None]));
+        assert!(!super::should_backoff_after_draws(std::iter::empty()));
+        assert!(!super::should_backoff_after_draws([
+            Some(DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured)),
+        ]));
+    }
 
     #[test]
     fn logical_size_scales_physical_by_scale_factor() {
