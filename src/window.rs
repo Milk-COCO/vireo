@@ -1096,6 +1096,38 @@ impl VireoWindow {
         }
     }
 
+    /// 每轮 `on_frame` 前的轻量尺寸同步（P2 最小改造，2026-08-06）：
+    /// 只把逻辑尺寸/缩放字段刷到当前窗口值，让用户构建 batch 时 `metrics()` 至少
+    /// 反映本轮开始的实际大小。**策略与 `draw` 的 follow 分支一致**——仅当
+    /// `layout_follow` 开启且尺寸相对已配置值漂移时才更新；否则 Cells 保持已配置值
+    ///（几何 camera 也停在已配置布局，两者一致）。0×0 跳过。
+    /// 注意：这仍是本轮开始的快照，`draw()` acquire 后可能 late-poll 更新 camera，
+    /// 两者可以不同（camera 更接近 present 时刻）。
+    fn refresh_metrics(&self) {
+        let size = self.inner.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let sf = self.inner.scale_factor();
+        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let dpi_scale = sf as f32;
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let drift = {
+            let sc = self.surface_config.borrow();
+            sc.width != size.width
+                || sc.height != size.height
+                || logical_w != self.logical_width.get()
+                || logical_h != self.logical_height.get()
+                || scale != self.scale.get()
+        };
+        if self.layout_follow.get() && drift {
+            self.logical_width.set(logical_w);
+            self.logical_height.set(logical_h);
+            self.scale.set(scale);
+            self.dpi_scale.set(dpi_scale);
+        }
+    }
+
     /// Whether the observed window metrics differ from the configured surface/layout.
     pub fn resize_pending(&self) -> bool {
         let size = self.inner.inner_size();
@@ -2142,10 +2174,11 @@ where F: FnMut(&App) -> bool + Send + 'static
             }
         }
 
-        // 等所有窗口创建完才开始调用用户代码
+// 等所有窗口创建完才开始调用用户代码
         if created_windows >= expected_windows {
             for win in app.windows.iter().flatten() {
                 win.last_draw_outcome.set(None);
+                win.refresh_metrics();
             }
             if !(on_frame)(&app) {
                 // 用户请求退出：通知 winit 线程 exit，本线程返回。
