@@ -86,6 +86,7 @@ fn main() {
     let mut key_was = [false; 5]; // O F P D L
     let mut last_acq_ms = 0.0f64;
     let mut last_enc_ms = 0.0f64;
+    let mut last_conf_ms = 0.0f64;
     let mut last_suboptimal = false;
 
     app.run(move |app| {
@@ -156,10 +157,13 @@ fn main() {
                 metrics.width, metrics.height, app.fps, app.frame_time * 1000.0
             ),
             format!(
-                "last acquire: {:.2} ms  encode: {:.2} ms",
-                last_acq_ms, last_enc_ms
+                "last configure: {:.2} ms  acquire: {:.2} ms  encode: {:.2} ms",
+                last_conf_ms, last_acq_ms, last_enc_ms
             ),
-            format!("wgpu suboptimal: {}  (not a resize/drag signal)", last_suboptimal),
+            format!(
+                "resize pending: {}  presented/skipped: {}/{}  wgpu suboptimal: {}",
+                win.resize_pending(), win.presented_frames(), win.skipped_frames(), last_suboptimal,
+            ),
             "drag edge: O=OnRelease(默认) F=EveryFrame P=Periodic(400ms) D=去抖 L=布局跟随".into(),
         ];
         for (i, line) in lines.iter().enumerate() {
@@ -179,6 +183,7 @@ fn main() {
         }
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
+        last_conf_ms = report.timings.configure_secs * 1000.0;
         true
     });
 }

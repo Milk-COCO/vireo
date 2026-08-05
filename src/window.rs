@@ -332,11 +332,14 @@ impl WindowDesc {
 /// 分段耗时（秒），由 [`VireoWindow::draw`] 回传。
 ///
 /// 新流程（render thread 独占 surface 帧循环）：
+/// - `configure_secs`：本帧 `surface.configure`（未 configure 时为 0）
 /// - `acquire_secs`：`get_current_texture`（不含此前的尺寸同步与 `surface.configure`）
 /// - `encode_secs`：Renderer 编码 + `queue.submit`
 /// - `present_secs`：`queue.present`
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawTimings {
+    /// `surface.configure` 同步耗时；本帧未 configure 时为 0。
+    pub configure_secs: f64,
     /// `get_current_texture`：可能阻塞等待 swapchain 空位；不含尺寸同步与
     /// `surface.configure`，后两者发生在此计时区间之前。
     pub acquire_secs: f64,
@@ -533,6 +536,8 @@ pub struct VireoWindow {
     pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
     /// Outcome recorded by this window's draw call in the current update iteration.
     last_draw_outcome: std::cell::Cell<Option<DrawOutcome>>,
+    presented_frames: std::cell::Cell<u64>,
+    skipped_frames: std::cell::Cell<u64>,
 }
 
 impl VireoWindow {
@@ -599,6 +604,8 @@ impl VireoWindow {
             last_gpu_secs: Arc::new(Mutex::new(None)),
             pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             last_draw_outcome: std::cell::Cell::new(None),
+            presented_frames: std::cell::Cell::new(0),
+            skipped_frames: std::cell::Cell::new(0),
         }
     }
 
@@ -656,6 +663,15 @@ impl VireoWindow {
     ) -> DrawReport {
         let report = self.draw_frame(clear_color, batches);
         self.last_draw_outcome.set(Some(report.outcome));
+        match report.outcome {
+            DrawOutcome::Presented { .. } => {
+                self.presented_frames.set(self.presented_frames.get().saturating_add(1));
+            }
+            DrawOutcome::Skipped(_) => {
+                self.skipped_frames.set(self.skipped_frames.get().saturating_add(1));
+            }
+            DrawOutcome::Failed(_) => {}
+        }
         report
     }
 
@@ -673,6 +689,7 @@ impl VireoWindow {
         }
         let trace = std::env::var_os("VIREO_DRAW_TRACE").is_some();
         let t_trace = std::time::Instant::now();
+        let mut configure_secs = 0.0;
 
         // 1) 应用 pending present mode（改 config 即可；尺寸同步在下方统一 configure）
         if let Some(mode) = self.pending_mode.take() {
@@ -752,6 +769,7 @@ impl VireoWindow {
                 }
                 // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
                 self.configure_surface(size, now);
+                configure_secs = t_conf.elapsed().as_secs_f64();
                 if trace {
                     eprintln!("[draw] conf-end {:?}us", t_conf.elapsed().as_micros());
                 }
@@ -804,10 +822,15 @@ impl VireoWindow {
                         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
                     };
                 }
-                self.configure_surface(size, std::time::Instant::now());
+                let t_conf = std::time::Instant::now();
+                self.configure_surface(size, t_conf);
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
-                    timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                    timings: DrawTimings {
+                        configure_secs: t_conf.elapsed().as_secs_f64(),
+                        gpu_secs,
+                        ..DrawTimings::default()
+                    },
                 };
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
@@ -827,11 +850,13 @@ impl VireoWindow {
                 }
                 if let Some(new_surface) = self.recreate_surface() {
                     *self.surface.borrow_mut() = new_surface;
-                    self.configure_surface(size, std::time::Instant::now());
+                    let t_conf = std::time::Instant::now();
+                    self.configure_surface(size, t_conf);
+                    configure_secs = t_conf.elapsed().as_secs_f64();
                 }
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
-                    timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                    timings: DrawTimings { configure_secs, gpu_secs, ..DrawTimings::default() },
                 };
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -927,6 +952,7 @@ impl VireoWindow {
         DrawReport {
             outcome: DrawOutcome::Presented { suboptimal },
             timings: DrawTimings {
+                configure_secs,
                 acquire_secs,
                 encode_secs,
                 present_secs,
@@ -1005,6 +1031,28 @@ impl VireoWindow {
             height: self.logical_height.get(),
             scale_factor: self.scale.get() as f64,
         }
+    }
+
+    /// Whether the observed window metrics differ from the configured surface/layout.
+    pub fn resize_pending(&self) -> bool {
+        let size = self.inner.inner_size();
+        let sf = self.inner.scale_factor();
+        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let config = self.surface_config.borrow();
+        config.width != size.width
+            || config.height != size.height
+            || self.configured_layout.get() != (logical_w, logical_h, scale, sf as f32)
+    }
+
+    /// Number of successful `queue.present` calls made by this window.
+    pub fn presented_frames(&self) -> u64 {
+        self.presented_frames.get()
+    }
+
+    /// Number of draw attempts skipped before present.
+    pub fn skipped_frames(&self) -> u64 {
+        self.skipped_frames.get()
     }
 
     /// 获取当前鼠标位置（窗口用户坐标系，即 WindowDesc 传入的宽高范围）
@@ -2065,6 +2113,7 @@ fn should_backoff_after_draws(
             return false;
         }
     }
+
     any
 }
 
