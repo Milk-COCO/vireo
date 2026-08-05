@@ -26,6 +26,8 @@ use winit::window::Cursor;
 
 /// 滑动窗口帧数：约 0.5s@60Hz，平滑 FPS，避免「满 1 秒整段重置」导致 55↔60 乱跳。
 const FPS_SAMPLE_CAP: usize = 30;
+/// presented rate 的滑动窗口大小（成功 `queue.present` 的间隔采样数）。
+const PRESENT_SAMPLE_CAP: usize = 30;
 /// resize 去抖默认值：尺寸**稳定**满此时间才 `surface.configure`。
 /// 连续拖动时每帧尺寸都变、去抖永不触发 → 全程不 configure，按旧尺寸持续
 /// present（DXGI SCALING_STRETCH 实时拉伸），帧流保持满速、无 27-68ms 卡顿
@@ -470,6 +472,19 @@ fn skip_report(gpu_secs: Option<f64>, reason: DrawSkipReason) -> DrawReport {
     }
 }
 
+/// 滑动窗口平均频率（样本/总时长）。空窗口或总时长非正返回 0。
+fn sliding_rate(samples: &[f64]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().sum();
+    if sum > 0.0 {
+        samples.len() as f64 / sum
+    } else {
+        0.0
+    }
+}
+
 /// 窗口实例 —— 渲染线程独占，持有 surface/renderer/input 与完整帧循环。
 ///
 /// **关键架构（第五十一轮）**：`SurfaceTexture` 从 acquire 到 present 全程是
@@ -538,6 +553,9 @@ pub struct VireoWindow {
     last_draw_outcome: std::cell::Cell<Option<DrawOutcome>>,
     presented_frames: std::cell::Cell<u64>,
     skipped_frames: std::cell::Cell<u64>,
+    /// 最近成功 present 的间隔（秒），滑动窗口，用于 [`VireoWindow::presented_fps`]。
+    present_intervals: std::cell::RefCell<Vec<f64>>,
+    last_present: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 impl VireoWindow {
@@ -606,6 +624,8 @@ impl VireoWindow {
             last_draw_outcome: std::cell::Cell::new(None),
             presented_frames: std::cell::Cell::new(0),
             skipped_frames: std::cell::Cell::new(0),
+            present_intervals: std::cell::RefCell::new(Vec::with_capacity(PRESENT_SAMPLE_CAP)),
+            last_present: std::cell::Cell::new(None),
         }
     }
 
@@ -666,6 +686,7 @@ impl VireoWindow {
         match report.outcome {
             DrawOutcome::Presented { .. } => {
                 self.presented_frames.set(self.presented_frames.get().saturating_add(1));
+                self.record_present();
             }
             DrawOutcome::Skipped(_) => {
                 self.skipped_frames.set(self.skipped_frames.get().saturating_add(1));
@@ -673,6 +694,22 @@ impl VireoWindow {
             DrawOutcome::Failed(_) => {}
         }
         report
+    }
+
+    /// 记录一次成功 present 的间隔（供 `presented_fps` 滑动窗口）。
+    fn record_present(&self) {
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_present.get() {
+            let dt = now.duration_since(prev).as_secs_f64();
+            if dt > 0.0 && dt < 0.5 {
+                let mut v = self.present_intervals.borrow_mut();
+                v.push(dt);
+                if v.len() > PRESENT_SAMPLE_CAP {
+                    v.remove(0);
+                }
+            }
+        }
+        self.last_present.set(Some(now));
     }
 
     fn draw_frame(
@@ -1076,6 +1113,15 @@ impl VireoWindow {
         self.presented_frames.get()
     }
 
+    /// 最近成功 present 的提交频率（滑动窗口平均值）。
+    ///
+    /// 这是**提交节拍**（本进程成功 `queue.present` 的间隔），不是显示器/compositor
+    /// 实际呈现频率：present 只把帧排队给合成器，displayed FPS 需 DXGI present
+    /// statistics / PresentMon / ETW 才能测得，不能用 CPU 循环推断。无样本返回 0。
+    pub fn presented_fps(&self) -> f64 {
+        sliding_rate(&self.present_intervals.borrow())
+    }
+
     /// Number of draw attempts skipped before present.
     pub fn skipped_frames(&self) -> u64 {
         self.skipped_frames.get()
@@ -1191,8 +1237,9 @@ pub struct App {
     /// 相邻两次 update/`on_frame` 调用的间隔（秒），瞬时值。第一帧为 0。
     /// 它不是相邻 displayed frame 的呈现间隔。
     pub frame_time: f64,
-    /// update/`on_frame` 调用频率的滑动窗口平均值。它不是 displayed FPS；surface acquire、
-    /// present mode、跳帧或合成器可能使实际显示频率不同。第一帧为 0。
+    /// update/`on_frame` 调用频率的滑动窗口平均值（约 0.5s@60Hz）。它不是 displayed FPS；
+    /// surface acquire、present mode、跳帧或合成器可能使实际显示频率不同。第一帧为 0。
+    /// 需要每窗口成功提交节拍用 [`VireoWindow::presented_fps`]。
     pub fps: f64,
     /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
     pub init_duration: f64,
@@ -2902,7 +2949,7 @@ mod present_state_tests {
 mod metrics_tests {
     //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
-    use super::{logical_size, skip_report, DrawOutcome, DrawSkipReason};
+    use super::{logical_size, skip_report, sliding_rate, DrawOutcome, DrawSkipReason};
 
     #[test]
     fn draw_backoff_requires_every_active_window_to_skip() {
@@ -2984,6 +3031,24 @@ mod metrics_tests {
     fn resolve_present_mode_unsupported_mode_falls_back_to_auto_vsync() {
         let supported = [wgpu::PresentMode::Fifo];
         assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported), wgpu::PresentMode::AutoVsync);
+    }
+
+    #[test]
+    fn sliding_rate_empty_is_zero() {
+        assert_eq!(sliding_rate(&[]), 0.0);
+    }
+
+    #[test]
+    fn sliding_rate_averages_intervals() {
+        // 60Hz：30 个 ~16.67ms 间隔 → 约 60/s
+        let samples: Vec<f64> = (0..30).map(|_| 1.0 / 60.0).collect();
+        let r = sliding_rate(&samples);
+        assert!((r - 60.0).abs() < 1e-6, "got {r}");
+    }
+
+    #[test]
+    fn sliding_rate_ignores_nonpositive_sum() {
+        assert_eq!(sliding_rate(&[0.0, 0.0]), 0.0);
     }
 
     fn base() -> std::time::Instant {

@@ -161,8 +161,8 @@ fn main() {
                 last_conf_ms, last_acq_ms, last_enc_ms
             ),
             format!(
-                "resize pending: {}  presented/skipped: {}/{}  wgpu suboptimal: {}",
-                win.resize_pending(), win.presented_frames(), win.skipped_frames(), last_suboptimal,
+                "resize pending: {}  present: {} ({:.1}/s)  skipped: {}  wgpu suboptimal: {}",
+                win.resize_pending(), win.presented_frames(), win.presented_fps(), win.skipped_frames(), last_suboptimal,
             ),
             "drag edge: O=OnRelease(默认) F=EveryFrame P=Periodic(400ms) D=去抖 L=布局跟随".into(),
         ];
