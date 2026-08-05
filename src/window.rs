@@ -687,6 +687,12 @@ impl VireoWindow {
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
             };
         }
+        if self.gpu.is_device_lost() {
+            return DrawReport {
+                outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
+                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+            };
+        }
         let trace = std::env::var_os("VIREO_DRAW_TRACE").is_some();
         let t_trace = std::time::Instant::now();
         let mut configure_secs = 0.0;
@@ -860,7 +866,27 @@ impl VireoWindow {
                 };
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return skip_report(gpu_secs, DrawSkipReason::SurfaceReconfigured);
+                // get_current_texture 内部校验失败：surface 配置可能已失效。
+                // 按当前尺寸重配后本帧跳过（与 Outdated 一致），并记录告警——
+                // 不再伪装成「已重配」（旧实现只打 SurfaceReconfigured 不实际重配）。
+                eprintln!("vireo: surface get_current_texture validation error — reconfiguring");
+                let size = self.inner.inner_size();
+                if size.width == 0 || size.height == 0 {
+                    return DrawReport {
+                        outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
+                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                    };
+                }
+                let t_conf = std::time::Instant::now();
+                self.configure_surface(size, t_conf);
+                return DrawReport {
+                    outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                    timings: DrawTimings {
+                        configure_secs: t_conf.elapsed().as_secs_f64(),
+                        gpu_secs,
+                        ..DrawTimings::default()
+                    },
+                };
             }
         };
         if trace {
@@ -1147,9 +1173,8 @@ pub struct App {
     pub windows: Vec<Option<VireoWindow>>,
     pub gpu: Arc<GpuContext>,
     instance: Option<wgpu::Instance>,
-    /// 设备丢失标志（预留：wgpu 30 的 `get_current_texture` 无 `DeviceLost` 变体，
-    /// 当前无代码路径置位；未来接 `Device::set_device_lost_callback` 时使用）。
-    /// 渲染循环每帧读它，置位则干净终止。
+    /// 设备丢失标志：由 `GpuContext` 的 `Device::set_device_lost_callback` 置位
+    ///（`GpuContext::device_lost()` 同 Arc）。渲染循环每帧读它，置位则干净终止。
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     /// 稳定 handle → winit WindowId。handle 由 `App::window()` 分配，
     /// 在 run() 中被取出给 winit 线程用。
@@ -1213,6 +1238,7 @@ impl App {
             wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
         );
         let gpu = Arc::new(GpuContext::new(&instance));
+        let device_lost = gpu.device_lost();
         let default_icon = std::fs::read("logo.png")
             .ok()
             .and_then(|data| image::load_from_memory(&data).ok())
@@ -1228,7 +1254,7 @@ impl App {
             windows: Vec::new(),
             gpu,
             instance: Some(instance),
-            device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            device_lost,
             handle_to_id: FxHashMap::default(),
             next_handle: 0,
             close_hooks: FxHashMap::default(),

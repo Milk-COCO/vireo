@@ -473,6 +473,9 @@ pub struct GpuContext {
     shader_geo_instance: wgpu::ShaderModule, // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
     shader_instance_ssaa: wgpu::ShaderModule,
+    /// GPU 设备丢失标志：由 `Device::set_device_lost_callback` 置位。
+    /// 供 `VireoWindow::draw`（返回 `Failed(DeviceLost)`）与渲染循环（终止）共用。
+    device_lost: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[repr(C)]
@@ -576,12 +579,24 @@ impl GpuContext {
             }))
             .unwrap();
 
+        // 设备丢失检测：回调置位共享标志。渲染循环每帧轮询并在丢失时终止；
+        // `draw` 也据此返回 `DrawOutcome::Failed(DeviceLost)`。
+        let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = device_lost.clone();
+            device.set_device_lost_callback(move |reason: wgpu::DeviceLostReason, msg: String| {
+                eprintln!("vireo: GPU device lost ({reason:?}): {msg}");
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+        }
+
         Self::build_resources(
             device,
             queue,
             adapter,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             ColorMode::Accurate,
+            device_lost,
         )
     }
 
@@ -591,6 +606,7 @@ impl GpuContext {
         adapter: wgpu::Adapter,
         surface_format: wgpu::TextureFormat,
         color_mode: ColorMode,
+        device_lost: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -964,6 +980,7 @@ impl GpuContext {
             shader_geo_instance,
             shader_instance,
             shader_instance_ssaa,
+            device_lost,
         }
     }
 
@@ -978,6 +995,16 @@ impl GpuContext {
     /// 当前设备支持的 MSAA 最大 sample_count。
     pub fn max_sample_count(&self) -> u32 {
         *self.supported_sample_counts.last().unwrap_or(&1)
+    }
+
+    /// 设备丢失标志副本（与 App/渲染循环共享同一 `Arc`）。
+    pub fn device_lost(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.device_lost.clone()
+    }
+
+    /// 设备是否已丢失。
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 将请求的 sample_count 收束到 `supported_sample_counts` 中

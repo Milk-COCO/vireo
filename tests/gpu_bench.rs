@@ -878,3 +878,16 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let pixels = canvas.read_pixels();
     assert!(region_has_color(&pixels, 320, 42, 42, 78, 78), "custom VS Material geo mesh fallback 像素应可见");
 }
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn device_lost_flag_is_shared_and_clear_by_default() {
+    println!("\n=== device-lost 标志：默认 false，App/GpuContext 共享同一 Arc ===");
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    assert!(!gpu.is_device_lost(), "新设备不应处于 lost 状态");
+    let flag = gpu.device_lost();
+    flag.store(true, std::sync::atomic::Ordering::Release);
+    assert!(gpu.is_device_lost(), "设置返回的 Arc 后 GpuContext 应观测到 lost");
+    assert!(flag.load(std::sync::atomic::Ordering::Acquire), "同一 Arc 应被置位");
+}
