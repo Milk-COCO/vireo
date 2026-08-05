@@ -343,6 +343,11 @@ pub struct Renderer {
     physical_height: u32,
     scale: f32,
     dpi_scale: f32,
+    /// 文字 shader `screen_resolution` 覆盖（`layout_follow` 拖动中用）。
+    /// `Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi）：glyph 不重新光栅化
+    /// （scale/dpi 不变 → 图集 cache key 稳定），仅 shader NDC 映射补偿 DXGI 拉伸。
+    /// `None` = 用 `physical_width/height`（旧 surface 尺寸）。
+    text_viewport_override: std::cell::Cell<Option<(u32, u32)>>,
     sample_count: u32,
     alpha_to_coverage: bool,
     ssaa: bool,
@@ -433,6 +438,7 @@ impl Renderer {
             physical_height,
             scale,
             dpi_scale,
+            text_viewport_override: std::cell::Cell::new(None),
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
             ssaa: aa.is_ssaa(),
@@ -533,14 +539,19 @@ impl Renderer {
         dt.as_ref().unwrap().1.clone()
     }
 
-    /// 更新相机投影（窗口 resize 时调用）。
-    /// `scale`：逻辑→物理（文字/scissor）；`dpi_scale`：OS 缩放（SDF feather，可与 scale 不同）。
-    pub fn resize(
+    /// 只更新相机投影 + 逻辑尺寸/scale/dpi 字段，**不**触碰 surface 相关资源
+    /// （`physical_width/height`、msaa/ds 纹理保持旧 surface 尺寸）。
+    ///
+    /// `layout_follow`（`VireoWindow::set_layout_follow`，默认开）拖动中每帧调用：
+    /// 窗口已变但 surface 未重配时，把 camera 切到新逻辑尺寸 → 几何/形状按新布局
+    /// 实时重排（复合映射 `logical→NDC→旧surface→DXGI拉伸→window` = uniform dpi，
+    /// 零畸变）。`scale` 保持 dpi 不变（glyph 光栅化 cache key 稳定），文字拉伸由
+    /// `set_text_viewport_override` 在 shader 层补偿；`dpi_scale` 保持 OS 缩放
+    /// （SDF feather 用）。
+    pub(crate) fn update_layout(
         &mut self,
         logical_width: u32,
         logical_height: u32,
-        physical_width: u32,
-        physical_height: u32,
         scale: f32,
         dpi_scale: f32,
     ) {
@@ -550,12 +561,35 @@ impl Renderer {
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
         camera_raw[64..68].copy_from_slice(&dpi_scale.to_le_bytes());
         self.gpu.queue.write_buffer(&self.camera_buf, 0, &camera_raw);
-        self.physical_width = physical_width;
-        self.physical_height = physical_height;
         self.logical_width = logical_width;
         self.logical_height = logical_height;
         self.scale = scale;
         self.dpi_scale = dpi_scale;
+    }
+
+    /// 设置文字 shader `screen_resolution` 覆盖（`layout_follow` 拖动中）。
+    /// `None` = 用物理 surface 尺寸；`Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi），
+    /// glyph 不重新光栅化（`scale` 保持 dpi 不变），纯 shader 层 NDC 补偿拉伸。
+    pub(crate) fn set_text_viewport_override(&self, size: Option<(u32, u32)>) {
+        self.text_viewport_override.set(size);
+    }
+
+    /// 更新相机投影（窗口 resize 时调用）。
+    /// `scale`：逻辑→物理（文字/scissor）；`dpi_scale`：OS 缩放（SDF feather，可与 scale 不同）。
+    /// surface 已重配时调用（重建 msaa/ds 纹理以匹配新物理尺寸）。
+    pub fn resize(
+        &mut self,
+        logical_width: u32,
+        logical_height: u32,
+        physical_width: u32,
+        physical_height: u32,
+        scale: f32,
+        dpi_scale: f32,
+    ) {
+        self.update_layout(logical_width, logical_height, scale, dpi_scale);
+        self.physical_width = physical_width;
+        self.physical_height = physical_height;
+        self.text_viewport_override.set(None);
         *self.msaa_tex.borrow_mut() = None;
         *self.ds_tex.borrow_mut() = None;
     }
@@ -636,8 +670,8 @@ impl Renderer {
 
         let target_view = &target.view;
         // 相机为逻辑像素正交；Pop 全屏四边形也用逻辑尺寸
-        let lw = self.physical_width as f32 / self.scale.max(1e-6);
-        let lh = self.physical_height as f32 / self.scale.max(1e-6);
+        let lw = self.logical_width as f32;
+        let lh = self.logical_height as f32;
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
         let mut event_infos = self.scratch_event_infos.borrow_mut();
@@ -1472,10 +1506,13 @@ impl Renderer {
         for (ei, event) in events.iter().enumerate() {
             if let DrawEvent::Batch(batch) = event {
                 if !batch.texts.entries.is_empty() {
+                    // layout_follow 时用虚拟新物理尺寸（screen_resolution uniform 补偿 DXGI 拉伸）
+                    let (tw, th) = self.text_viewport_override.get()
+                        .unwrap_or((self.physical_width, self.physical_height));
                     let prepared = batch.texts.prepare_texts(
                         &self.gpu,
-                        self.physical_width,
-                        self.physical_height,
+                        tw,
+                        th,
                         self.scale,
                         &batch.transform_table,
                         &mut global_transforms,

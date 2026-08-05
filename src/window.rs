@@ -507,6 +507,12 @@ pub struct VireoWindow {
     /// resize 去抖时长：尺寸稳定满此时间才一次性 configure（松手 snap）。默认
     /// [`DEFAULT_RESIZE_DEBOUNCE`]（100ms），可经 `set_resize_debounce` 覆盖。
     resize_debounce: std::cell::Cell<std::time::Duration>,
+    /// 布局跟随开关（独立于 `ResizeRefreshPolicy`，默认开）：窗口尺寸已变但 surface
+    /// 未重配时，每帧把 camera/逻辑尺寸更新到新窗口（`Renderer::update_layout`），
+    /// 内容**实时重排**而非停在旧布局——DXGI 把旧 surface 拉伸到新窗口时正好抵消
+    /// 畸变（几何零畸变、文字按 `旧surface宽/新逻辑宽` 补偿近似）。
+    /// 关闭 = 旧行为：拖动中内容停旧逻辑布局（纯拉伸）。
+    layout_follow: std::cell::Cell<bool>,
     /// 待应用的 AA 模式（在 draw 开头应用）
     pending_aa: std::cell::Cell<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
@@ -570,6 +576,7 @@ impl VireoWindow {
             )),
             resize_policy: std::cell::Cell::new(ResizeRefreshPolicy::OnRelease),
             resize_debounce: std::cell::Cell::new(DEFAULT_RESIZE_DEBOUNCE),
+            layout_follow: std::cell::Cell::new(true),
             pending_aa: std::cell::Cell::new(None),
             handle,
             closing: std::cell::Cell::new(false),
@@ -702,6 +709,34 @@ impl VireoWindow {
                     logical_w, logical_h,
                     size.width, size.height, new_scale, dpi_scale,
                 );
+            } else if size_drifted && self.layout_follow.get() {
+                // layout_follow（独立开关，默认开）：窗口已变但 surface 未重配——
+                // 只把 camera/逻辑尺寸更新到新窗口，让内容实时重排而非停在旧布局。
+                // DXGI 把旧 surface（S）拉伸到新窗口（W）：camera 用新逻辑尺寸 →
+                // 复合映射 uniform dpi、几何零畸变。
+                // 文字不重光栅化（保持 scale=dpi → 图集 cache key 稳定），而是把
+                // 文字 shader 的 screen_resolution 覆盖为「虚拟新物理尺寸」
+                // （新逻辑 × dpi）：NDC = 2*px/(L*dpi) - 1 与几何相机 2x/L - 1
+                // 对齐，纯 shader 层拉伸补偿 DXGI 拉伸（x 精确、y 在宽高比变化时近似）。
+                // 不重置 pending_resize_at：计时继续老化，松手满 debounce 触发
+                // 上方 Stable 分支一次性 configure（snap）。
+                if trace {
+                    eprintln!("[draw] follow-layout {}x{}", logical_w, logical_h);
+                }
+                self.logical_width.set(logical_w);
+                self.logical_height.set(logical_h);
+                self.scale.set(new_scale);
+                self.dpi_scale.set(dpi_scale);
+                let vw = (logical_w as f32 * new_scale).round().max(1.0) as u32;
+                let vh = (logical_h as f32 * new_scale).round().max(1.0) as u32;
+                self.renderer.borrow_mut().update_layout(
+                    logical_w, logical_h, new_scale, dpi_scale,
+                );
+                self.renderer.borrow_mut().set_text_viewport_override(Some((vw, vh)));
+            } else {
+                // 不跟随 / 尺寸未漂移：清掉可能残留的虚拟 viewport（配置/稳定路径已由
+                // `Renderer::resize` 清，这里兜底防 follow 中途关闭后残留）。
+                self.renderer.borrow_mut().set_text_viewport_override(None);
             }
         }
 
@@ -2229,6 +2264,26 @@ impl VireoWindow {
     /// 当前 resize 去抖时长（默认 100ms）。见 [`VireoWindow::set_resize_debounce`]。
     pub fn resize_debounce(&self) -> std::time::Duration {
         self.resize_debounce.get()
+    }
+
+    /// 布局跟随开关（独立于 [`ResizeRefreshPolicy`]，默认开）。
+    ///
+    /// 窗口尺寸已变但 surface 未重配时（拖动中），每帧把 camera/逻辑尺寸更新到
+    /// 新窗口（`Renderer::update_layout`），让内容**实时重排**：DXGI 把旧 surface
+    /// 拉伸到新窗口时正好抵消畸变（几何零畸变；文字 `scale` 保持 dpi 不变、
+    /// 由 shader 层 `screen_resolution` 覆盖补偿拉伸，x 精确、y 在宽高比变化时近似）。
+    /// 关闭 = 旧行为：拖动中内容停在旧逻辑布局（纯拉伸，松手才 snap）。
+    ///
+    /// 与 [`VireoWindow::set_resize_refresh_policy`] 正交：策略决定**何时 configure
+    /// surface**，本开关决定**configure 之前布局是否跟随**。关闭后 configure 前
+    /// 内容完全停旧布局。
+    pub fn set_layout_follow(&self, enabled: bool) {
+        self.layout_follow.set(enabled);
+    }
+
+    /// 当前布局跟随开关（默认开）。见 [`VireoWindow::set_layout_follow`]。
+    pub fn layout_follow(&self) -> bool {
+        self.layout_follow.get()
     }
 
     /// 运行时切换抗锯齿（运行时重建 msaa 纹理）。
