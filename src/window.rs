@@ -26,6 +26,74 @@ use winit::window::Cursor;
 
 /// 滑动窗口帧数：约 0.5s@60Hz，平滑 FPS，避免「满 1 秒整段重置」导致 55↔60 乱跳。
 const FPS_SAMPLE_CAP: usize = 30;
+/// resize 去抖默认值：尺寸**稳定**满此时间才 `surface.configure`。
+/// 连续拖动时每帧尺寸都变、去抖永不触发 → 全程不 configure，按旧尺寸持续
+/// present（DXGI SCALING_STRETCH 实时拉伸），帧流保持满速、无 27-68ms 卡顿
+/// （wgpu-hal DX12 configure 每次都会 `wait_for_present_queue_idle` 等 present
+/// queue 排空，DWM 停消费时无限等 → 旧实现拖动即冻屏）。
+/// 用户可经 `VireoWindow::set_resize_debounce` 覆盖。
+const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 拖动窗口时的 resize 尺寸刷新策略（`VireoWindow::set_resize_refresh_policy`）。
+/// 目标是把「拖动中是否实时跟踪尺寸」的选择权交给用户：每帧/周期刷新在 wgpu-hal
+/// DX12 上每次 `surface.configure` 都要阻塞等 present queue 排空（实测 ~50-80ms），
+/// 会明显掉帧，但能实时看到新布局；`OnRelease` 全程不卡但内容拉伸到松手。
+/// 「松手 snap」的去抖时长由 `VireoWindow::set_resize_debounce` 配置（默认 100ms）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeRefreshPolicy {
+    /// 拖动全程不更新（按旧尺寸拉伸 present，帧流满速），松手尺寸稳定满
+    /// 去抖时长后一次性 `surface.configure`（snap）。默认。
+    OnRelease,
+    /// 拖动中**每帧**都 `surface.configure` 实时跟踪尺寸。每次 configure
+    /// 阻塞 ~50-80ms，帧率骤降、一顿一顿——给需要拖动时看到真实布局的用户。
+    EveryFrame,
+    /// 拖动中每满 `interval` 强制 configure 一次（折中；每次同样 ~50ms 级停顿）。
+    Periodic(std::time::Duration),
+}
+
+/// resize 刷新决策（`VireoWindow::draw` 尺寸同步用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeRefresh {
+    /// 尺寸未变，或当前策略下不需要 configure。
+    None,
+    /// 尺寸已**稳定**满 debounce（松手 snap）。
+    Stable,
+    /// 拖动中按策略实时刷新（每帧或周期性）。
+    Live,
+}
+
+/// 尺寸是否需要在 draw 阶段 configure：
+/// - 未变化 → `None`；
+/// - 稳定满 `debounce` → `Stable`（拖动结束后的 snap，任何策略下都生效）；
+/// - `EveryFrame` → 尺寸变化即 `Live`；`Periodic(iv)` → 距上次 configure 满 iv
+///   → `Live`；`OnRelease` → 无实时刷新。
+fn resize_refresh(
+    size_changed: bool,
+    stable_since: Option<std::time::Instant>,
+    now: std::time::Instant,
+    debounce: std::time::Duration,
+    policy: ResizeRefreshPolicy,
+    last_configure: std::time::Instant,
+) -> ResizeRefresh {
+    if !size_changed {
+        return ResizeRefresh::None;
+    }
+    if let Some(t) = stable_since {
+        if now.saturating_duration_since(t) >= debounce {
+            return ResizeRefresh::Stable;
+        }
+    }
+    match policy {
+        ResizeRefreshPolicy::OnRelease => {}
+        ResizeRefreshPolicy::EveryFrame => return ResizeRefresh::Live,
+        ResizeRefreshPolicy::Periodic(iv) => {
+            if now.saturating_duration_since(last_configure) >= iv {
+                return ResizeRefresh::Live;
+            }
+        }
+    }
+    ResizeRefresh::None
+}
 
 /// 窗口描述符（用于配置待创建窗口）
 /// 抗锯齿模式。
@@ -261,16 +329,76 @@ impl WindowDesc {
     }
 }
 
-/// 分段耗时（秒），由 render thread 回传。
+/// 分段耗时（秒），由 [`VireoWindow::draw`] 回传。
+///
+/// 新流程（render thread 独占 surface 帧循环）：
+/// - `acquire_secs`：尺寸同步 + `surface.configure` + `get_current_texture`
+/// - `encode_secs`：Renderer 编码 + `queue.submit`
+/// - `present_secs`：`queue.present`
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawTimings {
-    /// `get_current_texture`：可能阻塞等 swapchain 空位 / 上一帧 present。
+    /// 尺寸同步 + `surface.configure` + `get_current_texture`：可能阻塞等 swapchain 空位。
     pub acquire_secs: f64,
     /// 编码 + `queue.submit`（不含 present）。
     pub encode_secs: f64,
+    /// `queue.present`（不含 GPU 执行）。
+    pub present_secs: f64,
     /// 上一份已完成提交的 GPU queue latency（不含 CPU 构图）。
     /// 该值包含驱动排队/GPU 竞争，不等于纯 shader 执行时间。
     pub gpu_secs: Option<f64>,
+}
+
+/// 窗口尺寸/缩放只读快照（逻辑坐标 = 用户坐标系）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowMetrics {
+    /// 逻辑宽（用户坐标系宽度）
+    pub width: u32,
+    /// 逻辑高（用户坐标系高度）
+    pub height: u32,
+    /// 逻辑像素 → 物理像素 缩放因子（`high_dpi` 窗口为 1.0）
+    pub scale_factor: f64,
+}
+
+/// 一次 [`VireoWindow::draw`] 的结果。
+#[derive(Clone, Copy, Debug)]
+pub struct DrawReport {
+    /// 本帧结局（presented / skipped / failed）
+    pub outcome: DrawOutcome,
+    /// 分段耗时
+    pub timings: DrawTimings,
+}
+
+/// 一次 [`VireoWindow::draw`] 的结局。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawOutcome {
+    /// 已 acquire → submit → present 完成一帧。
+    Presented { suboptimal: bool },
+    /// 本帧被跳过（未 acquire / 未 present）。
+    Skipped(DrawSkipReason),
+    /// GPU 设备丢失，应用应终止。
+    Failed(DrawFailure),
+}
+
+/// 本帧被跳过的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawSkipReason {
+    /// 窗口为 0×0（如最小化）——不 acquire，避免忙循环。
+    ZeroSized,
+    /// `get_current_texture` 超时，稍后重试。
+    Timeout,
+    /// 窗口被遮挡/最小化，重开后再画。
+    Occluded,
+    /// surface 过期（`Outdated`），已重配，本帧跳过。
+    SurfaceReconfigured,
+    /// 窗口正在关闭，不绘制。
+    Closing,
+}
+
+/// 不可恢复的帧失败。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawFailure {
+    /// GPU 设备丢失，surface 与全部 GPU 资源失效。
+    DeviceLost,
 }
 
 /// 从 winit 线程发往渲染线程的事件（全是 Send-safe 的自定义类型）。
@@ -278,9 +406,13 @@ enum WinitEvent {
     WindowCreated {
         handle: usize,
         window: Arc<winit::window::Window>,
-        shared_present: Arc<SharedGPUState>,
+        surface: wgpu::Surface<'static>,
+        surface_config: wgpu::SurfaceConfiguration,
+        renderer: crate::context::Renderer,
         logical_width: u32,
         logical_height: u32,
+        scale: f32,
+        dpi_scale: f32,
         high_dpi: bool,
         init_duration: f64,
     },
@@ -312,140 +444,46 @@ enum WinitEvent {
     Exit,
 }
 
-/// 跨线程 GPU 状态：逻辑线程编码 / winit 线程 submit+present。
-///
-/// **核心约束**：
-/// - `SurfaceTexture` 整个生命周期都在 winit 线程（同线程 acquire+present，DWM 才接受）
-/// - 逻辑线程通过 `pending_view: Mutex<Option<TextureView>>` 拿渲染目标
-/// - 逻辑线程编码后通过 `pending_cmd_buf: Mutex<Option<CommandBuffer>>` 递交
-/// - `TextureView` 和 `CommandBuffer` 都是 `Send + Sync`（wgpu 30 已确认）
-///
-/// 状态机：
-/// - `Idle`：`pending_view = None`, `pending_cmd_buf = None`
-/// - `Acquired`：`pending_view = Some(v)`, `pending_cmd_buf = None`
-/// - `Encoded`：`pending_view = Some(v)`, `pending_cmd_buf = Some(c)`
-pub(crate) struct SharedGPUState {
-    pub surface: Mutex<wgpu::Surface<'static>>,
-    pub surface_config: Mutex<wgpu::SurfaceConfiguration>,
-    pub renderer: Mutex<crate::context::Renderer>,
-    pub pending_view: Mutex<Option<wgpu::TextureView>>,
-    pub pending_cmd_buf: Mutex<Option<wgpu::CommandBuffer>>,
-    /// winit 线程是否持有未释放的 SurfaceTexture。
-    /// true 时不能 surface.configure（wgpu 约束）。
-    /// winit 线程在 acquire 成功后置 true，present 后置 false。
-    pub winit_has_st: std::sync::atomic::AtomicBool,
-    /// Resize/present-mode changes are applied by the winit owner thread.
-    pub needs_configure: std::sync::atomic::AtomicBool,
-    /// The logic thread temporarily owns the view while encoding.
-    pub encoding: std::sync::atomic::AtomicBool,
-    /// Wakes the logic thread when the owner thread has acquired the next
-    /// surface view. This keeps the frame loop paced by the swapchain.
-    pub frame_wait: std::sync::Condvar,
-    pub frame_wait_lock: Mutex<()>,
-    /// Completion handshake for the logic frame loop.
-    pub frame_complete: std::sync::Condvar,
-    pub frame_complete_lock: Mutex<bool>,
-    /// Set by the owner thread before closing the window. All frame waits
-    /// must be interruptible so event-loop shutdown cannot block on join.
-    pub closing: std::sync::atomic::AtomicBool,
-    /// Whether queue completion timing is requested for this window.
-    pub gpu_timing_enabled: std::sync::atomic::AtomicBool,
-    pub last_gpu_secs: Mutex<Option<f64>>,
-    pub pending_gpu_starts: Mutex<std::collections::VecDeque<std::time::Instant>>,
-    pub inner: Arc<winit::window::Window>,
+/// 物理尺寸 → 逻辑尺寸（`high_dpi` 窗口逻辑 = 物理）。
+fn logical_size(width: u32, height: u32, high_dpi: bool, scale_factor: f64) -> (u32, u32) {
+    if high_dpi || scale_factor <= 0.0 {
+        (width, height)
+    } else {
+        (
+            (width as f64 / scale_factor) as u32,
+            (height as f64 / scale_factor) as u32,
+        )
+    }
 }
 
-impl SharedGPUState {
-    /// 全部清空（resize / close / 异常路径）。view/cmd_buf 释放即可。
-    pub fn drain(&self) {
-        *self.pending_view.lock().unwrap() = None;
-        *self.pending_cmd_buf.lock().unwrap() = None;
-        self.frame_wait.notify_all();
-        self.frame_complete.notify_all();
+/// 构造「本帧跳过」的 [`DrawReport`]（保留 gpu_secs）。
+fn skip_report(gpu_secs: Option<f64>, reason: DrawSkipReason) -> DrawReport {
+    DrawReport {
+        outcome: DrawOutcome::Skipped(reason),
+        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
     }
-
-    /// winit 线程：Idle → Acquired，把 acquire 出的 view 放进 pending_view。
-    /// 返回 `true` 成功（之前 Idle），`false` 状态错乱（已有 view）。
-    pub fn put_view(&self, view: wgpu::TextureView) -> bool {
-        let mut slot = self.pending_view.lock().unwrap();
-        if slot.is_some() { return false; }
-        *slot = Some(view);
-        self.frame_wait.notify_all();
-        true
-    }
-
-    pub fn wait_for_view(&self) -> bool {
-        let mut guard = self.frame_wait_lock.lock().unwrap();
-        while !self.has_view()
-            && !self.closing.load(std::sync::atomic::Ordering::Acquire)
-        {
-            guard = self.frame_wait.wait(guard).unwrap();
-        }
-        self.has_view()
-    }
-
-    /// 逻辑线程：Acquired → Encoded 起点，take view 用于编码。
-    pub fn take_view(&self) -> Option<wgpu::TextureView> {
-        self.pending_view.lock().unwrap().take()
-    }
-
-    /// 返回当前是否已经 acquire 了一个待编码的 view，不改变状态。
-    pub fn has_view(&self) -> bool {
-        self.pending_view.lock().unwrap().is_some()
-    }
-
-    /// 逻辑线程：编码完成后 put cmd_buf。
-    /// 返回 `true` 成功（之前 Acquired），`false` 状态错乱（已有 cmd_buf）。
-    pub fn put_cmd_buf(&self, cmd_buf: wgpu::CommandBuffer) -> bool {
-        let mut slot = self.pending_cmd_buf.lock().unwrap();
-        if slot.is_some() { return false; }
-        *slot = Some(cmd_buf);
-        *self.frame_complete_lock.lock().unwrap() = false;
-        true
-    }
-
-    /// winit 线程：Encoded → Idle 起点，take cmd_buf 用于 submit+present。
-    pub fn take_cmd_buf(&self) -> Option<wgpu::CommandBuffer> {
-        self.pending_cmd_buf.lock().unwrap().take()
-    }
-
-    pub fn wait_for_present(&self) -> bool {
-        let mut complete = self.frame_complete_lock.lock().unwrap();
-        while !*complete
-            && !self.closing.load(std::sync::atomic::Ordering::Acquire)
-        {
-            complete = self.frame_complete.wait(complete).unwrap();
-        }
-        *complete
-    }
-
-    pub fn mark_presented(&self) {
-        *self.frame_complete_lock.lock().unwrap() = true;
-        self.frame_complete.notify_all();
-    }
-
-    pub fn take_gpu_secs(&self) -> Option<f64> {
-        self.last_gpu_secs.lock().unwrap().take()
-    }
-
 }
 
-/// 窗口实例 —— 逻辑线程所有，持有 surface/renderer/input。
+/// 窗口实例 —— 渲染线程独占，持有 surface/renderer/input 与完整帧循环。
+///
+/// **关键架构（第五十一轮）**：`SurfaceTexture` 从 acquire 到 present 全程是
+/// `draw()` 内的局部值，不进入 Mutex/channel/winit 线程。同一 surface 最多一个
+/// outstanding texture，且满足 wgpu-hal 的同线程 acquire→present 约束。
+///
 /// 所有公开 API 坐标系为逻辑像素（用户友好），GPU 内部使用物理像素。
 pub struct VireoWindow {
-    /// **必须**在 surface 字段之前声明。
-    /// 原因：`SharedGPUState` 里的 `pending_view` 持有 `TextureView`（Send + Sync，
-    /// 引用 SurfaceTexture）；SurfaceTexture 持有 swapchain semaphore。
-    /// 如果 SharedGPUState 后于 surface drop，surface 的 swapchain 在
-    /// `release_resources` 时遇到 semaphore 引用残留 → panic（第三十四轮踩过）。
-    /// 字段按声明顺序 drop，所以 shared_present 必须先声明。
-    pub(crate) shared_present: Arc<SharedGPUState>,
+    pub(crate) surface: std::cell::RefCell<wgpu::Surface<'static>>,
+    instance: wgpu::Instance,
+    surface_config: std::cell::RefCell<wgpu::SurfaceConfiguration>,
+    renderer: std::cell::RefCell<crate::context::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
     pub mouse_pos: (f32, f32),
-    pub logical_width: u32,
-    pub logical_height: u32,
-    pub high_dpi: bool,
+    logical_width: std::cell::Cell<u32>,
+    logical_height: std::cell::Cell<u32>,
+    high_dpi: bool,
+    scale: std::cell::Cell<f32>,
+    dpi_scale: std::cell::Cell<f32>,
     pub input: InputState,
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
     pub init_duration: f64,
@@ -455,178 +493,397 @@ pub struct VireoWindow {
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
+    /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
+    applied_present_mode: std::cell::Cell<wgpu::PresentMode>,
+    /// 上次 `surface.configure` 的时刻（resize 实时刷新间隔用）
+    last_configure: std::cell::Cell<std::time::Instant>,
+    /// 最近一次「尺寸仍与已配置值不同」的帧时刻（resize 去抖用）
+    pending_resize_at: std::cell::Cell<Option<std::time::Instant>>,
+    /// 上一帧观测到的窗口状态 (phys_w, phys_h, log_w, log_h, scale)——
+    /// 用于判断尺寸是否仍在**移动**（相对上一帧变化才算移动，松手即停）。
+    last_observed: std::cell::Cell<(u32, u32, u32, u32, f32)>,
+    /// 拖动中的 resize 尺寸刷新策略。见 [`ResizeRefreshPolicy`]。
+    resize_policy: std::cell::Cell<ResizeRefreshPolicy>,
+    /// resize 去抖时长：尺寸稳定满此时间才一次性 configure（松手 snap）。默认
+    /// [`DEFAULT_RESIZE_DEBOUNCE`]（100ms），可经 `set_resize_debounce` 覆盖。
+    resize_debounce: std::cell::Cell<std::time::Duration>,
     /// 待应用的 AA 模式（在 draw 开头应用）
     pending_aa: std::cell::Cell<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
+    /// 关窗事件已到达（关闭中，draw 跳过）
+    closing: std::cell::Cell<bool>,
+    /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
+    gpu_timing_enabled: std::sync::atomic::AtomicBool,
+    /// 上一份已完成提交的 GPU queue latency（由 `on_submitted_work_done` 写回）
+    last_gpu_secs: Arc<Mutex<Option<f64>>>,
+    pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
 }
 
 impl VireoWindow {
     fn new(
         inner: Arc<winit::window::Window>,
         gpu: Arc<GpuContext>,
-        shared_present: Arc<SharedGPUState>,
+        surface: wgpu::Surface<'static>,
+        instance: wgpu::Instance,
+        surface_config: wgpu::SurfaceConfiguration,
+        renderer: crate::context::Renderer,
         logical_width: u32,
         logical_height: u32,
+        scale: f32,
+        dpi_scale: f32,
         high_dpi: bool,
         init_duration: f64,
-    event_tx: mpsc::Sender<WinitEvent>,
-    cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
-    handle: usize,
+        event_tx: mpsc::Sender<WinitEvent>,
+        cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
+        handle: usize,
     ) -> Self {
+        let initial_present_mode = surface_config.present_mode;
+        let initial_phys = (surface_config.width, surface_config.height);
         Self {
-            shared_present,
+            surface: std::cell::RefCell::new(surface),
+            instance,
+            surface_config: std::cell::RefCell::new(surface_config),
+            renderer: std::cell::RefCell::new(renderer),
             inner,
             gpu,
             mouse_pos: (-1.0, -1.0),
-            logical_width,
-            logical_height,
+            logical_width: std::cell::Cell::new(logical_width),
+            logical_height: std::cell::Cell::new(logical_height),
             high_dpi,
+            scale: std::cell::Cell::new(scale),
+            dpi_scale: std::cell::Cell::new(dpi_scale),
             input: InputState::default(),
             init_duration,
             event_tx,
             cb_tx,
             pending_mode: std::cell::Cell::new(None),
+            applied_present_mode: std::cell::Cell::new(initial_present_mode),
+            last_configure: std::cell::Cell::new(std::time::Instant::now()),
+            pending_resize_at: std::cell::Cell::new(None),
+            last_observed: std::cell::Cell::new((
+                initial_phys.0,
+                initial_phys.1,
+                logical_width,
+                logical_height,
+                scale,
+            )),
+            resize_policy: std::cell::Cell::new(ResizeRefreshPolicy::OnRelease),
+            resize_debounce: std::cell::Cell::new(DEFAULT_RESIZE_DEBOUNCE),
             pending_aa: std::cell::Cell::new(None),
             handle,
+            closing: std::cell::Cell::new(false),
+            gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
+            last_gpu_secs: Arc::new(Mutex::new(None)),
+            pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
-    /// 绘制一帧并返回分段耗时（秒），用于卡顿诊断。
+    /// 绘制一帧（render thread 独占 surface 帧循环）。
     ///
-    /// 新流程（present proxy）：
-    /// 1. 拿 `shared_present.pending_view` 的 view（winit 线程已 acquire）
-    /// 2. 编码用此 view 的 CommandBuffer
-    /// 3. 放 `shared_present.pending_cmd_buf`
-    /// 4. request_redraw() 通知 winit 线程 submit+present
+    /// 流程：
+    /// 1. 应用 pending present mode / AA（在 acquire 前，configure 时无 outstanding st）
+    /// 2. 轮询 `Window::inner_size()` / `scale_factor()`（模态循环期间尺寸事件滞后，
+    ///    逐帧主动同步是可靠兜底），必要时 `surface.configure`
+    /// 3. `get_current_texture` → 编码 CommandBuffer → `queue.submit` → `queue.present`
     ///
-    /// 若 `pending_view` 是 None（winit 线程还没 acquire）→ 跳过本次编码，
-    /// 返回零值 `DrawTimings`。这是半帧延迟的可见表现。
+    /// `SurfaceTexture` 从 acquire 到 present 都是本函数局部值，不跨线程、不同时
+    /// 存在两份，因此不违反 wgpu-hal 同线程 acquire→present 约束，也不会在 close/
+    /// resize 时残留 semaphore 引用。
     ///
-    /// **限制**：`set_present_mode` / `set_anti_aliasing` 只在 surface 空闲时
-    /// （无 view/cmd_buf in flight）生效。其他时机调用会被忽略。这是 wgpu
-    /// surface 约束（configure 时不能有 outstanding SurfaceTexture）。
+    /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
     pub fn draw(
         &self,
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
-    ) -> DrawTimings {
-        let t0 = std::time::Instant::now();
-        let gpu_secs = self.shared_present.take_gpu_secs();
-        // Do not start the next logical frame until the previous one has
-        // reached the owner-thread present point.
-        if !self.shared_present.wait_for_present() {
-            return DrawTimings { gpu_secs, ..DrawTimings::default() };
-        }
-        // Present mode changes are applied by the winit owner thread. The
-        // render thread must not call Surface::configure.
-        if let Some(mode) = self.pending_mode.take() {
-            let caps = self.shared_present.surface.lock().unwrap()
-                .get_capabilities(&self.gpu.adapter);
-            let actual = if caps.present_modes.contains(&mode) {
-                mode
-            } else {
-                eprintln!("vireo: PresentMode {mode:?} not supported, falling back to AutoVsync");
-                wgpu::PresentMode::AutoVsync
+    ) -> DrawReport {
+        let gpu_secs = self.last_gpu_secs.lock().unwrap().take();
+        if self.closing.get() {
+            return DrawReport {
+                outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
+                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
             };
-            self.shared_present.surface_config.lock().unwrap().present_mode = actual;
-            self.shared_present.needs_configure.store(true, std::sync::atomic::Ordering::Release);
         }
-        // Apply pending AA change; this does not touch the surface.
+        let trace = std::env::var_os("VIREO_DRAW_TRACE").is_some();
+        let t_trace = std::time::Instant::now();
+
+        // 1) 应用 pending present mode（改 config 即可；尺寸同步在下方统一 configure）
+        if let Some(mode) = self.pending_mode.take() {
+            let caps = self.surface.borrow().get_capabilities(&self.gpu.adapter);
+            let actual = Self::resolve_present_mode(mode, &caps.present_modes);
+            self.surface_config.borrow_mut().present_mode = actual;
+        }
+        // 应用 pending AA 变化（不触碰 surface；重建 msaa/ds 纹理）
         if let Some(aa) = self.pending_aa.take() {
             let sc = aa.sample_count();
             let atc = aa.alpha_to_coverage();
             let ssaa = aa.is_ssaa();
             let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
             let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
-            self.shared_present.renderer.lock().unwrap().update_aa(aa);
+            self.renderer.borrow_mut().update_aa(aa);
         }
-        // The logical frame is paced by the owner thread's acquire. Do not
-        // count a spin-loop iteration as a rendered frame.
-        if !self.shared_present.wait_for_view() {
-            self.shared_present.encoding.store(false, std::sync::atomic::Ordering::Release);
-            return DrawTimings::default();
+
+        // 2) 逐帧轮询实际尺寸 + 缩放（模态循环期间最可靠）。
+        //    resize 刷新策略（`ResizeRefreshPolicy`）：任何策略下，尺寸停止变化满
+        //    去抖时长（`set_resize_debounce`，默认 100ms）都会一次性 configure
+        //    （松手 snap）；`EveryFrame`/`Periodic` 在尺寸持续变化时额外实时
+        //    configure。configure 阻塞在 wgpu-hal DX12 present queue 排空（~50-80ms），
+        //    实时刷新会掉帧——这是用户显式选择。
+        //    present mode 变化不进去抖，下一帧立即 configure。
+        let size = self.inner.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return DrawReport {
+                outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
+                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+            };
         }
-        let Some(view) = self.shared_present.take_view() else {
-            self.shared_present.encoding.store(false, std::sync::atomic::Ordering::Release);
-            return DrawTimings::default();
-        };
-        // Mark the interval in which the logic thread owns the view. This
-        // must happen after wait_for_view, otherwise the owner thread would
-        // refuse the initial acquire and both threads would wait forever.
-        self.shared_present.encoding.store(true, std::sync::atomic::Ordering::Release);
+        let sf = self.inner.scale_factor();
+        let new_scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let dpi_scale = sf as f32;
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let mut configured_this_frame = false;
+        {
+            let sc = self.surface_config.borrow();
+            let size_drifted = sc.width != size.width
+                || sc.height != size.height
+                || logical_w != self.logical_width.get()
+                || logical_h != self.logical_height.get()
+                || new_scale != self.scale.get();
+            let mode_drifted = sc.present_mode != self.applied_present_mode.get();
+            drop(sc);
+            let now = std::time::Instant::now();
+            // 「移动」= 相对上一帧观测值有变化。只有移动才刷新去抖计时；松手后
+            // 尺寸不变 → 计时器不再刷新 → 开始老化，满去抖时长即 snap。
+            let moved = size_drifted
+                && self.last_observed.get() != (size.width, size.height, logical_w, logical_h, new_scale);
+            self.last_observed.set((size.width, size.height, logical_w, logical_h, new_scale));
+            if moved {
+                self.pending_resize_at.set(Some(now));
+            }
+            let refresh = resize_refresh(
+                size_drifted,
+                self.pending_resize_at.get(),
+                now,
+                self.resize_debounce.get(),
+                self.resize_policy.get(),
+                self.last_configure.get(),
+            );
+            let need_configure = size_drifted && refresh != ResizeRefresh::None
+                || mode_drifted;
+            if need_configure {
+                configured_this_frame = true;
+                let t_conf = std::time::Instant::now();
+                let mut new_config = self.surface_config.borrow().clone();
+                new_config.width = size.width;
+                new_config.height = size.height;
+                if trace {
+                    let label = match refresh {
+                        ResizeRefresh::Stable => "stable",
+                        ResizeRefresh::Live => "live",
+                        ResizeRefresh::None => "mode",
+                    };
+                    eprintln!("[draw] conf-start size={}x{} ({} {:?})", size.width, size.height,
+                        label, now);
+                }
+                // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
+                self.surface.borrow().configure(&self.gpu.device, &new_config);
+                if trace {
+                    eprintln!("[draw] conf-end {:?}us", t_conf.elapsed().as_micros());
+                }
+                self.last_configure.set(now);
+                self.pending_resize_at.set(None);
+                *self.surface_config.borrow_mut() = new_config;
+                self.logical_width.set(logical_w);
+                self.logical_height.set(logical_h);
+                self.scale.set(new_scale);
+                self.dpi_scale.set(dpi_scale);
+                self.applied_present_mode.set(self.surface_config.borrow().present_mode);
+                self.renderer.borrow_mut().resize(
+                    logical_w, logical_h,
+                    size.width, size.height, new_scale, dpi_scale,
+                );
+            }
+        }
+
+        // 3) acquire
         let t1 = std::time::Instant::now();
+        if trace {
+            eprintln!("[draw] acq-start");
+        }
+        let acquired = self.surface.borrow().get_current_texture();
+        let (st, suboptimal) = match acquired {
+            wgpu::CurrentSurfaceTexture::Success(st) => (st, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(st) => (st, true),
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                // 重配后再试；本帧跳过
+                let size = self.inner.inner_size();
+                if size.width == 0 || size.height == 0 {
+                    return DrawReport {
+                        outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
+                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                    };
+                }
+                self.surface_config.borrow_mut().width = size.width.max(1);
+                self.surface_config.borrow_mut().height = size.height.max(1);
+                self.applied_present_mode.set(self.surface_config.borrow().present_mode);
+                self.surface.borrow().configure(&self.gpu.device, &self.surface_config.borrow());
+                return DrawReport {
+                    outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                    timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                };
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                return skip_report(gpu_secs, DrawSkipReason::Timeout);
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                return skip_report(gpu_secs, DrawSkipReason::Occluded);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                // surface 丢失：用现有 instance+window 重建 surface 并重配，本帧跳过
+                if let Some(new_surface) = self.recreate_surface() {
+                    *self.surface.borrow_mut() = new_surface;
+                    let size = self.inner.inner_size();
+                    self.surface_config.borrow_mut().width = size.width.max(1);
+                    self.surface_config.borrow_mut().height = size.height.max(1);
+                    self.applied_present_mode.set(self.surface_config.borrow().present_mode);
+                    self.surface.borrow().configure(&self.gpu.device, &self.surface_config.borrow());
+                }
+                return DrawReport {
+                    outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                    timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                };
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return skip_report(gpu_secs, DrawSkipReason::SurfaceReconfigured);
+            }
+        };
+        if trace {
+            eprintln!("[draw] acq-end {:?}us", t1.elapsed().as_micros());
+        }
+        let acquire_secs = t1.elapsed().as_secs_f64();
+
+        // 4) 编码
+        let view = st.texture.create_view(&Default::default());
         let target = crate::context::RenderTarget::from_texture_view(view);
         let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
-        // 编码：返回 CommandBuffer（不 submit/present）
-        let cmd_buf = self.shared_present.renderer.lock().unwrap()
-            .draw(&target, clear_color, &batch_refs);
-        let encode_secs = t1.elapsed().as_secs_f64();
-        // 放 cmd_buf 供 winit 线程 submit
-        if !self.shared_present.put_cmd_buf(cmd_buf) {
-            // 状态错乱：cmd_buf 已存在。这不应该发生（winit take 后才能 put）。
-            eprintln!("vireo: put_cmd_buf failed (state error)");
+        let t2 = std::time::Instant::now();
+        let cmd_buf = self.renderer.borrow().draw(&target, clear_color, &batch_refs);
+
+        // 5) submit + 提交完成计时
+        let timing_enabled = self.gpu_timing_enabled.load(std::sync::atomic::Ordering::Acquire);
+        if timing_enabled {
+            self.pending_gpu_starts.lock().unwrap().push_back(std::time::Instant::now());
         }
-        self.shared_present.encoding.store(false, std::sync::atomic::Ordering::Release);
-        // 通知 winit 线程 present
-        self.shared_present.inner.request_redraw();
-        DrawTimings { acquire_secs: t0.elapsed().as_secs_f64() - encode_secs, encode_secs, gpu_secs }
+        self.gpu.queue.submit([cmd_buf]);
+        if timing_enabled {
+            let last_gpu_secs = self.last_gpu_secs.clone();
+            let pending_gpu_starts = self.pending_gpu_starts.clone();
+            self.gpu.queue.on_submitted_work_done(move || {
+                let start = pending_gpu_starts.lock().unwrap().pop_front();
+                if let Some(start) = start {
+                    *last_gpu_secs.lock().unwrap() = Some(start.elapsed().as_secs_f64());
+                }
+            });
+        }
+        let encode_secs = t2.elapsed().as_secs_f64();
+
+        // 6) present
+        let t3 = std::time::Instant::now();
+        self.gpu.queue.present(st);
+        let present_secs = t3.elapsed().as_secs_f64();
+
+        if trace {
+            eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us gpu={:?} suboptimal={}",
+                t_trace.elapsed().as_micros(),
+                configured_this_frame,
+                (acquire_secs * 1e6) as u64,
+                (encode_secs * 1e6) as u64,
+                (present_secs * 1e6) as u64,
+                gpu_secs.map(|v| v * 1e6),
+                suboptimal);
+        }
+
+        DrawReport {
+            outcome: DrawOutcome::Presented { suboptimal },
+            timings: DrawTimings {
+                acquire_secs,
+                encode_secs,
+                present_secs,
+                gpu_secs,
+            },
+        }
+    }
+
+    /// 解析请求的 present mode：
+    /// - 后端能力包含则直接用；
+    /// - `AutoVsync` 是 wgpu 别名（DX12/Vulkan 下映射到 `Fifo`），`get_capabilities`
+    ///   只返回后端具体模式、永不列出别名本身，直接接受；
+    /// - 其余不支持时回退 `AutoVsync` 并告警。
+    fn resolve_present_mode(
+        requested: wgpu::PresentMode,
+        supported: &[wgpu::PresentMode],
+    ) -> wgpu::PresentMode {
+        if supported.contains(&requested)
+            || matches!(requested, wgpu::PresentMode::AutoVsync)
+        {
+            requested
+        } else {
+            eprintln!("vireo: PresentMode {requested:?} not supported, falling back to AutoVsync");
+            wgpu::PresentMode::AutoVsync
+        }
+    }
+
+    /// 用保留的 Instance + Window 重建 surface（`CurrentSurfaceTexture::Lost`）。
+    fn recreate_surface(&self) -> Option<wgpu::Surface<'static>> {
+        self.instance.create_surface(self.inner.clone()).ok()
     }
 
     /// 启用 queue completion 计时，用于诊断 GPU 竞争和提交排队。
     /// 结果通过下一帧的 [`DrawTimings::gpu_secs`] 返回。
     pub fn set_gpu_timing(&self, enabled: bool) {
-        self.shared_present.gpu_timing_enabled.store(
-            enabled,
-            std::sync::atomic::Ordering::Release,
-        );
+        self.gpu_timing_enabled.store(enabled, std::sync::atomic::Ordering::Release);
     }
 
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
     /// `preserve_order=false` 重排合并后此值下降（如 bench 场景 3 混合 1000→2）。
     pub fn last_draw_calls(&self) -> u32 {
-        self.shared_present.renderer.lock().unwrap().last_draw_calls()
+        self.renderer.borrow().last_draw_calls()
     }
 
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。
-    /// 旧版：直接 acquire + present。
-    /// 新版：删除 preheat（首帧 PSO 编译卡一次可接受，避免跨线程 surface 持有）。
+    /// 新流程下 draw 自带尺寸同步 + acquire + present，首帧 PSO 编译卡一次可接受。
     /// 保留此函数为 no-op 以维持 API 兼容。
     pub fn preheat(&self, _clear_color: crate::color::Color) {
         // no-op
     }
 
-    /// 调整窗口大小（size 为物理像素）
+    /// 调整窗口大小（size 为物理像素）。
     ///
-    /// 新流程：
-    /// 1. 等 GPU 空闲（device.poll(Wait)），让 winit 线程把 pending cmd_buf submit 完
-    /// 2. drain SharedGPUState（清空 pending_view/cmd_buf，释放 view/cmd_buf）
-    /// 3. surface.configure（surface_id 会变，旧 view 失效）
-    /// 4. request_redraw 触发 winit 重新 acquire
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// 仅同步逻辑尺寸（用户代码当帧即可读到新 `metrics()`）。真正的
+    /// `surface.configure` / renderer 视图更新由 `draw` 的逐帧尺寸同步完成——
+    /// 拖动/模态循环期间 Resized 事件可能滞后，逐帧轮询 `inner_size` 才是可靠兜底。
+    pub(crate) fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 { return; }
-        if self.high_dpi {
-            self.logical_width = width;
-            self.logical_height = height;
-        } else {
-            let sf = self.inner.scale_factor();
-            self.logical_width = (width as f64 / sf) as u32;
-            self.logical_height = (height as f64 / sf) as u32;
+        let sf = self.inner.scale_factor();
+        let mut logical_w = width;
+        let mut logical_h = height;
+        if !self.high_dpi && sf > 0.0 {
+            logical_w = (width as f64 / sf) as u32;
+            logical_h = (height as f64 / sf) as u32;
         }
-        let scale = if self.high_dpi { 1.0 } else { self.inner.scale_factor() as f32 };
-        let dpi_scale = self.inner.scale_factor() as f32;
-        // Surface configuration is owned by the winit thread. Keep any
-        // acquired output in its owner-thread state until it is presented.
-        self.shared_present.surface_config.lock().unwrap().width = width;
-        self.shared_present.surface_config.lock().unwrap().height = height;
-        self.shared_present.needs_configure.store(true, std::sync::atomic::Ordering::Release);
-        // resize renderer 内部视图
-        self.shared_present.renderer.lock().unwrap().resize(
-            self.logical_width, self.logical_height,
-            width, height, scale, dpi_scale,
-        );
-        // 触发 winit 重新 acquire
-        self.shared_present.inner.request_redraw();
+        self.logical_width.set(logical_w);
+        self.logical_height.set(logical_h);
+        self.scale.set(if self.high_dpi { 1.0 } else { sf as f32 });
+        self.dpi_scale.set(sf as f32);
+    }
+
+    /// 当前逻辑尺寸/缩放只读快照（用户坐标系）。
+    pub fn metrics(&self) -> WindowMetrics {
+        WindowMetrics {
+            width: self.logical_width.get(),
+            height: self.logical_height.get(),
+            scale_factor: self.scale.get() as f64,
+        }
     }
 
     /// 获取当前鼠标位置（窗口用户坐标系，即 WindowDesc 传入的宽高范围）
@@ -638,8 +895,8 @@ impl VireoWindow {
     pub fn projection(&self) -> glam::Mat4 {
         glam::camera::rh::proj::opengl::orthographic(
             0.0,
-            self.logical_width as f32,
-            self.logical_height as f32,
+            self.logical_width.get() as f32,
+            self.logical_height.get() as f32,
             0.0,
             -1.0,
             1.0,
@@ -721,6 +978,10 @@ pub struct App {
     pub windows: Vec<Option<VireoWindow>>,
     pub gpu: Arc<GpuContext>,
     instance: Option<wgpu::Instance>,
+    /// 设备丢失标志（预留：wgpu 30 的 `get_current_texture` 无 `DeviceLost` 变体，
+    /// 当前无代码路径置位；未来接 `Device::set_device_lost_callback` 时使用）。
+    /// 渲染循环每帧读它，置位则干净终止。
+    device_lost: Arc<std::sync::atomic::AtomicBool>,
     /// 稳定 handle → winit WindowId。handle 由 `App::window()` 分配，
     /// 在 run() 中被取出给 winit 线程用。
     handle_to_id: FxHashMap<u64, WindowId>,
@@ -796,6 +1057,7 @@ impl App {
             windows: Vec::new(),
             gpu,
             instance: Some(instance),
+            device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             handle_to_id: FxHashMap::default(),
             next_handle: 0,
             close_hooks: FxHashMap::default(),
@@ -970,7 +1232,8 @@ impl App {
         let window_descs: Vec<_> = self.window_descs.drain(..).collect();
         let close_hooks = std::mem::take(&mut self.close_hooks);
         let default_icon = self.default_icon.take();
-        let instance = self.instance.take().expect("instance already taken");
+        // 保留 self.instance（渲染线程重建 surface 需要）；Runner 拿 clone。
+        let instance = self.instance.clone().expect("instance already taken");
         self.handle_to_id.clear();
         self.windows.clear();
 
@@ -987,16 +1250,27 @@ impl App {
         let (event_tx, event_rx) = mpsc::channel::<WinitEvent>();
         let render_event_tx = event_tx.clone();
         let (cb_tx, cb_rx) = mpsc::channel::<(usize, crate::input::InputCallbacks)>();
+        // 渲染线程 → winit 线程的终止请求（on_frame 返回 false / 设备丢失）。
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
-        let num_windows = window_descs.len();
-        // Clone GpuContext Arc for Runner（winit 线程需要调 queue.submit/queue.present）
+        // Clone GpuContext Arc for Runner（winit 线程只在创建窗口时用 device/queue 初始化 surface）
         let gpu_for_runner = self.gpu.clone();
+        let device_lost = self.device_lost.clone();
         let render_thread = std::thread::Builder::new()
             .name("vireo-render".into())
             .spawn(move || {
-                render_on_frame(self, on_frame, render_event_tx, event_rx, cb_tx, expected_windows);
+                render_on_frame(
+                    self,
+                    on_frame,
+                    render_event_tx,
+                    event_rx,
+                    cb_tx,
+                    exit_tx,
+                    device_lost,
+                    expected_windows,
+                );
             })
             .expect("failed to spawn render thread");
 
@@ -1005,6 +1279,8 @@ impl App {
     event_tx: mpsc::Sender<WinitEvent>,
     /// 接收渲染线程发来的输入回调注册
     cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
+    /// 接收渲染线程发来的终止请求
+    exit_rx: mpsc::Receiver<()>,
             window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
             close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
@@ -1012,13 +1288,8 @@ impl App {
             default_icon: Option<Icon>,
             window_init_durations: Vec<f64>,
             instance: wgpu::Instance,
-            /// 用于 winit 线程调 queue.submit/queue.present
+            /// 用于 winit 线程创建/初始化 surface（后续帧循环全在渲染线程）
             gpu: Arc<GpuContext>,
-            /// per-window 共享 GPU 状态（surface/renderer/pending_view/pending_cmd_buf）
-            shared_states: Vec<Arc<SharedGPUState>>,
-            /// winit 线程本地的"刚 acquire 的 st，下一帧 present"缓冲
-            /// —— 完全留在 winit 线程，st 永远不跨线程
-            pending_st: FxHashMap<WindowId, wgpu::SurfaceTexture>,
             created: bool,
             alive_handles: usize,
         }
@@ -1093,9 +1364,11 @@ impl App {
                     let surface = self.instance.create_surface(window.clone()).unwrap();
                     let window_id = window.id();
 
-                    // ---- 在 winit 线程上构造 SharedGPUState ----
-                    // 必须在 winit 线程上做，因为 wgpu 资源（surface/queue）
-                    // 后续 submit/present 都在 winit 线程跑。
+                    // ---- 在 winit 线程上创建 surface + 初始 configure ----
+                    // surface 的 create_surface 必须紧跟窗口创建；首次 configure 在此建立
+                    // 合法 swapchain。后续尺寸同步/重新 configure 由渲染线程 draw() 完成。
+                    // `SurfaceTexture` 从不跨线程：acquire→present 全在渲染线程 draw() 内，
+                    // 满足 wgpu-hal 同线程约束（第三十三/三十四轮的 handoff 失败不重演）。
                     let scale = if desc.scale_factor_override.is_some() {
                         1.0
                     } else {
@@ -1143,28 +1416,6 @@ impl App {
                     };
                     surface.configure(&self.gpu.device, &surface_config);
 
-                    let shared_present = Arc::new(SharedGPUState {
-                        surface: Mutex::new(surface),
-                        surface_config: Mutex::new(surface_config),
-                        renderer: Mutex::new(renderer),
-                        pending_view: Mutex::new(None),
-                        pending_cmd_buf: Mutex::new(None),
-                        winit_has_st: std::sync::atomic::AtomicBool::new(false),
-                        needs_configure: std::sync::atomic::AtomicBool::new(false),
-                        encoding: std::sync::atomic::AtomicBool::new(false),
-                        frame_wait: std::sync::Condvar::new(),
-                        frame_wait_lock: Mutex::new(()),
-                        frame_complete: std::sync::Condvar::new(),
-                        frame_complete_lock: Mutex::new(true),
-                        closing: std::sync::atomic::AtomicBool::new(false),
-                        gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
-                        last_gpu_secs: Mutex::new(None),
-                        pending_gpu_starts: Mutex::new(std::collections::VecDeque::new()),
-                        inner: window.clone(),
-                    });
-                    // 存到 Runner 供 RedrawRequested handler 用
-                    self.shared_states.push(shared_present.clone());
-
                     let init_duration = if handle < self.window_init_durations.len() {
                         self.window_init_durations[handle]
                     } else {
@@ -1177,9 +1428,13 @@ impl App {
                     self.send(WinitEvent::WindowCreated {
                         handle,
                         window,
-                        shared_present,
+                        surface,
+                        surface_config,
+                        renderer,
                         logical_width: desc.width,
                         logical_height: desc.height,
+                        scale,
+                        dpi_scale: dpi,
                         high_dpi: desc.scale_factor_override.is_some(),
                         init_duration,
                     });
@@ -1187,6 +1442,10 @@ impl App {
             }
 
             fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+                // 渲染线程请求终止（on_frame 返回 false / 设备丢失）
+                while self.exit_rx.try_recv().is_ok() {
+                    event_loop.exit();
+                }
                 // Drain callback registrations sent from render thread
                 while let Ok((handle, mut reg)) = self.cb_rx.try_recv() {
                     if let Some(cbs) = self.window_callbacks.get_mut(handle) {
@@ -1219,14 +1478,8 @@ impl App {
                         if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
                             if let Some(h) = hook_opt.take() { h(); }
                         }
-                        // drain SharedGPUState 防止 swapchain semaphore 残留 panic
-                        if let Some(shared) = self.shared_states.get(handle) {
-                            shared.closing.store(true, std::sync::atomic::Ordering::Release);
-                            shared.drain();
-                            shared.winit_has_st.store(false, std::sync::atomic::Ordering::Release);
-                        }
-                        // 释放 winit 线程本地的 st（drop，semaphore 引用清）
-                        self.pending_st.remove(&window_id);
+                        // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present，
+                        // 此处没有跨线程 st 需要释放。渲染线程在下一轮事件循环移除窗口。
                         self.send(WinitEvent::CloseRequested { handle });
                         self.alive_handles -= 1;
                         if self.alive_handles == 0 {
@@ -1235,9 +1488,9 @@ impl App {
                         }
                     }
                     WindowEvent::Resized(size) => {
-                        // Keep an acquired output until the owner thread can
-                        // submit/present it. The render thread marks the new
-                        // configuration; configure happens below on winit.
+                        // 事件驱动路径：仅同步逻辑尺寸。真正的 surface.configure /
+                        // renderer 视图更新由渲染线程 draw() 的逐帧尺寸同步完成
+                        // （模态循环期间 Resized 事件可能滞后，逐帧轮询 inner_size 兜底）。
                         self.send(WinitEvent::Resized {
                             handle,
                             width: size.width,
@@ -1325,115 +1578,9 @@ impl App {
                         }
                         self.send(WinitEvent::Touch { handle, event: mapped });
                     }
-                    WindowEvent::RedrawRequested => {
-                        // winit 线程的 present 状态机（owner 线程，DWM 接受 → 解冻屏）。
-                        //
-                        // 状态转换：
-                        // - Encoded: pending_cmd_buf = Some(c)
-                        //   → take c, submit, take st from pending_st[window_id], present
-                        //   → 回到 Idle
-                        // - Idle: pending_view = None, pending_cmd_buf = None
-                        //   → acquire st, create view, put view, save st to pending_st[window_id]
-                        //   → 转到 Acquired
-                        // - Acquired: pending_view = Some(v), pending_cmd_buf = None
-                        //   → 等逻辑线程编码；本次啥也不做（request_redraw 已自维持）
-                        if let Some(shared) = self.shared_states.get(handle).cloned() {
-                            // Configure only on the owner thread, and only
-                            // after the previous SurfaceTexture and encoded
-                            // frame have been fully retired.
-                            if shared.needs_configure.load(std::sync::atomic::Ordering::Acquire)
-                                && !shared.winit_has_st.load(std::sync::atomic::Ordering::Acquire)
-                                && !shared.has_view()
-                                && !shared.encoding.load(std::sync::atomic::Ordering::Acquire)
-                                && shared.pending_cmd_buf.lock().unwrap().is_none()
-                            {
-                                let cfg = shared.surface_config.lock().unwrap().clone();
-                                shared.surface.lock().unwrap().configure(&self.gpu.device, &cfg);
-                                shared.needs_configure.store(false, std::sync::atomic::Ordering::Release);
-                            }
-                            // 1. Encoded → Idle: take cmd_buf + present
-                            if let Some(cmd_buf) = shared.take_cmd_buf() {
-                                let gpu_timing = shared.gpu_timing_enabled.load(
-                                    std::sync::atomic::Ordering::Acquire,
-                                );
-                                if gpu_timing {
-                                    shared.pending_gpu_starts.lock().unwrap().push_back(std::time::Instant::now());
-                                }
-                                self.gpu.queue.submit([cmd_buf]);
-                                if gpu_timing {
-                                    let shared_done = shared.clone();
-                                    self.gpu.queue.on_submitted_work_done(move || {
-                                        let start = shared_done.pending_gpu_starts.lock().unwrap().pop_front();
-                                        if let Some(start) = start {
-                                            *shared_done.last_gpu_secs.lock().unwrap() =
-                                                Some(start.elapsed().as_secs_f64());
-                                        }
-                                    });
-                                }
-                                if let Some(st) = self.pending_st.remove(&window_id) {
-                                    let _ = self.gpu.queue.present(st);
-                                } else {
-                                    // 状态错乱：没有 st 供 present（逻辑线程没经过 Acquired 阶段）
-                                    // 通常是 acquire 失败时 — 忽略，不 panic
-                                }
-                                shared.winit_has_st.store(false, std::sync::atomic::Ordering::Release);
-                                shared.mark_presented();
-                                // Start the next acquire only after this
-                                // frame has been submitted and presented.
-                                shared.inner.request_redraw();
-                            }
-                            // 2. Idle → Acquired: acquire st + put view
-                            else if !shared.has_view()
-                                && !shared.encoding.load(std::sync::atomic::Ordering::Acquire)
-                                && !shared.winit_has_st.load(std::sync::atomic::Ordering::Acquire)
-                                && shared.pending_cmd_buf.lock().unwrap().is_none()
-                                // 不能与 needs_configure 抢：若 resize 置位后这里仍继续
-                                // acquire，winit_has_st 会一直 true，configure 分支被
-                                // 饿死 → 表面永不重配，内容冻结（livelock，无 panic）。
-                                && !shared.needs_configure.load(std::sync::atomic::Ordering::Acquire)
-                            {
-                                match shared.surface.lock().unwrap().get_current_texture() {
-                                    wgpu::CurrentSurfaceTexture::Success(st)
-                                    | wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
-                                        let view = st.texture.create_view(&Default::default());
-                                        if shared.put_view(view) {
-                                            self.pending_st.insert(window_id, st);
-                                            shared.winit_has_st.store(true, std::sync::atomic::Ordering::Release);
-                                        } else {
-                                            // 状态错乱：已有 view。drop st 防 semaphore 残留。
-                                            drop(st);
-                                        }
-                                    }
-                                    wgpu::CurrentSurfaceTexture::Outdated => {
-                                        // 重新配置（罕见，resize 已处理过）
-                                        // **关键**：必须先 drop 上一轮的 st，否则旧 st
-                                        // 持有旧 surface_id，drop 时会撞 storage.get panic
-                                        self.pending_st.remove(&window_id);
-                                        shared.drain();
-                                        let cfg = shared.surface_config.lock().unwrap().clone();
-                                        shared.surface.lock().unwrap()
-                                            .configure(&self.gpu.device, &cfg);
-                                        // 已在上面就地重配，清掉挂起的 needs_configure，
-                                        // 否则下一轮 acquire 又被挡住（见 Idle→Acquired 门）。
-                                        shared.needs_configure.store(false, std::sync::atomic::Ordering::Release);
-                                        // 不放 view，但必须重新 request_redraw，否则逻辑线程
-                                        // 会永久阻塞在 wait_for_view()（无 view = 画面冻结）。
-                                        shared.inner.request_redraw();
-                                    }
-                                    _ => {
-                                        // Lost / Timeout / Occluded：暂时失败。也 re-arm，
-                                        // 因为逻辑线程正阻塞在 wait_for_view()，不会自维持。
-                                        // 若真被系统遮挡（如最小化），此调用返回后事件循环在
-                                        // Poll 下继续，下一轮 RedrawRequested 会重试 acquire。
-                                        shared.inner.request_redraw();
-                                    }
-                                }
-                            }
-                            // 3. Acquired: wait for the logic thread to
-                            // encode. It will request the next redraw after
-                            // putting the command buffer in the shared slot.
-                        }
-                    }
+                    // 帧循环全在渲染线程（draw 内 acquire→submit→present），
+                    // winit 线程不需要响应 RedrawRequested。
+                    WindowEvent::RedrawRequested => {}
                     _ => {}
                 }
             }
@@ -1442,6 +1589,7 @@ impl App {
         event_loop.run_app(&mut Runner {
             event_tx,
             cb_rx,
+            exit_rx,
             window_descs,
             id_to_handle: FxHashMap::default(),
             close_hooks,
@@ -1450,8 +1598,6 @@ impl App {
             window_init_durations,
             instance,
             gpu: gpu_for_runner,
-            shared_states: Vec::with_capacity(num_windows),
-            pending_st: FxHashMap::default(),
             created: false,
             alive_handles: 0,
         }).unwrap();
@@ -1468,35 +1614,45 @@ fn render_on_frame<F>(
     event_tx: mpsc::Sender<WinitEvent>,
     rx: mpsc::Receiver<WinitEvent>,
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
+    exit_tx: mpsc::Sender<()>,
+    device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
 )
 where F: FnMut(&App) -> bool + Send + 'static
 {
     let mut created_windows = 0usize;
+    let request_exit = || {
+        let _ = exit_tx.send(());
+    };
     loop {
         // 处理所有待处理事件
         loop {
             match rx.try_recv() {
                 Ok(WinitEvent::WindowCreated {
-                    handle, window, shared_present,
-                    logical_width, logical_height, high_dpi, init_duration,
+                    handle, window, surface, surface_config, renderer,
+                    logical_width, logical_height, scale, dpi_scale, high_dpi, init_duration,
                 }) => {
                     let vw = VireoWindow::new(
-                        window, app.gpu.clone(), shared_present,
-                        logical_width, logical_height, high_dpi, init_duration,
-                        event_tx.clone(), cb_tx.clone(), handle,
+                        window,
+                        app.gpu.clone(),
+                        surface,
+                        app.instance.clone().expect("instance available"),
+                        surface_config,
+                        renderer,
+                        logical_width,
+                        logical_height,
+                        scale,
+                        dpi_scale,
+                        high_dpi,
+                        init_duration,
+                        event_tx.clone(),
+                        cb_tx.clone(),
+                        handle,
                     );
                     while app.windows.len() <= handle {
                         app.windows.push(None);
                     }
                     app.windows[handle] = Some(vw);
-                    // preheat 删掉（首帧 PSO 编译卡一次可接受，避免跨线程 surface 持有）
-                    // VireoWindow 构造后调 request_redraw() 触发首帧
-                    if let Some(ref _win) = app.windows[handle] {
-                        // 取 winit 线程的 inner
-                        let shared = _win.shared_present.clone();
-                        shared.inner.request_redraw();
-                    }
                     created_windows += 1;
                 }
 
@@ -1601,6 +1757,11 @@ where F: FnMut(&App) -> bool + Send + 'static
                 }
 
                 Ok(WinitEvent::CloseRequested { handle, .. }) => {
+                    if let Some(Some(win)) = app.windows.get_mut(handle) {
+                        win.closing.set(true);
+                        // 置 closing 后再 drop：此时无 outstanding SurfaceTexture
+                        // （draw 内的 st 在 present 后已释放），drop surface 安全。
+                    }
                     if let Some(w) = app.windows.get_mut(handle) {
                         *w = None;
                     }
@@ -1740,6 +1901,13 @@ where F: FnMut(&App) -> bool + Send + 'static
         // 等所有窗口创建完才开始调用用户代码
         if created_windows >= expected_windows {
             if !(on_frame)(&app) {
+                // 用户请求退出：通知 winit 线程 exit，本线程返回。
+                request_exit();
+                break;
+            }
+            if device_lost.load(std::sync::atomic::Ordering::Acquire) {
+                eprintln!("vireo: GPU device lost — terminating");
+                request_exit();
                 break;
             }
         } else {
@@ -2031,9 +2199,36 @@ impl VireoWindow {
         self.pending_mode.set(Some(mode));
     }
 
-    /// 当前 present mode（缓存的最后设置值）。
+    /// 当前真正生效（已 configure 到 surface）的 present mode；pending 尚未应用。
     pub fn present_mode(&self) -> wgpu::PresentMode {
-        self.shared_present.surface_config.lock().unwrap().present_mode
+        self.applied_present_mode.get()
+    }
+
+    /// 设置拖动窗口时的 resize 尺寸刷新策略（[`ResizeRefreshPolicy`]）。
+    /// 默认 `OnRelease`：拖动全程不更新（拉伸显示、帧流满速），松手 snap。
+    /// `EveryFrame` / `Periodic(interval)` 会在拖动中实时 `surface.configure`，
+    /// 每次阻塞 ~50-80ms（wgpu-hal DX12 present queue 排空），掉帧是预期代价。
+    pub fn set_resize_refresh_policy(&self, policy: ResizeRefreshPolicy) {
+        self.resize_policy.set(policy);
+    }
+
+    /// 当前拖动中的 resize 尺寸刷新策略（默认 [`ResizeRefreshPolicy::OnRelease`]）。
+    pub fn resize_refresh_policy(&self) -> ResizeRefreshPolicy {
+        self.resize_policy.get()
+    }
+
+    /// 设置 resize 去抖时长：拖动中尺寸**稳定**满此时间后才一次性
+    /// `surface.configure`（松手 snap）。默认 100ms。
+    ///
+    /// 调小 → 松手 snap 更快，但「按住但暂停一下」的拖动间隙更容易误触发
+    /// configure 卡顿；调大 → 松手 snap 更慢、更不容易被暂停误触发。
+    pub fn set_resize_debounce(&self, debounce: std::time::Duration) {
+        self.resize_debounce.set(debounce);
+    }
+
+    /// 当前 resize 去抖时长（默认 100ms）。见 [`VireoWindow::set_resize_debounce`]。
+    pub fn resize_debounce(&self) -> std::time::Duration {
+        self.resize_debounce.get()
     }
 
     /// 运行时切换抗锯齿（运行时重建 msaa 纹理）。
@@ -2078,19 +2273,10 @@ pub struct OffscreenIndex(pub usize);
 
 #[cfg(test)]
 mod present_state_tests {
-    //! 状态机测试：每窗口的 `SharedGPUState` 字段在逻辑线程/winit 线程间原子转移。
-    //!
-    //! 状态：
-    //! - `Idle`：`pending_view = None`, `pending_cmd_buf = None`
-    //! - `Acquired`：`pending_view = Some(v)`, `pending_cmd_buf = None`
-    //! - `Encoded`：`pending_view = Some(v)`（持有中，但 view 可能已被编码器消费）,
-    //!   `pending_cmd_buf = Some(c)`
-    //!
-    //! 关键不变量：winit 线程 `take_cmd_buf` 必须在 winit 已经 acquire 完 view 之后、
-    //! 逻辑线程已经把 cmd_buf 放进 `pending_cmd_buf` 之后。
-    //!
-    //! 字段声明顺序：必须 `shared_present` 在 `surface` 之前 drop（drop 测试在
-    //! `vireo_window_drop_order` 中验证字段声明顺序）。
+    //! 独立并发练习：`pending_view` / `pending_cmd_buf` 双槽状态机在多线程下的
+    //! 原子转移语义。第五十一轮起 vireo 删除 present-proxy（`SharedGPUState` 已移除，
+    //! render thread 独占 acquire→present，不再跨线程移交 SurfaceTexture），
+    //! 本模块作为通用并发 sanity 测试保留，不代表当前窗口架构。
 
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -2274,7 +2460,7 @@ mod present_state_tests {
     }
 
     /// 并发安全：N 线程随机执行状态机操作，验证不 panic + 最终可达成 Idle。
-    /// 模拟 winit 线程和逻辑线程同时操作 SharedGPUState 的 race 场景。
+    /// 模拟旧 present-proxy 双线程 race 的通用并发练习（当前架构已不适用）。
     #[test]
     fn concurrent_operations_safe() {
         let sm = Arc::new(StateMachine::<u32, u32>::new());
@@ -2456,39 +2642,171 @@ mod present_state_tests {
 }
 
 #[cfg(test)]
-mod vireo_window_drop_order {
-    //! 字段 drop 顺序：必须 `shared_present: Arc<SharedGPUState>` 在
-    //! `surface: wgpu::Surface<'static>` 之前声明。
-    //!
-    //! 原因：SharedGPUState 里的 `pending_view` 持有 `TextureView`（Send + Sync，
-    //! 引用 SurfaceTexture）；SurfaceTexture 持有 swapchain semaphore。
-    //! 如果 SharedGPUState 后于 surface drop，surface 的 swapchain 在
-    //! `release_resources` 时遇到 semaphore 引用残留 → panic（第三十四轮踩过）。
-    //!
-    //! 验证方法：源码注释 + 字段声明顺序检查（grep）。
-    //!
-    //! 真正的回归保护靠 code review：检查 `shared_present` 字段必须在 `surface`
-    //! 字段之前声明。
+mod metrics_tests {
+    //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
-    // 源码注释：vireo_window_drop_order_invariant
-    //
-    // invariant: VireoWindow.shared_present 字段必须在 surface 字段之前声明。
-    // 任何对字段顺序的改动都必须重新跑测试 + 手动验证拖动不 panic。
-    //
-    // 验证脚本（手动）：
-    //   grep "pub(crate) surface: wgpu::Surface" src/window.rs -n
-    //   grep "pub(crate) shared_present: Arc<SharedGPUState>" src/window.rs -n
-    //   前者的行号必须大于后者。
-    //
-    // 这个测试是 placeholder。真实保护靠 source review + drop order comment。
+    use super::{logical_size, skip_report, DrawOutcome, DrawSkipReason};
 
     #[test]
-    fn doc_invariant_documented() {
-        // 编译期保证：测试名包含 "drop order invariant" 提示
-        // 实际保证见模块顶部注释
-        let invariant_doc = "shared_present 在 surface 之前 drop";
-        assert!(invariant_doc.contains("shared_present"));
-        assert!(invariant_doc.contains("surface"));
-        assert!(invariant_doc.contains("之前"));
+    fn logical_size_scales_physical_by_scale_factor() {
+        // 非 high_dpi：逻辑 = 物理 / scale_factor
+        assert_eq!(logical_size(1920, 1080, false, 1.5), (1280, 720));
+        assert_eq!(logical_size(1000, 500, false, 2.0), (500, 250));
+    }
+
+    #[test]
+    fn logical_size_high_dpi_is_physical() {
+        // high_dpi：逻辑 = 物理（用户坐标即物理像素）
+        assert_eq!(logical_size(1920, 1080, true, 1.5), (1920, 1080));
+        assert_eq!(logical_size(1000, 500, true, 2.0), (1000, 500));
+    }
+
+    #[test]
+    fn logical_size_invalid_scale_factor_falls_back_to_physical() {
+        assert_eq!(logical_size(800, 600, false, 0.0), (800, 600));
+    }
+
+    #[test]
+    fn skip_report_preserves_gpu_secs_and_reason() {
+        let r = skip_report(Some(0.123), DrawSkipReason::ZeroSized);
+        assert!(matches!(r.outcome, DrawOutcome::Skipped(DrawSkipReason::ZeroSized)));
+        assert_eq!(r.timings.gpu_secs, Some(0.123));
+    }
+
+    #[test]
+    fn skip_report_default_timings_are_zero() {
+        let r = skip_report(None, DrawSkipReason::Timeout);
+        let t = r.timings;
+        assert_eq!((t.acquire_secs, t.encode_secs, t.present_secs), (0.0, 0.0, 0.0));
+        assert!(t.gpu_secs.is_none());
+    }
+
+    #[test]
+    fn window_metrics_matches_constructor_values() {
+        let m = super::WindowMetrics { width: 800, height: 600, scale_factor: 1.5 };
+        assert_eq!((m.width, m.height), (800, 600));
+        assert_eq!(m.scale_factor, 1.5);
+    }
+
+    #[test]
+    fn resolve_present_mode_auto_vsync_alias_always_accepted() {
+        // AutoVsync 是 wgpu 别名，get_capabilities 永不列出别名本身（只列 Fifo 等具体模式）
+        let supported = [wgpu::PresentMode::Fifo];
+        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &supported), wgpu::PresentMode::AutoVsync);
+        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &[]), wgpu::PresentMode::AutoVsync);
+    }
+
+    #[test]
+    fn resolve_present_mode_supported_mode_passes_through() {
+        let supported = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
+        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported), wgpu::PresentMode::Immediate);
+    }
+
+    #[test]
+    fn resolve_present_mode_unsupported_mode_falls_back_to_auto_vsync() {
+        let supported = [wgpu::PresentMode::Fifo];
+        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported), wgpu::PresentMode::AutoVsync);
+    }
+
+    fn base() -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    #[test]
+    fn resize_refresh_default_no_live_only_stable_snaps() {
+        // 默认（OnRelease）：拖动中尺寸持续变化 → 永不 configure；松手稳定满 debounce → Stable。
+        let t0 = base();
+        let debounce = std::time::Duration::from_millis(100);
+        // 刚变化（stable_since=now）→ 还不稳，OnRelease → None
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), t0, debounce,
+                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::ResizeRefresh::None,
+        );
+        // 已稳定 200ms → Stable
+        let stable = t0 + std::time::Duration::from_millis(200);
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), stable, debounce,
+                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::ResizeRefresh::Stable,
+        );
+    }
+
+    #[test]
+    fn resize_refresh_every_frame_tracks_during_change() {
+        let t0 = base();
+        let debounce = std::time::Duration::from_millis(100);
+        // 拖动中（stable_since=now，未稳）→ EveryFrame 立即 Live
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), t0, debounce,
+                super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::ResizeRefresh::Live,
+        );
+        // 尺寸稳定满 debounce 时 Stable 优先于 EveryFrame 的 Live
+        let stable = t0 + std::time::Duration::from_millis(200);
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), stable, debounce,
+                super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::ResizeRefresh::Stable,
+        );
+    }
+
+    #[test]
+    fn resize_refresh_periodic_triggers_on_interval() {
+        let t0 = base();
+        let debounce = std::time::Duration::from_millis(100);
+        let iv = std::time::Duration::from_millis(400);
+        // 拖动中：距上次 configure 200ms < iv → None
+        let mid = t0 + std::time::Duration::from_millis(200);
+        assert_eq!(
+            super::resize_refresh(true, Some(mid), mid, debounce,
+                super::ResizeRefreshPolicy::Periodic(iv), t0),
+            super::ResizeRefresh::None,
+        );
+        // 距上次 configure 已满 iv → Live（拖动中周期性实时刷新）
+        let late = t0 + std::time::Duration::from_millis(450);
+        assert_eq!(
+            super::resize_refresh(true, Some(late), late, debounce,
+                super::ResizeRefreshPolicy::Periodic(iv), t0),
+            super::ResizeRefresh::Live,
+        );
+    }
+
+    #[test]
+    fn resize_refresh_size_unchanged_never_configure() {
+        let t0 = base();
+        let debounce = std::time::Duration::from_millis(100);
+        assert_eq!(
+            super::resize_refresh(false, Some(t0), t0 + std::time::Duration::from_millis(500),
+                debounce, super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::ResizeRefresh::None,
+        );
+    }
+
+    #[test]
+    fn resize_refresh_honors_custom_debounce() {
+        // 自定义去抖被纯函数尊重：短 debounce 更快 snap，长 debounce 在旧默认点不 snap。
+        let t0 = base();
+        let short = std::time::Duration::from_millis(16);
+        let long = std::time::Duration::from_millis(500);
+        let at_50ms = t0 + std::time::Duration::from_millis(50);
+        let at_200ms = t0 + std::time::Duration::from_millis(200);
+        // 短去抖（16ms）：稳定 50ms 已 snap
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), at_50ms, short,
+                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::ResizeRefresh::Stable,
+        );
+        // 长去抖（500ms）：稳定 200ms 仍不 snap（旧默认 100ms 点也不 snap）
+        assert_eq!(
+            super::resize_refresh(true, Some(t0), at_200ms, long,
+                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::ResizeRefresh::None,
+        );
+    }
+
+    #[test]
+    fn default_resize_debounce_is_100ms() {
+        assert_eq!(super::DEFAULT_RESIZE_DEBOUNCE, std::time::Duration::from_millis(100));
     }
 }

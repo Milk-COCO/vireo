@@ -74,9 +74,9 @@ fn main() {
             );
         }
 
-        let timings = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
-        let acq_ms = timings.acquire_secs * 1000.0;
-        let enc_ms = timings.encode_secs * 1000.0;
+        let report = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let acq_ms = report.timings.acquire_secs * 1000.0;
+        let enc_ms = report.timings.encode_secs * 1000.0;
 
         eprintln!(
             "  F{:<2}  frame_time={:7.2}ms  acq={:6.2} enc={:6.2}  fps={:5.1}  focused={}",

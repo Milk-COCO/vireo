@@ -99,8 +99,12 @@ pub mod prelude {
     pub use crate::input::TouchEvent;
     pub use crate::input::TouchPhase;
 
+    pub use crate::window::ResizeRefreshPolicy;
     pub use crate::window::AntiAliasing;
     pub use crate::window::App;
+    pub use crate::window::DrawOutcome;
+    pub use crate::window::DrawReport;
+    pub use crate::window::DrawSkipReason;
     pub use crate::window::DrawTimings;
     pub use crate::window::Fullscreen;
     pub use crate::window::Icon;
@@ -108,6 +112,7 @@ pub mod prelude {
     pub use crate::window::WindowDesc;
     pub use crate::window::WindowIndex;
     pub use crate::window::WindowLevel;
+    pub use crate::window::WindowMetrics;
     pub use crate::offscreen::OffscreenCanvas;
     pub use crate::window::OffscreenIndex;
     pub use wgpu::PresentMode;
