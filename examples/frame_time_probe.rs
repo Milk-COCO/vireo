@@ -74,7 +74,7 @@ fn main() {
             );
         }
 
-        let timings = win.draw_timed(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let timings = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
         let acq_ms = timings.acquire_secs * 1000.0;
         let enc_ms = timings.encode_secs * 1000.0;
 

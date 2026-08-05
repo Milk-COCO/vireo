@@ -11,7 +11,7 @@
 //! - encode >= 4ms → ENCODE（命令编码/资源更新；不等于 GPU 执行）
 //! - 否则 → WAIT/OS（present、swapchain 或线程调度等待）
 //!
-//! 注意：当前 draw_timed 的 acquire 字段包含跨线程等待，不能单独证明是
+//! 注意：当前 draw 的 acquire 字段包含跨线程等待，不能单独证明是
 //! get_current_texture；GPU 忙时的驱动等待也不能直接归因于引擎负载。
 //! VIREO_QUIET=1 关闭 stderr spike 日志。
 
@@ -308,7 +308,7 @@ fn main() {
         }
 
         let build_ms = t_build.elapsed().as_secs_f64() * 1000.0;
-        let timings = win.draw_timed(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let timings = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
         let acq_ms = timings.acquire_secs * 1000.0;
         let enc_ms = timings.encode_secs * 1000.0;
         let gpu_ms = timings.gpu_secs.map(|v| v * 1000.0);

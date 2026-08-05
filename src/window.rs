@@ -453,9 +453,9 @@ pub struct VireoWindow {
     event_tx: mpsc::Sender<WinitEvent>,
     /// 向 winit 线程注册输入回调
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
-    /// 待应用的 present mode（在 draw_timed 开头应用）
+    /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
-    /// 待应用的 AA 模式（在 draw_timed 开头应用）
+    /// 待应用的 AA 模式（在 draw 开头应用）
     pending_aa: std::cell::Cell<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
@@ -492,13 +492,7 @@ impl VireoWindow {
         }
     }
 
-    /// Acquire a surface texture, reconfiguring on Outdated/Lost.
-    /// 绘制一帧并 present。在当前线程（渲染线程）上同步执行。
-    pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
-        self.draw_timed(clear_color, batches);
-    }
-
-    /// 与 [`draw`] 相同，并返回分段耗时（秒），用于卡顿诊断。
+    /// 绘制一帧并返回分段耗时（秒），用于卡顿诊断。
     ///
     /// 新流程（present proxy）：
     /// 1. 拿 `shared_present.pending_view` 的 view（winit 线程已 acquire）
@@ -512,7 +506,7 @@ impl VireoWindow {
     /// **限制**：`set_present_mode` / `set_anti_aliasing` 只在 surface 空闲时
     /// （无 view/cmd_buf in flight）生效。其他时机调用会被忽略。这是 wgpu
     /// surface 约束（configure 时不能有 outstanding SurfaceTexture）。
-    pub fn draw_timed(
+    pub fn draw(
         &self,
         clear_color: Option<crate::color::Color>,
         batches: &[&DrawBatch],
@@ -1393,6 +1387,10 @@ impl App {
                                 && !shared.encoding.load(std::sync::atomic::Ordering::Acquire)
                                 && !shared.winit_has_st.load(std::sync::atomic::Ordering::Acquire)
                                 && shared.pending_cmd_buf.lock().unwrap().is_none()
+                                // 不能与 needs_configure 抢：若 resize 置位后这里仍继续
+                                // acquire，winit_has_st 会一直 true，configure 分支被
+                                // 饿死 → 表面永不重配，内容冻结（livelock，无 panic）。
+                                && !shared.needs_configure.load(std::sync::atomic::Ordering::Acquire)
                             {
                                 match shared.surface.lock().unwrap().get_current_texture() {
                                     wgpu::CurrentSurfaceTexture::Success(st)
@@ -1415,6 +1413,9 @@ impl App {
                                         let cfg = shared.surface_config.lock().unwrap().clone();
                                         shared.surface.lock().unwrap()
                                             .configure(&self.gpu.device, &cfg);
+                                        // 已在上面就地重配，清掉挂起的 needs_configure，
+                                        // 否则下一轮 acquire 又被挡住（见 Idle→Acquired 门）。
+                                        shared.needs_configure.store(false, std::sync::atomic::Ordering::Release);
                                         // 不放 view，但必须重新 request_redraw，否则逻辑线程
                                         // 会永久阻塞在 wait_for_view()（无 view = 画面冻结）。
                                         shared.inner.request_redraw();
