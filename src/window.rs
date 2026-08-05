@@ -1415,10 +1415,16 @@ impl App {
                                         let cfg = shared.surface_config.lock().unwrap().clone();
                                         shared.surface.lock().unwrap()
                                             .configure(&self.gpu.device, &cfg);
-                                        // 不放 view，下一轮 RedrawRequested 再尝试
+                                        // 不放 view，但必须重新 request_redraw，否则逻辑线程
+                                        // 会永久阻塞在 wait_for_view()（无 view = 画面冻结）。
+                                        shared.inner.request_redraw();
                                     }
                                     _ => {
-                                        // Lost / Timeout / Occluded：跳过
+                                        // Lost / Timeout / Occluded：暂时失败。也 re-arm，
+                                        // 因为逻辑线程正阻塞在 wait_for_view()，不会自维持。
+                                        // 若真被系统遮挡（如最小化），此调用返回后事件循环在
+                                        // Poll 下继续，下一轮 RedrawRequested 会重试 acquire。
+                                        shared.inner.request_redraw();
                                     }
                                 }
                             }

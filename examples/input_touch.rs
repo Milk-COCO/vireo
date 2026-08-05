@@ -4,6 +4,7 @@
 //! 触屏设备可多点；显示 id / phase / force。
 
 use std::sync::{Arc, Mutex};
+use wgpu::PresentMode::Immediate;
 use vireo::prelude::*;
 
 struct TouchLog {
@@ -13,7 +14,7 @@ struct TouchLog {
 
 fn main() {
     let mut app = App::new();
-    let idx = app.window(WindowDesc::new("Input Touch", 800, 560), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate), None::<fn()>);
 
     let log = Arc::new(Mutex::new(TouchLog {
         last: None,
@@ -113,17 +114,23 @@ fn main() {
         }
 
         draw_rectangle(&mut batch, Pos::new(0.0, 480.0), 800.0, 80.0, Some(Color::new(0.08, 0.09, 0.12, 1.0)));
-        let g = log.lock().unwrap();
-        let last_s = match &g.last {
-            Some(e) => format!(
-                "last: id={} phase={:?} ({:.0},{:.0}) force={:?}",
-                e.id, e.phase, e.x, e.y, e.force
-            ),
-            None => "last: (none — touch or hold LMB)".into(),
+        // 先把 log 锁的作用域收窄：拷贝所需字段后立即释放。
+        // 若在 `win.draw()`（内部会阻塞等 owner 线程 present）期间仍持有 lock，
+        // 而 `on_touch` 回调（owner 线程）也在锁同一 Mutex → owner 卡住 → 死锁未响应。
+        let (count, last_s) = {
+            let g = log.lock().unwrap();
+            let last_s = match &g.last {
+                Some(e) => format!(
+                    "last: id={} phase={:?} ({:.0},{:.0}) force={:?}",
+                    e.id, e.phase, e.x, e.y, e.force
+                ),
+                None => "last: (none — touch or hold LMB)".into(),
+            };
+            (g.count, last_s)
         };
         draw_text(
             &mut batch.texts,
-            &format!("active: {}  events: {}\n{last_s}", touches.len(), g.count),
+            &format!("active: {}  events: {}\n{last_s}", touches.len(), count),
             Pos::new(16.0, 492.0),
             TextDef::default().font_size(14.0),
             TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
