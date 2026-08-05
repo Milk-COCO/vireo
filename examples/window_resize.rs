@@ -11,8 +11,9 @@
 //!    （松手 snap 的延迟），默认 100ms。
 //! 3. **`set_layout_follow`**：configure 之前的布局跟随（独立开关，默认开）。
 //!    窗口已变但 surface 未重配时，几何按新逻辑尺寸实时重排、文字由 shader 层
-//!    `screen_resolution` 覆盖补偿拉伸——DXGI 把旧 surface 拉伸到新窗口时正好抵消畸变，
-//!    零 configure 卡顿。关闭则拖动中内容停在旧布局（纯拉伸）。
+//!    `screen_resolution` 覆盖补偿拉伸。x/y 分别按新宽/高映射，宽高比变化时也无需
+//!    单轴近似；残余误差来自尺寸采样时序、舍入和 DPI 转换。关闭则拖动中内容停在
+//!    旧布局（纯拉伸）。
 //!
 //! 三者默认配合的效果：拖动全程不 configure（`layout_follow` 默认开 → 内容**实时重排**而非
 //! 停在旧布局，DXGI 拉伸只损失分辨率、不损失布局），尺寸已停止变化后满 debounce 时长
@@ -52,8 +53,9 @@
 //!
 //! ## 看什么
 //!
-//! 画面中央有动画方块验证拖动期间帧流是否持续；HUD 的 `suboptimal`
-//! 在拖动中为 true（旧尺寸拉伸 present），松手 snap 后回到 false。
+//! 画面中央有动画方块验证 update/`on_frame` 是否持续。HUD 的 `Update FPS` 是应用更新
+//! 频率，不是 displayed FPS。`suboptimal` 仅原样展示 wgpu acquire 状态；它不是规范的
+//! 「拖动拉伸中」信号，后端可能在拖动时仍返回 false，也可能因其他 surface 状态返回 true。
 //! PresentMode 建议切到 `Immediate`（`win.set_present_mode`）避免 vsync 干扰帧流观察。
 //! 
 //! 想看更详细的帧用时，可以把 `frame_stats` 示例与本示例结合。或者直接改那个示例的刷新策略/去抖/布局跟随也行。
@@ -150,14 +152,14 @@ fn main() {
             format!("Debounce: {}ms  (D)   present mode: {:?}", debounce_ms, win.present_mode()),
             format!("Layout follow: {}  (L)", follow_label),
             format!(
-                "window: {}x{} (logical)  FPS: {:.1}  frame_time: {:.2} ms",
+                "window: {}x{} (logical)  Update FPS: {:.1}  update dt: {:.2} ms",
                 metrics.width, metrics.height, app.fps, app.frame_time * 1000.0
             ),
             format!(
                 "last acquire: {:.2} ms  encode: {:.2} ms",
                 last_acq_ms, last_enc_ms
             ),
-            format!("suboptimal: {}  (true = 拖动拉伸中)", last_suboptimal),
+            format!("wgpu suboptimal: {}  (not a resize/drag signal)", last_suboptimal),
             "drag edge: O=OnRelease(默认) F=EveryFrame P=Periodic(400ms) D=去抖 L=布局跟随".into(),
         ];
         for (i, line) in lines.iter().enumerate() {

@@ -296,7 +296,7 @@ struct EventInfo {
 
 /// 渲染目标，封装用于 render pass 的 `TextureView`。
 ///
-/// 窗口和离屏纹理都通过此类型提交绘制。
+/// 窗口和离屏纹理都通过此类型编码绘制命令。
 pub struct RenderTarget {
     pub view: wgpu::TextureView,
 }
@@ -544,8 +544,9 @@ impl Renderer {
     ///
     /// `layout_follow`（`VireoWindow::set_layout_follow`，默认开）拖动中每帧调用：
     /// 窗口已变但 surface 未重配时，把 camera 切到新逻辑尺寸 → 几何/形状按新布局
-    /// 实时重排（复合映射 `logical→NDC→旧surface→DXGI拉伸→window` = uniform dpi，
-    /// 零畸变）。`scale` 保持 dpi 不变（glyph 光栅化 cache key 稳定），文字拉伸由
+    /// 实时重排。复合映射 `logical→NDC→旧surface→window` 对 x/y 分别使用新宽/高，
+    /// 宽高比变化时仍可逐轴精确映射；残余误差来自尺寸采样时序、整数舍入和 DPI
+    /// 转换。`scale` 保持 dpi 不变（glyph 光栅化 cache key 稳定），文字拉伸由
     /// `set_text_viewport_override` 在 shader 层补偿；`dpi_scale` 保持 OS 缩放
     /// （SDF feather 用）。
     pub(crate) fn update_layout(
@@ -596,7 +597,7 @@ impl Renderer {
 
     /// 编码渲染命令到 `CommandBuffer`，**不** submit/present。
     ///
-    /// 调用方负责在 wgpu owner 线程（= 窗口 owner 线程）上：
+    /// 调用方负责在持有目标 surface/texture 帧循环的线程上：
     /// ```ignore
     /// queue.submit([cmd_buf]);
     /// queue.present(surface_texture);
@@ -605,8 +606,8 @@ impl Renderer {
     /// 返回的 `CommandBuffer` 持有对 `target.view` 的引用（`TextureView`），
     /// 在 `submit` 之前 `target.view` 必须保持有效（即 `SurfaceTexture` 未被销毁）。
     ///
-    /// 拆分 submit/present 到 winit 线程解决了"模态循环期间冻屏"：present 必须在
-    /// owner 线程，DWM 才接受。详见 VIREO_OPT_NOTES 第三十五轮。
+    /// 当前窗口路径由渲染线程在 `VireoWindow::draw` 内完成 acquire、调用本方法、
+    /// submit 和 present；winit owner 线程不参与逐帧 surface 提交。离屏调用方则自行 submit。
     pub fn draw(
         &self,
         target: &RenderTarget,

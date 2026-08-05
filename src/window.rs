@@ -332,12 +332,13 @@ impl WindowDesc {
 /// 分段耗时（秒），由 [`VireoWindow::draw`] 回传。
 ///
 /// 新流程（render thread 独占 surface 帧循环）：
-/// - `acquire_secs`：尺寸同步 + `surface.configure` + `get_current_texture`
+/// - `acquire_secs`：`get_current_texture`（不含此前的尺寸同步与 `surface.configure`）
 /// - `encode_secs`：Renderer 编码 + `queue.submit`
 /// - `present_secs`：`queue.present`
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawTimings {
-    /// 尺寸同步 + `surface.configure` + `get_current_texture`：可能阻塞等 swapchain 空位。
+    /// `get_current_texture`：可能阻塞等待 swapchain 空位；不含尺寸同步与
+    /// `surface.configure`，后两者发生在此计时区间之前。
     pub acquire_secs: f64,
     /// 编码 + `queue.submit`（不含 present）。
     pub encode_secs: f64,
@@ -372,6 +373,8 @@ pub struct DrawReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawOutcome {
     /// 已 acquire → submit → present 完成一帧。
+    /// `suboptimal` 原样报告 wgpu 的 surface acquire 状态；它只表示当前 surface
+    /// 对 swapchain 而言不是最优状态，不是规范的 resize/拉伸/拖动状态信号。
     Presented { suboptimal: bool },
     /// 本帧被跳过（未 acquire / 未 present）。
     Skipped(DrawSkipReason),
@@ -382,7 +385,8 @@ pub enum DrawOutcome {
 /// 本帧被跳过的原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawSkipReason {
-    /// 窗口为 0×0（如最小化）——不 acquire，避免忙循环。
+    /// 窗口为 0×0（如最小化）——本次 draw 不 acquire。
+    /// 这只跳过当前帧，不负责限制调用方渲染循环的 CPU 频率。
     ZeroSized,
     /// `get_current_texture` 超时，稍后重试。
     Timeout,
@@ -510,7 +514,8 @@ pub struct VireoWindow {
     /// 布局跟随开关（独立于 `ResizeRefreshPolicy`，默认开）：窗口尺寸已变但 surface
     /// 未重配时，每帧把 camera/逻辑尺寸更新到新窗口（`Renderer::update_layout`），
     /// 内容**实时重排**而非停在旧布局——DXGI 把旧 surface 拉伸到新窗口时正好抵消
-    /// 畸变（几何零畸变、文字按 `旧surface宽/新逻辑宽` 补偿近似）。
+    /// 缩放：几何和文字都按 x/y 两轴的新尺寸映射，不因宽高比变化产生额外近似。
+    /// 可见误差来自窗口尺寸采样时序、整数舍入和 DPI 转换，而非单轴补偿。
     /// 关闭 = 旧行为：拖动中内容停旧逻辑布局（纯拉伸）。
     layout_follow: std::cell::Cell<bool>,
     /// 待应用的 AA 模式（在 draw 开头应用）
@@ -713,16 +718,17 @@ impl VireoWindow {
             } else if size_drifted && self.layout_follow.get() {
                 // layout_follow（独立开关，默认开）：窗口已变但 surface 未重配——
                 // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
-                // （见下方 `follow-layout` 段）：acquire 返回表示前一帧已上屏，此刻
-                // re-poll 的尺寸才贴近「本帧呈现时」的窗口。配合 frame_latency=1
-                // 把 camera 时差窗口压到 ~1 vblank，避免 vsync 拖动「弹一下」。
+                // （见下方 `follow-layout` 段）：acquire 可能等待 swapchain 空位，因此返回后
+                // re-poll 通常能取得更接近本帧 present 时刻的尺寸，但不保证前帧已上屏。
+                // 配合 frame_latency=1 降低 camera 的采样时差，不能保证消除拖动跳动。
                 // 这里只登记尺寸漂移状态 + 置 follow_pending 标记。
                 // DXGI 把旧 surface（S）拉伸到新窗口（W）：camera 用新逻辑尺寸 →
                 // 复合映射 uniform dpi、几何零畸变。
                 // 文字不重光栅化（保持 scale=dpi → 图集 cache key 稳定），而是把
                 // 文字 shader 的 screen_resolution 覆盖为「虚拟新物理尺寸」
                 // （新逻辑 × dpi）：NDC = 2*px/(L*dpi) - 1 与几何相机 2x/L - 1
-                // 对齐，纯 shader 层拉伸补偿 DXGI 拉伸（x 精确、y 在宽高比变化时近似）。
+                // 对齐。x/y 分别使用新宽/高，宽高比变化时也逐轴映射；残余误差来自
+                // 尺寸采样时序、逻辑/物理整数舍入及 DPI 转换。
                 // 不重置 pending_resize_at：计时继续老化，松手满 debounce 触发
                 // 上方 Stable 分支一次性 configure（snap）。
                 if trace {
@@ -797,9 +803,10 @@ impl VireoWindow {
         }
         let acquire_secs = t1.elapsed().as_secs_f64();
 
-        // 4a) follow 布局跟随（实际执行）：acquire 返回表示前一帧已上屏，此刻 re-poll
-        //     inner_size 拿到的尺寸才贴近「本帧呈现时」的窗口大小。配合 frame_latency=1
-        //     （在途帧封顶 1）把 camera 时差压到 ~1 vblank，vsync 拖动不再「弹一下」。
+        // 4a) follow 布局跟随（实际执行）：acquire 可能等待 swapchain 空位；返回后
+        //     re-poll inner_size 通常比 acquire 前的样本更接近本帧 present 时刻，但 acquire
+        //     不保证前帧已上屏。配合 frame_latency=1 降低 camera 时差与拖动跳动，仍可能
+        //     留下约一个刷新周期内的采样差异。
         //     只在 follow_pending（step 2 登记的漂移）且确实仍漂移时更新；否则清残留
         //     的虚拟 viewport。
         if follow_pending {
@@ -1068,9 +1075,11 @@ pub struct App {
     textures: Vec<Texture>,
     offscreens: Vec<OffscreenCanvas>,
     pub frame_count: u64,
-    /// 上一帧间隔（秒），瞬时值。第一帧为 0（A 语义：没有「上一帧」）。
+    /// 相邻两次 update/`on_frame` 调用的间隔（秒），瞬时值。第一帧为 0。
+    /// 它不是相邻 displayed frame 的呈现间隔。
     pub frame_time: f64,
-    /// 滑动窗口平均 FPS（比「每秒整段重置」更稳，少 55↔60 乱跳）。第一帧为 0。
+    /// update/`on_frame` 调用频率的滑动窗口平均值。它不是 displayed FPS；surface acquire、
+    /// present mode、跳帧或合成器可能使实际显示频率不同。第一帧为 0。
     pub fps: f64,
     /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
     pub init_duration: f64,
@@ -1485,8 +1494,8 @@ impl App {
                         present_mode: desc.present_mode,
                         alpha_mode,
                         view_formats: vec![],
-                        // 在途帧封顶到 1：follow 拖动态把 camera 时差窗口压到 ~1 vblank，
-                        // 避免 vsync 下内容按 2 帧前尺寸布局导致的「弹一下」。
+                        // 在途帧封顶到 1：follow 拖动态降低 camera 尺寸样本与 present
+                        // 之间的时差，减轻 vsync 下的布局跳动，但不保证完全消除。
                         desired_maximum_frame_latency: 1,
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
@@ -2311,8 +2320,8 @@ impl VireoWindow {
     ///
     /// 窗口尺寸已变但 surface 未重配时（拖动中），每帧把 camera/逻辑尺寸更新到
     /// 新窗口（`Renderer::update_layout`），让内容**实时重排**：DXGI 把旧 surface
-    /// 拉伸到新窗口时正好抵消畸变（几何零畸变；文字 `scale` 保持 dpi 不变、
-    /// 由 shader 层 `screen_resolution` 覆盖补偿拉伸，x 精确、y 在宽高比变化时近似）。
+    /// 拉伸到新窗口时，几何和文字都按 x/y 两轴的新尺寸映射；宽高比变化本身不会
+    /// 造成单轴近似。可见误差来自尺寸采样时序、逻辑/物理整数舍入和 DPI 转换。
     /// 关闭 = 旧行为：拖动中内容停在旧逻辑布局（纯拉伸，松手才 snap）。
     ///
     /// 与 [`VireoWindow::set_resize_refresh_policy`] 正交：策略决定**何时 configure

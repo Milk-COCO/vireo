@@ -1,6 +1,6 @@
 //! PresentMode 全模式：AutoVsync / Fifo / Mailbox / Immediate
 //!
-//! 键 1–4 切换；显示 FPS、frame_time、acquire/encode（draw）。
+//! 键 1–4 切换；显示 update FPS、update dt、acquire/encode（draw）。
 
 use vireo::prelude::*;
 
@@ -56,7 +56,7 @@ fn main() {
             format!("PresentMode: {}  (set_present_mode)", mode_name(cur)),
             "1 AutoVsync  2 Fifo  3 Mailbox  4 Immediate".into(),
             format!(
-                "FPS: {:.1}   frame_time: {:.2} ms",
+                "Update FPS: {:.1}   update dt: {:.2} ms",
                 app.fps,
                 app.frame_time * 1000.0
             ),
