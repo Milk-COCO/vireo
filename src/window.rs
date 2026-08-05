@@ -445,7 +445,6 @@ enum WinitEvent {
     SetDecorations { handle: usize, decorations: bool },
     SetIcon { handle: usize, icon: Icon },
     SetCursor { handle: usize, cursor: winit::window::Cursor },
-    Exit,
 }
 
 /// 物理尺寸 → 逻辑尺寸（`high_dpi` 窗口逻辑 = 物理）。
@@ -1580,7 +1579,7 @@ impl App {
 
             fn window_event(
                 &mut self,
-                event_loop: &ActiveEventLoop,
+                _event_loop: &ActiveEventLoop,
                 window_id: WindowId,
                 event: WindowEvent,
             ) {
@@ -1591,14 +1590,12 @@ impl App {
                         if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
                             if let Some(h) = hook_opt.take() { h(); }
                         }
-                        // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present，
-                        // 此处没有跨线程 st 需要释放。渲染线程在下一轮事件循环移除窗口。
+                        // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present。
+                        // owner 只发送关闭请求；最后一个 VireoWindow 由渲染线程 drop 后，
+                        // 渲染线程会通过 exit_tx 确认退出。此处不能先退出 event loop 再
+                        // join，否则 owner 可能无期限等待仍在同步 wgpu 调用中的渲染线程。
                         self.send(WinitEvent::CloseRequested { handle });
                         self.alive_handles -= 1;
-                        if self.alive_handles == 0 {
-                            self.send(WinitEvent::Exit);
-                            event_loop.exit();
-                        }
                     }
                     WindowEvent::Resized(size) => {
                         // 事件驱动路径：仅同步逻辑尺寸。真正的 surface.configure /
@@ -1879,6 +1876,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                         *w = None;
                     }
                     if app.window_count() == 0 {
+                        request_exit();
                         return;
                     }
                 }
@@ -1958,7 +1956,6 @@ where F: FnMut(&App) -> bool + Send + 'static
                     }
                 }
 
-                Ok(WinitEvent::Exit) => return,
                 Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
