@@ -591,6 +591,39 @@ impl VireoWindow {
         }
     }
 
+    /// Configure the surface and synchronise every size-dependent renderer state.
+    /// The caller must ensure no `SurfaceTexture` is outstanding.
+    fn configure_surface(&self, size: winit::dpi::PhysicalSize<u32>, now: std::time::Instant) {
+        debug_assert!(size.width > 0 && size.height > 0);
+        let sf = self.inner.scale_factor();
+        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let dpi_scale = sf as f32;
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+
+        let mut config = self.surface_config.borrow().clone();
+        config.width = size.width;
+        config.height = size.height;
+        self.surface.borrow().configure(&self.gpu.device, &config);
+
+        self.applied_present_mode.set(config.present_mode);
+        *self.surface_config.borrow_mut() = config;
+        self.logical_width.set(logical_w);
+        self.logical_height.set(logical_h);
+        self.scale.set(scale);
+        self.dpi_scale.set(dpi_scale);
+        self.last_configure.set(now);
+        self.pending_resize_at.set(None);
+        self.last_observed.set((size.width, size.height, logical_w, logical_h, scale));
+        self.renderer.borrow_mut().resize(
+            logical_w,
+            logical_h,
+            size.width,
+            size.height,
+            scale,
+            dpi_scale,
+        );
+    }
+
     /// 绘制一帧（render thread 独占 surface 帧循环）。
     ///
     /// 流程：
@@ -686,9 +719,6 @@ impl VireoWindow {
             if need_configure {
                 configured_this_frame = true;
                 let t_conf = std::time::Instant::now();
-                let mut new_config = self.surface_config.borrow().clone();
-                new_config.width = size.width;
-                new_config.height = size.height;
                 if trace {
                     let label = match refresh {
                         ResizeRefresh::Stable => "stable",
@@ -699,22 +729,10 @@ impl VireoWindow {
                         label, now);
                 }
                 // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
-                self.surface.borrow().configure(&self.gpu.device, &new_config);
+                self.configure_surface(size, now);
                 if trace {
                     eprintln!("[draw] conf-end {:?}us", t_conf.elapsed().as_micros());
                 }
-                self.last_configure.set(now);
-                self.pending_resize_at.set(None);
-                *self.surface_config.borrow_mut() = new_config;
-                self.logical_width.set(logical_w);
-                self.logical_height.set(logical_h);
-                self.scale.set(new_scale);
-                self.dpi_scale.set(dpi_scale);
-                self.applied_present_mode.set(self.surface_config.borrow().present_mode);
-                self.renderer.borrow_mut().resize(
-                    logical_w, logical_h,
-                    size.width, size.height, new_scale, dpi_scale,
-                );
             } else if size_drifted && self.layout_follow.get() {
                 // layout_follow（独立开关，默认开）：窗口已变但 surface 未重配——
                 // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
@@ -764,10 +782,7 @@ impl VireoWindow {
                         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
                     };
                 }
-                self.surface_config.borrow_mut().width = size.width.max(1);
-                self.surface_config.borrow_mut().height = size.height.max(1);
-                self.applied_present_mode.set(self.surface_config.borrow().present_mode);
-                self.surface.borrow().configure(&self.gpu.device, &self.surface_config.borrow());
+                self.configure_surface(size, std::time::Instant::now());
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
@@ -781,13 +796,16 @@ impl VireoWindow {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // surface 丢失：用现有 instance+window 重建 surface 并重配，本帧跳过
+                let size = self.inner.inner_size();
+                if size.width == 0 || size.height == 0 {
+                    return DrawReport {
+                        outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
+                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                    };
+                }
                 if let Some(new_surface) = self.recreate_surface() {
                     *self.surface.borrow_mut() = new_surface;
-                    let size = self.inner.inner_size();
-                    self.surface_config.borrow_mut().width = size.width.max(1);
-                    self.surface_config.borrow_mut().height = size.height.max(1);
-                    self.applied_present_mode.set(self.surface_config.borrow().present_mode);
-                    self.surface.borrow().configure(&self.gpu.device, &self.surface_config.borrow());
+                    self.configure_surface(size, std::time::Instant::now());
                 }
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
