@@ -649,6 +649,7 @@ impl VireoWindow {
         let dpi_scale = sf as f32;
         let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
         let mut configured_this_frame = false;
+        let mut follow_pending = false;
         {
             let sc = self.surface_config.borrow();
             let size_drifted = sc.width != size.width
@@ -711,7 +712,11 @@ impl VireoWindow {
                 );
             } else if size_drifted && self.layout_follow.get() {
                 // layout_follow（独立开关，默认开）：窗口已变但 surface 未重配——
-                // 只把 camera/逻辑尺寸更新到新窗口，让内容实时重排而非停在旧布局。
+                // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
+                // （见下方 `follow-layout` 段）：acquire 返回表示前一帧已上屏，此刻
+                // re-poll 的尺寸才贴近「本帧呈现时」的窗口。配合 frame_latency=1
+                // 把 camera 时差窗口压到 ~1 vblank，避免 vsync 拖动「弹一下」。
+                // 这里只登记尺寸漂移状态 + 置 follow_pending 标记。
                 // DXGI 把旧 surface（S）拉伸到新窗口（W）：camera 用新逻辑尺寸 →
                 // 复合映射 uniform dpi、几何零畸变。
                 // 文字不重光栅化（保持 scale=dpi → 图集 cache key 稳定），而是把
@@ -721,18 +726,13 @@ impl VireoWindow {
                 // 不重置 pending_resize_at：计时继续老化，松手满 debounce 触发
                 // 上方 Stable 分支一次性 configure（snap）。
                 if trace {
-                    eprintln!("[draw] follow-layout {}x{}", logical_w, logical_h);
+                    eprintln!("[draw] follow-layout(drift) {}x{}", logical_w, logical_h);
                 }
                 self.logical_width.set(logical_w);
                 self.logical_height.set(logical_h);
                 self.scale.set(new_scale);
                 self.dpi_scale.set(dpi_scale);
-                let vw = (logical_w as f32 * new_scale).round().max(1.0) as u32;
-                let vh = (logical_h as f32 * new_scale).round().max(1.0) as u32;
-                self.renderer.borrow_mut().update_layout(
-                    logical_w, logical_h, new_scale, dpi_scale,
-                );
-                self.renderer.borrow_mut().set_text_viewport_override(Some((vw, vh)));
+                follow_pending = true;
             } else {
                 // 不跟随 / 尺寸未漂移：清掉可能残留的虚拟 viewport（配置/稳定路径已由
                 // `Renderer::resize` 清，这里兜底防 follow 中途关闭后残留）。
@@ -797,13 +797,52 @@ impl VireoWindow {
         }
         let acquire_secs = t1.elapsed().as_secs_f64();
 
-        // 4) 编码
+        // 4a) follow 布局跟随（实际执行）：acquire 返回表示前一帧已上屏，此刻 re-poll
+        //     inner_size 拿到的尺寸才贴近「本帧呈现时」的窗口大小。配合 frame_latency=1
+        //     （在途帧封顶 1）把 camera 时差压到 ~1 vblank，vsync 拖动不再「弹一下」。
+        //     只在 follow_pending（step 2 登记的漂移）且确实仍漂移时更新；否则清残留
+        //     的虚拟 viewport。
+        if follow_pending {
+            let size = self.inner.inner_size();
+            let sf = self.inner.scale_factor();
+            let new_scale = if self.high_dpi { 1.0 } else { sf as f32 };
+            let dpi_scale = sf as f32;
+            let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+            let still_drifted = {
+                let sc = self.surface_config.borrow();
+                sc.width != size.width
+                    || sc.height != size.height
+                    || logical_w != self.logical_width.get()
+                    || logical_h != self.logical_height.get()
+                    || new_scale != self.scale.get()
+            };
+            if still_drifted && size.width != 0 && size.height != 0 {
+                if trace {
+                    eprintln!("[draw] follow-layout(acq) {}x{}", logical_w, logical_h);
+                }
+                self.logical_width.set(logical_w);
+                self.logical_height.set(logical_h);
+                self.scale.set(new_scale);
+                self.dpi_scale.set(dpi_scale);
+                let vw = (logical_w as f32 * new_scale).round().max(1.0) as u32;
+                let vh = (logical_h as f32 * new_scale).round().max(1.0) as u32;
+                self.renderer.borrow_mut().update_layout(
+                    logical_w, logical_h, new_scale, dpi_scale,
+                );
+                self.renderer.borrow_mut().set_text_viewport_override(Some((vw, vh)));
+            } else {
+                // 松手尺寸回稳但尚未 snap（debounce 未满）：不再重排，清虚拟 viewport，
+                // 内容停在当前布局，等 Stable 分支一次性 configure。
+                self.renderer.borrow_mut().set_text_viewport_override(None);
+            }
+        }
+
+        // 4b) 编码
         let view = st.texture.create_view(&Default::default());
         let target = crate::context::RenderTarget::from_texture_view(view);
         let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
         let t2 = std::time::Instant::now();
         let cmd_buf = self.renderer.borrow().draw(&target, clear_color, &batch_refs);
-
         // 5) submit + 提交完成计时
         let timing_enabled = self.gpu_timing_enabled.load(std::sync::atomic::Ordering::Acquire);
         if timing_enabled {
@@ -1446,7 +1485,9 @@ impl App {
                         present_mode: desc.present_mode,
                         alpha_mode,
                         view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
+                        // 在途帧封顶到 1：follow 拖动态把 camera 时差窗口压到 ~1 vblank，
+                        // 避免 vsync 下内容按 2 帧前尺寸布局导致的「弹一下」。
+                        desired_maximum_frame_latency: 1,
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     surface.configure(&self.gpu.device, &surface_config);
