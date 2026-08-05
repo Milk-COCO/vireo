@@ -488,6 +488,9 @@ pub struct VireoWindow {
     high_dpi: bool,
     scale: std::cell::Cell<f32>,
     dpi_scale: std::cell::Cell<f32>,
+    /// Last layout committed by `surface.configure`. FollowLayout may temporarily
+    /// move the live camera away from this snapshot while the surface keeps its size.
+    configured_layout: std::cell::Cell<(u32, u32, f32, f32)>,
     pub input: InputState,
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
     pub init_duration: f64,
@@ -564,6 +567,12 @@ impl VireoWindow {
             high_dpi,
             scale: std::cell::Cell::new(scale),
             dpi_scale: std::cell::Cell::new(dpi_scale),
+            configured_layout: std::cell::Cell::new((
+                logical_width,
+                logical_height,
+                scale,
+                dpi_scale,
+            )),
             input: InputState::default(),
             init_duration,
             event_tx,
@@ -611,6 +620,7 @@ impl VireoWindow {
         self.logical_height.set(logical_h);
         self.scale.set(scale);
         self.dpi_scale.set(dpi_scale);
+        self.configured_layout.set((logical_w, logical_h, scale, dpi_scale));
         self.last_configure.set(now);
         self.pending_resize_at.set(None);
         self.last_observed.set((size.width, size.height, logical_w, logical_h, scale));
@@ -2346,7 +2356,17 @@ impl VireoWindow {
     /// surface**，本开关决定**configure 之前布局是否跟随**。关闭后 configure 前
     /// 内容完全停旧布局。
     pub fn set_layout_follow(&self, enabled: bool) {
-        self.layout_follow.set(enabled);
+        let was_enabled = self.layout_follow.replace(enabled);
+        if was_enabled && !enabled {
+            let (logical_w, logical_h, scale, dpi_scale) = self.configured_layout.get();
+            self.logical_width.set(logical_w);
+            self.logical_height.set(logical_h);
+            self.scale.set(scale);
+            self.dpi_scale.set(dpi_scale);
+            let mut renderer = self.renderer.borrow_mut();
+            renderer.update_layout(logical_w, logical_h, scale, dpi_scale);
+            renderer.set_text_viewport_override(None);
+        }
     }
 
     /// 当前布局跟随开关（默认开）。见 [`VireoWindow::set_layout_follow`]。
