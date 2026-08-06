@@ -3610,7 +3610,12 @@ impl DrawBatch {
             }
         }
         out.push(DrawEvent::Batch(self));
-        let has_geom = !self.vertices.is_empty() || !self.instances.is_empty();
+        // 与 draw 阶段 `compute_stencil_at_level` 的 has_geom 一致：geo-instance
+        // 路径（sdf_feather=None 的默认几何）也算有几何，否则 clips_children 的
+        // geo-only batch 只 Push 不 Pop，clip_depth 泄漏。
+        let has_geom = !self.vertices.is_empty()
+            || !self.instances.is_empty()
+            || !self.geo_instances.is_empty();
         // 子树 stencil base（与 draw 的 content_level 抬升一致）：
         // Area cover → +1；clips_children 且走 stencil Push → 再 +1；scissor 不抬 stencil。
         let child_level = level
@@ -6395,6 +6400,23 @@ mod tests {
         // 无子：不发空 scissor Push/Pop
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
+    }
+
+    #[test]
+    fn geo_instance_clip_emits_stencil_pop() {
+        // 回归：flatten_events 的 has_geom 此前漏了 geo_instances。
+        // sdf_feather=None 的几何走 geo_instance_shape → 只有 geo_instances
+        //（vertices/instances 均空）；clips_children=true 时 draw 阶段会 Push
+        // 但 flatten 不发 StencilPop → clip_depth 泄漏、后续 batch stencil ref 偏移。
+        let mut g = DrawBatch::new();
+        g.sdf_feather = None;
+        g.clips_children = true;
+        crate::shapes::draw_triangle(&mut g, 0.0, 0.0, 100.0, 0.0, 0.0, 50.0, Some(WHITE));
+        assert!(!g.geo_instances.is_empty());
+        assert!(g.vertices.is_empty() && g.instances.is_empty());
+        let mut events: Vec<DrawEvent> = Vec::new();
+        g.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
     }
 
     #[test]
