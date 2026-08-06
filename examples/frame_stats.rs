@@ -5,6 +5,7 @@
 //! - T: 开关文字（A/B：有字 vs 无字）
 //! - V: 切换 PresentMode AutoVsync ↔ Immediate
 //! - C: 循环帧率上限 cap = 240 / 120 / 60 / 30 / 10 / off（无 vsync 空转时生效）
+//! - L: 循环 swapchain 在途帧 frame_latency = 2 / 1（DX12 buffer 数 = latency+1）
 //!
 //! Spike 阈值 20ms。分类（按已测 CPU 阶段，互斥）：
 //! - build  >= 4ms → BUILD（CPU 构图）
@@ -102,18 +103,21 @@ fn main() {
     let mut current_aa = AntiAliasing::None;
     let mut show_text = true;
     let mut present_immediate = false;
-    let mut current_cap: Option<u32> = None;
+    let mut current_cap: Option<u32> = app.max_fps();
+    let mut current_latency: u32 = 2;
     let mut was_focused = true;
     let mut last_gpu_ms: Option<f64> = None;
     let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));
     let toggle_text: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let toggle_present: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let cycle_cap: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let cycle_latency: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let pending_aa_keys = Arc::clone(&pending_aa);
     let toggle_text_keys = Arc::clone(&toggle_text);
     let toggle_present_keys = Arc::clone(&toggle_present);
     let cycle_cap_keys = Arc::clone(&cycle_cap);
+    let cycle_latency_keys = Arc::clone(&cycle_latency);
     app.on_key_down(idx, move |event| {
         if event.repeat {
             return;
@@ -127,6 +131,9 @@ fn main() {
             }
             KeyCode::KeyC => {
                 *cycle_cap_keys.lock().unwrap() = true;
+            }
+            KeyCode::KeyL => {
+                *cycle_latency_keys.lock().unwrap() = true;
             }
             KeyCode::Digit1 => {
                 *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::None);
@@ -201,6 +208,17 @@ fn main() {
                 eprintln!("[diag] max_fps={:?}", current_cap);
             }
         }
+        if std::mem::take(&mut *cycle_latency.lock().unwrap()) {
+            const LATENCY_CYCLE: [u32; 2] = [2, 1];
+            let next = LATENCY_CYCLE.iter().copied().position(|l| l == current_latency)
+                .map_or(0, |i| (i + 1) % LATENCY_CYCLE.len());
+            current_latency = LATENCY_CYCLE[next];
+            win.set_frame_latency(current_latency);
+            history.clear();
+            if !quiet {
+                eprintln!("[diag] frame_latency={}", current_latency);
+            }
+        }
 
         let ft_ms = app.frame_time * 1000.0;
         let t_build = std::time::Instant::now();
@@ -213,6 +231,10 @@ fn main() {
         }
         let (lo, hi, avg, p50, p95, p99, stddev) = compute_stats(&history);
         let spike_count = history.iter().filter(|&&v| v > SPIKE_THRESHOLD_MS).count();
+
+        if !quiet && app.frame_count % 60 == 0 {
+            eprintln!("[fps] text={} fps={:.1} ft={:.2}ms gpu={:.3}ms", show_text, app.fps, ft_ms, last_gpu_ms.unwrap_or(0.0));
+        }
 
         let present_label = if present_immediate {
             "Immediate"
@@ -255,6 +277,7 @@ fn main() {
                     TextPart::normal("  |  Cap: "), TextPart::dynamic(
                         current_cap.map_or_else(|| "off".to_string(), |c| c.to_string()),
                     ),
+                    TextPart::normal("  |  Latency: "), TextPart::dynamic(current_latency.to_string()),
                     TextPart::normal("  |  Text: "), TextPart::dynamic(if show_text { "on" } else { "off" }),
                 ], 82.0),
                 (vec![
@@ -278,7 +301,7 @@ fn main() {
 
         let k_msaa8 = if max_sc >= 8 { " 3=MSAA8" } else { "" };
         let keys = format!(
-            "1=None 2=MSAA4{} 4=SSAA4  |  T=text  V=vsync/imm  C=cap(240/120/60/30/10/off)  |  hw max {}x",
+            "1=None 2=MSAA4{} 4=SSAA4  |  T=text  V=vsync/imm  C=cap  L=latency(2/1)  |  hw max {}x",
             k_msaa8, max_sc,
         );
         if show_text {

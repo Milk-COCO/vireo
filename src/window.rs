@@ -211,6 +211,11 @@ pub struct WindowDesc {
     pub blur: bool,
     pub present_mode: wgpu::PresentMode,
     pub anti_aliasing: AntiAliasing,
+    /// 期望最大在途帧（`SurfaceConfiguration::desired_maximum_frame_latency`）。
+    /// DX12 下 swapchain buffer 数 = latency + 1：默认 2 → 3 buffer（CPU 可超前
+    /// 2 帧，无 vsync 时峰值更高）；设 1 → 2 buffer（在途封顶 1，vsync 拖动时
+    /// camera 时差更小）。可在创建后经 [`VireoWindow::set_frame_latency`] 运行时调整。
+    pub frame_latency: u32,
 }
 
 impl WindowDesc {
@@ -240,6 +245,7 @@ impl WindowDesc {
             blur: false,
             present_mode: wgpu::PresentMode::AutoVsync,
             anti_aliasing: AntiAliasing::None,
+            frame_latency: 2,
         }
     }
 
@@ -355,6 +361,14 @@ impl WindowDesc {
 
     pub fn present_mode(mut self, mode: wgpu::PresentMode) -> Self {
         self.present_mode = mode;
+        self
+    }
+
+    /// 期望最大在途帧（`desired_maximum_frame_latency`）。DX12 下 buffer 数 =
+    /// latency + 1；默认 2（3 buffer）。设为 1 则只有 2 buffer（vsync 拖动时
+    /// camera 时差更小，但无 vsync 峰值下降）。详见 [`WindowDesc::frame_latency`]。
+    pub fn frame_latency(mut self, latency: u32) -> Self {
+        self.frame_latency = latency;
         self
     }
 
@@ -552,6 +566,10 @@ pub struct VireoWindow {
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
     applied_present_mode: std::cell::Cell<wgpu::PresentMode>,
+    /// 待应用的最大在途帧（`desired_maximum_frame_latency`，在 draw 开头应用）
+    pending_frame_latency: std::cell::Cell<Option<u32>>,
+    /// 真正 configure 到 surface 的在途帧（仅 configure 时更新）
+    applied_frame_latency: std::cell::Cell<u32>,
     /// 上次 `surface.configure` 的时刻（resize 实时刷新间隔用）
     last_configure: std::cell::Cell<std::time::Instant>,
     /// 最近一次「尺寸仍与已配置值不同」的帧时刻（resize 去抖用）
@@ -617,6 +635,7 @@ impl VireoWindow {
         handle: usize,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
+        let initial_frame_latency = surface_config.desired_maximum_frame_latency;
         let initial_phys = (surface_config.width, surface_config.height);
         Self {
             surface: std::cell::RefCell::new(surface),
@@ -643,6 +662,8 @@ impl VireoWindow {
             cb_tx,
             pending_mode: std::cell::Cell::new(None),
             applied_present_mode: std::cell::Cell::new(initial_present_mode),
+            pending_frame_latency: std::cell::Cell::new(None),
+            applied_frame_latency: std::cell::Cell::new(initial_frame_latency),
             last_configure: std::cell::Cell::new(std::time::Instant::now()),
             pending_resize_at: std::cell::Cell::new(None),
             last_observed: std::cell::Cell::new((
@@ -687,6 +708,7 @@ impl VireoWindow {
         self.surface.borrow().configure(&self.gpu.device, &config);
 
         self.applied_present_mode.set(config.present_mode);
+        self.applied_frame_latency.set(config.desired_maximum_frame_latency);
         *self.surface_config.borrow_mut() = config;
         self.logical_width.set(logical_w);
         self.logical_height.set(logical_h);
@@ -783,6 +805,9 @@ impl VireoWindow {
             let actual = Self::resolve_present_mode(mode, &caps.present_modes);
             self.surface_config.borrow_mut().present_mode = actual;
         }
+        if let Some(latency) = self.pending_frame_latency.take() {
+            self.surface_config.borrow_mut().desired_maximum_frame_latency = latency;
+        }
         // 应用 pending AA 变化（不触碰 surface；重建 msaa/ds 纹理）
         if let Some(aa) = self.pending_aa.take() {
             let sc = aa.sample_count();
@@ -821,6 +846,8 @@ impl VireoWindow {
                 || logical_h != self.logical_height.get()
                 || new_scale != self.scale.get();
             let mode_drifted = sc.present_mode != self.applied_present_mode.get();
+            let latency_drifted =
+                sc.desired_maximum_frame_latency != self.applied_frame_latency.get();
             drop(sc);
             let now = std::time::Instant::now();
             // 「移动」= 相对上一帧观测值有变化。只有移动才刷新去抖计时；松手后
@@ -840,7 +867,7 @@ impl VireoWindow {
                 self.last_configure.get(),
             );
             let need_configure = size_drifted && refresh != ResizeRefresh::None
-                || mode_drifted;
+                || mode_drifted || latency_drifted;
             if need_configure {
                 configured_this_frame = true;
                 let t_conf = std::time::Instant::now();
@@ -1780,9 +1807,10 @@ impl App {
                         present_mode: desc.present_mode,
                         alpha_mode,
                         view_formats: vec![],
-                        // 在途帧封顶到 1：follow 拖动态降低 camera 尺寸样本与 present
-                        // 之间的时差，减轻 vsync 下的布局跳动，但不保证完全消除。
-                        desired_maximum_frame_latency: 1,
+                        // 在途帧上限：默认 2（DX12 → 3 buffer，CPU 可超前 2 帧、
+                        // 无 vsync 峰值更高）；设 1 → 2 buffer（vsync 拖动时 camera
+                        // 时差更小）。经 `WindowDesc::frame_latency` / `set_frame_latency`。
+                        desired_maximum_frame_latency: desc.frame_latency,
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     surface.configure(&self.gpu.device, &surface_config);
@@ -2653,6 +2681,23 @@ impl VireoWindow {
         self.applied_present_mode.get()
     }
 
+    /// 设置期望最大在途帧（`desired_maximum_frame_latency`），下一帧 draw 时
+    /// 触发一次 `surface.configure`。
+    ///
+    /// DX12 下 swapchain buffer 数 = latency + 1：
+    /// - `2`（默认）→ 3 buffer：CPU 可超前 2 帧，无 vsync 时峰值更高；
+    /// - `1` → 2 buffer：在途封顶 1，vsync 拖动时 camera 时差更小。
+    ///
+    /// 值域为 wgpu 能力范围（通常 1..=16），超出会被 wgpu 夹紧。`0` 非法。
+    pub fn set_frame_latency(&self, latency: u32) {
+        self.pending_frame_latency.set(Some(latency));
+    }
+
+    /// 当前真正生效（configure 到 surface）的在途帧。pending 未应用时返回旧值。
+    pub fn frame_latency(&self) -> u32 {
+        self.applied_frame_latency.get()
+    }
+
     /// 设置拖动窗口时的 resize 尺寸刷新策略（[`ResizeRefreshPolicy`]）。
     /// 默认 `OnRelease`：拖动全程不更新（拉伸显示、帧流满速），松手 snap。
     /// `EveryFrame` / `Periodic(interval)` 会在拖动中实时 `surface.configure`，
@@ -3407,5 +3452,15 @@ mod metrics_tests {
     #[test]
     fn default_resize_debounce_is_100ms() {
         assert_eq!(super::DEFAULT_RESIZE_DEBOUNCE, std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn window_desc_default_frame_latency_is_2() {
+        // DX12 下 latency 2 → 3 swapchain buffer（无 vsync 峰值更高），默认值即 3 buffer。
+        assert_eq!(super::WindowDesc::new("t", 640, 360).frame_latency, 2);
+        assert_eq!(
+            super::WindowDesc::new("t", 640, 360).frame_latency(1).frame_latency,
+            1
+        );
     }
 }
