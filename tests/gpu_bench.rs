@@ -32,6 +32,13 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
         let t = time_ms(|| {
             build(&mut b);
             canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
+            loop {
+                if let Ok(wgpu::PollStatus::QueueEmpty) =
+                    canvas.gpu().device.poll(wgpu::PollType::Poll)
+                {
+                    break;
+                }
+            }
         });
         stats = b.shape_stats();
         draw_calls = canvas.last_draw_calls();
@@ -118,6 +125,87 @@ fn scene_full(b: &mut DrawBatch) {
     scene_transforms(b);
 }
 
+/// 模拟 frame_stats HUD：约 10 行文字 + 600 个 glyph 实例（动态数字每帧变化）。
+fn scene_text_hud(b: &mut DrawBatch) {
+    let def = TextDef::default().font_size(12.0);
+    for row in 0..10 {
+        let s = format!(
+            "FPS: {:.1}  Frame time: {:6.2}ms  avg {:5.2}  / p50 {:5.2}  / p99 {:5.2}  GPU: {:6.2}",
+            60.0 + row as f64, 16.6 + row as f64, 16.6, 16.6, 16.6, 1.5
+        );
+        draw_text(
+            &mut b.texts,
+            &s,
+            Pos::new(16.0, 12.0 + row as f32 * 14.0),
+            def.clone(),
+            TextOverride::from_color(Color::new(0.9, 0.9, 1.0, 1.0)),
+        );
+    }
+}
+
+/// 模拟 frame_stats HUD 的动态数字：Glyphs parts + dynamic 每帧新字符串。
+fn scene_text_hud_glyphs(b: &mut DrawBatch) {
+    let def = TextDef::default().font_size(12.0);
+    let rows: [(&[TextPart], f32); 8] = [
+        (&[TextPart::normal("FPS: "), TextPart::glyphs(format!("{:.1}", 60.0))], 12.0),
+        (&[
+            TextPart::normal("Frame time: "), TextPart::glyphs(format!("{:6.2}", 16.6)),
+            TextPart::normal("ms  avg "), TextPart::glyphs(format!("{:5.2}", 16.6)),
+            TextPart::normal(" / p50 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
+            TextPart::normal(" / p95 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
+            TextPart::normal(" / p99 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
+        ], 26.0),
+        (&[
+            TextPart::normal("GPU queue: "),
+            TextPart::glyphs(format!("{:6.2}", 1.5)),
+            TextPart::normal("ms (previous completed submission)"),
+        ], 40.0),
+        (&[
+            TextPart::normal("min "), TextPart::glyphs(format!("{:5.2}", 1.0)),
+            TextPart::normal(" / max "), TextPart::glyphs(format!("{:5.2}", 40.0)),
+            TextPart::normal(" / stddev "), TextPart::glyphs(format!("{:4.2}", 3.0)),
+            TextPart::normal("  (n="), TextPart::glyphs(300u32.to_string()), TextPart::normal(")"),
+        ], 54.0),
+        (&[
+            TextPart::normal("Spikes (>"), TextPart::glyphs(format!("{:.0}", 50.0)),
+            TextPart::normal("ms): "), TextPart::glyphs(0u32.to_string()),
+            TextPart::normal(" / "), TextPart::glyphs(300u32.to_string()),
+        ], 68.0),
+        (&[
+            TextPart::normal("AA: "), TextPart::dynamic("None".to_string()),
+            TextPart::normal("  |  Present: "), TextPart::dynamic("AutoVsync".to_string()),
+            TextPart::normal("  |  Cap: "), TextPart::dynamic("240".to_string()),
+            TextPart::normal("  |  Latency: "), TextPart::dynamic("2".to_string()),
+            TextPart::normal("  |  Text: "), TextPart::dynamic("on".to_string()),
+        ], 82.0),
+        (&[
+            TextPart::normal("Focus: "), TextPart::dynamic("yes".to_string()),
+            TextPart::normal("  |  Frames: "), TextPart::glyphs(100u32.to_string()),
+        ], 96.0),
+        (&[
+            TextPart::normal("Init: app "), TextPart::glyphs(format!("{:.0}", 10.0)),
+            TextPart::normal("ms + win "), TextPart::glyphs(format!("{:.0}", 20.0)), TextPart::normal("ms"),
+        ], 110.0),
+    ];
+    for (row, y) in rows.iter() {
+        b.text_parts(
+            row,
+            Pos::new(16.0, *y),
+            def.clone(),
+            TextOverride::from_color(Color::new(0.9, 0.9, 1.0, 1.0)),
+        );
+    }
+}
+
+/// frame_stats 的 graph：300 根不同高度的 bar（走 geo template 路径）。
+fn scene_graph_300(b: &mut DrawBatch) {
+    b.clear_sdf_feather();
+    for i in 0..300 {
+        let h = ((i as f64 * 0.31).sin().abs() * 90.0 + 1.0) as f32;
+        draw_rectangle(b, Pos::new(16.0 + i as f32 * 7.0, 250.0), 6.0, h, Some(RED));
+    }
+}
+
 /// SDF + 几何混合 ×1000（交替）：`preserve_order=true` 时 1000 个 draw call，
 /// `false` 时排序合并为 2 个。
 fn scene_mixed(b: &mut DrawBatch) {
@@ -150,6 +238,25 @@ fn gpu_bench_scenes() {
     measure_scene("Unique transforms x1000", &canvas, scene_transforms, FRAMES);
     measure_scene("Polygons x200", &canvas, scene_polygons, FRAMES);
     measure_scene("Full SDF+xform", &canvas, scene_full, FRAMES);
+    measure_scene("Text HUD x10 rows", &canvas, scene_text_hud, FRAMES);
+    measure_scene("Graph 300 bars", &canvas, scene_graph_300, FRAMES);
+    measure_scene("Graph 300 + Text", &canvas, |b| {
+        scene_graph_300(b);
+        scene_text_hud(b);
+    }, FRAMES);
+    measure_scene("Text glyphs x8 rows", &canvas, scene_text_hud_glyphs, FRAMES);
+    measure_scene("Graph 300 + Glyphs", &canvas, |b| {
+        scene_graph_300(b);
+        scene_text_hud_glyphs(b);
+    }, FRAMES);
+    measure_scene("Graph 300 SDF + Glyphs", &canvas, |b| {
+        b.set_sdf_feather(Some(1.0));
+        for i in 0..300 {
+            let h = ((i as f64 * 0.31).sin().abs() * 90.0 + 1.0) as f32;
+            draw_rectangle(b, Pos::new(16.0 + i as f32 * 7.0, 250.0), 6.0, h, Some(RED));
+        }
+        scene_text_hud_glyphs(b);
+    }, FRAMES);
 }
 
 #[test]

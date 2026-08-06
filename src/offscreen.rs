@@ -58,6 +58,11 @@ impl OffscreenCanvas {
         self.renderer.last_draw_calls()
     }
 
+    /// 底层 GpuContext（供基准/诊断等待 GPU 排空）。
+    pub fn gpu(&self) -> &crate::gpu::GpuContext {
+        self.renderer.gpu()
+    }
+
     /// 获取纹理视图（用于贴到窗口等）
     pub fn view(&self) -> &wgpu::TextureView {
         &self.texture.view
