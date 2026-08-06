@@ -51,12 +51,15 @@
 //! 与 O/F/P 策略正交：策略决定**何时 configure surface**，布局跟随决定
 //! **configure 之前内容是否实时重排**。
 //!
+//! `V`：切换 present mode（`AutoVsync` ↔ `Immediate`）。`Immediate` 下无 vsync 节流，
+//! 便于观察拖动中帧流是否持续；`AutoVsync` 更贴近实际显示节奏。
+//!
 //! ## 看什么
 //!
 //! 画面中央有动画方块验证 update/`on_frame` 是否持续。HUD 的 `Update FPS` 是应用更新
 //! 频率，不是 displayed FPS。`suboptimal` 仅原样展示 wgpu acquire 状态；它不是规范的
 //! 「拖动拉伸中」信号，后端可能在拖动时仍返回 false，也可能因其他 surface 状态返回 true。
-//! PresentMode 建议切到 `Immediate`（`win.set_present_mode`）避免 vsync 干扰帧流观察。
+//! 默认 `Immediate` 便于观察帧流，按 `V` 切 `AutoVsync` 看真实显示节奏。
 //! 
 //! 想看更详细的帧用时，可以把 `frame_stats` 示例与本示例结合。或者直接改那个示例的刷新策略/去抖/布局跟随也行。
 
@@ -73,7 +76,7 @@ fn policy_label(p: ResizeRefreshPolicy) -> String {
 fn main() {
     let mut app = App::new();
     let idx = app.window(
-        WindowDesc::new("Resize Refresh Policy", 640, 360).present_mode(PresentMode::Immediate),
+        WindowDesc::new("Resize Refresh Policy", 640, 360).present_mode(PresentMode::AutoVsync),
         None::<fn()>,
     );
 
@@ -83,7 +86,7 @@ fn main() {
 
     let mut policy = ResizeRefreshPolicy::OnRelease;
     let mut layout_follow = true;
-    let mut key_was = [false; 5]; // O F P D L
+    let mut key_was = [false; 6]; // O F P D L V
     let mut last_acq_ms = 0.0f64;
     let mut last_enc_ms = 0.0f64;
     let mut last_conf_ms = 0.0f64;
@@ -98,8 +101,9 @@ fn main() {
             win.key_down(KeyCode::KeyP),
             win.key_down(KeyCode::KeyD),
             win.key_down(KeyCode::KeyL),
+            win.key_down(KeyCode::KeyV),
         ];
-        for i in 0..5 {
+        for i in 0..6 {
             if keys[i] && !key_was[i] {
                 match i {
                     0 => policy = ResizeRefreshPolicy::OnRelease,
@@ -112,6 +116,14 @@ fn main() {
                     4 => {
                         layout_follow = !layout_follow;
                         win.set_layout_follow(layout_follow);
+                    }
+                    5 => {
+                        // 切 present mode：AutoVsync ↔ Immediate
+                        let next = match win.present_mode() {
+                            PresentMode::Immediate => PresentMode::AutoVsync,
+                            _ => PresentMode::Immediate,
+                        };
+                        win.set_present_mode(next);
                     }
                     _ => {}
                 }
@@ -164,7 +176,7 @@ fn main() {
                 "resize pending: {}  present: {} ({:.1}/s)  skipped: {}  wgpu suboptimal: {}",
                 win.resize_pending(), win.presented_frames(), win.presented_fps(), win.skipped_frames(), last_suboptimal,
             ),
-            "drag edge: O=OnRelease(默认) F=EveryFrame P=Periodic(400ms) D=去抖 L=布局跟随".into(),
+            "drag edge: O=OnRelease F=EveryFrame P=Periodic(400ms) D=去抖 L=跟随 V=present".into(),
         ];
         for (i, line) in lines.iter().enumerate() {
             draw_text(

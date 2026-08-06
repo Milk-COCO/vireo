@@ -4,6 +4,7 @@
 //! - 1/2/3/4: AA = None / MSAA4 / MSAA8 / SSAA4
 //! - T: 开关文字（A/B：有字 vs 无字）
 //! - V: 切换 PresentMode AutoVsync ↔ Immediate
+//! - C: 循环帧率上限 cap = 240 / 120 / 60 / 30 / 10 / off（无 vsync 空转时生效）
 //!
 //! Spike 阈值 20ms。分类（按已测 CPU 阶段，互斥）：
 //! - build  >= 4ms → BUILD（CPU 构图）
@@ -101,15 +102,18 @@ fn main() {
     let mut current_aa = AntiAliasing::None;
     let mut show_text = true;
     let mut present_immediate = false;
+    let mut current_cap: Option<u32> = None;
     let mut was_focused = true;
     let mut last_gpu_ms: Option<f64> = None;
     let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));
     let toggle_text: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let toggle_present: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let cycle_cap: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let pending_aa_keys = Arc::clone(&pending_aa);
     let toggle_text_keys = Arc::clone(&toggle_text);
     let toggle_present_keys = Arc::clone(&toggle_present);
+    let cycle_cap_keys = Arc::clone(&cycle_cap);
     app.on_key_down(idx, move |event| {
         if event.repeat {
             return;
@@ -120,6 +124,9 @@ fn main() {
             }
             KeyCode::KeyV => {
                 *toggle_present_keys.lock().unwrap() = true;
+            }
+            KeyCode::KeyC => {
+                *cycle_cap_keys.lock().unwrap() = true;
             }
             KeyCode::Digit1 => {
                 *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::None);
@@ -183,6 +190,17 @@ fn main() {
                 eprintln!("[diag] present={:?}", mode);
             }
         }
+        if std::mem::take(&mut *cycle_cap.lock().unwrap()) {
+            const CAP_CYCLE: [Option<u32>; 6] = [Some(240), Some(120), Some(60), Some(30), Some(10), None];
+            let next = CAP_CYCLE.iter().copied().position(|c| c == current_cap)
+                .map_or(0, |i| (i + 1) % CAP_CYCLE.len());
+            current_cap = CAP_CYCLE[next];
+            app.set_max_fps(current_cap);
+            history.clear();
+            if !quiet {
+                eprintln!("[diag] max_fps={:?}", current_cap);
+            }
+        }
 
         let ft_ms = app.frame_time * 1000.0;
         let t_build = std::time::Instant::now();
@@ -234,6 +252,9 @@ fn main() {
                 (vec![
                     TextPart::normal("AA: "), TextPart::dynamic(aa_label(current_aa)),
                     TextPart::normal("  |  Present: "), TextPart::dynamic(present_label),
+                    TextPart::normal("  |  Cap: "), TextPart::dynamic(
+                        current_cap.map_or_else(|| "off".to_string(), |c| c.to_string()),
+                    ),
                     TextPart::normal("  |  Text: "), TextPart::dynamic(if show_text { "on" } else { "off" }),
                 ], 82.0),
                 (vec![
@@ -257,7 +278,7 @@ fn main() {
 
         let k_msaa8 = if max_sc >= 8 { " 3=MSAA8" } else { "" };
         let keys = format!(
-            "1=None 2=MSAA4{} 4=SSAA4  |  T=text  V=vsync/imm  |  hw max {}x",
+            "1=None 2=MSAA4{} 4=SSAA4  |  T=text  V=vsync/imm  C=cap(240/120/60/30/10/off)  |  hw max {}x",
             k_msaa8, max_sc,
         );
         if show_text {

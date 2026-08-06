@@ -100,6 +100,8 @@ pub mod prelude {
     pub use crate::input::TouchPhase;
 
     pub use crate::window::ResizeRefreshPolicy;
+    pub use crate::window::FollowAmount;
+    pub use crate::window::FollowFramesOrTime;
     pub use crate::window::AntiAliasing;
     pub use crate::window::App;
     pub use crate::window::DrawOutcome;

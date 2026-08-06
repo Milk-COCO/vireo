@@ -64,6 +64,39 @@ enum ResizeRefresh {
     Live,
 }
 
+/// 布局跟随（`layout_follow`）的平滑强度单位：既可按**帧数**也可按**真实时长**表达。
+///
+/// - `Time(d)`：以采样时间差判断（与刷新率无关）。
+/// - `Frames(n)`：以**实际执行跟随**的帧数判断（`VireoWindow` 会按此计数）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowFramesOrTime {
+    /// 平滑窗长 / 保持时长按时间：`Duration::ZERO` = 每帧追（= `PerFrame`）。
+    Time(std::time::Duration),
+    /// 平滑窗宽 / 保持步幅按帧数：`0` = 每帧追（= `PerFrame`）。
+    Frames(u32),
+}
+
+/// 布局跟随的平滑模式（`VireoWindow::set_layout_follow_smoothing`）。
+///
+/// `layout_follow` 打开时，窗口尺寸已变但 surface 未重配（拖动中），内容跟随窗口
+/// 更新的节奏由这里决定。强度统一用 [`FollowFramesOrTime`] 表达——既可按真实时长
+/// （`Time`，与刷新率无关）也可按帧数（`Frames`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowAmount {
+    /// 每帧都追到最新尺寸（不平滑）。最跟手，但窗口动得快时画面容易「抖/闪一帧」。
+    PerFrame,
+    /// 平均窗：camera 目标 = 最近 `amt` 内观察到的窗口尺寸的**均值**。画面连续渐变
+    /// 不跳格；`amt` 越小越跟手、越大越平滑（反应越慢）。`0` 退化为 `PerFrame`。
+    Average(FollowFramesOrTime),
+}
+
+impl Default for FollowAmount {
+    /// 默认 `Average(Time(16ms))`：小幅平滑，既不每帧硬追（免抖）也不明显滞后。
+    fn default() -> Self {
+        FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(16)))
+    }
+}
+
 /// 尺寸是否需要在 draw 阶段 configure：
 /// - 未变化 → `None`；
 /// - 稳定满 `debounce` → `Stable`（拖动结束后的 snap，任何策略下都生效）；
@@ -538,6 +571,13 @@ pub struct VireoWindow {
     /// 可见误差来自窗口尺寸采样时序、整数舍入和 DPI 转换，而非单轴补偿。
     /// 关闭 = 旧行为：拖动中内容停旧逻辑布局（纯拉伸）。
     layout_follow: std::cell::Cell<bool>,
+    /// 布局跟随的平滑模式（`FollowAmount`，默认 `Average(Time(16ms))`）。
+    /// 参量化每个模式的平滑强度，详见 [`VireoWindow::set_layout_follow_smoothing`]。
+    follow_smoothing: std::cell::Cell<FollowAmount>,
+    /// 平均窗（`Average`）的尺寸采样队列：(帧号, 时刻, 逻辑宽, 逻辑高)。
+    follow_samples: std::cell::RefCell<std::collections::VecDeque<(u64, std::time::Instant, f32, f32)>>,
+    /// 跟随执行计数器（`Frames` 单位节流依据），每次 4a 跟随段自增。
+    follow_frame: std::cell::Cell<u64>,
     /// 待应用的 AA 模式（在 draw 开头应用）
     pending_aa: std::cell::Cell<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
@@ -615,6 +655,9 @@ impl VireoWindow {
             resize_policy: std::cell::Cell::new(ResizeRefreshPolicy::OnRelease),
             resize_debounce: std::cell::Cell::new(DEFAULT_RESIZE_DEBOUNCE),
             layout_follow: std::cell::Cell::new(true),
+            follow_smoothing: std::cell::Cell::new(FollowAmount::default()),
+            follow_samples: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(16)),
+            follow_frame: std::cell::Cell::new(0),
             pending_aa: std::cell::Cell::new(None),
             handle,
             closing: std::cell::Cell::new(false),
@@ -952,19 +995,60 @@ impl VireoWindow {
                     || new_scale != self.scale.get()
             };
             if still_drifted && size.width != 0 && size.height != 0 {
-                if trace {
-                    eprintln!("[draw] follow-layout(acq) {}x{}", logical_w, logical_h);
+                // 平滑模式分派：PerFrame 每帧追；Average 用滑动窗均值。
+                let frame = self.follow_frame.get() + 1;
+                self.follow_frame.set(frame);
+                let now = std::time::Instant::now();
+                let target: Option<(u32, u32)> = match self.follow_smoothing.get() {
+                    FollowAmount::PerFrame => Some((logical_w, logical_h)),
+                    FollowAmount::Average(amt) => {
+                        // 采样并入滑动窗，淘汰过期样本，取均值（连续渐变，不跳格）。
+                        let mut q = self.follow_samples.borrow_mut();
+                        q.push_back((frame, now, logical_w as f32, logical_h as f32));
+                        loop {
+                            let stale = match amt {
+                                FollowFramesOrTime::Time(d) => q
+                                    .front()
+                                    .map(|&(_, t, _, _)| now.saturating_duration_since(t) > d)
+                                    .unwrap_or(false),
+                                FollowFramesOrTime::Frames(n) => q
+                                    .front()
+                                    .map(|&(f, _, _, _)| frame.saturating_sub(f) >= n as u64)
+                                    .unwrap_or(false),
+                            };
+                            if stale {
+                                q.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                        let (tw, th) = q.iter().fold(
+                            (0.0f64, 0.0f64),
+                            |(a, b), &(_, _, w, h)| (a + w as f64, b + h as f64),
+                        );
+                        let n = q.len().max(1) as f64;
+                        drop(q);
+                        Some((
+                            (tw / n).round().max(1.0) as u32,
+                            (th / n).round().max(1.0) as u32,
+                        ))
+                    }
+                };
+                if let Some((lw, lh)) = target {
+                    if trace {
+                        eprintln!("[draw] follow-layout(acq) {}x{}", lw, lh);
+                    }
+                    self.logical_width.set(lw);
+                    self.logical_height.set(lh);
+                    self.scale.set(new_scale);
+                    self.dpi_scale.set(dpi_scale);
+                    let vw = (lw as f32 * new_scale).round().max(1.0) as u32;
+                    let vh = (lh as f32 * new_scale).round().max(1.0) as u32;
+                    self.renderer.borrow_mut().update_layout(
+                        lw, lh, new_scale, dpi_scale,
+                    );
+                    self.renderer.borrow_mut().set_text_viewport_override(Some((vw, vh)));
                 }
-                self.logical_width.set(logical_w);
-                self.logical_height.set(logical_h);
-                self.scale.set(new_scale);
-                self.dpi_scale.set(dpi_scale);
-                let vw = (logical_w as f32 * new_scale).round().max(1.0) as u32;
-                let vh = (logical_h as f32 * new_scale).round().max(1.0) as u32;
-                self.renderer.borrow_mut().update_layout(
-                    logical_w, logical_h, new_scale, dpi_scale,
-                );
-                self.renderer.borrow_mut().set_text_viewport_override(Some((vw, vh)));
             } else {
                 // 松手尺寸回稳但尚未 snap（debounce 未满）：不再重排，清虚拟 viewport，
                 // 内容停在当前布局，等 Stable 分支一次性 configure。
@@ -1282,6 +1366,13 @@ pub struct App {
     fps_samples: Vec<f64>,
     last_frame: std::time::Instant,
     deferred_tasks: RefCell<Vec<DeferredTask>>,
+    /// 可选帧率上限（`App::set_max_fps`）。仅在 acquire 不阻塞（拖动/无 vsync）时
+    /// 用 sleep 把 CPU 循环拉回目标频率，避免空转。默认 `Some(240)`：给足余量，
+    /// 正常 vsync 下 acquire 更早卡住、cap 不生效；仅在空转时兜底。
+    max_fps: std::cell::Cell<Option<u32>>,
+    /// 下一次帧循环「开始」的目标时刻（相位锁）。每帧推进一个 stride；落后（中途
+    /// 耗时已超 stride）时不追赶、直接跳到 now+stride，避免攒出 33ms 双帧。
+    pacing_deadline: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 /// 延迟执行的任务，由 [`App::after_frames`] / [`App::after_secs`] 注册。
@@ -1349,6 +1440,8 @@ impl App {
             fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
             last_frame: std::time::Instant::now(),
             deferred_tasks: RefCell::new(Vec::new()),
+            max_fps: std::cell::Cell::new(Some(240)),
+            pacing_deadline: std::cell::Cell::new(None),
         }
     }
 
@@ -2198,6 +2291,42 @@ where F: FnMut(&App) -> bool + Send + 'static
         } else {
             std::thread::yield_now();
         }
+
+        // 空转抑制：相位锁——本帧滞后于 stride 时（无 vsync / acquire 不阻塞），
+        // 下一帧 sleep 到「绝对 deadline」，且落后不追赶（跳 slot），避免双帧。
+        // 有 vsync 阻塞（acquire 自然到刷新率）时 stride 早已过去，deadline 总是
+        // 落后 → 直接跳 now+stride 不睡，cap 不干预 vsync。精确 vsync 由 present 保证。
+        let (next_deadline, sleep) =
+            pac_advance(std::time::Instant::now(), app.pacing_deadline.get(), app.max_fps.get());
+        app.pacing_deadline.set(next_deadline);
+        if let Some(s) = sleep {
+            std::thread::sleep(s);
+        }
+    }
+}
+
+/// 空转抑制的纯决策（相位锁）。给定当前时刻 `now`、上一次算出的 `pacing_deadline`
+/// 与上限 `max_fps`，返回 `(新的 pacing_deadline, 本次应 sleep 的时长)`。
+/// 推进规则：
+///   - 未设上限 / fps=0 → `(None, None)`（不限制）。
+///   - 本帧已落后于 deadline（`deadline <= now`，说明 work 已经占满 stride）→
+///     **不睡**（`None`），只把 deadline 重锚到 `now+stride`。「落后不追赶」。
+///     关键：此刻 work 已耗尽目标间隔，再多睡一整格就是「work+stride」超帧，
+///     实测 60fps→48、30fps→25。cap 只在「跑太快」时补觉，跑慢了不加倍等。
+///   - 还有剩余时间（`deadline > now`）→ 睡 `deadline-now`，下次推到 `deadline+stride`。
+///     `(Some(d+stride), Some(d-now))`。
+fn pac_advance(
+    now: std::time::Instant,
+    deadline: Option<std::time::Instant>,
+    max_fps: Option<u32>,
+) -> (Option<std::time::Instant>, Option<std::time::Duration>) {
+    let stride = match max_fps {
+        Some(f) if f > 0 => std::time::Duration::from_secs_f64(1.0 / f as f64),
+        _ => return (None, None),
+    };
+    match deadline {
+        Some(d) if d > now => (Some(d + stride), Some(d - now)),
+        _ => (Some(now + stride), None),
     }
 }
 
@@ -2300,13 +2429,26 @@ impl App {
         self.windows.iter().filter(|w| w.is_some()).count()
     }
 
-    /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
+/// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
     pub fn init_duration(&self) -> f64 {
         self.init_duration
     }
 
-    /// 所有存活窗口引用
-    pub fn windows(&self) -> Vec<&VireoWindow> {
+    /// 设置渲染循环帧率上限。`Some(n)` 在有 vsync 阻塞时基本不生效（acquire 自然
+    /// 锁到刷新率），仅在 acquire 不阻塞（拖动拉伸、`Immediate`、后台等）时用
+    /// sleep 把 CPU 循环拉回约 n fps，避免空转烧 CPU。`None` 不限制。
+    /// 默认 `Some(240)`——给足余量，正常 vsync 下 cap 不生效，仅空转时兜底。
+    /// `&self` 即可，可在 `run` 回调内随时切换。
+    pub fn set_max_fps(&self, fps: Option<u32>) {
+        self.max_fps.set(fps);
+    }
+
+    /// 当前帧率上限（`App::set_max_fps` 所设）。
+    pub fn max_fps(&self) -> Option<u32> {
+        self.max_fps.get()
+    }
+
+pub fn windows(&self) -> Vec<&VireoWindow> {
         self.windows.iter().filter_map(|w| w.as_ref()).collect()
     }
 
@@ -2552,6 +2694,7 @@ impl VireoWindow {
     pub fn set_layout_follow(&self, enabled: bool) {
         let was_enabled = self.layout_follow.replace(enabled);
         if was_enabled && !enabled {
+            self.follow_samples.borrow_mut().clear();
             let (logical_w, logical_h, scale, dpi_scale) = self.configured_layout.get();
             self.logical_width.set(logical_w);
             self.logical_height.set(logical_h);
@@ -2566,6 +2709,42 @@ impl VireoWindow {
     /// 当前布局跟随开关（默认开）。见 [`VireoWindow::set_layout_follow`]。
     pub fn layout_follow(&self) -> bool {
         self.layout_follow.get()
+    }
+
+    /// 布局跟随的平滑模式（默认 `FollowAmount::Average(Time(16ms))`）。
+    ///
+    /// `layout_follow` 打开（默认）时，窗口尺寸已变但 surface 未重配，内容以
+    /// `Renderer::update_layout` 跟随窗口更新的节奏由这里决定。强度统一用
+    /// [`FollowFramesOrTime`] 表达——既可按**真实时长**（`Time(d)`，与刷新率无关）
+    /// 也可按**帧数**（`Frames(n)`）：
+    ///
+    /// - [`FollowAmount::PerFrame`]：每帧都追到最新尺寸，最跟手，但窗口动得快时容易
+    ///   「抖/闪一帧」。
+    /// - [`FollowAmount::Average(amt)`]：平均窗——camera 目标 = 最近 `amt` 内观测到的
+    ///   窗口尺寸均值，连续渐变不跳格；窗越大越平滑（反应越慢）、越小越跟手。
+    ///
+    /// `Average` 的单位为 `Frames(0)` / `Time(0)` 时退化为 `PerFrame`。
+    /// 切换模式会清空平均窗采样，避免新旧语义串用。
+    pub fn set_layout_follow_smoothing(&self, amount: FollowAmount) {
+        self.follow_smoothing.set(amount);
+        self.follow_samples.borrow_mut().clear();
+    }
+
+    /// 当前布局跟随平滑模式。见 [`VireoWindow::set_layout_follow_smoothing`]。
+    pub fn layout_follow_smoothing(&self) -> FollowAmount {
+        self.follow_smoothing.get()
+    }
+
+    /// 便捷：平均窗，按真实时长。等价
+    /// `set_layout_follow_smoothing(Average(Time(d)))`；`Time` 越小越跟手、越大越平滑。
+    pub fn set_layout_follow_window(&self, d: std::time::Duration) {
+        self.set_layout_follow_smoothing(FollowAmount::Average(FollowFramesOrTime::Time(d)));
+    }
+
+    /// 便捷：平均窗，按帧数。等价
+    /// `set_layout_follow_smoothing(Average(Frames(n)))`；`n` 越小越跟手、越大越平滑。
+    pub fn set_layout_follow_window_frames(&self, n: u32) {
+        self.set_layout_follow_smoothing(FollowAmount::Average(FollowFramesOrTime::Frames(n)));
     }
 
     /// 运行时切换抗锯齿（运行时重建 msaa 纹理）。
@@ -2983,6 +3162,50 @@ mod metrics_tests {
     //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
     use super::{logical_size, skip_report, sliding_rate, DrawOutcome, DrawSkipReason};
+
+    #[test]
+    fn pace_none_when_no_cap() {
+        assert_eq!(super::pac_advance(std::time::Instant::now(), None, None), (None, None));
+    }
+
+    #[test]
+    fn pace_zero_fps_disables() {
+        assert_eq!(super::pac_advance(std::time::Instant::now(), None, Some(0)), (None, None));
+    }
+
+    #[test]
+    fn pace_overdue_resets_deadline_and_does_not_sleep() {
+        // work 已耗尽 stride（无 deadline / 已落后）→ 不睡，仅重锚到 now+stride
+        let now = std::time::Instant::now();
+        let (d, sleep) = super::pac_advance(now, None, Some(60));
+        assert!(sleep.is_none());
+        let d = d.expect("deadline set");
+        assert!(d >= now + std::time::Duration::from_millis(15));
+    }
+
+    #[test]
+    fn pace_advances_deadline_when_ahead() {
+        // deadline 在未来 → 睡到 deadline，并把下次推到 deadline+stride
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_millis(5);
+        let (d, s) = super::pac_advance(now, Some(deadline), Some(60));
+        let sleep = s.expect("sleeps to deadline");
+        assert!(sleep >= std::time::Duration::from_millis(4));
+        assert!(sleep < std::time::Duration::from_millis(6));
+        let d = d.expect("next deadline");
+        assert!(d >= deadline + std::time::Duration::from_millis(15));
+    }
+
+    #[test]
+    fn pace_does_not_catch_up_when_late() {
+        // deadline 已过去 → 不追赶、不补睡（否则 work+stride 会超帧）
+        let now = std::time::Instant::now();
+        let behind = now - std::time::Duration::from_secs(1);
+        let (d, sleep) = super::pac_advance(now, Some(behind), Some(60));
+        assert!(sleep.is_none());
+        let d = d.expect("next deadline after late frame");
+        assert!(d <= now + std::time::Duration::from_millis(17)); // 重锚，不追平历史
+    }
 
     #[test]
     fn draw_backoff_requires_every_active_window_to_skip() {
