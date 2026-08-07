@@ -1,1 +1,0 @@
-   Compiling vireo v0.1.0 (D:\MilkCOCO\vireo)

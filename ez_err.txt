@@ -1,9 +1,0 @@
-   Compiling vireo v0.1.0 (D:\MilkCOCO\vireo)
-warning: unused import: `wgpu::PresentMode::Immediate`
- --> examples\ez.rs:1:5
-  |
-1 | use wgpu::PresentMode::Immediate;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
