@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::cell::RefCell;
 use rustc_hash::FxHashMap;
 
-use crate::context::Renderer;
+use crate::render::Renderer;
 
 use winit::{
     application::ApplicationHandler,
@@ -11,7 +11,7 @@ use winit::{
     window::{WindowId, WindowAttributes},
 };
 
-use crate::context::DrawBatch;
+use crate::render::DrawBatch;
 use crate::offscreen::OffscreenCanvas;
 use crate::texture::Texture;
 use crate::gpu::GpuContext;
@@ -464,7 +464,7 @@ enum WinitEvent {
         window: Arc<winit::window::Window>,
         surface: wgpu::Surface<'static>,
         surface_config: wgpu::SurfaceConfiguration,
-        renderer: crate::context::Renderer,
+        renderer: crate::render::Renderer,
         logical_width: u32,
         logical_height: u32,
         scale: f32,
@@ -543,7 +543,7 @@ pub struct VireoWindow {
     pub(crate) surface: std::cell::RefCell<wgpu::Surface<'static>>,
     instance: wgpu::Instance,
     surface_config: std::cell::RefCell<wgpu::SurfaceConfiguration>,
-    renderer: std::cell::RefCell<crate::context::Renderer>,
+    renderer: std::cell::RefCell<crate::render::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
     pub mouse_pos: (f32, f32),
@@ -623,7 +623,7 @@ impl VireoWindow {
         surface: wgpu::Surface<'static>,
         instance: wgpu::Instance,
         surface_config: wgpu::SurfaceConfiguration,
-        renderer: crate::context::Renderer,
+        renderer: crate::render::Renderer,
         logical_width: u32,
         logical_height: u32,
         scale: f32,
@@ -1089,7 +1089,7 @@ impl VireoWindow {
 
         // 4b) 编码
         let view = st.texture.create_view(&Default::default());
-        let target = crate::context::RenderTarget::from_texture_view(view);
+        let target = crate::render::RenderTarget::from_texture_view(view);
         let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
         let t2 = std::time::Instant::now();
         let cmd_buf = self.renderer.borrow().draw(&target, Some(clear_color), &batch_refs);

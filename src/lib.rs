@@ -16,7 +16,7 @@
 
 pub mod area;
 pub mod color;
-pub mod context;
+pub mod render;
 pub mod material;
 pub mod glyphon;
 pub mod gpu;
@@ -36,15 +36,15 @@ pub mod prelude {
     pub use crate::color::Color;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
-    pub use crate::context::DrawBatch;
-    pub use crate::context::InheritFromParent;
-    pub use crate::context::Pos;
-    pub use crate::context::Rect;
-    pub use crate::context::RenderTarget;
-    pub use crate::context::Renderer;
-    pub use crate::context::ShapeStats;
-    pub use crate::context::Transform;
-    pub use crate::context::UvRect;
+    pub use crate::render::DrawBatch;
+    pub use crate::render::InheritFromParent;
+    pub use crate::render::Pos;
+    pub use crate::render::Rect;
+    pub use crate::render::RenderTarget;
+    pub use crate::render::Renderer;
+    pub use crate::render::ShapeStats;
+    pub use crate::render::Transform;
+    pub use crate::render::UvRect;
     pub use crate::texture::Texture;
     pub use crate::material::Material;
     pub use crate::material::MATERIAL_TEX_SLOTS;

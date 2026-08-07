@@ -3,7 +3,7 @@
 use std::f32::consts::{PI, FRAC_PI_2};
 
 use crate::color::Color;
-use crate::context::{DrawBatch, Pos, Transform, UvRect};
+use crate::render::{DrawBatch, Pos, Transform, UvRect};
 use crate::gpu::Vertex;
 
 /// 可绘制形状（填充 + 描边）。具体光栅化（SDF / 几何）由 [`Shape::append`] 决定。
@@ -1174,7 +1174,7 @@ fn emit_arc_outline(
 
 // ---- 几何模板实例化（geo-instance path） ----
 //
-// 这些 `geo_emit_*` 由 [`crate::context::DrawBatch::geo_instance_shape`] 调用，
+// 这些 `geo_emit_*` 由 [`crate::render::DrawBatch::geo_instance_shape`] 调用，
 // 是 `draw_shape` 几何模式（`sdf_feather = None`）的热路径。思路：
 // 1. 用「形状参数 + UV」算一个 `key`；
 // 2. `geo_emit_template` 命中缓存 → 跳过网格生成，只推实例（CPU 节省）；

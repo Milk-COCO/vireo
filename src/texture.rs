@@ -48,8 +48,8 @@ impl Texture {
     }
 
     /// 获取 RenderTarget 用于离屏渲染。
-    pub fn target(&self) -> crate::context::RenderTarget {
-        crate::context::RenderTarget::from_texture_view(self.view.clone())
+    pub fn target(&self) -> crate::render::RenderTarget {
+        crate::render::RenderTarget::from_texture_view(self.view.clone())
     }
 
     // ---- 从文件/RGBA 加载 ----

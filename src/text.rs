@@ -27,7 +27,7 @@ pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
 use crate::color::Color;
-use crate::context::Pos;
+use crate::render::Pos;
 use crate::gpu::GpuContext;
 
 /// 默认硬顶（可 `set_shape_cache_max_entries` 修改；`None` = 不限制条数）。
@@ -831,7 +831,7 @@ pub struct TextOverride {
     pub clip: Option<Option<crate::glyphon::TextBounds>>,
     /// `Some` = 在 batch 局部空间上叠加变换（右乘 batch 变换），不污染 batch 状态。
     /// `None` = 保持 batch 当前变换。
-    pub transform: Option<crate::context::Transform>,
+    pub transform: Option<crate::render::Transform>,
 }
 
 impl TextOverride {
@@ -861,7 +861,7 @@ impl TextOverride {
     }
 
     /// 在 batch 局部空间上叠加变换（不覆盖整个 batch transform，仅对本次绘制生效）。
-    pub fn transform(mut self, t: crate::context::Transform) -> Self {
+    pub fn transform(mut self, t: crate::render::Transform) -> Self {
         self.transform = Some(t);
         self
     }
@@ -1278,7 +1278,7 @@ pub fn split_hud(s: &str) -> Vec<TextPart> {
 pub struct TextTextureState {
     pub(crate) generation: u64,
     pub(crate) view: Option<wgpu::TextureView>,
-    pub(crate) uv: crate::context::UvRect,
+    pub(crate) uv: crate::render::UvRect,
 }
 
 /// 一次 `prepare_texts` 产出的连续文字渲染段（内部用）。
@@ -1296,7 +1296,7 @@ impl Default for TextTextureState {
         Self {
             generation: 0,
             view: None,
-            uv: crate::context::UvRect::default(),
+            uv: crate::render::UvRect::default(),
         }
     }
 }
@@ -1313,7 +1313,7 @@ impl TextTextureState {
     }
 
     /// 捕获时的 batch UV 子区域。
-    pub fn uv(&self) -> crate::context::UvRect {
+    pub fn uv(&self) -> crate::render::UvRect {
         self.uv
     }
 }
@@ -1502,7 +1502,7 @@ impl TextEntryList {
 
     /// 更新当前文字画笔的 UV 子区域（由 [`DrawBatch::set_uv`] / [`DrawBatch::clear_uv`] 调用）。
     /// 递增 `generation`；之后 `push*` 的条目会冻结新状态。
-    pub(crate) fn set_uv_state(&mut self, uv: crate::context::UvRect) {
+    pub(crate) fn set_uv_state(&mut self, uv: crate::render::UvRect) {
         self.texture_state.generation = self.texture_state.generation.wrapping_add(1);
         self.texture_state.uv = uv;
     }
@@ -1685,13 +1685,13 @@ impl TextEntryList {
         fn composed_phys_cols(
             ti: u32,
             table: &[f32],
-            ov: Option<&crate::context::Transform>,
+            ov: Option<&crate::render::Transform>,
             scale: f32,
         ) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
             let m = if let Some((c0, c1, c2)) = table_cols(table, ti) {
-                crate::context::Transform::matrix(c0[0], c1[0], c0[1], c1[1], c2[0], c2[1])
+                crate::render::Transform::matrix(c0[0], c1[0], c0[1], c1[1], c2[0], c2[1])
             } else {
-                crate::context::Transform::IDENTITY
+                crate::render::Transform::IDENTITY
             };
             let composed = match ov {
                 Some(o) => m.then(o),
@@ -2345,7 +2345,7 @@ let entry = TextEntry::Parts {
         assert_eq!(list.entries[0].texture_state().generation(), 1);
         assert!(!list.entries[0].texture_state().has_texture());
 
-        list.set_uv_state(crate::context::UvRect {
+        list.set_uv_state(crate::render::UvRect {
             u0: 0.1,
             v0: 0.2,
             u1: 0.9,

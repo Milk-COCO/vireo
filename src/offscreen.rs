@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::context::{DrawBatch, Renderer};
+use crate::render::{DrawBatch, Renderer};
 use crate::gpu::GpuContext;
 use crate::texture::Texture;
 use crate::window::{AntiAliasing, OffscreenIndex};

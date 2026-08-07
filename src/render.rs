@@ -33,7 +33,7 @@ use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
 /// 合并值见 [`DrawBatch::shape_vertex_count`].
 ///
 /// **draw call 数不在本结构**：真实 draw call 由渲染器统计（
-/// [`crate::context::Renderer::last_draw_calls`]，经 [`crate::window::VireoWindow::last_draw_calls`]
+/// [`crate::render::Renderer::last_draw_calls`]，经 [`crate::window::VireoWindow::last_draw_calls`]
 /// 获取），而非 batch 侧 `shape_commands.len()` 的估算值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShapeStats {

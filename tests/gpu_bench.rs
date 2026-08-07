@@ -25,7 +25,7 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     }
 
     let mut times = Vec::with_capacity(frames as usize);
-    let mut stats = vireo::context::ShapeStats { mesh_vertices: 0, sdf_instances: 0, geo_instances: 0, geo_templates: 0, geo_template_vertices: 0 };
+    let mut stats = vireo::render::ShapeStats { mesh_vertices: 0, sdf_instances: 0, geo_instances: 0, geo_templates: 0, geo_template_vertices: 0 };
     let mut draw_calls: u32 = 0;
     for _ in 0..frames {
         let mut b = DrawBatch::new();
