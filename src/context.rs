@@ -98,7 +98,8 @@ impl Pos {
 
 /// 一次 `Renderer::draw` 的扁平事件序列（模块级，扁平方法可引用）。
 ///
-/// - `Batch`：常规 batch（自身 shapes + texts）。
+/// - `Batch`：常规 batch（自身 shapes + texts）。有效视图（累计祖先 view）在
+///   `flatten_events` 时写入旁路 `view_map`（按 batch 指针索引），不放进事件。
 /// - `StencilPop`：父 batch `clips_children` 收尾（op=3 模板，ref=父 Push 后层级）。
 /// - `AreaOp`：Area 掩码单 op（来自 `Area::compile_cover` / `compile_erase` 的展平）。
 ///   `is_setup=true` 是 batch 子树前的 cover，渲染时累加 area_depth；
@@ -366,6 +367,8 @@ pub struct Renderer {
     scratch_poly_edges: RefCell<Vec<f32>>,
     scratch_event_infos: RefCell<Vec<EventInfo>>,
     scratch_aabb_map: RefCell<FxHashMap<usize, Option<Rect>>>,
+    scratch_view_map: RefCell<FxHashMap<usize, Transform>>,
+    scratch_view_table: RefCell<Vec<f32>>,
     scratch_ref_stack: RefCell<Vec<u32>>,
     scratch_batch_transform_bases: RefCell<Vec<u32>>,
     scratch_batch_poly_base: RefCell<Vec<u32>>,
@@ -453,6 +456,8 @@ impl Renderer {
             scratch_poly_edges: RefCell::new(Vec::new()),
             scratch_event_infos: RefCell::new(Vec::new()),
             scratch_aabb_map: RefCell::new(FxHashMap::default()),
+            scratch_view_map: RefCell::new(FxHashMap::default()),
+            scratch_view_table: RefCell::new(Vec::new()),
             scratch_ref_stack: RefCell::new(Vec::new()),
             scratch_batch_transform_bases: RefCell::new(Vec::new()),
             scratch_batch_poly_base: RefCell::new(Vec::new()),
@@ -626,7 +631,7 @@ impl Renderer {
             let mut aabb_map = self.scratch_aabb_map.borrow_mut();
             aabb_map.clear();
             for b in batches {
-                compute_subtree_aabb(b, &mut aabb_map);
+                compute_subtree_aabb(b, &mut aabb_map, &Transform::IDENTITY);
             }
         }
 
@@ -635,9 +640,18 @@ impl Renderer {
         let mut uses_stencil = false;
         {
             let aabb_map = self.scratch_aabb_map.borrow();
+            let mut view_map = self.scratch_view_map.borrow_mut();
+            view_map.clear();
             for b in batches {
                 let event_start = events.len();
-                b.flatten_events(&mut events, 0, Some(viewport), &aabb_map);
+                b.flatten_events(
+                    &mut events,
+                    0,
+                    Some(viewport),
+                    &aabb_map,
+                    &Transform::IDENTITY,
+                    &mut view_map,
+                );
                 uses_stencil |= events[event_start..]
                     .iter()
                     .any(|ev| matches!(ev, DrawEvent::StencilPop | DrawEvent::AreaOp { .. }));
@@ -873,62 +887,72 @@ impl Renderer {
         let mut batch_geo_index_base = self.scratch_batch_geo_index_base.borrow_mut();
         batch_geo_vertex_base.clear();
         batch_geo_index_base.clear();
+        {
+            let view_map = self.scratch_view_map.borrow();
+            let mut view_table = self.scratch_view_table.borrow_mut();
 
-        for (ei, event) in events.iter().enumerate() {
-            if let DrawEvent::Batch(batch) = event {
-                let _e = &mut event_infos[ei];
-                batch_transform_bases.push((global_transforms.len() / 12) as u32);
-                global_transforms.extend_from_slice(&batch.transform_table);
-                batch_poly_base.push(poly_offset);
-                poly_offset += batch.polygon_edges.len() as u32 / 4;
-                polygon_edges_global.extend_from_slice(&batch.polygon_edges);
-                total_vcount += batch.vertices.len() as u32;
-                total_icount += batch.indices.len() as u32;
-                if batch.custom_material.is_some() {
-                    total_vcount += batch.instances.len() as u32 * 4;
-                    total_icount += batch.instances.len() as u32 * 6;
-                }
-                batch_geo_vertex_base.push(combined_geo_vertices.len() as u32);
-                batch_geo_index_base.push(combined_geo_indices.len() as u32);
-                combined_geo_vertices.extend_from_slice(&batch.geo_template_vertices);
-                combined_geo_indices.extend_from_slice(&batch.geo_template_indices);
-            } else if let DrawEvent::StencilPop = event {
-                // Pop 事件：添加全屏四边形（2 三角，6 索引）
-                pop_screen_verts += 4;
-                pop_screen_idx += 6;
-                batch_transform_bases.push(0);
-                batch_poly_base.push(poly_offset);
-                batch_geo_vertex_base.push(0);
-                batch_geo_index_base.push(0);
-            } else if let DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop = event {
-                // Scissor 事件不需要 transform/poly，但保留索引对齐
-                batch_transform_bases.push(0);
-                batch_poly_base.push(poly_offset);
-                batch_geo_vertex_base.push(0);
-                batch_geo_index_base.push(0);
-            } else if let DrawEvent::AreaOp { op, .. } = event {
-                // Area 事件：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
-                if let Some(geom) = op.geom() {
-                    total_vcount += geom.vertices.len() as u32;
-                    total_icount += geom.indices.len() as u32;
-                    // 空表：顶点 index 走全局槽 0（单位阵），不追加、不 patch 偏移。
-                    if geom.transform_table.is_empty() {
-                        batch_transform_bases.push(0);
-                    } else {
-                        batch_transform_bases.push((global_transforms.len() / 12) as u32);
-                        global_transforms.extend_from_slice(&geom.transform_table);
-                    }
+            for (ei, event) in events.iter().enumerate() {
+                if let DrawEvent::Batch(batch) = event {
+                    let _e = &mut event_infos[ei];
+                    batch_transform_bases.push((global_transforms.len() / 12) as u32);
+                    // 左乘有效视图：几何与文字共用同一张表（见 `flatten_events` view_map）。
+                let eff = view_map
+                    .get(&(*batch as *const DrawBatch as *const () as usize))
+                    .copied()
+                    .unwrap_or(Transform::IDENTITY);
+                    left_mul_view_table(&eff, &batch.transform_table, &mut view_table);
+                    global_transforms.extend_from_slice(&view_table);
                     batch_poly_base.push(poly_offset);
-                    poly_offset += geom.polygon_edges.len() as u32 / 4;
-                    polygon_edges_global.extend_from_slice(&geom.polygon_edges);
-                } else {
+                    poly_offset += batch.polygon_edges.len() as u32 / 4;
+                    polygon_edges_global.extend_from_slice(&batch.polygon_edges);
+                    total_vcount += batch.vertices.len() as u32;
+                    total_icount += batch.indices.len() as u32;
+                    if batch.custom_material.is_some() {
+                        total_vcount += batch.instances.len() as u32 * 4;
+                        total_icount += batch.instances.len() as u32 * 6;
+                    }
+                    batch_geo_vertex_base.push(combined_geo_vertices.len() as u32);
+                    batch_geo_index_base.push(combined_geo_indices.len() as u32);
+                    combined_geo_vertices.extend_from_slice(&batch.geo_template_vertices);
+                    combined_geo_indices.extend_from_slice(&batch.geo_template_indices);
+                } else if let DrawEvent::StencilPop = event {
+                    // Pop 事件：添加全屏四边形（2 三角，6 索引）
                     pop_screen_verts += 4;
                     pop_screen_idx += 6;
                     batch_transform_bases.push(0);
                     batch_poly_base.push(poly_offset);
+                    batch_geo_vertex_base.push(0);
+                    batch_geo_index_base.push(0);
+                } else if let DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop = event {
+                    // Scissor 事件不需要 transform/poly，但保留索引对齐
+                    batch_transform_bases.push(0);
+                    batch_poly_base.push(poly_offset);
+                    batch_geo_vertex_base.push(0);
+                    batch_geo_index_base.push(0);
+                } else if let DrawEvent::AreaOp { op, .. } = event {
+                    // Area 事件：Full → 全屏 4v/6i；Geom → AreaGeom 自带 v/i。
+                    if let Some(geom) = op.geom() {
+                        total_vcount += geom.vertices.len() as u32;
+                        total_icount += geom.indices.len() as u32;
+                        // 空表：顶点 index 走全局槽 0（单位阵），不追加、不 patch 偏移。
+                        if geom.transform_table.is_empty() {
+                            batch_transform_bases.push(0);
+                        } else {
+                            batch_transform_bases.push((global_transforms.len() / 12) as u32);
+                            global_transforms.extend_from_slice(&geom.transform_table);
+                        }
+                        batch_poly_base.push(poly_offset);
+                        poly_offset += geom.polygon_edges.len() as u32 / 4;
+                        polygon_edges_global.extend_from_slice(&geom.polygon_edges);
+                    } else {
+                        pop_screen_verts += 4;
+                        pop_screen_idx += 6;
+                        batch_transform_bases.push(0);
+                        batch_poly_base.push(poly_offset);
+                    }
+                    batch_geo_vertex_base.push(0);
+                    batch_geo_index_base.push(0);
                 }
-                batch_geo_vertex_base.push(0);
-                batch_geo_index_base.push(0);
             }
         }
 
@@ -1510,16 +1534,26 @@ impl Renderer {
                     // layout_follow 时用虚拟新物理尺寸（screen_resolution uniform 补偿 DXGI 拉伸）
                     let (tw, th) = self.text_viewport_override.get()
                         .unwrap_or((self.physical_width, self.physical_height));
+                    // 文字与几何共用同一张表：左乘有效视图，保证 view 同时作用于文字。
+                    let mut view_table = self.scratch_view_table.borrow_mut();
+                    let eff = self
+                        .scratch_view_map
+                        .borrow()
+                        .get(&(*batch as *const DrawBatch as *const () as usize))
+                        .copied()
+                        .unwrap_or(Transform::IDENTITY);
+                    left_mul_view_table(&eff, &batch.transform_table, &mut view_table);
                     let prepared = batch.texts.prepare_texts(
                         &self.gpu,
                         tw,
                         th,
                         self.scale,
-                        &batch.transform_table,
+                        &view_table,
                         &mut global_transforms,
                         batch.text_clip,
                         batch.color,
                     );
+                    drop(view_table);
                     let text_ctx = self.gpu.text_ctx.lock().unwrap();
                     event_infos[ei].text = prepared
                         .into_iter()
@@ -2538,6 +2572,57 @@ fn mul_affine_cols(
     (r0, r1, r2)
 }
 
+/// 对矩形的 4 个角应用 2D 仿射列矩阵，返回外接 AABB（保守，含旋转/缩放）。
+fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> Rect {
+    let tx = |x: f32, y: f32| c0[0] * x + c1[0] * y + c2[0];
+    let ty = |x: f32, y: f32| c0[1] * x + c1[1] * y + c2[1];
+    let (xs, ys) = ([r.x, r.x + r.w], [r.y, r.y + r.h]);
+    let mut minx = f32::INFINITY;
+    let mut maxx = f32::NEG_INFINITY;
+    let mut miny = f32::INFINITY;
+    let mut maxy = f32::NEG_INFINITY;
+    for &x in &xs {
+        for &y in &ys {
+            let (wx, wy) = (tx(x, y), ty(x, y));
+            if wx < minx { minx = wx; }
+            if wx > maxx { maxx = wx; }
+            if wy < miny { miny = wy; }
+            if wy > maxy { maxy = wy; }
+        }
+    }
+    Rect::new(minx, miny, maxx - minx, maxy - miny)
+}
+
+/// 把 `view` 左乘到 `table` 每一行（12 f32 的列主序矩阵），写入 `out`。
+/// `view` 为单位阵时直接整表拷贝；否则逐行 `view.to_cols() * row`。
+fn left_mul_view_table(view: &Transform, table: &[f32], out: &mut Vec<f32>) {
+    out.clear();
+    if view.a == 1.0
+        && view.b == 0.0
+        && view.c == 0.0
+        && view.d == 1.0
+        && view.x == 0.0
+        && view.y == 0.0
+        && view.px == 0.0
+        && view.py == 0.0
+    {
+        out.extend_from_slice(table);
+        return;
+    }
+    let (v0, v1, v2) = view.to_cols();
+    for row in table.chunks_exact(12) {
+        let m0 = [row[0], row[1], 0.0];
+        let m1 = [row[4], row[5], 0.0];
+        let m2 = [row[8], row[9], 1.0];
+        let (r0, r1, r2) = mul_affine_cols(v0, v1, v2, m0, m1, m2);
+        out.extend_from_slice(&[
+            r0[0], r0[1], 0.0, 0.0, //
+            r1[0], r1[1], 0.0, 0.0, //
+            r2[0], r2[1], 1.0, 0.0, //
+        ]);
+    }
+}
+
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
 /// 挂在子上：`child.inherit = …`，再 `parent.push_child(child)`。
@@ -2809,15 +2894,24 @@ fn seed_identity_transform_table(table: &mut Vec<f32>, map: &mut FxHashMap<u64, 
 }
 
 /// Bottom-up 计算 batch 整棵子树的 AABB（含子顶点），存入 map 供 culling 使用。
+///
+/// `view` 是祖先累计视图：本 batch 自身顶点先按其世界 AABB 计算，再按有效视图
+/// （`view × self.view`）仿射到**视图空间**后并入。子树递归传 `eff_view`，因此
+/// 存储的 AABB 已统一在视图空间，flatten 时 map 命中项**不再**重复左乘视图。
 fn compute_subtree_aabb(
     batch: &DrawBatch,
     map: &mut FxHashMap<usize, Option<Rect>>,
+    view: &Transform,
 ) -> Option<Rect> {
     let key = batch as *const DrawBatch as *const () as usize;
-    let own = batch.compute_own_world_aabb();
+    let eff_view = view.then(&batch.view);
+    let own = batch.compute_own_world_aabb().map(|b| {
+        let (v0, v1, v2) = eff_view.to_cols();
+        affine_rect_bounds(&b, v0, v1, v2)
+    });
     let mut combined = own;
     for child in &batch.children {
-        let ca = compute_subtree_aabb(child, map);
+        let ca = compute_subtree_aabb(child, map, &eff_view);
         if let Some(c) = ca {
             combined = match combined {
                 Some(a) => Some(a.union(&c)),
@@ -2932,6 +3026,15 @@ pub struct DrawBatch {
     shape_texture_generation: u32,
     shape_mesh_end: u32,
     pub(crate) transform: Option<Transform>,
+    /// 整批视图变换（**属性，非画笔状态**）。单位阵 = 无变换。
+    ///
+    /// 对本 batch 全部形状/文字/子树统一**左乘**（渲染期应用到 `transform_table`，
+    /// 不落盘进顶点/实例）；子树继承（`flatten_events` 递归累计祖先 view）。
+    ///
+    /// 与 [`Self::transform`]（状态机，record 时逐形状烘焙）正交：`view` 是属性，
+    /// flatten/draw 时整批一次消费，零 record 副作用。`Transform::IDENTITY` 是自然缺省
+    /// （非 `Option`：`None` 与 `Some(IDENTITY)` 等价）。
+    pub view: Transform,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
     ///
@@ -3046,6 +3149,7 @@ impl DrawBatch {
             shape_texture_generation: 0,
             shape_mesh_end: 0,
             transform: None,
+            view: Transform::IDENTITY,
             sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
@@ -3089,6 +3193,7 @@ impl DrawBatch {
         self.shape_texture_generation = 0;
         self.shape_mesh_end = 0;
         self.transform = None;
+        self.view = Transform::IDENTITY;
         self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
@@ -3567,23 +3672,40 @@ impl DrawBatch {
     ///
     /// `aabb_map` 是 pre-pass 计算的子树 AABB 表（`compute_subtree_aabb`）。
     ///   bounds 优先 > map 内子树 AABB > 自身顶点
+    ///
+    /// `view` 是祖先累计视图（`Transform::IDENTITY` 起始），子树左乘继承；
+    /// `view_map` 按 batch 指针记录本 batch **有效视图**（祖先 × 自身），
+    /// 供 draw 阶段对 `transform_table` 左乘（几何与文字共用）。
     pub(crate) fn flatten_events<'a>(
         &'a self,
         out: &mut Vec<DrawEvent<'a>>,
         level: u32,
         viewport: Option<Rect>,
         aabb_map: &FxHashMap<usize, Option<Rect>>,
+        view: &Transform,
+        view_map: &mut FxHashMap<usize, Transform>,
     ) {
-        // Culling: 跳过屏外子树
+        // 有效视图 = 祖先累计 view × 自身 view（左乘，子树继承）。
+        let eff_view = view.then(&self.view);
+        view_map.insert(self as *const DrawBatch as *const () as usize, eff_view);
+
+        // Culling: 跳过屏外子树。
+        // map 命中项已由 `compute_subtree_aabb` 仿射到视图空间，不再左乘视图；
+        // 手动 bounds 与自身顶点 fallback 是世界空间，需按 eff_view 仿射。
         if let Some(vp) = viewport {
+            let (v0, v1, v2) = eff_view.to_cols();
             let effective = match self.bounds {
                 None => None,
                 Some(None) => {
                     let key = self as *const DrawBatch as *const () as usize;
-                    aabb_map.get(&key).copied().flatten()
-                        .or_else(|| self.compute_own_world_aabb())
+                    match aabb_map.get(&key).copied().flatten() {
+                        Some(b) => Some(b),
+                        None => self.compute_own_world_aabb().map(|b| {
+                            affine_rect_bounds(&b, v0, v1, v2)
+                        }),
+                    }
                 }
-                Some(Some(b)) => Some(b),
+                Some(Some(b)) => Some(affine_rect_bounds(&b, v0, v1, v2)),
             };
             if let Some(b) = effective {
                 if !vp.intersects(&b) {
@@ -3632,7 +3754,7 @@ impl DrawBatch {
             }
         }
         for child in &self.children {
-            child.flatten_events(out, child_level, viewport, aabb_map);
+            child.flatten_events(out, child_level, viewport, aabb_map, &eff_view, view_map);
         }
         if use_scissor && !self.children.is_empty() {
             out.push(DrawEvent::ScissorPop);
@@ -4381,6 +4503,7 @@ impl DrawBatch {
             shape_mesh_end: self.shape_mesh_end,
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
+            view: self.view,
             sdf_feather: self.sdf_feather,
             color: self.color,
             uv: self.uv,
@@ -6138,7 +6261,7 @@ mod tests {
         b.area_include = Some(include_batch.to_area());
 
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 1 cover op + 1 Batch + 1 erase op = 3 events
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
@@ -6163,7 +6286,7 @@ mod tests {
         root.push_child(child);
 
         let mut events: Vec<DrawEvent> = Vec::new();
-        root.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        root.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 1 setup + Batch + child.Batch + StencilPop + 1 cleanup = 5
         assert_eq!(events.len(), 5);
         assert!(matches!(events[0], DrawEvent::AreaOp { is_setup: true, .. }));
@@ -6181,7 +6304,7 @@ mod tests {
         // empty 几何 → Area::Empty
         b.area_include = Some(Area::Empty);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 仅 Batch（无 AreaOp）
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DrawEvent::Batch(_)));
@@ -6202,7 +6325,7 @@ mod tests {
         parent.push_child(child);
 
         let mut events: Vec<DrawEvent> = Vec::new();
-        parent.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        parent.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
 
         // 模拟 draw 路径：clip_depth 与 area_depth 分离
         let mut clip_depth = 0u32;
@@ -6263,7 +6386,7 @@ mod tests {
         b.bounds = Some(Some(Rect::new(9999.0, 9999.0, 10.0, 10.0)));
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert!(events.is_empty());
     }
 
@@ -6273,7 +6396,7 @@ mod tests {
         b.bounds = Some(Some(Rect::new(100.0, 100.0, 50.0, 50.0)));
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DrawEvent::Batch(_)));
     }
@@ -6285,7 +6408,7 @@ mod tests {
         b.set_position(9999.0, 9999.0);
         draw_rectangle(&mut b, Pos::ZERO, 4.0, 4.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert!(events.is_empty());
     }
 
@@ -6300,7 +6423,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::ZERO, 4.0, 4.0, Some(WHITE));
         parent.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        parent.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default());
+        parent.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // parent 空容器 → 自身 event（无顶点），子剪掉
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(b) if b.vertices.is_empty()));
@@ -6315,7 +6438,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert_eq!(events.len(), 4);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
         assert!(matches!(&events[1], DrawEvent::ScissorPush(r) if *r == Rect::new(10.0, 10.0, 200.0, 150.0)));
@@ -6332,7 +6455,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // scissor 现在不依赖 clips_children，仍会为子节点发 ScissorPush/Pop
         assert_eq!(events.len(), 4);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
@@ -6351,7 +6474,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         let uses_stencil = events.iter().any(|e| matches!(e, DrawEvent::StencilPop | DrawEvent::AreaOp { .. }));
         assert!(!uses_stencil);
     }
@@ -6366,7 +6489,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 自动检测为矩形 → ScissorPush/Pop 代替 StencilPop
         assert_eq!(events.len(), 4);
         assert!(matches!(&events[1], DrawEvent::ScissorPush(r) if (r.w - 100.0).abs() < 1e-4));
@@ -6384,7 +6507,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 非矩形 → 走 stencil
         assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
     }
@@ -6396,7 +6519,7 @@ mod tests {
         b.clips_children = true;
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 100.0, 50.0, Some(WHITE));
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // 无子：不发空 scissor Push/Pop
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
@@ -6415,7 +6538,7 @@ mod tests {
         assert!(!g.geo_instances.is_empty());
         assert!(g.vertices.is_empty() && g.instances.is_empty());
         let mut events: Vec<DrawEvent> = Vec::new();
-        g.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        g.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
     }
 
@@ -6428,7 +6551,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
         assert!(matches!(&events[1], DrawEvent::Batch(_)));
@@ -6454,6 +6577,8 @@ mod tests {
             0,
             Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
             &FxHashMap::default(),
+            &Transform::IDENTITY,
+            &mut FxHashMap::default(),
         );
         assert!(matches!(&events[0], DrawEvent::Batch(_)));
         assert!(
@@ -6473,6 +6598,8 @@ mod tests {
             0,
             Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
             &FxHashMap::default(),
+            &Transform::IDENTITY,
+            &mut FxHashMap::default(),
         );
         assert!(events.is_empty());
     }
@@ -6487,7 +6614,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         assert_eq!(events.len(), 4);
         match &events[1] {
             DrawEvent::ScissorPush(r) => {
@@ -6510,7 +6637,7 @@ mod tests {
         draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
         b.push_child(child);
         let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, None, &FxHashMap::default());
+        b.flatten_events(&mut events, 0, None, &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
         // SDF 圆不得 auto-scissor → StencilPop
         assert!(events.iter().any(|e| matches!(e, DrawEvent::StencilPop)));
         assert!(events.iter().all(|e| !matches!(e, DrawEvent::ScissorPush(_))));
@@ -6531,6 +6658,8 @@ mod tests {
             0,
             Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
             &FxHashMap::default(),
+            &Transform::IDENTITY,
+            &mut FxHashMap::default(),
         );
         assert_eq!(events.len(), 1);
     }
@@ -6569,5 +6698,76 @@ mod tests {
     fn draw_batch_is_sync() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<DrawBatch>();
+    }
+
+    #[test]
+    fn view_field_defaults_to_identity() {
+        let b = DrawBatch::new();
+        assert_eq!(b.view, Transform::IDENTITY);
+    }
+
+    #[test]
+    fn view_field_resets_on_clear() {
+        let mut b = DrawBatch::new();
+        b.view = Transform::translation(100.0, 200.0);
+        b.clear();
+        assert_eq!(b.view, Transform::IDENTITY);
+    }
+
+    #[test]
+    fn view_field_carries_on_clone() {
+        let mut b = DrawBatch::new();
+        b.view = Transform::translation(10.0, 20.0);
+        let c = b.clone_batch();
+        assert_eq!(c.view, Transform::translation(10.0, 20.0));
+    }
+
+    #[test]
+    fn flatten_records_effective_view_for_batch_and_children() {
+        let mut parent = DrawBatch::new();
+        parent.view = Transform::translation(100.0, 200.0);
+        let mut child = DrawBatch::new();
+        child.view = Transform::translation(5.0, 7.0);
+        parent.push_child(child);
+        let mut events: Vec<DrawEvent> = Vec::new();
+        let mut view_map = FxHashMap::default();
+        parent.flatten_events(
+            &mut events,
+            0,
+            None,
+            &FxHashMap::default(),
+            &Transform::IDENTITY,
+            &mut view_map,
+        );
+        assert_eq!(events.len(), 2);
+        let pkey = &(&parent as *const DrawBatch as *const () as usize);
+        let child_ref = match &events[1] {
+            DrawEvent::Batch(cb) => *cb,
+            _ => unreachable!(),
+        };
+        let ckey = &(child_ref as *const DrawBatch as *const () as usize);
+        // 父子 view 有效值：父 = 自身 view；子 = 父 view × 子 view（左乘）。
+        let pe = view_map[pkey];
+        assert_eq!(pe, Transform::translation(100.0, 200.0));
+        let ce = view_map[ckey];
+        assert_eq!(ce, Transform::translation(105.0, 207.0));
+    }
+
+    #[test]
+    fn left_mul_view_table_applies_view_to_rows() {
+        // 单位视图：整表原样
+        let table = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 12.0, 34.0, 1.0, 0.0,
+        ];
+        let mut out = Vec::new();
+        left_mul_view_table(&Transform::IDENTITY, &table, &mut out);
+        assert_eq!(out, table);
+        // 平移视图：tx/ty 列被左乘（单位线性部分）
+        let view = Transform::translation(50.0, 60.0);
+        left_mul_view_table(&view, &table, &mut out);
+        assert_eq!(out.len(), 12);
+        // 平移列 = (50+12, 60+34)（view 线性部分为单位阵）
+        assert!((out[8] - 62.0).abs() < 1e-4);
+        assert!((out[9] - 94.0).abs() < 1e-4);
     }
 }
