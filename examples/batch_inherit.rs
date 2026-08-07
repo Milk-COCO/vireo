@@ -249,7 +249,7 @@ fn main() {
         for r in &roots {
             refs.push(r);
         }
-        win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &refs);
+        win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &refs);
         true
     });
 }

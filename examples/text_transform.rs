@@ -52,7 +52,7 @@ fn main() {
         b3.text("scale 2x", Pos::new(17.0, 50.0), TextDef::default().font_size(14.0), TextOverride::from_color(yl));
         b3.text("stretched", Pos::new(17.0, 67.0), TextDef::default().font_size(11.0), TextOverride::from_color(gray));
 
-        win.draw(Some(bg), &[&title, &b0, &b1, &b2, &b3]);
+        win.draw(bg, &[&title, &b0, &b1, &b2, &b3]);
         true
     });
 }

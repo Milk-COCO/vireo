@@ -137,7 +137,7 @@ fn main() {
             TextOverride::from_color(Color::new(0.7, 0.75, 0.85, 1.0)),
         );
 
-        win.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&batch]);
         true
     });
 }

@@ -85,7 +85,7 @@ fn main() {
         let x = 80.0 + (t.sin() * 0.5 + 0.5) * 400.0;
         draw_rounded_rect(&mut batch, Pos::new(x, 220.0), 80.0, 60.0, 10.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
 
-        let report = win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);
+        let report = win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
         true

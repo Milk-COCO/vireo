@@ -73,7 +73,7 @@ fn main() {
                 Pos::new(12.0, 12.0), TextDef::default().font_size(14.0),
                 TextOverride::from_color(WHITE),
             );
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
 
         if app.frame_count >= 3 {
             eprintln!("[3] draw OK — no panic. exit.");

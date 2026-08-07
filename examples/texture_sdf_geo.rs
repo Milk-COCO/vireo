@@ -59,13 +59,13 @@ fn main() {
                 draw_text(&mut sdf.texts, "SDF (sdf_feather = 1.0)",
                           Pos::new(10.0, 155.0), TextDef::default().font_size(14.0), TextOverride::from_color(label));
 
-                win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&geo, &sdf]);
+                win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&geo, &sdf]);
             }
             None => {
                 let mut batch = DrawBatch::new();
                 draw_text(&mut batch.texts, "Place logo_quad.png in the project root.",
                           Pos::new(150.0, 160.0), TextDef::default().font_size(18.0), TextOverride::from_color(Color::new(0.8, 0.8, 0.8, 1.0)));
-                win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&batch]);
+                win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
             }
         }
 

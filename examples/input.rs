@@ -122,7 +122,7 @@ fn main() {
             TextOverride::from_color(focus_color),
         );
 
-        win.draw(Some(BLACK), &[&batch]);
+        win.draw(BLACK, &[&batch]);
         true
     });
 }

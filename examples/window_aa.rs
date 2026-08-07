@@ -44,10 +44,10 @@ fn main() {
     let raw = app.window(WindowDesc::new("No AA", 320, 240), None::<fn()>);
 
     app.run(move |app| {
-        if let Some(w) = app.window_ref(&ssaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "SSAA x4"); w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Some(w) = app.window_ref(&msaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "MSAA x4"); w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Some(w) = app.window_ref(&sdf)  { let mut b = DrawBatch::new(); draw_shapes(&mut b, 1.0, "SDF 1px");      w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Some(w) = app.window_ref(&raw)  { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "No AA");             w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Some(w) = app.window_ref(&ssaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "SSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Some(w) = app.window_ref(&msaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "MSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Some(w) = app.window_ref(&sdf)  { let mut b = DrawBatch::new(); draw_shapes(&mut b, 1.0, "SDF 1px");      w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Some(w) = app.window_ref(&raw)  { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "No AA");             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
         true
     });
 }

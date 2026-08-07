@@ -75,7 +75,7 @@ fn main() {
             Pos::new(20.0, 20.0), TextDef::default().font_size(13.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
         );
 
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
     });
 }

@@ -296,7 +296,7 @@ fn main() {
         batches.push(footer);
 
         let refs: Vec<&DrawBatch> = batches.iter().collect();
-        win.draw(Some(Color::new(0.07, 0.07, 0.10, 1.0)), &refs);
+        win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &refs);
         true
     });
 }

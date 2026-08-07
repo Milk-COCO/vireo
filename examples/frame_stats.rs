@@ -352,7 +352,7 @@ fn main() {
         }
 
         let build_ms = t_build.elapsed().as_secs_f64() * 1000.0;
-        let report = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let report = win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         let acq_ms = report.timings.acquire_secs * 1000.0;
         let enc_ms = report.timings.encode_secs * 1000.0;
         let gpu_ms = report.timings.gpu_secs.map(|v| v * 1000.0);

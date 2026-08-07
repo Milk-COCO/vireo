@@ -41,7 +41,7 @@ fn main() {
             }
         }
 
-        win.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&batch]);
+        win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
     });
 }

@@ -40,7 +40,7 @@ fn main() {
         draw_text(&mut batch.texts, "Bottom-right", Pos::new(280.0, 60.0),
                   TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
 
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
 
         true
     });

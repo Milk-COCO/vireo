@@ -45,7 +45,7 @@ fn main() {
                       TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
             draw_text(&mut b.texts, "SDF 1px only", Pos::new(785.0, 345.0),
                       TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
-            w.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
+            w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         true
     });

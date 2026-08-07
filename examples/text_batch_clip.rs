@@ -50,7 +50,7 @@ fn main() {
         let right = text_clip_panel(680.0, 260.0, t + 0.8, false, long);
 
         win.draw(
-            Some(Color::new(0.05, 0.06, 0.09, 1.0)),
+            Color::new(0.05, 0.06, 0.09, 1.0),
             &[&ui, &left, &right],
         );
         true

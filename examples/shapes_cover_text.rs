@@ -32,7 +32,7 @@ fn main() {
         draw_text(&mut b3.texts, "Layer 3 — BLUE", Pos::new(280.0, 68.0),
                   TextDef::default().font_size(24.0), TextOverride::from_color(WHITE));
 
-        win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&b1, &b2, &b3]);
+        win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b1, &b2, &b3]);
 
         true
     });

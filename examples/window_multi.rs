@@ -47,7 +47,7 @@ fn main() {
                 TextOverride::default(),
             );
         }
-        win_a.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&batch]);
+        win_a.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&batch]);
 
         // B
         let mut batch = DrawBatch::new();
@@ -81,7 +81,7 @@ fn main() {
             );
         }
 
-        win_b.draw(Some(Color::new(0.12, 0.12, 0.18, 1.0)), &[&batch]);
+        win_b.draw(Color::new(0.12, 0.12, 0.18, 1.0), &[&batch]);
 
         true
     });

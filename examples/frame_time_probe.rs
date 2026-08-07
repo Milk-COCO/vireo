@@ -1,4 +1,4 @@
-﻿//! 帧间隔探针：cargo run 跑 12 帧后自动退出。
+//! 帧间隔探针：cargo run 跑 12 帧后自动退出。
 //!
 //! cargo run --example frame_time_probe
 //! cargo run --example frame_time_probe -- --no-text
@@ -74,7 +74,7 @@ fn main() {
             );
         }
 
-        let report = win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        let report = win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         let acq_ms = report.timings.acquire_secs * 1000.0;
         let enc_ms = report.timings.encode_secs * 1000.0;
 

@@ -14,7 +14,7 @@ fn main() {
         draw_circle(&mut batch, Pos::new(500.0, 300.0), 80.0, Some(BLUE));
         draw_line(&mut batch, 50.0, 50.0, 750.0, 550.0, 2.0, Some(GREEN));
 
-        win.draw(Some(BLACK), &[&batch]);
+        win.draw(BLACK, &[&batch]);
 
         true
     });

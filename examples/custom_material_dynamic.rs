@@ -86,7 +86,7 @@ fn main() {
         );
 
         let refs: Vec<&DrawBatch> = batches.iter().chain(std::iter::once(&title)).collect();
-        win.draw(Some(Color::new(0.05, 0.07, 0.11, 1.0)), &refs);
+        win.draw(Color::new(0.05, 0.07, 0.11, 1.0), &refs);
         true
     });
 }

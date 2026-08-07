@@ -52,7 +52,7 @@ fn main() {
         let right = three_level(680.0, 270.0, t + 1.0, false, true);
 
         win.draw(
-            Some(Color::new(0.05, 0.06, 0.09, 1.0)),
+            Color::new(0.05, 0.06, 0.09, 1.0),
             &[&ui, &left, &right],
         );
         true

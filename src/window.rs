@@ -730,6 +730,10 @@ impl VireoWindow {
 
     /// 绘制一帧（render thread 独占 surface 帧循环）。
     ///
+    /// `clear_color` 为本帧目标底色，任何情况下都会先 Clear 再绘制 batch。
+    /// （不提供「保留旧内容」模式：present 后 swapchain buffer 内容即被丢弃，
+    /// `LoadOp::Load` 只会读到未定义值，对窗口无意义。）
+    ///
     /// 流程：
     /// 1. 应用 pending present mode / AA（在 acquire 前，configure 时无 outstanding st）
     /// 2. 轮询 `Window::inner_size()` / `scale_factor()`（模态循环期间尺寸事件滞后，
@@ -743,7 +747,7 @@ impl VireoWindow {
     /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
     pub fn draw(
         &self,
-        clear_color: Option<crate::color::Color>,
+        clear_color: crate::color::Color,
         batches: &[&DrawBatch],
     ) -> DrawReport {
         let report = self.draw_frame(clear_color, batches);
@@ -779,7 +783,7 @@ impl VireoWindow {
 
     fn draw_frame(
         &self,
-        clear_color: Option<crate::color::Color>,
+        clear_color: crate::color::Color,
         batches: &[&DrawBatch],
     ) -> DrawReport {
         let gpu_secs = self.last_gpu_secs.lock().unwrap().take();
@@ -1088,7 +1092,7 @@ impl VireoWindow {
         let target = crate::context::RenderTarget::from_texture_view(view);
         let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
         let t2 = std::time::Instant::now();
-        let cmd_buf = self.renderer.borrow().draw(&target, clear_color, &batch_refs);
+        let cmd_buf = self.renderer.borrow().draw(&target, Some(clear_color), &batch_refs);
         // 5) submit + 提交完成计时
         let timing_enabled = self.gpu_timing_enabled.load(std::sync::atomic::Ordering::Acquire);
         if timing_enabled {

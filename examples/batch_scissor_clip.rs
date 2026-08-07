@@ -125,7 +125,7 @@ fn main() {
         );
 
         win.draw(
-            Some(Color::new(0.06, 0.07, 0.1, 1.0)),
+            Color::new(0.06, 0.07, 0.1, 1.0),
             &[&ui, &scissor_batch, &no_clip],
         );
         true

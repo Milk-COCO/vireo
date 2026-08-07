@@ -132,7 +132,7 @@ fn main() {
         p4.push_child(ring);
 
         win.draw(
-            Some(Color::new(0.05, 0.06, 0.09, 1.0)),
+            Color::new(0.05, 0.06, 0.09, 1.0),
             &[&ui, &p1, &p2, &p3, &p4],
         );
         true

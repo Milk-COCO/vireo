@@ -50,7 +50,7 @@ fn main() {
                       TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.6, 0.6, 0.7, 1.0)));
         }
 
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
     });
 }

@@ -9,7 +9,7 @@
 //!     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
 //!     draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
 //!         TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
-//!     app.window_ref(&win).unwrap().draw(Some(BLACK), &[&batch]);
+//!     app.window_ref(&win).unwrap().draw(BLACK, &[&batch]);
 //!     true
 //! });
 //! ```

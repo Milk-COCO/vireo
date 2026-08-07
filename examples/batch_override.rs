@@ -204,7 +204,7 @@ fn main() {
             ShapeOverride::new().color(LIME).sdf(1.0),
         );
 
-        win.draw(Some(Color::new(0.06, 0.07, 0.1, 1.0)), &[&batch]);
+        win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
     });
 }

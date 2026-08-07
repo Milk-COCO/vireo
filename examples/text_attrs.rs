@@ -201,7 +201,7 @@ fn main() {
         draw_line(&mut batch, 0.0, 600.0, w, 600.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
         draw_line(&mut batch, w, 0.0, w, 600.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
 
-        win.draw(Some(Color::new(0.08, 0.1, 0.14, 1.0)), &[&batch]);
+        win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
     });

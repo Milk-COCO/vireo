@@ -61,7 +61,7 @@ fn main() {
                   Pos::new(cx - 50., cy + 0.0), TextDef::default().font_size(16.0),
                   TextOverride::from_color(Color::new(0.5, 0.65, 0.85, 1.0)));
 
-        win.draw(Some(Color::new(0.04, 0.06, 0.1, 1.0)), &[&ring, &logo_batch, &text]);
+        win.draw(Color::new(0.04, 0.06, 0.1, 1.0), &[&ring, &logo_batch, &text]);
 
         true
     });

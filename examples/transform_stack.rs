@@ -88,7 +88,7 @@ fn main() {
             draw_circle_outline(&mut batch, Pos::new(x, y), 4.0, 1.5, Some(Color::new(1.0, 1.0, 1.0, 0.35)), 16);
         }
 
-        win.draw(Some(Color::new(0.05, 0.06, 0.09, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&batch]);
         true
     });
 }

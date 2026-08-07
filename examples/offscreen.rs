@@ -25,7 +25,7 @@ fn main() {
         win_batch.set_texture(Some(&canvas.texture));
         draw_rectangle(&mut win_batch, Pos::new(50.0, 50.0), 256.0, 256.0, Some(WHITE));
         draw_rectangle(&mut win_batch, Pos::new(350.0, 200.0), 256.0, 256.0, Some(WHITE));
-        win.draw(Some(BLACK), &[&win_batch]);
+        win.draw(BLACK, &[&win_batch]);
 
         true
     });

@@ -229,7 +229,7 @@ fn main() {
                 TextOverride::from_color(Color::new(1.0, 0.9, 0.3, 1.0)),
             );
 
-            let report = win.draw(Some(CONFIGS[i].bg), &[&batch]);
+            let report = win.draw(CONFIGS[i].bg, &[&batch]);
             let t = report.timings;
             prev[i] = Some((
                 t.acquire_secs * 1000.0,

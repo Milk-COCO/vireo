@@ -105,7 +105,7 @@ fn main() {
         }
         draw_circle(&mut batch, Pos::new(cx, cy), 6.0, Some(WHITE));
 
-        win.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&batch]);
+        win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
     });
 }

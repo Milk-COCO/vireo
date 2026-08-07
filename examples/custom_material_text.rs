@@ -64,7 +64,7 @@ fn main() {
             TextOverride::from_color(WHITE),
         );
 
-        win.draw(Some(Color::new(0.035, 0.045, 0.075, 1.0)), &[&batch]);
+        win.draw(Color::new(0.035, 0.045, 0.075, 1.0), &[&batch]);
         true
     });
 }

@@ -56,7 +56,7 @@ fn main() {
         batch.set_texture(Some(&logo));
         draw_rectangle(&mut batch, Pos::new(cx - 50.0, cy + float - 50.0), 100.0, 100.0, Some(WHITE));
 
-        win.draw(Some(Color::new(0.06, 0.08, 0.12, 1.0)), &[&glow, &batch]);
+        win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&glow, &batch]);
 
         true
     });

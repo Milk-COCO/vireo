@@ -119,7 +119,7 @@ fn main() {
             TextOverride::from_color(WHITE),
         );
         win.draw(
-            Some(Color::new(0.05, 0.07, 0.11, 1.0)),
+            Color::new(0.05, 0.07, 0.11, 1.0),
             &[&parent, &free, &title],
         );
         true

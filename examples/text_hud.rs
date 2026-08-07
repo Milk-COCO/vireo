@@ -150,7 +150,7 @@ fn main() {
             ov(dim),
         );
 
-        win.draw(Some(bg), &[&batch]);
+        win.draw(bg, &[&batch]);
         true
     });
 }
