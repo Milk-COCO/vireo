@@ -21,6 +21,7 @@ pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
+pub mod math;
 pub mod offscreen;
 pub mod shapes;
 pub mod text;
