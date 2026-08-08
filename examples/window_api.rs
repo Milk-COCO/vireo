@@ -9,13 +9,15 @@
 //! - `5`：请求用户注意 Critical（request_user_attention）
 //! - `6`：循环主题 None / Dark / Light（set_theme）
 //! - `F`：切换全屏 Borderless
-//! - `G`：光标移动到窗口中心（set_cursor_position）
-//! - `R`：重置外层位置到 (80, 80)（set_outer_position）
+//! - `G`：光标移动到窗口中心（set_cursor_position，裸数 = vireo 逻辑像素）
+//! - `R`：重置外层位置到 (80, 80)（set_outer_position，裸数 = vireo 逻辑像素）
 //! - `T`：循环窗口标题（set_title）
 //! - `M` / `N`：最大化 / 最小化（set_maximized / set_minimized）
 //! - `H`：显示 / 隐藏（set_visible）
-//! - `O`：切换 vireo 封装 high_dpi（逻辑 = 物理，set_high_dpi）
-//! - `7` / `8` / `9`：预设大小 300×200 / 600×400 / 900×600（set_size，逻辑像素）
+//! - `O`：循环 vireo 自定义 dpi 覆盖 None / 1.0 / 1.5（set_dpi_override）。
+//!   `None` = vireo 逻辑即 winit 逻辑（OS 缩放参与）；`Some(v)` = vireo 全自持像素，
+//!   物理 = 逻辑 × v（忽略 OS 缩放）。切换保持 vireo 逻辑尺寸、调整物理窗口大小。
+//! - `7` / `8` / `9`：预设大小 300×200 / 600×400 / 900×600（set_size，vireo 逻辑像素）
 //!
 //! ```bash
 //! cargo run --example window_api
@@ -48,8 +50,9 @@ fn main() {
     let mut theme_mode: u8 = 0; // 0=None 1=Dark 2=Light
     let mut decorated = true;
     let mut fullsc = false;
+    let mut lb_was_down = false;
     let mut visible = true;
-    let mut high_dpi = false;
+    let mut dpi_override: Option<f64> = None;
     let titles = ["Window API", "标题已换!", "Vireo Window"];
     let mut title_i = 0usize;
 
@@ -117,10 +120,10 @@ fn main() {
             });
         }
         if edge(KeyCode::KeyG) {
-            let _ = win.set_cursor_position(winit::dpi::LogicalPosition::new(480.0, 270.0));
+            let _ = win.set_cursor_position(480.0f64, 270.0f64);
         }
         if edge(KeyCode::KeyR) {
-            win.set_outer_position(winit::dpi::LogicalPosition::new(80.0, 80.0));
+            win.set_outer_position(80.0f64, 80.0f64);
         }
         if edge(KeyCode::KeyT) {
             title_i = (title_i + 1) % titles.len();
@@ -137,8 +140,12 @@ fn main() {
             win.set_visible(visible);
         }
         if edge(KeyCode::KeyO) {
-            high_dpi = !high_dpi;
-            win.set_high_dpi(high_dpi);
+            dpi_override = match dpi_override {
+                None => Some(1.0),
+                Some(1.0) => Some(1.5),
+                _ => None,
+            };
+            win.set_dpi_override(dpi_override);
         }
         if edge(KeyCode::Digit7) {
             win.set_size(300, 200);
@@ -150,12 +157,17 @@ fn main() {
             win.set_size(900, 600);
         }
 
-        // 拖「标题栏」区域（顶部 36px）拖动窗口
+        // 拖「标题栏」区域（顶部 36px）拖动窗口。
+        // 只能在「左键按下沿」且按下点在区域内时调用一次 drag_window()；
+        // 若每帧 while 按住就调用，winit 会以当时光标位置重发 WM_NCLBUTTONDOWN，
+        // 从窗口别处按住再移入区域内会瞬间把窗口吸附到鼠标。
         let (_, my) = win.mouse_pos();
         let lb_down = win.mouse_left();
-        if lb_down && my < 36.0 {
+        let lb_pressed = lb_down && !lb_was_down;
+        if lb_pressed && my < 36.0 {
             let _ = win.drag_window();
         }
+        lb_was_down = lb_down;
 
         // ---- 查询（直接转发 winit）----
         let is_min = win.is_minimized().unwrap_or(false);
@@ -164,8 +176,8 @@ fn main() {
         let is_dec = win.is_decorated();
         let full = win.fullscreen().is_some();
         let outer_size = win.outer_size();
-        let inner_pos = win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
-        let outer_pos = win.outer_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+        let inner_pos = win.inner_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
+        let outer_pos = win.outer_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
         let cur_theme = win.theme();
 
         let st_guard = st.lock().unwrap();
@@ -192,11 +204,11 @@ fn main() {
         lines.push(format!("enabled_buttons={}  fullscreen={}", if buttons_all { "all" } else { "close-only" }, full));
         lines.push(format!("theme(set)={:?}  theme(query)={:?}", match theme_mode { 1 => Some(Theme::Dark), 2 => Some(Theme::Light), _ => None }, cur_theme));
         lines.push(format!("minimized={}  maximized={}  visible={}", is_min, is_max, is_vis));
-        lines.push(format!("inner_pos={:?}  outer_pos={:?}  outer_size={}x{}", inner_pos, outer_pos, outer_size.width, outer_size.height));
+        lines.push(format!("inner_pos={:?}  outer_pos={:?}  outer_size(logical)={}x{}", inner_pos, outer_pos, outer_size.logical().0 as u32, outer_size.logical().1 as u32));
         lines.push(format!("on_moved=({}, {})  on_theme_changed={:?}", moved_x, moved_y, evt_theme));
         lines.push(format!(
-            "high_dpi={}  metrics logical={}x{} physical={}x{} sf={:.2}",
-            high_dpi,
+            "dpi_override={:?}  metrics logical={}x{} physical={}x{} sf={:.2}",
+            dpi_override,
             win.metrics().width,
             win.metrics().height,
             win.metrics().physical_width,
@@ -218,7 +230,7 @@ fn main() {
 
         draw_text(
             &mut b.texts,
-            "D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · G 光标中心 · R 位置 · T 标题 · M/N 最大/最小 · H 显隐 · O high_dpi · 7/8/9 尺寸",
+            "D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · G 光标中心 · R 位置 · T 标题 · M/N 最大/最小 · H 显隐 · O dpi覆盖 · 7/8/9 尺寸",
             Pos::new(20.0, 500.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),

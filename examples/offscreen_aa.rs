@@ -21,7 +21,7 @@ fn main() {
     let off_msaa = app.offscreen(300, 300, AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true });
     let off_sdf  = app.offscreen(300, 300, AntiAliasing::None);
     let win = app.window(
-        WindowDesc::new("Offscreen AA: SSAA vs MSAA vs SDF", 1000, 380).high_dpi(true),
+        WindowDesc::new("Offscreen AA: SSAA vs MSAA vs SDF", 1000, 380).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

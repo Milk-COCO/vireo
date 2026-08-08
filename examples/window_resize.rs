@@ -63,22 +63,30 @@
 //! 
 //! 想看更详细的帧用时，可以把 `frame_stats` 示例与本示例结合。或者直接改那个示例的刷新策略/去抖/布局跟随也行。
 //!
-//! ## 逻辑/物理像素（winit dpi 类型化）
+//! ## 逻辑/物理像素（vireo 逻辑 + 可选 dpi 覆盖）
 //!
-//! `WindowDesc::new` 的裸宽高恒为**逻辑像素**（vireo 用户坐标系）。需要物理像素或声明
-//! 其他约束时，用 winit dpi 类型 builder 在调用点显式声明，不随 `high_dpi` 翻转：
+//! `WindowDesc::new` 的裸宽高恒为**vireo 逻辑像素**（用户坐标系）。尺寸族 builder
+//! （`size`/`min_size`/`max_size`/`resize_increments`）与 `position` 接受 `impl ToPx`，
+//! 语义由调用点声明，不随 `dpi_override` 翻转：裸数值 / [`Dp`] = vireo 逻辑像素，
+//! [`Px`] = 物理像素。
 //!
 //! ```rust,ignore
-//! WindowDesc::new("t", 640, 360)                        // 逻辑 640x360（默认）
-//!     .size(PhysicalSize::new(1280, 720))               // 显式物理 1280x720
-//!     .min_size(LogicalSize::new(400, 300))             // 最小（逻辑）
-//!     .max_size(PhysicalSize::new(2560, 1440))          // 最大（物理）
-//!     .resize_increments(LogicalSize::new(8, 8))        // 按 8px 步进
-//!     .position(LogicalPosition::new(100, 100));        // 初始位置（逻辑）
+//! WindowDesc::new("t", 640, 360)          // vireo 逻辑 640x360（默认，裸数 = 逻辑）
+//!     .min_size(320, 200)                 // 最小（裸数 = vireo 逻辑）
+//!     .max_size(1920, 1080)               // 最大（裸数 = vireo 逻辑）
+//!     .resize_increments(8, 8)            // 按 8px 步进（裸数 = vireo 逻辑）
+//!     .position(100, 100);                // 初始位置（裸数 = vireo 逻辑）
+//! // 需要物理像素时显式声明意图：
+//! // .size(px(1280.0), px(720.0))
 //! ```
 //!
-//! 运行时查询见 `win.metrics()`：`width/height` 是逻辑，`physical_width/physical_height`
-//! 是物理像素（= 逻辑 × scale_factor；`high_dpi` 窗口下二者相同）。HUD 下方同时显示两种。
+//! `dpi_override`（`None` 默认 / `Some(d)`）决定 vireo 逻辑如何映射到物理像素：
+//! - `None`：vireo 逻辑即 winit 逻辑，OS 系统 DPI 缩放正常参与；
+//! - `Some(d)`：vireo 全自持像素，物理 = 逻辑 × d，忽略 OS 缩放。
+//!
+//! 运行时查询见 `win.metrics()`：`width/height` 是 vireo 逻辑，`physical_width/physical_height`
+//! 是物理像素（= 逻辑 × scale_factor；`Some(dpi_override)` 窗口下 scale_factor = d，
+//! 逻辑 ≠ 物理，除非 d = 1.0）。HUD 下方同时显示两种。
 
 use vireo::prelude::*;
 
@@ -92,14 +100,13 @@ fn policy_label(p: ResizeRefreshPolicy) -> String {
 
 fn main() {
     let mut app = App::new();
-    // `new` 裸宽高恒为逻辑像素；下面用 dpi 类型显式声明最小/最大/初始位置/步进。
-    // 如需物理尺寸覆盖，用 `.size(PhysicalSize::new(w, h))`。
+    // `new` 裸宽高恒为 vireo 逻辑像素；尺寸族/位置 builder 收 `impl ToPx`（裸数 = 逻辑）。
     let idx = app.window(
         WindowDesc::new("Resize Refresh Policy", 640, 360)
-            .min_size(LogicalSize::new(320, 200))
-            .max_size(PhysicalSize::new(1920, 1080))
-            .resize_increments(LogicalSize::new(8, 8))
-            .position(LogicalPosition::new(120, 80))
+            .min_size(320, 200)
+            .max_size(1920, 1080)
+            .resize_increments(8, 8)
+            .position(120, 80)
             .present_mode(PresentMode::AutoVsync),
         None::<fn()>,
     );

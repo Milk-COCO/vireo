@@ -31,7 +31,7 @@ fn main() {
     }
 
     let idx = app.window(
-        WindowDesc::new("Text Font — load_font", 720, 360).high_dpi(true),
+        WindowDesc::new("Text Font — load_font", 720, 360).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

@@ -26,7 +26,7 @@ fn main() {
     let mut app = App::new();
     let logo = Some(app.load_texture("logo_quad.png"));
     let idx = app.window(
-        WindowDesc::new("ShapeOverride", 900, 520).high_dpi(true),
+        WindowDesc::new("ShapeOverride", 900, 520).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

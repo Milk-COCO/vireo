@@ -7,7 +7,7 @@ fn main() {
 
     let tex = Some(app.load_texture("logo.png"));
 
-    let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).high_dpi(true), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).dpi_override(Some(1.0)), None::<fn()>);
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();

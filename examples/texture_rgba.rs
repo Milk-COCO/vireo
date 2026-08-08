@@ -50,7 +50,7 @@ fn main() {
         Err(_) => None,
     };
 
-    let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).high_dpi(true), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)), None::<fn()>);
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();

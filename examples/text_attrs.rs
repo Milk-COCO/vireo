@@ -22,7 +22,7 @@ fn main() {
     let mut app = App::new();
 
     let idx = app.window(
-        WindowDesc::new("Text Attributes", 700, 600).high_dpi(true),
+        WindowDesc::new("Text Attributes", 700, 600).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

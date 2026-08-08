@@ -22,7 +22,8 @@ cargo run --example ez
 
 - **即时模式**：每帧构建 `DrawBatch`，填充形状/文本，提交到窗口
 - **单 pass**：一次 `draw()` 内多 batch 按序渲染；batch 树可嵌套（子节点、继承、裁切）
-- **坐标系**：左上角原点，x 向右，y 向下（逻辑像素）
+- **坐标系**：左上角原点，x 向右，y 向下（vireo 逻辑像素）。`dpi_override=None` 时逻辑即 winit 逻辑（OS 缩放参与）；`Some(d)` 时 vireo 全自持像素，物理 = 逻辑 × d
+- **像素意图**：窗口尺寸/位置 API（`WindowDesc` 尺寸族 builder 与 `set_size`/`set_outer_position`/`set_cursor_position`/`resize_increments`）接受 `impl ToPx`——裸数值 / [`Dp`] = vireo 逻辑像素，[`Px`] = 物理像素；语义由调用点声明，不随 `dpi_override` 翻转。位置/尺寸 getter 返回 `Pixel`/`PixelPos`/`PixelSize`（物理 + 逻辑双表示）
 - **位置 `Pos`**：圆/矩形等锚点形状的位置走 `Pos` + 变换表；线/多边形等点列即几何坐标
 
 ```rust
@@ -58,7 +59,7 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text；MSAA/stencil/SDF 兼容
 - 多窗口 + 离屏渲染
 - 纹理（文件 / 字节 / RGBA，UV 子区域）
-- 窗口控制（全屏、图标、PresentMode、AA、high_dpi 等）
+- 窗口控制（全屏、图标、PresentMode、AA、自定义 dpi 覆盖等）
 - 帧统计 + 输入（轮询 / 事件 / 触摸）
 
 ### Material 约定（未冻结）

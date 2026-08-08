@@ -20,7 +20,7 @@ use vireo::prelude::*;
 fn main() {
     let mut app = App::new();
     let idx = app.window(
-        WindowDesc::new("DrawBatch.view — pan/zoom", 960, 540).high_dpi(true),
+        WindowDesc::new("DrawBatch.view — pan/zoom", 960, 540).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

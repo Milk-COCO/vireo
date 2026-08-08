@@ -15,7 +15,7 @@ use vireo::prelude::*;
 fn main() {
     let mut app = App::new();
     let idx = app.window(
-        WindowDesc::new("Area — include/exclude/∪/∩", 920, 500).high_dpi(true),
+        WindowDesc::new("Area — include/exclude/∪/∩", 920, 500).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 

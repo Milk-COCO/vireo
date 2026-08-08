@@ -1,11 +1,11 @@
-/// 演示：high_dpi 模式、多窗口、鼠标跟随、关闭钩子、文本渲染
+/// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
 use vireo::prelude::*;
 
 fn main() {
     let mut app = App::new();
 
     let idx_a = app.window(
-        WindowDesc::new("A - high_dpi mouse follower", 800, 600).high_dpi(true),
+        WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
         Some(|| println!("窗口 A 已关闭")),
     );
     let idx_b = app.window(

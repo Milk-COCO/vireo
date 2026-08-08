@@ -22,7 +22,8 @@ cargo run --example ez
 
 - **Immediate mode**: Build a `DrawBatch` each frame, fill shapes/text, submit to the window
 - **Single pass**: Multiple batches in one `draw()`; batch trees support children, inherit, and clipping
-- **Coordinates**: Top-left origin; x right, y down (logical pixels)
+- **Coordinates**: Top-left origin; x right, y down (vireo logical pixels). With `dpi_override=None` the logical units match winit logical units (OS scaling applies); with `Some(d)` vireo owns its pixels, physical = logical × d
+- **Pixel intent**: Window size/position APIs (`WindowDesc` dimension builders and `set_size`/`set_outer_position`/`set_cursor_position`/`resize_increments`) accept `impl ToPx` — bare numbers / [`Dp`] mean vireo logical pixels, [`Px`] means physical pixels; intent is declared at the call site and does not flip with `dpi_override`. Position/size getters return `Pixel`/`PixelPos`/`PixelSize` (physical + logical dual view)
 - **`Pos`**: Anchored shapes (circle/rect/…) take a `Pos` plus the transform table; polylines keep point coordinates as geometry
 
 ```rust
@@ -58,7 +59,7 @@ win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
 - **Custom Material**: one `material_main(MaterialInput)` for shape / text; MSAA, stencil, and SDF aware
 - Multi-window + offscreen rendering
 - Textures (file / bytes / RGBA, UV subregions)
-- Window controls (fullscreen, icon, PresentMode, AA, high_dpi, …)
+- Window controls (fullscreen, icon, PresentMode, AA, custom dpi override, …)
 - Frame stats + input (polling / events / touch)
 
 ### Material conventions (not frozen)
