@@ -8,7 +8,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
-    window::{WindowId, WindowAttributes},
+    window::WindowAttributes,
 };
 
 use crate::render::DrawBatch;
@@ -17,12 +17,27 @@ use crate::texture::Texture;
 use crate::gpu::GpuContext;
 use crate::input::InputState;
 
+pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
+pub use winit::dpi::PhysicalPosition;
+pub use winit::dpi::PhysicalSize;
+pub use winit::dpi::Position;
+pub use winit::dpi::Size;
+pub use winit::error::ExternalError;
+pub use winit::error::NotSupportedError;
+pub use winit::monitor::MonitorHandle;
+pub use winit::monitor::VideoModeHandle;
+pub use winit::window::Cursor;
+pub use winit::window::CursorGrabMode;
 pub use winit::window::Fullscreen;
 pub use winit::window::Icon;
+pub use winit::window::ImePurpose;
+pub use winit::window::ResizeDirection;
+pub use winit::window::Theme;
+pub use winit::window::UserAttentionType;
+pub use winit::window::WindowButtons;
+pub use winit::window::WindowId;
 pub use winit::window::WindowLevel;
-
-use winit::window::Cursor;
 
 /// 滑动窗口帧数：约 0.5s@60Hz，平滑 FPS，避免「满 1 秒整段重置」导致 55↔60 乱跳。
 const FPS_SAMPLE_CAP: usize = 30;
@@ -186,14 +201,28 @@ pub(crate) fn clamp_aa(aa: AntiAliasing, supported: &[u32]) -> AntiAliasing {
     }
 }
 
+/// `winit::raw_window_handle::RawWindowHandle` 的 Send+Sync 包装（`RawWindowHandle` 本身
+/// 未实现 Send/Sync，但内部只是平台原生指针/整数句柄，跨线程 Move 安全——与 winit 的
+/// `SendSyncRawWindowHandle` 相同策略）。
+#[derive(Clone, Copy, Debug)]
+pub struct SendRawWindowHandle(pub winit::raw_window_handle::RawWindowHandle);
+unsafe impl Send for SendRawWindowHandle {}
+unsafe impl Sync for SendRawWindowHandle {}
+
 pub struct WindowDesc {
     pub title: String,
-    pub width: u32,
-    pub height: u32,
+    /// 初始客户区尺寸（winit dpi 类型：逻辑/物理显式声明）。
+    /// 逻辑像素 = vireo 用户坐标系（`new` 的裸宽高即逻辑）；
+    /// 物理像素需显式 `PhysicalSize::new(w, h).into()`。
+    pub size: winit::dpi::Size,
+    /// vireo 内部 high_dpi 标志（`Some(1.0)` = 逻辑=物理，见 [`WindowDesc::high_dpi`]）。
+    /// **不**传给 winit 的 `scale_factor_override`；窗口对 OS 的系统 DPI 照常生效。
     pub scale_factor_override: Option<f64>,
-    pub min_size: Option<(u32, u32)>,
-    pub max_size: Option<(u32, u32)>,
-    pub position: Option<(i32, i32)>,
+    pub min_size: Option<winit::dpi::Size>,
+    pub max_size: Option<winit::dpi::Size>,
+    pub position: Option<winit::dpi::Position>,
+    /// 父窗口句柄（rwh_06，Windows/X11 子窗口）。`None` = 顶层窗口。
+    pub parent_window: Option<SendRawWindowHandle>,
     pub resizable: bool,
     pub fullscreen: Option<Fullscreen>,
     pub maximized: bool,
@@ -203,7 +232,7 @@ pub struct WindowDesc {
     pub window_level: WindowLevel,
     pub window_icon: Option<Icon>,
     pub theme: Option<winit::window::Theme>,
-    pub resize_increments: Option<(u32, u32)>,
+    pub resize_increments: Option<winit::dpi::Size>,
     pub content_protected: bool,
     pub active: bool,
     pub cursor: Cursor,
@@ -219,15 +248,17 @@ pub struct WindowDesc {
 }
 
 impl WindowDesc {
+    /// 创建窗口描述。裸宽高按**逻辑像素**处理（vireo 用户坐标系）；
+    /// 需要物理像素时用 [`WindowDesc::size`] 显式传 `PhysicalSize`。
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         Self {
             title: title.to_string(),
-            width,
-            height,
+            size: LogicalSize::new(width as f64, height as f64).into(),
             scale_factor_override: None,
             min_size: None,
             max_size: None,
             position: None,
+            parent_window: None,
             resizable: true,
             fullscreen: None,
             maximized: false,
@@ -249,24 +280,51 @@ impl WindowDesc {
         }
     }
 
-    /// 启用 high_dpi 模式：逻辑像素 = 物理像素（scale_factor = 1.0）
+    /// 启用 **vireo 封装** 的 high_dpi 模式：强制 vireo 逻辑像素 = 物理像素
+    /// （`scale_factor = 1.0`）。这是 vireo 层的坐标约定，**不**设置 winit 的
+    /// `scale_factor_override`——窗口对 OS 的系统 DPI 缩放不受影响，只改变 vireo
+    /// 内部的 scale / logical 换算与 `metrics().scale_factor`。运行时可用
+    /// [`VireoWindow::set_high_dpi`] 切换。
     pub fn high_dpi(mut self, enabled: bool) -> Self {
         self.scale_factor_override = if enabled { Some(1.0) } else { None };
         self
     }
 
-    pub fn min_size(mut self, w: u32, h: u32) -> Self {
-        self.min_size = Some((w, h));
+    /// 显式设置初始客户区尺寸（winit dpi 类型，逻辑/物理在调用点声明）。
+    /// 覆盖 [`WindowDesc::new`] 的默认逻辑尺寸。例：
+    /// `WindowDesc::new("t", 640, 360).size(PhysicalSize::new(1280, 720))`
+    pub fn size<S: Into<winit::dpi::Size>>(mut self, size: S) -> Self {
+        self.size = size.into();
         self
     }
 
-    pub fn max_size(mut self, w: u32, h: u32) -> Self {
-        self.max_size = Some((w, h));
+    pub fn min_size<S: Into<winit::dpi::Size>>(mut self, size: S) -> Self {
+        self.min_size = Some(size.into());
         self
     }
 
-    pub fn position(mut self, x: i32, y: i32) -> Self {
-        self.position = Some((x, y));
+    pub fn max_size<S: Into<winit::dpi::Size>>(mut self, size: S) -> Self {
+        self.max_size = Some(size.into());
+        self
+    }
+
+    pub fn position<P: Into<winit::dpi::Position>>(mut self, position: P) -> Self {
+        self.position = Some(position.into());
+        self
+    }
+
+    /// 设置父窗口句柄（rwh_06 `RawWindowHandle`），本窗口成为其子窗口。
+    /// `None`（默认）= 顶层窗口。
+    ///
+    /// ## Safety
+    /// 传入的句柄必须有效且在本窗口存活期间保持存在（rwh_06 winit 契约）。
+    ///
+    /// ## Platform-specific
+    /// - **Windows**：子窗口带 `WS_CHILD`，被限制在父窗口客户区内。
+    /// - **X11**：子窗口被限制在父窗口客户区内。
+    /// - **Android / iOS / Wayland / Web**：不支持。
+    pub unsafe fn parent_window(mut self, handle: winit::raw_window_handle::RawWindowHandle) -> Self {
+        self.parent_window = Some(SendRawWindowHandle(handle));
         self
     }
 
@@ -329,8 +387,8 @@ impl WindowDesc {
         self
     }
 
-    pub fn resize_increments(mut self, w: u32, h: u32) -> Self {
-        self.resize_increments = Some((w, h));
+    pub fn resize_increments<S: Into<winit::dpi::Size>>(mut self, size: S) -> Self {
+        self.resize_increments = Some(size.into());
         self
     }
 
@@ -408,6 +466,10 @@ pub struct WindowMetrics {
     pub width: u32,
     /// 逻辑高（用户坐标系高度）
     pub height: u32,
+    /// 物理宽（像素）；`high_dpi` 窗口下与 `width` 相同
+    pub physical_width: u32,
+    /// 物理高（像素）；`high_dpi` 窗口下与 `height` 相同
+    pub physical_height: u32,
     /// 逻辑像素 → 物理像素 缩放因子（`high_dpi` 窗口为 1.0）
     pub scale_factor: f64,
 }
@@ -549,7 +611,9 @@ pub struct VireoWindow {
     pub mouse_pos: (f32, f32),
     logical_width: std::cell::Cell<u32>,
     logical_height: std::cell::Cell<u32>,
-    high_dpi: bool,
+    /// vireo 层封装：强制逻辑像素 = 物理像素（`scale = 1.0`），**不**设置 winit 的
+    /// `scale_factor_override`。运行时经 [`VireoWindow::set_high_dpi`] 切换。
+    high_dpi: std::cell::Cell<bool>,
     scale: std::cell::Cell<f32>,
     dpi_scale: std::cell::Cell<f32>,
     /// Last layout committed by `surface.configure`. FollowLayout may temporarily
@@ -647,7 +711,7 @@ impl VireoWindow {
             mouse_pos: (-1.0, -1.0),
             logical_width: std::cell::Cell::new(logical_width),
             logical_height: std::cell::Cell::new(logical_height),
-            high_dpi,
+            high_dpi: std::cell::Cell::new(high_dpi),
             scale: std::cell::Cell::new(scale),
             dpi_scale: std::cell::Cell::new(dpi_scale),
             configured_layout: std::cell::Cell::new((
@@ -698,9 +762,9 @@ impl VireoWindow {
     fn configure_surface(&self, size: winit::dpi::PhysicalSize<u32>, now: std::time::Instant) {
         debug_assert!(size.width > 0 && size.height > 0);
         let sf = self.inner.scale_factor();
-        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let scale = if self.high_dpi.get() { 1.0 } else { sf as f32 };
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi.get(), sf);
 
         let mut config = self.surface_config.borrow().clone();
         config.width = size.width;
@@ -837,9 +901,9 @@ impl VireoWindow {
             };
         }
         let sf = self.inner.scale_factor();
-        let new_scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let new_scale = if self.high_dpi.get() { 1.0 } else { sf as f32 };
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi.get(), sf);
         let mut configured_this_frame = false;
         let mut follow_pending = false;
         {
@@ -1014,9 +1078,9 @@ impl VireoWindow {
         if follow_pending {
             let size = self.inner.inner_size();
             let sf = self.inner.scale_factor();
-            let new_scale = if self.high_dpi { 1.0 } else { sf as f32 };
+            let new_scale = if self.high_dpi.get() { 1.0 } else { sf as f32 };
             let dpi_scale = sf as f32;
-            let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+            let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi.get(), sf);
             let still_drifted = {
                 let sc = self.surface_config.borrow();
                 sc.width != size.width
@@ -1112,6 +1176,8 @@ impl VireoWindow {
         let encode_secs = t2.elapsed().as_secs_f64();
 
         // 6) present
+        // Wayland 需要 present 前通知合成器（调度 frame callback）；其余平台 no-op。
+        self.inner.pre_present_notify();
         let t3 = std::time::Instant::now();
         self.gpu.queue.present(st);
         let present_secs = t3.elapsed().as_secs_f64();
@@ -1192,22 +1258,31 @@ impl VireoWindow {
         let sf = self.inner.scale_factor();
         let mut logical_w = width;
         let mut logical_h = height;
-        if !self.high_dpi && sf > 0.0 {
+        if !self.high_dpi.get() && sf > 0.0 {
             logical_w = (width as f64 / sf) as u32;
             logical_h = (height as f64 / sf) as u32;
         }
         self.logical_width.set(logical_w);
         self.logical_height.set(logical_h);
-        self.scale.set(if self.high_dpi { 1.0 } else { sf as f32 });
+        self.scale.set(if self.high_dpi.get() { 1.0 } else { sf as f32 });
         self.dpi_scale.set(sf as f32);
     }
 
-    /// 当前逻辑尺寸/缩放只读快照（用户坐标系）。
+    /// 当前逻辑/物理尺寸与缩放只读快照。
+    /// `width`/`height` 为逻辑（用户坐标系）；`physical_width`/`physical_height` 为
+    /// 物理像素（与 `width/height × scale_factor` 一致；`high_dpi` 窗口下逻辑=物理）。
     pub fn metrics(&self) -> WindowMetrics {
+        let width = self.logical_width.get();
+        let height = self.logical_height.get();
+        let scale_factor = self.scale.get() as f64;
+        let physical_width = (width as f64 * scale_factor).round() as u32;
+        let physical_height = (height as f64 * scale_factor).round() as u32;
         WindowMetrics {
-            width: self.logical_width.get(),
-            height: self.logical_height.get(),
-            scale_factor: self.scale.get() as f64,
+            width,
+            height,
+            physical_width,
+            physical_height,
+            scale_factor,
         }
     }
 
@@ -1224,9 +1299,9 @@ impl VireoWindow {
             return;
         }
         let sf = self.inner.scale_factor();
-        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
+        let scale = if self.high_dpi.get() { 1.0 } else { sf as f32 };
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi.get(), sf);
         let drift = {
             let sc = self.surface_config.borrow();
             sc.width != size.width
@@ -1247,8 +1322,8 @@ impl VireoWindow {
     pub fn resize_pending(&self) -> bool {
         let size = self.inner.inner_size();
         let sf = self.inner.scale_factor();
-        let scale = if self.high_dpi { 1.0 } else { sf as f32 };
-        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi, sf);
+        let scale = if self.high_dpi.get() { 1.0 } else { sf as f32 };
+        let (logical_w, logical_h) = logical_size(size.width, size.height, self.high_dpi.get(), sf);
         let config = self.surface_config.borrow();
         config.width != size.width
             || config.height != size.height
@@ -1626,6 +1701,26 @@ impl App {
         self
     }
 
+    pub fn on_moved(&mut self, handle: WindowIndex, callback: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_moved.push(Box::new(callback));
+        self
+    }
+
+    pub fn on_theme_changed(&mut self, handle: WindowIndex, callback: impl FnMut(winit::window::Theme) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_theme_changed.push(Box::new(callback));
+        self
+    }
+
+    /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
+    /// 运行在 winit 线程。
+    pub fn on_resized(&mut self, handle: WindowIndex, callback: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_resized.push(Box::new(callback));
+        self
+    }
+
     /// 注册一个延迟 `frames` 帧后执行的闭包。
     /// frame 计数以 `render_on_frame` 循环的帧为单位，首次调用 `on_frame` 时 `frame_count` 为 1。
     pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
@@ -1729,13 +1824,9 @@ impl App {
             }
 
             fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>) -> WindowAttributes {
-                let size: winit::dpi::Size = match desc.scale_factor_override {
-                    Some(_) => winit::dpi::PhysicalSize::new(desc.width, desc.height).into(),
-                    None => winit::dpi::LogicalSize::new(desc.width, desc.height).into(),
-                };
                 let mut attrs = WindowAttributes::default()
                     .with_title(&desc.title)
-                    .with_inner_size(size)
+                    .with_inner_size(desc.size)
                     .with_resizable(desc.resizable)
                     .with_maximized(desc.maximized)
                     .with_visible(desc.visible)
@@ -1747,14 +1838,14 @@ impl App {
                     .with_blur(desc.blur)
                     .with_cursor(desc.cursor.clone())
                     .with_enabled_buttons(desc.enabled_buttons);
-                if let Some((w, h)) = desc.min_size {
-                    attrs = attrs.with_min_inner_size(LogicalSize::new(w, h));
+                if let Some(min) = desc.min_size {
+                    attrs = attrs.with_min_inner_size(min);
                 }
-                if let Some((w, h)) = desc.max_size {
-                    attrs = attrs.with_max_inner_size(LogicalSize::new(w, h));
+                if let Some(max) = desc.max_size {
+                    attrs = attrs.with_max_inner_size(max);
                 }
-                if let Some((x, y)) = desc.position {
-                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+                if let Some(pos) = desc.position {
+                    attrs = attrs.with_position(pos);
                 }
                 if let Some(ref fs) = desc.fullscreen {
                     attrs = attrs.with_fullscreen(Some(fs.clone()));
@@ -1766,8 +1857,11 @@ impl App {
                 if let Some(theme) = desc.theme {
                     attrs = attrs.with_theme(Some(theme));
                 }
-                if let Some((w, h)) = desc.resize_increments {
-                    attrs = attrs.with_resize_increments(LogicalSize::new(w, h));
+                if let Some(ri) = desc.resize_increments {
+                    attrs = attrs.with_resize_increments(ri);
+                }
+                if let Some(ph) = desc.parent_window {
+                    attrs = unsafe { attrs.with_parent_window(Some(ph.0)) };
                 }
                 attrs
             }
@@ -1799,10 +1893,16 @@ impl App {
                         window.scale_factor() as f32
                     };
                     let dpi = window.scale_factor() as f32;
+                    let (logical_w, logical_h) = logical_size(
+                        window.inner_size().width,
+                        window.inner_size().height,
+                        desc.scale_factor_override.is_some(),
+                        scale as f64,
+                    );
                     let renderer = Renderer::new(
                         self.gpu.clone(),
-                        desc.width,
-                        desc.height,
+                        logical_w,
+                        logical_h,
                         window.inner_size().width,
                         window.inner_size().height,
                         scale,
@@ -1858,8 +1958,8 @@ impl App {
                         surface,
                         surface_config,
                         renderer,
-                        logical_width: desc.width,
-                        logical_height: desc.height,
+                        logical_width: logical_w,
+                        logical_height: logical_h,
                         scale,
                         dpi_scale: dpi,
                         high_dpi: desc.scale_factor_override.is_some(),
@@ -1891,6 +1991,8 @@ impl App {
                         cbs.on_file_dropped.extend(reg.on_file_dropped.drain(..));
                         cbs.on_file_hovered.extend(reg.on_file_hovered.drain(..));
                         cbs.on_file_hover_cancelled.extend(reg.on_file_hover_cancelled.drain(..));
+                        cbs.on_moved.extend(reg.on_moved.drain(..));
+                        cbs.on_theme_changed.extend(reg.on_theme_changed.drain(..));
                     }
                 }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -1920,6 +2022,9 @@ impl App {
                         // 事件驱动路径：仅同步逻辑尺寸。真正的 surface.configure /
                         // renderer 视图更新由渲染线程 draw() 的逐帧尺寸同步完成
                         // （模态循环期间 Resized 事件可能滞后，逐帧轮询 inner_size 兜底）。
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_resized { cb(size); }
+                        }
                         self.send(WinitEvent::Resized {
                             handle,
                             width: size.width,
@@ -2027,6 +2132,16 @@ impl App {
                             for c in cbs.on_file_hover_cancelled.drain(..) { c(); }
                         }
                     }
+                    WindowEvent::Moved(position) => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_moved { cb(position); }
+                        }
+                    }
+                    WindowEvent::ThemeChanged(theme) => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_theme_changed { cb(theme); }
+                        }
+                    }
                     // 帧循环全在渲染线程（draw 内 acquire→submit→present），
                     // winit 线程不需要响应 RedrawRequested。
                     WindowEvent::RedrawRequested => {}
@@ -2120,7 +2235,7 @@ where F: FnMut(&App) -> bool + Send + 'static
 
                 Ok(WinitEvent::CursorMoved { handle, x, y }) => {
                     if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        let sf = if win.high_dpi { 1.0_f64 } else { win.inner.scale_factor() };
+                        let sf = if win.high_dpi.get() { 1.0_f64 } else { win.inner.scale_factor() };
                         win.mouse_pos = ((x / sf) as f32, (y / sf) as f32);
                     }
                 }
@@ -2191,7 +2306,7 @@ where F: FnMut(&App) -> bool + Send + 'static
 
                 Ok(WinitEvent::Touch { handle, event }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        let sf = if win.high_dpi { 1.0_f64 } else { win.inner.scale_factor() };
+                        let sf = if win.high_dpi.get() { 1.0_f64 } else { win.inner.scale_factor() };
                         let tx = (event.x as f64 / sf) as f32;
                         let ty = (event.y as f64 / sf) as f32;
                         match event.phase {
@@ -2570,6 +2685,47 @@ impl VireoWindow {
         });
     }
 
+    /// 这是 vireo 层的坐标约定，**不**设置 winit 的 `scale_factor_override`——窗口对 OS
+    /// 的系统 DPI 缩放不受影响，只改变 vireo 内部的 scale / logical 换算、鼠标坐标换算与
+    /// `metrics()` 的 `scale_factor`。切换下一帧 `draw` 会检测到漂移并按当前 resize 刷新
+    /// 策略重算布局（配置好 surface 后立即生效；配扩张布局跟随则实时切换）。
+    ///
+    /// 示例：`examples/window_api.rs` 按 `O` 键实时切换。
+    pub fn set_high_dpi(&self, high_dpi: bool) {
+        self.high_dpi.set(high_dpi);
+    }
+
+    /// 当前是否为 vireo 封装的 high_dpi 模式（逻辑 = 物理）。
+    pub fn high_dpi(&self) -> bool {
+        self.high_dpi.get()
+    }
+
+    /// 异步请求窗口尺寸并立即返回。
+    ///
+    /// 接受 winit [`LogicalSize`]/[`PhysicalSize`]（或 `.into()`）。返回值：
+    /// - `Some(size)`：尺寸已生效或已排队，`size` 为请求后的**物理**尺寸；
+    /// - `None`：请求无法在本线程同步处理（后续会收到 `Resized` / `on_resized`）。
+    ///
+    /// 与 [`VireoWindow::set_size`]（逻辑像素）等价但可感知返回值。
+    /// ## Platform-specific
+    /// - **iOS / Web**：仅主线程可用。
+    pub fn request_inner_size<S: Into<winit::dpi::Size>>(
+        &self,
+        size: S,
+    ) -> Option<PhysicalSize<u32>> {
+        self.inner.request_inner_size(size)
+    }
+
+    /// present 前通知合成器（告诉窗口系统下一帧即将上屏）。
+    /// 已在 [`VireoWindow::draw`] 的 present 前自动调用一次；单独调用用于
+    /// 外部同步 present 的场景。
+    /// ## Platform-specific
+    /// - **Android / iOS / X11 / Web / Windows / macOS / Orbital**：no-op。
+    /// - **Wayland**：调度 frame callback 节流合成。
+    pub fn pre_present_notify(&self) {
+        self.inner.pre_present_notify();
+    }
+
     /// 设置最小窗口大小（逻辑像素，通过 winit 线程异步操作）
     pub fn set_min_size(&self, width: Option<u32>, height: Option<u32>) {
         let _ = self.event_tx.send(WinitEvent::SetMinSize {
@@ -2750,6 +2906,31 @@ impl VireoWindow {
         self
     }
 
+    /// 窗口位置（物理像素，含边框外沿）变化时回调。运行在 winit 线程。
+    pub fn on_moved(&self, callback: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_moved.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    /// 系统主题变化时回调（仅 Windows/macOS 上报）。运行在 winit 线程。
+    pub fn on_theme_changed(&self, callback: impl FnMut(winit::window::Theme) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_theme_changed.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
+    /// 运行在 winit 线程。
+    pub fn on_resized(&self, callback: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_resized.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
     /// 设置窗口是否接收 IME 事件（默认关闭）。
     ///
     /// 开启后窗口才会收到 [`Ime`](crate::input::Ime) 事件；preedit 期间**不再收到**
@@ -2797,6 +2978,223 @@ impl VireoWindow {
     /// - **仅 Wayland** 支持；Windows / X11 / macOS 等平台为 no-op。
     pub fn set_ime_purpose(&self, purpose: winit::window::ImePurpose) {
         self.inner.set_ime_purpose(purpose);
+    }
+
+    // ------ 窗口状态命令与查询（1:1 转发 winit `Window`，直接 `self.inner`，任意线程可调）------
+
+    /// 运行时切换窗口是否可调大小。
+    /// ## Platform-specific
+    /// - 仅桌面有效；X11 下 Xfce 窗口管理器可能不生效。
+    pub fn set_resizable(&self, resizable: bool) {
+        self.inner.set_resizable(resizable);
+    }
+
+    /// 当前窗口是否可调大小。X11 未实现。
+    pub fn is_resizable(&self) -> bool {
+        self.inner.is_resizable()
+    }
+
+    /// 运行时设置标题栏启用的按钮（最小化/最大化/关闭）。
+    /// ## Platform-specific
+    /// - Wayland / X11 / Orbital 不支持。
+    pub fn set_enabled_buttons(&self, buttons: WindowButtons) {
+        self.inner.set_enabled_buttons(buttons);
+    }
+
+    /// 当前启用的标题栏按钮。Wayland / X11 / Orbital 恒为全部。
+    pub fn enabled_buttons(&self) -> WindowButtons {
+        self.inner.enabled_buttons()
+    }
+
+    /// 运行时切换窗口透明。
+    /// ## Platform-specific
+    /// - Web / iOS / Android 不支持；X11 仅构建期可设。
+    pub fn set_transparent(&self, transparent: bool) {
+        self.inner.set_transparent(transparent);
+    }
+
+    /// 设置窗口外层位置（含边框）。
+    /// ## Platform-specific
+    /// - Android / Wayland 不支持。
+    pub fn set_outer_position<P: Into<winit::dpi::Position>>(&self, position: P) {
+        self.inner.set_outer_position(position);
+    }
+
+    /// 客户端区（不含边框）左上角物理像素位置。
+    /// ## Platform-specific
+    /// - Android / Wayland 恒 `NotSupported`。
+    pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
+        self.inner.inner_position()
+    }
+
+    /// 窗口外沿（含边框）物理像素位置。
+    /// ## Platform-specific
+    /// - Android / Wayland 恒 `NotSupported`。
+    pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
+        self.inner.outer_position()
+    }
+
+    /// 窗口外沿物理尺寸（含边框）。iOS / Web 与 `inner_size` 相同。
+    pub fn outer_size(&self) -> PhysicalSize<u32> {
+        self.inner.outer_size()
+    }
+
+    /// 当前是否最小化。`None` 表示平台无法查询。
+    pub fn is_minimized(&self) -> Option<bool> {
+        self.inner.is_minimized()
+    }
+
+    /// 当前是否最大化。
+    pub fn is_maximized(&self) -> bool {
+        self.inner.is_maximized()
+    }
+
+    /// 当前是否可见。`None` 表示平台无法查询。
+    pub fn is_visible(&self) -> Option<bool> {
+        self.inner.is_visible()
+    }
+
+    /// 当前是否带系统装饰（标题栏/边框）。
+    pub fn is_decorated(&self) -> bool {
+        self.inner.is_decorated()
+    }
+
+    /// 当前全屏状态（`None` = 非全屏）。
+    pub fn fullscreen(&self) -> Option<Fullscreen> {
+        self.inner.fullscreen()
+    }
+
+    /// 运行时切换窗口主题。
+    /// ## Platform-specific
+    /// - iOS / Android / Web / Orbital 不支持。
+    pub fn set_theme(&self, theme: Option<Theme>) {
+        self.inner.set_theme(theme);
+    }
+
+    /// 当前窗口主题。iOS / Android / X11 / Orbital 不支持；Wayland 仅在显式设置后返回。
+    pub fn theme(&self) -> Option<Theme> {
+        self.inner.theme()
+    }
+
+    /// 请求用户注意（任务栏闪烁/图标抖动）。
+    /// ## Platform-specific
+    /// - iOS / Android / Web / Orbital 不支持；X11 须手动清除；Wayland 需 xdg-activation 配合。
+    pub fn request_user_attention(&self, request_type: Option<UserAttentionType>) {
+        self.inner.request_user_attention(request_type);
+    }
+
+    /// 隐藏/显示系统光标。
+    /// ## Platform-specific
+    /// - iOS / Android 不支持。
+    pub fn set_cursor_visible(&self, visible: bool) {
+        self.inner.set_cursor_visible(visible);
+    }
+
+    /// 把光标移到窗口内指定位置。
+    /// ## Platform-specific
+    /// - Wayland 需要已 grab；iOS / Android / Web / Orbital 恒 `NotSupported`。
+    pub fn set_cursor_position<P: Into<winit::dpi::Position>>(
+        &self,
+        position: P,
+    ) -> Result<(), ExternalError> {
+        self.inner.set_cursor_position(position)
+    }
+
+    /// 抓取/锁定光标。
+    /// ## Platform-specific
+    /// - macOS 不支持 `Confined`；X11 不支持 `Locked`。
+    pub fn set_cursor_grab(&self, mode: CursorGrabMode) -> Result<(), ExternalError> {
+        self.inner.set_cursor_grab(mode)
+    }
+
+    /// 程序化拖动窗口（自定义标题栏）。
+    /// ## Platform-specific
+    /// - iOS / Android / Web 不支持；macOS 可能吞掉随后的释放事件。
+    pub fn drag_window(&self) -> Result<(), ExternalError> {
+        self.inner.drag_window()
+    }
+
+    /// 程序化缩放窗口（自定义边框）。
+    /// ## Platform-specific
+    /// - macOS / iOS / Android / Web 不支持。
+    pub fn drag_resize_window(&self, direction: ResizeDirection) -> Result<(), ExternalError> {
+        self.inner.drag_resize_window(direction)
+    }
+
+    /// 显示系统窗口菜单（右键标题栏菜单）。
+    /// ## Platform-specific
+    /// - **仅 Windows** 支持。
+    pub fn show_window_menu<P: Into<winit::dpi::Position>>(&self, position: P) {
+        self.inner.show_window_menu(position);
+    }
+
+    /// 设置窗口是否响应光标命中测试（`false` = 鼠标事件穿透窗口）。
+    /// ## Platform-specific
+    /// - 仅 Windows / X11 有效；其余平台恒 `NotSupported`。
+    pub fn set_cursor_hittest(&self, hittest: bool) -> Result<(), ExternalError> {
+        self.inner.set_cursor_hittest(hittest)
+    }
+
+    /// 重置死键状态。切换输入法 / 输入状态后调用，避免后续字符被死键组合。
+    /// ## Platform-specific
+    /// - 仅 macOS / Windows 有效；其余平台 no-op。
+    pub fn reset_dead_keys(&self) {
+        self.inner.reset_dead_keys();
+    }
+
+    /// 窗口背景模糊（毛玻璃）。
+    /// ## Platform-specific
+    /// - **仅 Wayland (kwin)** 有效；其余平台 no-op。
+    pub fn set_blur(&self, blur: bool) {
+        self.inner.set_blur(blur);
+    }
+
+    /// 禁止窗口内容被录屏 / 截屏捕获。
+    /// ## Platform-specific
+    /// - **仅 macOS** 有效；其余平台 no-op。
+    pub fn set_content_protected(&self, protected: bool) {
+        self.inner.set_content_protected(protected);
+    }
+
+    /// 当前窗口尺寸调整步进（网格对齐窗口）。无步进时返回 `None`。
+    /// ## Platform-specific
+    /// - iOS / Android / Web / Orbital 恒 `None`。
+    pub fn resize_increments(&self) -> Option<PhysicalSize<u32>> {
+        self.inner.resize_increments()
+    }
+
+    /// 设置窗口尺寸调整步进（网格对齐窗口）。
+    /// ## Platform-specific
+    /// - iOS / Android / Web / Orbital 不支持。
+    pub fn set_resize_increments<S: Into<winit::dpi::Size>>(&self, increments: Option<S>) {
+        self.inner.set_resize_increments(increments);
+    }
+
+    /// 窗口当前所在显示器。
+    pub fn current_monitor(&self) -> Option<MonitorHandle> {
+        self.inner.current_monitor()
+    }
+
+    /// 主显示器。
+    /// ## Platform-specific
+    /// - Wayland / Web 恒 `None`。
+    pub fn primary_monitor(&self) -> Option<MonitorHandle> {
+        self.inner.primary_monitor()
+    }
+
+    /// 全部可用显示器。
+    pub fn available_monitors(&self) -> impl Iterator<Item = MonitorHandle> {
+        self.inner.available_monitors()
+    }
+
+    /// winit 窗口唯一标识（跨窗口 / 事件对比用）。
+    pub fn id(&self) -> WindowId {
+        self.inner.id()
+    }
+
+    /// 当前 DPI 缩放因子（物理像素 / 逻辑像素）。
+    pub fn scale_factor(&self) -> f64 {
+        self.inner.scale_factor()
     }
 
     /// 运行时切换 present mode（会 reconfigure surface）。
@@ -3438,8 +3836,15 @@ mod metrics_tests {
 
     #[test]
     fn window_metrics_matches_constructor_values() {
-        let m = super::WindowMetrics { width: 800, height: 600, scale_factor: 1.5 };
+        let m = super::WindowMetrics {
+            width: 800,
+            height: 600,
+            physical_width: 1200,
+            physical_height: 900,
+            scale_factor: 1.5,
+        };
         assert_eq!((m.width, m.height), (800, 600));
+        assert_eq!((m.physical_width, m.physical_height), (1200, 900));
         assert_eq!(m.scale_factor, 1.5);
     }
 
@@ -3591,5 +3996,36 @@ mod metrics_tests {
             super::WindowDesc::new("t", 640, 360).frame_latency(1).frame_latency,
             1
         );
+    }
+
+    #[test]
+    fn window_desc_new_size_is_logical_and_builders_are_typed() {
+        use winit::dpi::{LogicalSize, PhysicalSize};
+        // `new` 的裸宽高按逻辑像素处理（vireo 用户坐标系）
+        assert_eq!(
+            super::WindowDesc::new("t", 640, 360).size,
+            winit::dpi::Size::Logical(LogicalSize::new(640.0, 360.0))
+        );
+        // `size`/`min_size`/`max_size`/`resize_increments` 收 `Into<Size>`，
+        // 逻辑/物理在调用点显式声明，不随 high_dpi 翻转
+        let d = super::WindowDesc::new("t", 640, 360)
+            .high_dpi(true)
+            .size(PhysicalSize::new(1280, 720))
+            .min_size(LogicalSize::new(200, 100))
+            .max_size(PhysicalSize::new(2560, 1440))
+            .resize_increments(LogicalSize::new(10, 10));
+        assert_eq!(d.size, winit::dpi::Size::Physical(PhysicalSize::new(1280, 720)));
+        assert_eq!(d.min_size, Some(winit::dpi::Size::Logical(LogicalSize::new(200.0, 100.0))));
+        assert_eq!(d.max_size, Some(winit::dpi::Size::Physical(PhysicalSize::new(2560, 1440))));
+        assert_eq!(d.resize_increments, Some(winit::dpi::Size::Logical(LogicalSize::new(10.0, 10.0))));
+    }
+
+    #[test]
+    fn window_desc_position_is_typed() {
+        use winit::dpi::{LogicalPosition, PhysicalPosition};
+        let d = super::WindowDesc::new("t", 640, 360).position(LogicalPosition::new(10, 20));
+        assert_eq!(d.position, Some(winit::dpi::Position::Logical(LogicalPosition::new(10.0, 20.0))));
+        let d = super::WindowDesc::new("t", 640, 360).position(PhysicalPosition::new(10, 20));
+        assert_eq!(d.position, Some(winit::dpi::Position::Physical(PhysicalPosition::new(10, 20))));
     }
 }

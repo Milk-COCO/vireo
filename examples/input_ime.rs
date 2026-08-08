@@ -10,7 +10,7 @@
 //! - 从系统拖文件进窗口：显示 hovered / dropped / cancelled 事件
 //!
 //! ```bash
-//! cargo run --example ime_input
+//! cargo run --example input_ime
 //! ```
 
 use std::sync::{Arc, Mutex};

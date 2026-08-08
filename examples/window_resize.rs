@@ -62,6 +62,23 @@
 //! 默认 `Immediate` 便于观察帧流，按 `V` 切 `AutoVsync` 看真实显示节奏。
 //! 
 //! 想看更详细的帧用时，可以把 `frame_stats` 示例与本示例结合。或者直接改那个示例的刷新策略/去抖/布局跟随也行。
+//!
+//! ## 逻辑/物理像素（winit dpi 类型化）
+//!
+//! `WindowDesc::new` 的裸宽高恒为**逻辑像素**（vireo 用户坐标系）。需要物理像素或声明
+//! 其他约束时，用 winit dpi 类型 builder 在调用点显式声明，不随 `high_dpi` 翻转：
+//!
+//! ```rust,ignore
+//! WindowDesc::new("t", 640, 360)                        // 逻辑 640x360（默认）
+//!     .size(PhysicalSize::new(1280, 720))               // 显式物理 1280x720
+//!     .min_size(LogicalSize::new(400, 300))             // 最小（逻辑）
+//!     .max_size(PhysicalSize::new(2560, 1440))          // 最大（物理）
+//!     .resize_increments(LogicalSize::new(8, 8))        // 按 8px 步进
+//!     .position(LogicalPosition::new(100, 100));        // 初始位置（逻辑）
+//! ```
+//!
+//! 运行时查询见 `win.metrics()`：`width/height` 是逻辑，`physical_width/physical_height`
+//! 是物理像素（= 逻辑 × scale_factor；`high_dpi` 窗口下二者相同）。HUD 下方同时显示两种。
 
 use vireo::prelude::*;
 
@@ -75,8 +92,15 @@ fn policy_label(p: ResizeRefreshPolicy) -> String {
 
 fn main() {
     let mut app = App::new();
+    // `new` 裸宽高恒为逻辑像素；下面用 dpi 类型显式声明最小/最大/初始位置/步进。
+    // 如需物理尺寸覆盖，用 `.size(PhysicalSize::new(w, h))`。
     let idx = app.window(
-        WindowDesc::new("Resize Refresh Policy", 640, 360).present_mode(PresentMode::AutoVsync),
+        WindowDesc::new("Resize Refresh Policy", 640, 360)
+            .min_size(LogicalSize::new(320, 200))
+            .max_size(PhysicalSize::new(1920, 1080))
+            .resize_increments(LogicalSize::new(8, 8))
+            .position(LogicalPosition::new(120, 80))
+            .present_mode(PresentMode::AutoVsync),
         None::<fn()>,
     );
 
@@ -165,8 +189,8 @@ fn main() {
             format!("Debounce: {}ms  (D)   present mode: {:?}", debounce_ms, win.present_mode()),
             format!("Layout follow: {}  (L)", follow_label),
             format!(
-                "window: {}x{} (logical)  Update FPS: {:.1}  update dt: {:.2} ms",
-                metrics.width, metrics.height, app.fps, app.frame_time * 1000.0
+                "window: {}x{} (logical)  {}x{} (physical)  Update FPS: {:.1}  update dt: {:.2} ms",
+                metrics.width, metrics.height, metrics.physical_width, metrics.physical_height, app.fps, app.frame_time * 1000.0
             ),
             format!(
                 "last configure: {:.2} ms  acquire: {:.2} ms  encode: {:.2} ms",

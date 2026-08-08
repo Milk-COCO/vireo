@@ -136,7 +136,8 @@ cargo run --example custom_material_text
 cargo run --example custom_material_post
 
 # 窗口 / 输入 / 离屏
-cargo run --example window_controls
+cargo run --example window_api
+cargo run --example input_ime
 cargo run --example window_present
 cargo run --example window_resize
 cargo run --example window_aa

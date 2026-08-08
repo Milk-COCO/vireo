@@ -148,6 +148,13 @@ pub struct InputCallbacks {
     pub on_file_hovered: Vec<Box<dyn FnMut(&std::path::PathBuf)>>,
     /// 悬停取消（文件移出窗口或取消）。无论多少文件悬停只触发一次。运行在 winit 线程。
     pub on_file_hover_cancelled: Vec<Box<dyn FnOnce()>>,
+    /// 窗口位置（物理像素，含窗口边框外沿）变化。运行在 winit 线程。
+    pub on_moved: Vec<Box<dyn FnMut(winit::dpi::PhysicalPosition<i32>)>>,
+    /// 系统主题变化（`Theme`）。仅 Windows/macOS 上报。运行在 winit 线程。
+    pub on_theme_changed: Vec<Box<dyn FnMut(winit::window::Theme)>>,
+    /// 窗口尺寸（物理像素）变化。模态循环期间可能滞后（渲染线程逐帧轮询兜底）。
+    /// 运行在 winit 线程。
+    pub on_resized: Vec<Box<dyn FnMut(winit::dpi::PhysicalSize<u32>)>>,
 }
 
 // SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。
@@ -171,6 +178,9 @@ impl Default for InputCallbacks {
             on_file_dropped: Vec::new(),
             on_file_hovered: Vec::new(),
             on_file_hover_cancelled: Vec::new(),
+            on_moved: Vec::new(),
+            on_theme_changed: Vec::new(),
+            on_resized: Vec::new(),
         }
     }
 }
@@ -428,6 +438,9 @@ mod tests {
         assert!(cb.on_file_dropped.is_empty());
         assert!(cb.on_file_hovered.is_empty());
         assert!(cb.on_file_hover_cancelled.is_empty());
+    assert!(cb.on_moved.is_empty());
+    assert!(cb.on_theme_changed.is_empty());
+    assert!(cb.on_resized.is_empty());
     }
 
     #[test]
@@ -439,11 +452,17 @@ mod tests {
         cb.on_file_dropped.push(Box::new(|_| {}));
         cb.on_file_hovered.push(Box::new(|_| {}));
         cb.on_file_hover_cancelled.push(Box::new(|| {}));
+    cb.on_moved.push(Box::new(|_| {}));
+    cb.on_theme_changed.push(Box::new(|_| {}));
+    cb.on_resized.push(Box::new(|_| {}));
         assert_eq!(cb.on_key_down.len(), 1);
         assert_eq!(cb.on_mouse_down.len(), 1);
         assert_eq!(cb.on_ime.len(), 1);
         assert_eq!(cb.on_file_dropped.len(), 1);
         assert_eq!(cb.on_file_hovered.len(), 1);
         assert_eq!(cb.on_file_hover_cancelled.len(), 1);
+    assert_eq!(cb.on_moved.len(), 1);
+    assert_eq!(cb.on_theme_changed.len(), 1);
+    assert_eq!(cb.on_resized.len(), 1);
     }
 }
