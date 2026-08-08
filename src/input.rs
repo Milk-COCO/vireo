@@ -4,6 +4,17 @@ use std::collections::{HashMap, HashSet};
 // ------ Re-exports (winit types direct) ------
 
 pub use winit::event::ElementState;
+/// 输入法（IME）事件，1:1 对应 winit 的 [`Ime`]（winit 文档见
+/// `winit::event::Ime`）。四个变体：`Enabled` / `Preedit(String, Option<(usize,usize)>)` /
+/// `Commit(String)` / `Disabled`。
+///
+/// winit 行为要点：
+/// - `Preedit` 的第二个参数是光标在组词串中的 **byte** 区间 `(begin, end)`；`None` = 隐藏光标；
+///   空串 `""` = 清除组词（winit 合成事件）。
+/// - 事件顺序：`Enabled → Preedit* → Commit → Disabled`。
+/// - 仅当 [`VireoWindow::set_ime_allowed(true)`](crate::window::VireoWindow::set_ime_allowed)
+///   且窗口聚焦时才会收到；IME 开启期间 preedit 阶段**收不到** `KeyboardInput` 事件。
+pub use winit::event::Ime;
 pub use winit::event::MouseButton;
 pub use winit::keyboard::Key;
 pub use winit::keyboard::KeyCode;
@@ -129,6 +140,14 @@ pub struct InputCallbacks {
     pub on_focus_gained: Vec<Box<dyn FnOnce()>>,
     pub on_focus_lost: Vec<Box<dyn FnOnce()>>,
     pub on_modifiers_changed: Vec<Box<dyn FnMut(Modifiers)>>,
+    /// 输入法（IME）事件（见 [`Ime`]）。运行在 winit 线程。
+    pub on_ime: Vec<Box<dyn FnMut(&Ime)>>,
+    /// 文件被拖放进窗口。多文件逐个触发。运行在 winit 线程。
+    pub on_file_dropped: Vec<Box<dyn FnMut(&std::path::PathBuf)>>,
+    /// 文件正悬停在窗口上方。多文件逐个触发。运行在 winit 线程。
+    pub on_file_hovered: Vec<Box<dyn FnMut(&std::path::PathBuf)>>,
+    /// 悬停取消（文件移出窗口或取消）。无论多少文件悬停只触发一次。运行在 winit 线程。
+    pub on_file_hover_cancelled: Vec<Box<dyn FnOnce()>>,
 }
 
 // SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。
@@ -148,6 +167,10 @@ impl Default for InputCallbacks {
             on_focus_gained: Vec::new(),
             on_focus_lost: Vec::new(),
             on_modifiers_changed: Vec::new(),
+            on_ime: Vec::new(),
+            on_file_dropped: Vec::new(),
+            on_file_hovered: Vec::new(),
+            on_file_hover_cancelled: Vec::new(),
         }
     }
 }
@@ -401,6 +424,10 @@ mod tests {
         assert!(cb.on_focus_gained.is_empty());
         assert!(cb.on_focus_lost.is_empty());
         assert!(cb.on_modifiers_changed.is_empty());
+        assert!(cb.on_ime.is_empty());
+        assert!(cb.on_file_dropped.is_empty());
+        assert!(cb.on_file_hovered.is_empty());
+        assert!(cb.on_file_hover_cancelled.is_empty());
     }
 
     #[test]
@@ -408,7 +435,15 @@ mod tests {
         let mut cb = InputCallbacks::default();
         cb.on_key_down.push(Box::new(|_| {}));
         cb.on_mouse_down.push(Box::new(|_| {}));
+        cb.on_ime.push(Box::new(|_| {}));
+        cb.on_file_dropped.push(Box::new(|_| {}));
+        cb.on_file_hovered.push(Box::new(|_| {}));
+        cb.on_file_hover_cancelled.push(Box::new(|| {}));
         assert_eq!(cb.on_key_down.len(), 1);
         assert_eq!(cb.on_mouse_down.len(), 1);
+        assert_eq!(cb.on_ime.len(), 1);
+        assert_eq!(cb.on_file_dropped.len(), 1);
+        assert_eq!(cb.on_file_hovered.len(), 1);
+        assert_eq!(cb.on_file_hover_cancelled.len(), 1);
     }
 }

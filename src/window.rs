@@ -1602,6 +1602,30 @@ impl App {
         self
     }
 
+    pub fn on_ime(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::Ime) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_ime.push(Box::new(callback));
+        self
+    }
+
+    pub fn on_file_dropped(&mut self, handle: WindowIndex, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_file_dropped.push(Box::new(callback));
+        self
+    }
+
+    pub fn on_file_hovered(&mut self, handle: WindowIndex, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_file_hovered.push(Box::new(callback));
+        self
+    }
+
+    pub fn on_file_hover_cancelled(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_file_hover_cancelled.push(Box::new(callback));
+        self
+    }
+
     /// 注册一个延迟 `frames` 帧后执行的闭包。
     /// frame 计数以 `render_on_frame` 循环的帧为单位，首次调用 `on_frame` 时 `frame_count` 为 1。
     pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
@@ -1863,6 +1887,10 @@ impl App {
                         cbs.on_focus_gained.extend(reg.on_focus_gained.drain(..));
                         cbs.on_focus_lost.extend(reg.on_focus_lost.drain(..));
                         cbs.on_modifiers_changed.extend(reg.on_modifiers_changed.drain(..));
+                        cbs.on_ime.extend(reg.on_ime.drain(..));
+                        cbs.on_file_dropped.extend(reg.on_file_dropped.drain(..));
+                        cbs.on_file_hovered.extend(reg.on_file_hovered.drain(..));
+                        cbs.on_file_hover_cancelled.extend(reg.on_file_hover_cancelled.drain(..));
                     }
                 }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -1978,6 +2006,26 @@ impl App {
                             for cb in &mut cbs.on_touch { cb(&mapped); }
                         }
                         self.send(WinitEvent::Touch { handle, event: mapped });
+                    }
+                    WindowEvent::Ime(ime) => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_ime { cb(&ime); }
+                        }
+                    }
+                    WindowEvent::DroppedFile(path) => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_file_dropped { cb(&path); }
+                        }
+                    }
+                    WindowEvent::HoveredFile(path) => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in &mut cbs.on_file_hovered { cb(&path); }
+                        }
+                    }
+                    WindowEvent::HoveredFileCancelled => {
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for c in cbs.on_file_hover_cancelled.drain(..) { c(); }
+                        }
                     }
                     // 帧循环全在渲染线程（draw 内 acquire→submit→present），
                     // winit 线程不需要响应 RedrawRequested。
@@ -2672,6 +2720,83 @@ impl VireoWindow {
         cbs.on_modifiers_changed.push(Box::new(callback));
         let _ = self.cb_tx.send((self.handle, cbs));
         self
+    }
+
+    pub fn on_ime(&self, callback: impl FnMut(&crate::input::Ime) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_ime.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    pub fn on_file_dropped(&self, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_file_dropped.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    pub fn on_file_hovered(&self, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_file_hovered.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    pub fn on_file_hover_cancelled(&self, callback: impl FnOnce() + 'static) -> &Self {
+        let mut cbs = crate::input::InputCallbacks::default();
+        cbs.on_file_hover_cancelled.push(Box::new(callback));
+        let _ = self.cb_tx.send((self.handle, cbs));
+        self
+    }
+
+    /// 设置窗口是否接收 IME 事件（默认关闭）。
+    ///
+    /// 开启后窗口才会收到 [`Ime`](crate::input::Ime) 事件；preedit 期间**不再收到**
+    /// `KeyboardInput`。应在期待文本输入时开启（例如输入框聚焦），否则关闭。
+    ///
+    /// 1:1 封装 winit [`Window::set_ime_allowed`](winit::window::Window::set_ime_allowed)。
+    /// 内部由 winit 排队到窗口线程执行，任意线程可调用。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **macOS:** IME 必须开启才能收到 dead-key 序列组合的文本输入。
+    /// - **iOS / Android:** 控制软键盘显示/隐藏。
+    /// - **Web / Orbital:** 不支持。
+    /// - **X11:** 开启 IME 后 compose 期间不再报告 dead keys。
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.inner.set_ime_allowed(allowed);
+    }
+
+    /// 设置 IME 候选窗/组合窗跟随光标的矩形区域（位置 + 大小）。
+    ///
+    /// 在文本光标移动时调用，位置/大小均为逻辑或物理坐标（见 winit
+    /// [`Position`](winit::dpi::Position) / [`Size`](winit::dpi::Size)）。
+    ///
+    /// 1:1 封装 winit [`Window::set_ime_cursor_area`](winit::window::Window::set_ime_cursor_area)。
+    /// 内部由 winit 排队到窗口线程执行，任意线程可调用。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **X11:** 仅支持位置，忽略大小。
+    /// - **iOS / Android / Web / Orbital:** 不支持。
+    pub fn set_ime_cursor_area<P: Into<winit::dpi::Position>, S: Into<winit::dpi::Size>>(
+        &self,
+        position: P,
+        size: S,
+    ) {
+        self.inner.set_ime_cursor_area(position, size);
+    }
+
+    /// 设置 IME 用途（影响候选词等行为）。
+    ///
+    /// 1:1 封装 winit [`Window::set_ime_purpose`](winit::window::Window::set_ime_purpose)。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **仅 Wayland** 支持；Windows / X11 / macOS 等平台为 no-op。
+    pub fn set_ime_purpose(&self, purpose: winit::window::ImePurpose) {
+        self.inner.set_ime_purpose(purpose);
     }
 
     /// 运行时切换 present mode（会 reconfigure surface）。

@@ -89,6 +89,7 @@ pub mod prelude {
     pub use crate::hud_format;
     // 输入系统
     pub use crate::input::ElementState;
+    pub use crate::input::Ime;
     pub use crate::input::Key;
     pub use crate::input::KeyCode;
     pub use crate::input::KeyEvent;
