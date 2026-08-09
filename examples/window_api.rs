@@ -18,6 +18,16 @@
 //!   `None` = vireo 逻辑即 winit 逻辑（OS 缩放参与）；`Some(v)` = vireo 全自持像素，
 //!   物理 = 逻辑 × v（忽略 OS 缩放）。切换保持 vireo 逻辑尺寸、调整物理窗口大小。
 //! - `7` / `8` / `9`：预设大小 300×200 / 600×400 / 900×600（set_size，vireo 逻辑像素）
+//! - `I`：请求把当前逻辑尺寸缩到 0.66×（request_resize，请求尺寸并回告是否当场生效）
+//! - `[` / `]`：循环 resize_increments 无 / 8px / 32px（set_resize_increments，Px 意图）
+//! - `Q`：切换光标穿透（set_cursor_hittest）
+//! - `C`：切换内容保护 / 模糊（set_content_protected / set_blur，仅 macOS / Wayland 生效，
+//!   其它平台 no-op）
+//! - `B`：刷新显示器查询（current / primary / available 数量）
+//! - `K`：重置键盘 dead key 状态（reset_dead_keys，macOS/Windows）
+//!
+//! HUD 中 `PixelSize` / `PixelPos` 同时给出物理（`px`）与 vireo 逻辑（`dp`）双视图，
+//! 展示统一像素 API：getter 返回双表示快照，裸数值写入默认按逻辑像素。
 //!
 //! ```bash
 //! cargo run --example window_api
@@ -55,6 +65,10 @@ fn main() {
     let mut dpi_override: Option<f64> = None;
     let titles = ["Window API", "标题已换!", "Vireo Window"];
     let mut title_i = 0usize;
+    let mut hittest = true;
+    let mut inc_mode: u8 = 0; // 0=None 1=8px 2=32px
+    let mut protect = false;
+    let mut reqsize: Option<(u32, u32)> = None;
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -156,6 +170,33 @@ fn main() {
         if edge(KeyCode::Digit9) {
             win.set_size(900, 600);
         }
+        if edge(KeyCode::KeyI) {
+            let m = win.metrics();
+            reqsize = win.request_resize(
+                (m.width as f64 * 0.66).max(1.0),
+                (m.height as f64 * 0.66).max(1.0),
+            ).map(|s| (s.width, s.height));
+        }
+        if edge(KeyCode::BracketLeft) || edge(KeyCode::BracketRight) {
+            inc_mode = (inc_mode + 1) % 3;
+            match inc_mode {
+                0 => win.set_resize_increments::<f64, f64>(None),
+                1 => win.set_resize_increments(Some((8.0f64, 8.0f64))),
+                _ => win.set_resize_increments(Some((px(32.0), px(32.0)))),
+            }
+        }
+        if edge(KeyCode::KeyQ) {
+            hittest = !hittest;
+            let _ = win.set_cursor_hittest(hittest);
+        }
+        if edge(KeyCode::KeyC) {
+            protect = !protect;
+            win.set_content_protected(protect);
+            win.set_blur(protect);
+        }
+        if edge(KeyCode::KeyK) {
+            win.reset_dead_keys();
+        }
 
         // 拖「标题栏」区域（顶部 36px）拖动窗口。
         // 只能在「左键按下沿」且按下点在区域内时调用一次 drag_window()；
@@ -177,8 +218,13 @@ fn main() {
         let full = win.fullscreen().is_some();
         let outer_size = win.outer_size();
         let inner_pos = win.inner_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
+        let inner_pos_px = win.inner_position().map(|p| p.physical()).unwrap_or((0.0, 0.0));
         let outer_pos = win.outer_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
         let cur_theme = win.theme();
+        let cur_mon = win.current_monitor();
+        let prim_mon = win.primary_monitor();
+        let avail_n = win.available_monitors().count();
+        let inc_q = win.resize_increments();
 
         let st_guard = st.lock().unwrap();
         let (moved_x, moved_y) = st_guard.moved.unwrap_or((0, 0));
@@ -204,7 +250,15 @@ fn main() {
         lines.push(format!("enabled_buttons={}  fullscreen={}", if buttons_all { "all" } else { "close-only" }, full));
         lines.push(format!("theme(set)={:?}  theme(query)={:?}", match theme_mode { 1 => Some(Theme::Dark), 2 => Some(Theme::Light), _ => None }, cur_theme));
         lines.push(format!("minimized={}  maximized={}  visible={}", is_min, is_max, is_vis));
-        lines.push(format!("inner_pos={:?}  outer_pos={:?}  outer_size(logical)={}x{}", inner_pos, outer_pos, outer_size.logical().0 as u32, outer_size.logical().1 as u32));
+        lines.push(format!(
+            "inner_pos px={:.0},{:.0} dp={:.0},{:.0}  outer_pos(dp)={:?}  outer_size px={:.0}x{:.0} dp(logical)={:.0}x{:.0}",
+            inner_pos_px.0, inner_pos_px.1, inner_pos.0, inner_pos.1,
+            outer_pos,
+            outer_size.physical().0, outer_size.physical().1,
+            outer_size.logical().0, outer_size.logical().1,
+        ));
+        lines.push(format!("hittest={}  reqsize={:?}  resize_increments={:?}", hittest, reqsize, inc_q.map(|p| p.logical())));
+        lines.push(format!("content_protected={}  monitor_current={:?}  primary={:?}  available={}", protect, cur_mon.is_some(), prim_mon.is_some(), avail_n));
         lines.push(format!("on_moved=({}, {})  on_theme_changed={:?}", moved_x, moved_y, evt_theme));
         lines.push(format!(
             "dpi_override={:?}  metrics logical={}x{} physical={}x{} sf={:.2}",
@@ -230,10 +284,17 @@ fn main() {
 
         draw_text(
             &mut b.texts,
-            "D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · G 光标中心 · R 位置 · T 标题 · M/N 最大/最小 · H 显隐 · O dpi覆盖 · 7/8/9 尺寸",
-            Pos::new(20.0, 500.0),
+            "D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · G 中心 · R 位置 · T 标题 · M/N 最大/最小 · H 显隐 · O dpi覆盖 · 7/8/9 尺寸",
+            Pos::new(20.0, 438.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),
+        );
+        draw_text(
+            &mut b.texts,
+            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 显示器 · K dead-key重置",
+            Pos::new(20.0, 462.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
         );
 
         win.draw(Color::new(0.07, 0.08, 0.12, 1.0), &[&b]);

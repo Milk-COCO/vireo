@@ -2734,7 +2734,7 @@ impl VireoWindow {
     /// - `Some(1.0)`：逻辑 = 物理（旧 `set_high_dpi(true)` 行为）。
     ///
     /// **保持 vireo 逻辑尺寸不变**，按新 dpi 重新计算并调整物理窗口大小
-    /// （`request_inner_size(物理尺寸)`）；`draw` 在物理 resize 落地后按新 override
+    /// （`request_resize` 以物理意图请求）；`draw` 在物理 resize 落地后按新 override
     /// 一次性 apply（重算相机/scale/逻辑尺寸并 configure）。切换由用户主动触发，
     /// 期间每次 configure 的 DX12 阻塞（~60-90ms）可接受。
     ///
@@ -2771,19 +2771,25 @@ impl VireoWindow {
         self.dpi_override.get()
     }
 
-    /// 异步请求窗口尺寸并立即返回。
+    /// 请求窗口尺寸变化，返回本次请求**是否当场生效**。
     ///
-    /// 接受 winit [`LogicalSize`]/[`PhysicalSize`]（或 `.into()`）。返回值：
-    /// - `Some(size)`：尺寸已生效或已排队，`size` 为请求后的**物理**尺寸；
-    /// - `None`：请求无法在本线程同步处理（后续会收到 `Resized` / `on_resized`）。
+    /// 与 [`VireoWindow::set_size`]（只发指令、不关心落地）不同，返回值告知
+    /// 结果：
+    /// - `Some(size)`：已**立即应用**，返回实际生效的物理尺寸——可能被平台
+    ///   约束（min/max 等）clamp，不一定等于请求值。
+    /// - `None`：请求已交给窗口系统但**尚未生效**，稍后以 `Resized` 事件送达；
+    ///   需要时用 [`VireoWindow::metrics`] 轮询实际值。
     ///
-    /// 与 [`VireoWindow::set_size`]（逻辑像素）等价但可感知返回值。
+    /// 参数意图同 [`VireoWindow::set_size`]（裸数值 = vireo 逻辑像素，
+    /// 受 `dpi_override` 影响）。
     /// ## Platform-specific
     /// - **iOS / Web**：仅主线程可用。
-    pub fn request_inner_size<S: Into<winit::dpi::Size>>(
+    pub fn request_resize<W: ToPx, H: ToPx>(
         &self,
-        size: S,
+        width: W,
+        height: H,
     ) -> Option<PhysicalSize<u32>> {
+        let size = dim_to_winit_size(desc_dim_from(width, height), self.dpi_override.get());
         self.inner.request_inner_size(size)
     }
 
@@ -3263,15 +3269,12 @@ impl VireoWindow {
     }
 
     /// 设置窗口尺寸调整步进（网格对齐窗口）。参数意图同 [`VireoWindow::set_size`]。
+    /// `None` 清除步进；`Some((w, h))` 设网格。对齐 winit 单 Size 选项语义，两轴必须同时设置。
     /// ## Platform-specific
     /// - iOS / Android / Web / Orbital 不支持。
-    pub fn set_resize_increments<W: ToPx, H: ToPx>(&self, width: Option<W>, height: Option<H>) {
-        let increments = match (width, height) {
-            (Some(w), Some(h)) => {
-                Some(dim_to_winit_size(desc_dim_from(w, h), self.dpi_override.get()))
-            }
-            _ => None,
-        };
+    pub fn set_resize_increments<W: ToPx, H: ToPx>(&self, increments: Option<(W, H)>) {
+        let increments = increments
+            .map(|(w, h)| dim_to_winit_size(desc_dim_from(w, h), self.dpi_override.get()));
         self.inner.set_resize_increments(increments);
     }
 
