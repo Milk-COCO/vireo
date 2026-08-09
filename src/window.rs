@@ -211,17 +211,17 @@ unsafe impl Sync for SendRawWindowHandle {}
 
 pub struct WindowDesc {
     pub title: String,
-    /// 初始客户区尺寸（意图存储：`Dp` = vireo 逻辑像素，`Px` = 物理像素）。
+    /// 初始客户区尺寸（每轴意图 [`Pp`]：`Dp` = vireo 逻辑像素，`Px` = 物理像素）。
     /// 在 `create_attrs` 时才结合最终 `dpi_override` 换算为 winit `Size`。
     /// [`WindowDesc::new`] 与 [`WindowDesc::size`] 的裸数值按意图解释。
-    pub size: DescDim,
+    pub size: (Pp, Pp),
     /// vireo 层自定义 dpi 覆盖：`Some(v)` = **vireo 全自持像素**（vireo 逻辑为源真相，
     /// 物理 = vireo 逻辑 × v，窗口对 OS 的系统 DPI 缩放被忽略）；`None`（默认）=
     /// vireo 逻辑即 winit 逻辑（OS 系统 DPI 正常参与）。见 [`WindowDesc::dpi_override`]。
     pub dpi_override: Option<f64>,
-    pub min_size: Option<DescDim>,
-    pub max_size: Option<DescDim>,
-    pub position: Option<DescDim>,
+    pub min_size: Option<(Pp, Pp)>,
+    pub max_size: Option<(Pp, Pp)>,
+    pub position: Option<(Pp, Pp)>,
     /// 父窗口句柄（rwh_06，Windows/X11 子窗口）。`None` = 顶层窗口。
     pub parent_window: Option<SendRawWindowHandle>,
     pub resizable: bool,
@@ -233,7 +233,7 @@ pub struct WindowDesc {
     pub window_level: WindowLevel,
     pub window_icon: Option<Icon>,
     pub theme: Option<winit::window::Theme>,
-    pub resize_increments: Option<DescDim>,
+    pub resize_increments: Option<(Pp, Pp)>,
     pub content_protected: bool,
     pub active: bool,
     pub cursor: Cursor,
@@ -255,7 +255,7 @@ impl WindowDesc {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         Self {
             title: title.to_string(),
-            size: DescDim::Dp(width as f64, height as f64),
+            size: (Pp::Dp(dp(width as f64)), Pp::Dp(dp(height as f64))),
             dpi_override: None,
             min_size: None,
             max_size: None,
@@ -301,26 +301,26 @@ impl WindowDesc {
     }
 
     /// 显式设置初始客户区尺寸，覆盖 [`WindowDesc::new`] 的默认值。尺寸族
-    /// （`size`/`min_size`/`max_size`/`resize_increments`）与 `position` 的裸数值
-    /// 均由调用点类型声明意图（`Px` = 物理像素，`Dp` = vireo 逻辑像素），不再
-    /// 随 `dpi_override` 翻转语义。
-    pub fn size<W: ToPx, H: ToPx>(mut self, width: W, height: H) -> Self {
-        self.size = desc_dim_from(width, height);
+    /// （`size`/`min_size`/`max_size`/`resize_increments`）与 `position` 的数值
+    /// 均由调用点类型声明意图（[`Pp::Px`] = 物理像素，[`Pp::Dp`] = vireo 逻辑像素；
+    /// 裸数值默认 = [`Pp::Dp`]），不再随 `dpi_override` 翻转语义。
+    pub fn size<W: Into<Pp>, H: Into<Pp>>(mut self, width: W, height: H) -> Self {
+        self.size = (width.into(), height.into());
         self
     }
 
-    pub fn min_size<W: ToPx, H: ToPx>(mut self, width: W, height: H) -> Self {
-        self.min_size = Some(desc_dim_from(width, height));
+    pub fn min_size<W: Into<Pp>, H: Into<Pp>>(mut self, width: W, height: H) -> Self {
+        self.min_size = Some((width.into(), height.into()));
         self
     }
 
-    pub fn max_size<W: ToPx, H: ToPx>(mut self, width: W, height: H) -> Self {
-        self.max_size = Some(desc_dim_from(width, height));
+    pub fn max_size<W: Into<Pp>, H: Into<Pp>>(mut self, width: W, height: H) -> Self {
+        self.max_size = Some((width.into(), height.into()));
         self
     }
 
-    pub fn position<X: ToPx, Y: ToPx>(mut self, x: X, y: Y) -> Self {
-        self.position = Some(desc_dim_from(x, y));
+    pub fn position<W: Into<Pp>, H: Into<Pp>>(mut self, x: W, y: H) -> Self {
+        self.position = Some((x.into(), y.into()));
         self
     }
 
@@ -398,8 +398,8 @@ impl WindowDesc {
         self
     }
 
-    pub fn resize_increments<W: ToPx, H: ToPx>(mut self, width: W, height: H) -> Self {
-        self.resize_increments = Some(desc_dim_from(width, height));
+    pub fn resize_increments<W: Into<Pp>, H: Into<Pp>>(mut self, width: W, height: H) -> Self {
+        self.resize_increments = Some((width.into(), height.into()));
         self
     }
 
@@ -470,13 +470,8 @@ pub struct DrawTimings {
     pub gpu_secs: Option<f64>,
 }
 
-pub use crate::dpi::{
-    DescDim, Dp, Pixel, PixelPos, PixelSize, Px, ToPx, dp, px,
-};
-use crate::dpi::{
-    desc_dim_from, dim_to_winit_position, dim_to_winit_size, logical_size, to_pixel_pos,
-    to_pixel_size,
-};
+pub use crate::dpi::{Dp, Pixel, PixelPos, PixelSize, Pp, Px, dp, px};
+use crate::dpi::{dim_to_winit_position, dim_to_winit_size, logical_size, to_pixel_pos, to_pixel_size};
 
 /// 窗口尺寸/缩放只读快照（逻辑坐标 = 用户坐标系）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1872,10 +1867,10 @@ impl App {
                 let _ = self.event_tx.send(event);
             }
 
-            fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>) -> WindowAttributes {
+            fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>, os_scale: f64) -> WindowAttributes {
                 let mut attrs = WindowAttributes::default()
                     .with_title(&desc.title)
-                    .with_inner_size(dim_to_winit_size(desc.size, desc.dpi_override))
+                    .with_inner_size(dim_to_winit_size(desc.size.0, desc.size.1, desc.dpi_override, os_scale))
                     .with_resizable(desc.resizable)
                     .with_maximized(desc.maximized)
                     .with_visible(desc.visible)
@@ -1888,13 +1883,13 @@ impl App {
                     .with_cursor(desc.cursor.clone())
                     .with_enabled_buttons(desc.enabled_buttons);
                 if let Some(d) = desc.min_size {
-                    attrs = attrs.with_min_inner_size(dim_to_winit_size(d, desc.dpi_override));
+                    attrs = attrs.with_min_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
                 }
                 if let Some(d) = desc.max_size {
-                    attrs = attrs.with_max_inner_size(dim_to_winit_size(d, desc.dpi_override));
+                    attrs = attrs.with_max_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
                 }
                 if let Some(d) = desc.position {
-                    attrs = attrs.with_position(dim_to_winit_position(d, desc.dpi_override));
+                    attrs = attrs.with_position(dim_to_winit_position(d.0, d.1, desc.dpi_override, os_scale));
                 }
                 if let Some(ref fs) = desc.fullscreen {
                     attrs = attrs.with_fullscreen(Some(fs.clone()));
@@ -1907,7 +1902,7 @@ impl App {
                     attrs = attrs.with_theme(Some(theme));
                 }
                 if let Some(d) = desc.resize_increments {
-                    attrs = attrs.with_resize_increments(dim_to_winit_size(d, desc.dpi_override));
+                    attrs = attrs.with_resize_increments(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
                 }
                 if let Some(ph) = desc.parent_window {
                     attrs = unsafe { attrs.with_parent_window(Some(ph.0)) };
@@ -1924,7 +1919,11 @@ impl App {
                 self.created = true;
 
                 for (handle, desc) in self.window_descs.iter().enumerate() {
-                    let attrs = Self::create_attrs(desc, &self.default_icon);
+                    let os_scale = event_loop
+                        .primary_monitor()
+                        .map(|m| m.scale_factor())
+                        .unwrap_or(1.0);
+                    let attrs = Self::create_attrs(desc, &self.default_icon, os_scale);
                     let window = Arc::new(
                         event_loop.create_window(attrs).unwrap(),
                     );
@@ -2714,10 +2713,16 @@ impl VireoWindow {
     }
 
     /// 设置窗口大小（通过 winit 线程异步操作）。
-    /// 两参由调用点类型声明意图：`Px` = 物理像素，`Dp` = vireo 逻辑像素
-    /// （`Some(dpi_override)` 下物理窗口 = 逻辑 × dpi；`None` 下按 OS 系统 DPI 换算）。
-    pub fn set_size<W: ToPx, H: ToPx>(&self, width: W, height: H) {
-        let size = dim_to_winit_size(desc_dim_from(width, height), self.dpi_override.get());
+    /// 两参由调用点类型声明意图：`Pp::Px` = 物理像素，`Pp::Dp` = vireo 逻辑像素
+    /// （裸数值默认 = `Pp::Dp`，`Some(dpi_override)` 下物理窗口 = 逻辑 × dpi；
+    /// `None` 下按 OS 系统 DPI 换算）。
+    pub fn set_size<W: Into<Pp>, H: Into<Pp>>(&self, width: W, height: H) {
+        let size = dim_to_winit_size(
+            width.into(),
+            height.into(),
+            self.dpi_override.get(),
+            self.inner.scale_factor(),
+        );
         let _ = self.event_tx.send(WinitEvent::SetSize {
             handle: self.handle(),
             size,
@@ -2780,16 +2785,21 @@ impl VireoWindow {
     /// - `None`：请求已交给窗口系统但**尚未生效**，稍后以 `Resized` 事件送达；
     ///   需要时用 [`VireoWindow::metrics`] 轮询实际值。
     ///
-    /// 参数意图同 [`VireoWindow::set_size`]（裸数值 = vireo 逻辑像素，
-    /// 受 `dpi_override` 影响）。
+    /// 参数意图同 [`VireoWindow::set_size`]（裸数值 = vireo 逻辑像素 =
+    /// `Pp::Dp`，受 `dpi_override` 影响）。
     /// ## Platform-specific
     /// - **iOS / Web**：仅主线程可用。
-    pub fn request_resize<W: ToPx, H: ToPx>(
+    pub fn request_resize<W: Into<Pp>, H: Into<Pp>>(
         &self,
         width: W,
         height: H,
     ) -> Option<PhysicalSize<u32>> {
-        let size = dim_to_winit_size(desc_dim_from(width, height), self.dpi_override.get());
+        let size = dim_to_winit_size(
+            width.into(),
+            height.into(),
+            self.dpi_override.get(),
+            self.inner.scale_factor(),
+        );
         self.inner.request_inner_size(size)
     }
 
@@ -2805,11 +2815,14 @@ impl VireoWindow {
 
     /// 设置最小窗口大小（通过 winit 线程异步操作）。
     /// 参数意图同 [`VireoWindow::set_size`]。
-    pub fn set_min_size<W: ToPx, H: ToPx>(&self, width: Option<W>, height: Option<H>) {
+    pub fn set_min_size<W: Into<Pp>, H: Into<Pp>>(&self, width: Option<W>, height: Option<H>) {
         let size = match (width, height) {
-            (Some(w), Some(h)) => {
-                Some(dim_to_winit_size(desc_dim_from(w, h), self.dpi_override.get()))
-            }
+            (Some(w), Some(h)) => Some(dim_to_winit_size(
+                w.into(),
+                h.into(),
+                self.dpi_override.get(),
+                self.inner.scale_factor(),
+            )),
             _ => None,
         };
         let _ = self.event_tx.send(WinitEvent::SetMinSize {
@@ -2820,11 +2833,14 @@ impl VireoWindow {
 
     /// 设置最大窗口大小（通过 winit 线程异步操作）。
     /// 参数意图同 [`VireoWindow::set_size`]。
-    pub fn set_max_size<W: ToPx, H: ToPx>(&self, width: Option<W>, height: Option<H>) {
+    pub fn set_max_size<W: Into<Pp>, H: Into<Pp>>(&self, width: Option<W>, height: Option<H>) {
         let size = match (width, height) {
-            (Some(w), Some(h)) => {
-                Some(dim_to_winit_size(desc_dim_from(w, h), self.dpi_override.get()))
-            }
+            (Some(w), Some(h)) => Some(dim_to_winit_size(
+                w.into(),
+                h.into(),
+                self.dpi_override.get(),
+                self.inner.scale_factor(),
+            )),
             _ => None,
         };
         let _ = self.event_tx.send(WinitEvent::SetMaxSize {
@@ -3102,11 +3118,16 @@ impl VireoWindow {
         self.inner.set_transparent(transparent);
     }
 
-    /// 设置窗口外层位置（含边框）。两参意图同 [`VireoWindow::set_size`]（`Px`/`Dp`）。
+    /// 设置窗口外层位置（含边框）。两参意图同 [`VireoWindow::set_size`]（`Pp`）。
     /// ## Platform-specific
     /// - Android / Wayland 不支持。
-    pub fn set_outer_position<X: ToPx, Y: ToPx>(&self, x: X, y: Y) {
-        let position = dim_to_winit_position(desc_dim_from(x, y), self.dpi_override.get());
+    pub fn set_outer_position<W: Into<Pp>, H: Into<Pp>>(&self, x: W, y: H) {
+        let position = dim_to_winit_position(
+            x.into(),
+            y.into(),
+            self.dpi_override.get(),
+            self.inner.scale_factor(),
+        );
         self.inner.set_outer_position(position);
     }
 
@@ -3188,12 +3209,17 @@ impl VireoWindow {
     /// 把光标移到窗口内指定位置。两参意图同 [`VireoWindow::set_size`]（`Px`/`Dp`）。
     /// ## Platform-specific
     /// - Wayland 需要已 grab；iOS / Android / Web / Orbital 恒 `NotSupported`。
-    pub fn set_cursor_position<X: ToPx, Y: ToPx>(
+    pub fn set_cursor_position<W: Into<Pp>, H: Into<Pp>>(
         &self,
-        x: X,
-        y: Y,
+        x: W,
+        y: H,
     ) -> Result<(), ExternalError> {
-        let position = dim_to_winit_position(desc_dim_from(x, y), self.dpi_override.get());
+        let position = dim_to_winit_position(
+            x.into(),
+            y.into(),
+            self.dpi_override.get(),
+            self.inner.scale_factor(),
+        );
         self.inner.set_cursor_position(position)
     }
 
@@ -3272,9 +3298,16 @@ impl VireoWindow {
     /// `None` 清除步进；`Some((w, h))` 设网格。对齐 winit 单 Size 选项语义，两轴必须同时设置。
     /// ## Platform-specific
     /// - iOS / Android / Web / Orbital 不支持。
-    pub fn set_resize_increments<W: ToPx, H: ToPx>(&self, increments: Option<(W, H)>) {
-        let increments = increments
-            .map(|(w, h)| dim_to_winit_size(desc_dim_from(w, h), self.dpi_override.get()));
+    pub fn set_resize_increments<W: Into<Pp>, H: Into<Pp>>(&self, increments: Option<(W, H)>) {
+        let increments =
+            increments.map(|(w, h)| {
+                dim_to_winit_size(
+                    w.into(),
+                    h.into(),
+                    self.dpi_override.get(),
+                    self.inner.scale_factor(),
+                )
+            });
         self.inner.set_resize_increments(increments);
     }
 
@@ -4117,10 +4150,14 @@ mod metrics_tests {
 
     #[test]
     fn window_desc_new_size_is_logical_and_builders_are_typed() {
-        // `new` 的裸宽高恒为 vireo 逻辑像素（用户坐标系）
-        use super::DescDim;
-        assert_eq!(super::WindowDesc::new("t", 640, 360).size, DescDim::Dp(640.0, 360.0));
-        // 尺寸族全部收 `impl ToPx`，由调用点声明意图（裸数值/`Dp` = 逻辑，`Px` = 物理）
+        // `new` 的裸宽高恒为 vireo 逻辑像素（用户坐标系）= `Pp::Dp`
+        use super::Pp;
+        use crate::dpi::{dp, px};
+        assert_eq!(
+            super::WindowDesc::new("t", 640, 360).size,
+            (Pp::Dp(dp(640.0)), Pp::Dp(dp(360.0)))
+        );
+        // 尺寸族全部收 `impl Into<Pp>`，由调用点声明意图（裸数值/`Dp` = 逻辑，`Px` = 物理）
         let d = super::WindowDesc::new("t", 640, 360)
             .dpi_override(Some(2.0))
             .size(1280, 720)
@@ -4128,67 +4165,91 @@ mod metrics_tests {
             .max_size(2560, 1440)
             .resize_increments(10, 10);
         assert_eq!(d.dpi_override, Some(2.0));
-        assert_eq!(d.size, DescDim::Dp(1280.0, 720.0));
-        assert_eq!(d.min_size, Some(DescDim::Dp(200.0, 100.0)));
-        assert_eq!(d.max_size, Some(DescDim::Dp(2560.0, 1440.0)));
-        assert_eq!(d.resize_increments, Some(DescDim::Dp(10.0, 10.0)));
+        assert_eq!(d.size, (Pp::Dp(dp(1280.0)), Pp::Dp(dp(720.0))));
+        assert_eq!(d.min_size, Some((Pp::Dp(dp(200.0)), Pp::Dp(dp(100.0)))));
+        assert_eq!(d.max_size, Some((Pp::Dp(dp(2560.0)), Pp::Dp(dp(1440.0)))));
+        assert_eq!(d.resize_increments, Some((Pp::Dp(dp(10.0)), Pp::Dp(dp(10.0)))));
         // 显式 `Px` 意图被保留
-        let d = super::WindowDesc::new("t", 640, 360).size(super::px(1280.0), super::px(720.0));
-        assert_eq!(d.size, DescDim::Px(1280.0, 720.0));
+        let d = super::WindowDesc::new("t", 640, 360).size(px(1280.0), px(720.0));
+        assert_eq!(d.size, (Pp::Px(px(1280.0)), Pp::Px(px(720.0))));
     }
 
     #[test]
     fn window_desc_position_is_vireo_logical() {
-        use super::DescDim;
+        use super::Pp;
+        use crate::dpi::{dp, px};
         let d = super::WindowDesc::new("t", 640, 360).position(10, 20);
-        assert_eq!(d.position, Some(DescDim::Dp(10.0, 20.0)));
+        assert_eq!(d.position, Some((Pp::Dp(dp(10.0)), Pp::Dp(dp(20.0)))));
         let d = super::WindowDesc::new("t", 640, 360).position(-5, -6);
-        assert_eq!(d.position, Some(DescDim::Dp(-5.0, -6.0)));
-        let d = super::WindowDesc::new("t", 640, 360)
-            .position(super::px(100.0), super::px(200.0));
-        assert_eq!(d.position, Some(DescDim::Px(100.0, 200.0)));
+        assert_eq!(d.position, Some((Pp::Dp(dp(-5.0)), Pp::Dp(dp(-6.0)))));
+        let d = super::WindowDesc::new("t", 640, 360).position(px(100.0), px(200.0));
+        assert_eq!(d.position, Some((Pp::Px(px(100.0)), Pp::Px(px(200.0)))));
     }
 
     #[test]
     fn dim_to_winit_size_and_position_follow_dpi_override() {
-        use super::DescDim;
+        use super::Pp;
+        use crate::dpi::{dp, px};
         use super::{dim_to_winit_position, dim_to_winit_size};
         use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
         // `Dp` + `None` dpi：vireo 逻辑即 winit 逻辑（OS 缩放参与）
         assert_eq!(
-            dim_to_winit_size(DescDim::Dp(640.0, 360.0), None),
+            dim_to_winit_size(Pp::Dp(dp(640.0)), Pp::Dp(dp(360.0)), None, 1.0),
             winit::dpi::Size::Logical(LogicalSize::new(640.0, 360.0))
         );
         assert_eq!(
-            dim_to_winit_position(DescDim::Dp(10.0, 20.0), None),
+            dim_to_winit_position(Pp::Dp(dp(10.0)), Pp::Dp(dp(20.0)), None, 1.0),
             winit::dpi::Position::Logical(LogicalPosition::new(10.0, 20.0))
         );
         // `Some(d)` + `Dp`：vireo 全自持像素，物理 = 逻辑 × d
         assert_eq!(
-            dim_to_winit_size(DescDim::Dp(640.0, 360.0), Some(2.0)),
+            dim_to_winit_size(Pp::Dp(dp(640.0)), Pp::Dp(dp(360.0)), Some(2.0), 1.0),
             winit::dpi::Size::Physical(PhysicalSize::new(1280, 720))
         );
         assert_eq!(
-            dim_to_winit_size(DescDim::Dp(100.0, 100.0), Some(0.5)),
+            dim_to_winit_size(Pp::Dp(dp(100.0)), Pp::Dp(dp(100.0)), Some(0.5), 1.0),
             winit::dpi::Size::Physical(PhysicalSize::new(50, 50))
         );
         assert_eq!(
-            dim_to_winit_position(DescDim::Dp(10.0, 20.0), Some(2.0)),
+            dim_to_winit_position(Pp::Dp(dp(10.0)), Pp::Dp(dp(20.0)), Some(2.0), 1.0),
             winit::dpi::Position::Physical(PhysicalPosition::new(20, 40))
         );
         // 非法/非正 dpi 兜底为逻辑
         assert_eq!(
-            dim_to_winit_size(DescDim::Dp(640.0, 360.0), Some(0.0)),
+            dim_to_winit_size(Pp::Dp(dp(640.0)), Pp::Dp(dp(360.0)), Some(0.0), 1.0),
             winit::dpi::Size::Logical(LogicalSize::new(640.0, 360.0))
         );
         assert_eq!(
-            dim_to_winit_position(DescDim::Dp(10.0, 20.0), Some(-1.0)),
+            dim_to_winit_position(Pp::Dp(dp(10.0)), Pp::Dp(dp(20.0)), Some(-1.0), 1.0),
             winit::dpi::Position::Logical(LogicalPosition::new(10.0, 20.0))
         );
         // `Px` 意图直接物理，忽略 dpi
         assert_eq!(
-            dim_to_winit_size(DescDim::Px(640.0, 360.0), Some(2.0)),
+            dim_to_winit_size(Pp::Px(px(640.0)), Pp::Px(px(360.0)), Some(2.0), 1.0),
             winit::dpi::Size::Physical(PhysicalSize::new(640, 360))
+        );
+        // 混用意图：任一轴 Px → 整体物理空间；Dp 轴按有效缩放换算
+        //   dpi_override=Some(2) → 有效缩放 2
+        assert_eq!(
+            dim_to_winit_size(Pp::Px(px(640.0)), Pp::Dp(dp(360.0)), Some(2.0), 1.0),
+            winit::dpi::Size::Physical(PhysicalSize::new(640, 720))
+        );
+        assert_eq!(
+            dim_to_winit_size(Pp::Dp(dp(640.0)), Pp::Px(px(360.0)), Some(2.0), 1.0),
+            winit::dpi::Size::Physical(PhysicalSize::new(1280, 360))
+        );
+        assert_eq!(
+            dim_to_winit_position(Pp::Dp(dp(10.0)), Pp::Px(px(20.0)), Some(2.0), 1.0),
+            winit::dpi::Position::Physical(PhysicalPosition::new(20, 20))
+        );
+        //   dpi_override=None → 有效缩放 = os_scale
+        assert_eq!(
+            dim_to_winit_size(Pp::Dp(dp(640.0)), Pp::Px(px(360.0)), None, 1.5),
+            winit::dpi::Size::Physical(PhysicalSize::new(960, 360))
+        );
+        assert_eq!(
+            dim_to_winit_position(Pp::Px(px(10.0)), Pp::Dp(dp(20.0)), None, 2.0),
+            winit::dpi::Position::Physical(PhysicalPosition::new(10, 40))
         );
     }
 }

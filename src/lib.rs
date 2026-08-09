@@ -135,6 +135,7 @@ pub mod prelude {
     pub use crate::window::WindowLevel;
     pub use crate::window::WindowMetrics;
     pub use crate::dpi::Dp;
+    pub use crate::dpi::Pp;
     pub use crate::dpi::Px;
     pub use crate::dpi::px;
     pub use crate::dpi::dp;
@@ -142,7 +143,6 @@ pub mod prelude {
     pub use crate::dpi::Pixel;
     pub use crate::dpi::PixelPos;
     pub use crate::dpi::PixelSize;
-    pub use crate::dpi::DescDim;
     pub use crate::offscreen::OffscreenCanvas;
     pub use crate::window::OffscreenIndex;
     pub use wgpu::PresentMode;
