@@ -139,6 +139,7 @@ cargo run --example custom_material_text
 cargo run --example custom_material_post
 
 # Window / input / offscreen
+cargo run --example window_create
 cargo run --example window_api
 cargo run --example input_ime
 cargo run --example window_present
