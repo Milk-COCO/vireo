@@ -301,6 +301,13 @@ pub struct WindowDesc {
     pub cursor: Cursor,
     pub enabled_buttons: winit::window::WindowButtons,
     pub blur: bool,
+    /// 无装饰窗口的背景阴影。仅 Windows 有效（winit `undecorated_shadow`）：
+    /// 对 `Frameless` 生效；`Normal` 无意义。默认 `false`（winit 默认关闭）。
+    /// ## Platform-specific
+    /// - **Windows**：开启后 winit 在 `WM_NCCALCSIZE` 里把客户区顶部下移 1px
+    ///   留阴影位（`undecorated_shadow` 的已知副作用：窗口顶部出现 1px 细线）。
+    /// - 其它平台 no-op。
+    pub undecorated_shadow: bool,
     pub present_mode: wgpu::PresentMode,
     pub anti_aliasing: AntiAliasing,
     /// 期望最大在途帧（`SurfaceConfiguration::desired_maximum_frame_latency`）。
@@ -338,6 +345,7 @@ impl WindowDesc {
             cursor: Cursor::default(),
             enabled_buttons: winit::window::WindowButtons::all(),
             blur: false,
+            undecorated_shadow: false,
             present_mode: wgpu::PresentMode::AutoVsync,
             anti_aliasing: AntiAliasing::None,
             frame_latency: 2,
@@ -489,6 +497,16 @@ impl WindowDesc {
 
     pub fn blur(mut self, blur: bool) -> Self {
         self.blur = blur;
+        self
+    }
+
+    /// 无装饰窗口的背景阴影（仅 Windows 有效，默认 `false`）。
+    ///
+    /// 对 `FrameStyle::Frameless` 生效（配合 winit `undecorated_shadow`）；
+    /// 开启后 winit 在 `WM_NCCALCSIZE` 里把客户区顶部下移 1px 留阴影位，
+    /// 副作用是窗口顶部出现 1px 细线。其它平台 no-op。
+    pub fn undecorated_shadow(mut self, shadow: bool) -> Self {
+        self.undecorated_shadow = shadow;
         self
     }
 
@@ -1976,6 +1994,11 @@ impl App {
                 if let Some(ph) = desc.parent_window {
                     attrs = unsafe { attrs.with_parent_window(Some(ph.0)) };
                 }
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::WindowAttributesExtWindows;
+                    attrs = attrs.with_undecorated_shadow(desc.undecorated_shadow);
+                }
                 attrs
             }
         }
@@ -1996,16 +2019,17 @@ impl App {
                     let window = Arc::new(
                         event_loop.create_window(attrs).unwrap(),
                     );
-                    // Windows：子类化窗口，拦截 WM_NCCALCSIZE 实现标题栏/边框独立开关
-                    // （`titlebar=false` 去标题栏、`border=true` 保留系统 resize 边框）。
+                    // Windows：仅 `HiddenTitlebar` 需子类化拦截 WM_NCCALCSIZE
+                    // （去标题栏、保留系统 resize 边框、顶部不留 inset）。
+                    // `Normal`/`Frameless` 不装子类，完全放行 winit 原生：
+                    // Frameless 由 winit 处理客户区 + 可选 undecorated_shadow。
                     // 必须在 winit 事件线程、窗口创建后安装。
                     #[cfg(target_os = "windows")]
                     if let Some(hwnd) = win_hwnd(&window) {
-                        crate::platform::windows::install(
-                            hwnd,
-                            desc.frame_style.has_titlebar(),
-                            desc.frame_style.has_border(),
-                        );
+                        let fs = desc.frame_style;
+                        if !fs.has_titlebar() && fs.has_border() {
+                            crate::platform::windows::install(hwnd, false, true);
+                        }
                     }
                     let surface = self.instance.create_surface(window.clone()).unwrap();
                     let window_id = window.id();
@@ -2519,7 +2543,13 @@ where F: FnMut(&App) -> bool + Send + 'static
                         win.inner.set_decorations(style.decorated());
                         #[cfg(target_os = "windows")]
                         if let Some(hwnd) = win_hwnd(&win.inner) {
-                            crate::platform::windows::set_frame(hwnd, style.has_titlebar(), style.has_border());
+                            // 只有 HiddenTitlebar 需要子类；切到 Normal/Frameless
+                            // 时卸载，让 winit 原生接管（Frameless 客户区/阴影）。
+                            if !style.has_titlebar() && style.has_border() {
+                                crate::platform::windows::set_frame(hwnd, false, true);
+                            } else {
+                                crate::platform::windows::remove(hwnd);
+                            }
                         }
                     }
                 }
@@ -3376,6 +3406,25 @@ impl VireoWindow {
     /// - **仅 macOS** 有效；其余平台 no-op。
     pub fn set_content_protected(&self, protected: bool) {
         self.inner.set_content_protected(protected);
+    }
+
+    /// 无装饰窗口的背景阴影（winit `undecorated_shadow`）。
+    /// ## Platform-specific
+    /// - **Windows**：对 `FrameStyle::Frameless` 生效；开启后 winit 在
+    ///   `WM_NCCALCSIZE` 里把客户区顶部下移 1px 留阴影位（窗口顶部出现 1px
+    ///   细线为已知副作用）。`HiddenTitlebar`（vireo 子类接管 `WM_NCCALCSIZE`）
+    ///   下不生效。
+    /// - 其它平台 no-op。
+    pub fn set_undecorated_shadow(&self, shadow: bool) {
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowExtWindows;
+            self.inner.set_undecorated_shadow(shadow);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = shadow;
+        }
     }
 
     /// 当前窗口尺寸调整步进（网格对齐窗口，物理 + 逻辑双表示）。无步进时返回 `None`。
