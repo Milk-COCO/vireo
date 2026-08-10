@@ -188,3 +188,29 @@ fn monitor_work_rect(rect: RECT) -> Option<RECT> {
         Some(info.rcWork)
     }
 }
+
+/// Windows 专属窗口扩展（镜像 winit `WindowExtWindows` 的可复用子集）。
+///
+/// 需要显式导入后调用：
+/// ```no_run
+/// use vireo::platform::windows::WindowExtWindows;
+/// win.set_undecorated_shadow(true);
+/// ```
+///
+/// 非 Windows 平台本模块不存在（`#[cfg(target_os = "windows")]` 门控）。
+pub trait WindowExtWindows {
+    /// 无装饰窗口的背景阴影（winit `undecorated_shadow`）。
+    /// 对 `FrameStyle::Frameless` 生效；开启后 winit 在 `WM_NCCALCSIZE` 里把
+    /// 客户区顶部下移 1px 留阴影位（窗口顶部出现 1px 细线为已知副作用）。
+    /// `HiddenTitlebar`（vireo 子类接管 `WM_NCCALCSIZE`）下不生效。
+    fn set_undecorated_shadow(&self, shadow: bool);
+}
+
+impl WindowExtWindows for crate::window::VireoWindow {
+    fn set_undecorated_shadow(&self, shadow: bool) {
+        winit::platform::windows::WindowExtWindows::set_undecorated_shadow(
+            &*self.inner,
+            shadow,
+        );
+    }
+}

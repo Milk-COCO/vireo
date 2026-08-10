@@ -3408,25 +3408,6 @@ impl VireoWindow {
         self.inner.set_content_protected(protected);
     }
 
-    /// 无装饰窗口的背景阴影（winit `undecorated_shadow`）。
-    /// ## Platform-specific
-    /// - **Windows**：对 `FrameStyle::Frameless` 生效；开启后 winit 在
-    ///   `WM_NCCALCSIZE` 里把客户区顶部下移 1px 留阴影位（窗口顶部出现 1px
-    ///   细线为已知副作用）。`HiddenTitlebar`（vireo 子类接管 `WM_NCCALCSIZE`）
-    ///   下不生效。
-    /// - 其它平台 no-op。
-    pub fn set_undecorated_shadow(&self, shadow: bool) {
-        #[cfg(target_os = "windows")]
-        {
-            use winit::platform::windows::WindowExtWindows;
-            self.inner.set_undecorated_shadow(shadow);
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = shadow;
-        }
-    }
-
     /// 当前窗口尺寸调整步进（网格对齐窗口，物理 + 逻辑双表示）。无步进时返回 `None`。
     /// ## Platform-specific
     /// - iOS / Android / Web / Orbital 恒 `None`。
