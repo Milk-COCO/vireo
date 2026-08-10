@@ -1,7 +1,8 @@
 //! 窗口控制 API 演示：1:1 封装 winit 的窗口状态命令/查询
 //!
 //! 键位：
-//! - `D`：切换系统装饰（set_decorations）；无边框后可拖顶部「标题栏」区域拖动窗口
+//! - `D`：循环窗口边框样式 Normal → HiddenTitlebar → Frameless（set_frame_style）；
+//!   无标题栏后可拖顶部「标题栏」区域拖动窗口
 //! - `1`：切换可调大小（set_resizable）
 //! - `2`：切换光标可见（set_cursor_visible）
 //! - `3`：切换光标抓取 Locked（set_cursor_grab）
@@ -58,7 +59,7 @@ fn main() {
     let mut grab = false;
     let mut buttons_all = true;
     let mut theme_mode: u8 = 0; // 0=None 1=Dark 2=Light
-    let mut decorated = true;
+    let mut frame_style = FrameStyle::Normal;
     let mut fullsc = false;
     let mut lb_was_down = false;
     let mut visible = true;
@@ -94,8 +95,12 @@ fn main() {
         };
 
         if edge(KeyCode::KeyD) {
-            decorated = !decorated;
-            win.set_decorations(decorated);
+            frame_style = match frame_style {
+                FrameStyle::Normal => FrameStyle::HiddenTitlebar,
+                FrameStyle::HiddenTitlebar => FrameStyle::Frameless,
+                FrameStyle::Frameless => FrameStyle::Normal,
+            };
+            win.set_frame_style(frame_style);
         }
         if edge(KeyCode::Digit1) {
             resizable = !resizable;
@@ -214,7 +219,6 @@ fn main() {
         let is_min = win.is_minimized().unwrap_or(false);
         let is_max = win.is_maximized();
         let is_vis = win.is_visible().unwrap_or(true);
-        let is_dec = win.is_decorated();
         let full = win.fullscreen().is_some();
         let outer_size = win.outer_size();
         let inner_pos = win.inner_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
@@ -246,7 +250,7 @@ fn main() {
         );
 
         let mut lines = Vec::new();
-        lines.push(format!("decorated={}  resizable={}  cursor_visible={}  grab={}", is_dec, resizable, cursor_visible, grab));
+        lines.push(format!("frame={:?}  resizable={}  cursor_visible={}  grab={}", win.frame_style(), resizable, cursor_visible, grab));
         lines.push(format!("enabled_buttons={}  fullscreen={}", if buttons_all { "all" } else { "close-only" }, full));
         lines.push(format!("theme(set)={:?}  theme(query)={:?}", match theme_mode { 1 => Some(Theme::Dark), 2 => Some(Theme::Light), _ => None }, cur_theme));
         lines.push(format!("minimized={}  maximized={}  visible={}", is_min, is_max, is_vis));

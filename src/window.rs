@@ -17,6 +17,19 @@ use crate::texture::Texture;
 use crate::gpu::GpuContext;
 use crate::input::InputState;
 
+/// 取 winit 窗口的原生 HWND（Windows）。失败返回 `None`。
+#[cfg(target_os = "windows")]
+fn win_hwnd(window: &winit::window::Window) -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle() {
+        Ok(wh) => match wh.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
 pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
 pub use winit::dpi::PhysicalPosition;
@@ -176,6 +189,51 @@ impl AntiAliasing {
     }
 }
 
+/// 窗口边框样式（跨平台统一枚举；平台差异见各变体注释）。
+///
+/// 取代两个独立布尔（`titlebar`/`border`）——布尔自由组合会产生「合法但无效」
+/// 的状态（如 `titlebar(true) + border(false)`），枚举让每个值都有明确语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FrameStyle {
+    /// 完整系统标题栏 + 边框（默认）。
+    #[default]
+    Normal,
+    /// 无标题栏、无边框：客户区 == 窗口矩形（旧 frameless）。
+    /// ## Platform-specific
+    /// - **Windows**：客户区 = 整个窗口矩形，无系统 resize 热区（可配合
+    ///   自定义 `drag_window`/`drag_resize_window` 手势）。
+    /// - 其它平台：等价 winit `set_decorations(false)`，标题栏与边框一起移除；
+    ///   `resizable(true)` 仍保留系统缩放。
+    Frameless,
+    /// 无标题栏但保留系统 resize 边框（= Electron `titleBarStyle: 'hidden'`）。
+    /// ## Platform-specific
+    /// - **Windows**：唯一真正「只去标题栏」的模式——保留 `WS_SIZEBOX` +
+    ///   `WM_NCCALCSIZE` 非客户区 insets（约 8px），系统默认边缘 hit-test
+    ///   自动接管缩放热区。
+    /// - **其它平台：与 [`FrameStyle::Frameless`] 行为相同**（winit 无法只去
+    ///   标题栏，边框随装饰整体移除）。
+    HiddenTitlebar,
+}
+
+impl FrameStyle {
+    /// 是否保留系统装饰整体（winit `set_decorations` 参数）。`Normal` 才保留；
+    /// 非 Windows 平台上 `Frameless`/`HiddenTitlebar` 都整体去装饰（winit 无法
+    /// 只去标题栏）。
+    pub(crate) fn decorated(self) -> bool {
+        matches!(self, FrameStyle::Normal)
+    }
+
+    /// Windows 内部布尔：是否绘制系统标题栏。
+    pub(crate) fn has_titlebar(self) -> bool {
+        matches!(self, FrameStyle::Normal)
+    }
+
+    /// Windows 内部布尔：是否保留系统 resize 边框。
+    pub(crate) fn has_border(self) -> bool {
+        !matches!(self, FrameStyle::Frameless)
+    }
+}
+
 /// 把 AA 的 sample_count snap 到 `supported` 中 ≤ 请求的最大项。
 /// 不可用 `min(req, max)`：列表可能是 `[1,4]`（无 2/8），硬截到 8 仍会在 pipeline 创建时 panic。
 pub(crate) fn clamp_aa(aa: AntiAliasing, supported: &[u32]) -> AntiAliasing {
@@ -229,7 +287,11 @@ pub struct WindowDesc {
     pub maximized: bool,
     pub visible: bool,
     pub transparent: bool,
-    pub decorations: bool,
+    /// 窗口边框样式（标题栏 + resize 边框的组合语义）。默认 [`FrameStyle::Normal`]。
+    ///
+    /// 见 [`FrameStyle`] 各变体文档；`HiddenTitlebar` 仅在 Windows 上与
+    /// `Frameless` 有实际差别（其它平台都退化为整体去装饰）。
+    pub frame_style: FrameStyle,
     pub window_level: WindowLevel,
     pub window_icon: Option<Icon>,
     pub theme: Option<winit::window::Theme>,
@@ -266,7 +328,7 @@ impl WindowDesc {
             maximized: false,
             visible: true,
             transparent: false,
-            decorations: true,
+            frame_style: FrameStyle::Normal,
             window_level: WindowLevel::default(),
             window_icon: None,
             theme: None,
@@ -364,8 +426,10 @@ impl WindowDesc {
         self
     }
 
-    pub fn decorations(mut self, decorations: bool) -> Self {
-        self.decorations = decorations;
+    /// 窗口边框样式（标题栏 + resize 边框的组合语义）。默认
+    /// [`FrameStyle::Normal`]。见 [`FrameStyle`] 各变体文档。
+    pub fn frame_style(mut self, frame_style: FrameStyle) -> Self {
+        self.frame_style = frame_style;
         self
     }
 
@@ -547,6 +611,7 @@ enum WinitEvent {
         dpi_scale: f32,
         dpi_override: Option<f64>,
         init_duration: f64,
+        frame_style: FrameStyle,
     },
     Resized { handle: usize, width: u32, height: u32 },
     ScaleFactorChanged { handle: usize, scale: f64 },
@@ -571,7 +636,7 @@ enum WinitEvent {
     SetVisible { handle: usize, visible: bool },
     FocusWindow { handle: usize },
     SetWindowLevel { handle: usize, level: WindowLevel },
-    SetDecorations { handle: usize, decorations: bool },
+    SetFrameStyle { handle: usize, style: FrameStyle },
     SetIcon { handle: usize, icon: Icon },
     SetCursor { handle: usize, cursor: winit::window::Cursor },
 }
@@ -677,6 +742,8 @@ pub struct VireoWindow {
     pending_aa: std::cell::Cell<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
+    /// 窗口边框样式（供 `frame_style()` 查询；运行时经 `set_frame_style` 切换）。
+    frame_style: std::cell::Cell<FrameStyle>,
     /// 关窗事件已到达（关闭中，draw 跳过）
     closing: std::cell::Cell<bool>,
     /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
@@ -707,6 +774,7 @@ impl VireoWindow {
         dpi_scale: f32,
         dpi_override: Option<f64>,
         init_duration: f64,
+        frame_style: FrameStyle,
         event_tx: mpsc::Sender<WinitEvent>,
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
         handle: usize,
@@ -761,6 +829,7 @@ impl VireoWindow {
             follow_frame: std::cell::Cell::new(0),
             pending_aa: std::cell::Cell::new(None),
             handle,
+            frame_style: std::cell::Cell::new(frame_style),
             closing: std::cell::Cell::new(false),
             gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
             last_gpu_secs: Arc::new(Mutex::new(None)),
@@ -1875,7 +1944,7 @@ impl App {
                     .with_maximized(desc.maximized)
                     .with_visible(desc.visible)
                     .with_transparent(desc.transparent)
-                    .with_decorations(desc.decorations)
+                    .with_decorations(desc.frame_style.decorated())
                     .with_window_level(desc.window_level)
                     .with_content_protected(desc.content_protected)
                     .with_active(desc.active)
@@ -1927,6 +1996,17 @@ impl App {
                     let window = Arc::new(
                         event_loop.create_window(attrs).unwrap(),
                     );
+                    // Windows：子类化窗口，拦截 WM_NCCALCSIZE 实现标题栏/边框独立开关
+                    // （`titlebar=false` 去标题栏、`border=true` 保留系统 resize 边框）。
+                    // 必须在 winit 事件线程、窗口创建后安装。
+                    #[cfg(target_os = "windows")]
+                    if let Some(hwnd) = win_hwnd(&window) {
+                        crate::platform::windows::install(
+                            hwnd,
+                            desc.frame_style.has_titlebar(),
+                            desc.frame_style.has_border(),
+                        );
+                    }
                     let surface = self.instance.create_surface(window.clone()).unwrap();
                     let window_id = window.id();
 
@@ -2008,6 +2088,7 @@ impl App {
                         dpi_scale: dpi,
                         dpi_override: desc.dpi_override,
                         init_duration,
+                        frame_style: desc.frame_style,
                     });
                 }
             }
@@ -2239,6 +2320,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                 Ok(WinitEvent::WindowCreated {
                     handle, window, surface, surface_config, renderer,
                     logical_width, logical_height, scale, dpi_scale, dpi_override, init_duration,
+                    frame_style,
                 }) => {
                     let vw = VireoWindow::new(
                         window,
@@ -2253,6 +2335,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                         dpi_scale,
                         dpi_override,
                         init_duration,
+                        frame_style,
                         event_tx.clone(),
                         cb_tx.clone(),
                         handle,
@@ -2430,9 +2513,14 @@ where F: FnMut(&App) -> bool + Send + 'static
                         win.inner.set_window_level(level);
                     }
                 }
-                Ok(WinitEvent::SetDecorations { handle, decorations }) => {
+                Ok(WinitEvent::SetFrameStyle { handle, style }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_decorations(decorations);
+                        win.frame_style.set(style);
+                        win.inner.set_decorations(style.decorated());
+                        #[cfg(target_os = "windows")]
+                        if let Some(hwnd) = win_hwnd(&win.inner) {
+                            crate::platform::windows::set_frame(hwnd, style.has_titlebar(), style.has_border());
+                        }
                     }
                 }
                 Ok(WinitEvent::SetIcon { handle, icon }) => {
@@ -2896,11 +2984,15 @@ impl VireoWindow {
         });
     }
 
-    /// 设置窗口装饰（标题栏边框，通过 winit 线程异步操作）
-    pub fn set_decorations(&self, decorations: bool) {
-        let _ = self.event_tx.send(WinitEvent::SetDecorations {
+    /// 设置窗口边框样式（通过 winit 线程异步操作）。
+    ///
+    /// 见 [`FrameStyle`] 各变体文档；非 Windows 平台上 [`FrameStyle::HiddenTitlebar`]
+    /// 与 [`FrameStyle::Frameless`] 行为相同（都整体去装饰）。
+    pub fn set_frame_style(&self, style: FrameStyle) {
+        self.frame_style.set(style);
+        let _ = self.event_tx.send(WinitEvent::SetFrameStyle {
             handle: self.handle(),
-            decorations,
+            style,
         });
     }
 
@@ -3170,9 +3262,10 @@ impl VireoWindow {
         self.inner.is_visible()
     }
 
-    /// 当前是否带系统装饰（标题栏/边框）。
-    pub fn is_decorated(&self) -> bool {
-        self.inner.is_decorated()
+    /// 当前窗口边框样式（vireo 层状态；非 winit `is_decorated`）。
+    /// 返回的是 vireo 存储的目标值，不保证 OS 已实际应用。
+    pub fn frame_style(&self) -> FrameStyle {
+        self.frame_style.get()
     }
 
     /// 当前全屏状态（`None` = 非全屏）。

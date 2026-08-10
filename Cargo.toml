@@ -20,3 +20,11 @@ pollster = "1.0.1"
 wgpu = "30.0.0"
 winit = "0.30.13"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

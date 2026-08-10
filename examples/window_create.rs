@@ -6,9 +6,14 @@
 //!
 //! - **W1**：默认逻辑像素尺寸 + `dpi_override(Some(1.0))`（vireo 全自持像素，
 //!   逻辑 = 物理）。`min_size`/`max_size`/`resize_increments` 用裸数（= 逻辑像素）。
-//! - **W2**：`size(Px, Px)` 显式物理像素 + `position` 定位 + `decorations(false)`
-//!   无边框。**自定义装饰**：顶部自绘标题栏拖动窗口（`drag_window`），四边/四角
-//!   缩放手势（`drag_resize_window`），跟原生窗口一样有系统吸附/Aero Snap/拖动阴影。
+//! - **W2**：`size(Px, Px)` 显式物理像素 + `position` 定位 +
+//!   `FrameStyle::HiddenTitlebar` 无标题栏但保留系统 resize 边框
+//!   （= Electron `titleBarStyle:'hidden'`；**保留边框仅 Windows 生效，其它平台
+//!   整体去装饰**）。**自定义装饰**：
+//!   顶部自绘标题栏拖动窗口（`drag_window`）+ 更宽的边/角缩放手势
+//!   （`drag_resize_window`），跟原生窗口一样有系统吸附/Aero Snap/拖动阴影。
+//!   顶部无系统 resize 热区（`WM_NCCALCSIZE` top inset=0，避免 DWM 顶部白条），
+//!   顶部缩放交给自绘 `drag_resize_window(North*)` 手势。
 //! - **W3**：`present_mode` / `frame_latency` / `anti_aliasing` / `theme` 等
 //!   GPU 与外观选项 + `maximized`。
 //!
@@ -23,7 +28,7 @@
 //! - `icon_from_path("logo.png")` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
 //! - 关闭窗口时触发 `on_close` 回调；三个窗口全部关闭后进程退出。
 //! - 键盘 `T`：切换 W1 与 W2 的可见性（`set_visible`）。
-//! - W2 无边框缩放/拖动为 Windows 演示（`drag_resize_window` macOS 不支持）。
+//! - W2 无标题栏的拖动/缩放为 Windows 演示（`drag_window`/`drag_resize_window` macOS 不支持）。
 
 use vireo::prelude::*;
 use vireo::window::Cursor;
@@ -128,16 +133,18 @@ fn main() {
         Some(|| println!("W1 已关闭")),
     );
 
-    // ---- W2：显式物理像素 + 定位 + 无边框（自定义装饰）----
+    // ---- W2：显式物理像素 + 定位 + 无标题栏但保留系统边框（HiddenTitlebar）----
     // `px(...)` 是物理像素意图：物理尺寸固定，逻辑 = 物理 ÷ OS DPI。
     // 高 DPI（如 200%）下逻辑会变小，故物理尺寸要比 W1 大不少才看着相当。
-    // `resizable(true)`：无边框窗口没有系统边框，拖动/缩放全靠下方自定义热点。
+    // `FrameStyle::HiddenTitlebar` = Electron `titleBarStyle:'hidden'`：
+    // 系统 resize 边框（≈8px）由 Windows 自动接管缩放，无需手写命中测试；
+    // 下方自定义装饰仅演示「顶部自绘标题栏拖动 + 更宽的边/角缩放热区」。
     let w2 = app.window(
         WindowDesc::new("Vireo Window 2 — 物理像素 + 无边框", 480, 320)
             .size(px(1024.0), px(640.0)) // 物理像素意图；W1/W3 用裸数 = 逻辑像素
             .position(px(80.0), px(60.0))
             .resizable(true)
-            .decorations(false),
+            .frame_style(FrameStyle::HiddenTitlebar), // 无标题栏 + 保留系统 resize 边框
         Some(|| println!("W2 已关闭")),
     );
 
@@ -179,7 +186,7 @@ fn main() {
         // W2 无边框：自定义装饰——顶部标题栏拖动、四边四角缩放。
         // 手势只在「左键按下沿」调一次；按住期间每帧调会让 winit 重发
         // WM_NCLBUTTONDOWN，把窗口吸附到鼠标。
-        if !win2.is_decorated() {
+        if win2.frame_style() != FrameStyle::Normal {
             let lb_down = win2.mouse_left();
             let lb_pressed = lb_down && !w2_lb_was_down;
             handle_custom_decoration(win2, lb_pressed, &mut w2_last_cursor);
@@ -187,7 +194,7 @@ fn main() {
         }
 
         draw_window(win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑");
-        draw_window(win2, 2, "W2", "size(Px) · position · resizable · 无边框自定义装饰");
+        draw_window(win2, 2, "W2", "size(Px) · position · HiddenTitlebar · 保留系统边框");
         draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized");
         true
     });
@@ -199,17 +206,17 @@ fn draw_window(win: &vireo::window::VireoWindow, id: u8, name: &str, cfg: &str) 
     let h = m.height as f32;
 
     // 无边框窗口（W2）自绘了 32px 标题栏，内容区要向下让出
-    let content_top = if win.is_decorated() { 0.0 } else { 32.0 };
+    let content_top = if win.frame_style() != FrameStyle::Normal { 32.0 } else { 0.0 };
 
     let mut b = DrawBatch::new();
 
     // 无边框窗口（W2）顶部画一条「标题栏」示意可拖动区域（拖动逻辑在 main 闭包）
-    if !win.is_decorated() {
+    if win.frame_style() != FrameStyle::Normal {
         b.set_color(Color::new(0.18, 0.2, 0.28, 1.0));
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), w, TITLE_H, None);
         draw_text(
             &mut b.texts,
-            "无边框 · 拖这里移动 · 四边/四角可缩放",
+            "无标题栏 · 拖这里移动 · 边/角可缩放（系统边框+自定义热区）",
             Pos::new(12.0, 8.0),
             TextDef::default().font_size(14.0),
             TextOverride::from_color(Color::new(0.85, 0.9, 1.0, 1.0)),

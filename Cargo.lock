@@ -2128,6 +2128,7 @@ dependencies = [
  "pollster",
  "rustc-hash 2.1.3",
  "wgpu",
+ "windows-sys 0.52.0",
  "winit",
 ]
 

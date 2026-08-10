@@ -24,6 +24,7 @@ pub mod input;
 pub mod dpi;
 pub mod math;
 pub mod offscreen;
+pub mod platform;
 pub mod shapes;
 pub mod text;
 pub mod texture;
@@ -106,6 +107,7 @@ pub mod prelude {
     pub use crate::window::FollowAmount;
     pub use crate::window::FollowFramesOrTime;
     pub use crate::window::AntiAliasing;
+    pub use crate::window::FrameStyle;
     pub use crate::window::App;
     pub use crate::window::DrawOutcome;
     pub use crate::window::DrawReport;
