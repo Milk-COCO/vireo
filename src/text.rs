@@ -206,6 +206,17 @@ impl TextContext {
         }
     }
 
+    /// 同步文字管线到真实 surface 格式（macOS Metal surface 常为 Bgra8UnormSrgb）。
+    /// 首次窗口创建时调用一次：atlas 格式 + 文字管线目标格式与新格式对齐。
+    /// 此后的 stencil 模式切换（`ensure_text_stencil_mode`）会按新格式重建管线。
+    pub(crate) fn ensure_text_format(&mut self, device: &Device, format: TextureFormat) {
+        if self.text_atlas.format == format {
+            return;
+        }
+        self.text_atlas.format = format;
+        self.ensure_text_stencil_mode(device, TextStencilMode::None);
+    }
+
     /// 设置文字管线 DS 模式（与当前 render pass / 是否测裁切一致）。
     pub(crate) fn ensure_text_stencil_mode(&mut self, device: &Device, mode: TextStencilMode) {
         let ds = match mode {

@@ -18,16 +18,20 @@ use crate::gpu::GpuContext;
 use crate::input::InputState;
 
 /// 取 winit 窗口的原生 HWND（Windows）。失败返回 `None`。
+///
+/// 跨线程可用：winit 的 `Window::window_handle()` 有线程亲和限制（仅 owner 线程），
+/// 而 vireo 的部分调用点（如 `set_opacity`）跑在渲染线程，故走
+/// `window_handle_any_thread()` 逃生通道。调用方负责只把 handle 传给线程安全的
+/// Win32 API（本模块的调用点均为线程安全操作）。
 #[cfg(target_os = "windows")]
 fn win_hwnd(window: &winit::window::Window) -> Option<isize> {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match window.window_handle() {
-        Ok(wh) => match wh.as_raw() {
-            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-            _ => None,
-        },
-        Err(_) => None,
-    }
+    use winit::platform::windows::WindowExtWindows;
+    use winit::raw_window_handle::RawWindowHandle;
+    let wh = unsafe { window.window_handle_any_thread() }.ok()?;
+    let RawWindowHandle::Win32(h) = wh.as_raw() else {
+        return None;
+    };
+    Some(h.hwnd.get())
 }
 
 pub use winit::dpi::LogicalPosition;
@@ -1867,6 +1871,17 @@ impl App {
         self
     }
 
+    /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
+    ///
+    /// 运行在 winit 线程。窗口创建后（`resumed`）由 Runner 注册到进程级拦截子类，
+    /// 与运行期 [`VireoWindow::on_thumb_button`] 等价。
+    #[cfg(target_os = "windows")]
+    pub fn on_thumb_button(&mut self, handle: WindowIndex, callback: impl FnMut(u32) + 'static) -> &mut Self {
+        let h = handle.0;
+        self.callbacks.entry(h).or_default().on_thumb_button.push(Box::new(callback));
+        self
+    }
+
     /// 注册一个延迟 `frames` 帧后执行的闭包。
     /// frame 计数以 `render_on_frame` 循环的帧为单位，首次调用 `on_frame` 时 `frame_count` 为 1。
     pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
@@ -2059,6 +2074,13 @@ impl App {
                         if !fs.has_titlebar() && fs.has_border() {
                             crate::platform::windows::install(hwnd, false, true);
                         }
+                        // run 前注册的缩略图按钮点击回调（App::on_thumb_button）：
+                        // 移出（take）注册到进程级拦截子类，避免重复注册。
+                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                            for cb in std::mem::take(&mut cbs.on_thumb_button) {
+                                crate::platform::windows::set_thumbar_callback(hwnd, cb);
+                            }
+                        }
                     }
                     let surface = self.instance.create_surface(window.clone()).unwrap();
                     let window_id = window.id();
@@ -2099,11 +2121,25 @@ impl App {
                     } else {
                         wgpu::CompositeAlphaMode::Auto
                     };
-                    let fmt = if caps.formats.contains(&self.gpu.surface_format) {
-                        self.gpu.surface_format
+                    let fmt = if caps.formats.contains(&self.gpu.surface_format()) {
+                        self.gpu.surface_format()
                     } else {
                         caps.formats[0]
                     };
+                    // 首次建窗时把真实 surface 格式同步进 GpuContext（macOS Metal
+                    // surface 无 Rgba8UnormSrgb，只提供 Bgra8UnormSrgb）。管线缓存键
+                    // 均含 format 位（gpu.rs），旧 Rgba8 条目永不命中，并清空共享管线
+                    // 表兜底；文字 atlas 格式 + 管线一并刷新。offscreen 纹理亦派生
+                    // 自此格式，保持一致。
+                    if self.gpu.surface_format() != fmt {
+                        self.gpu.set_surface_format(fmt);
+                        self.gpu.clear_pipelines();
+                        self.gpu
+                            .text_ctx
+                            .lock()
+                            .unwrap()
+                            .ensure_text_format(&self.gpu.device, fmt);
+                    }
                     let surface_config = wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                         format: fmt,
@@ -3187,6 +3223,21 @@ impl VireoWindow {
         self
     }
 
+    /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
+    ///
+    /// 依赖 `set_thumbar_buttons` 安装的 `WM_COMMAND`/`THBN_CLICKED` 拦截子类；
+    /// 点击发生在窗口所属线程（winit 事件线程），回调在该线程执行（无需 `+Send`）。
+    /// 回调注册到进程级表，`set_thumbar_buttons(None)` 清除按钮时一并卸载。
+    ///
+    /// 跨线程可用：内部经 `window_handle_any_thread` 取 HWND 后写入 Mutex 保护的表。
+    #[cfg(target_os = "windows")]
+    pub fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self {
+        if let Some(hwnd) = win_hwnd(&self.inner) {
+            crate::platform::windows::set_thumbar_callback(hwnd, Box::new(callback));
+        }
+        self
+    }
+
     /// 设置窗口是否接收 IME 事件（默认关闭）。
     ///
     /// 开启后窗口才会收到 [`Ime`](crate::input::Ime) 事件；preedit 期间**不再收到**
@@ -3269,6 +3320,54 @@ impl VireoWindow {
         self.inner.set_transparent(transparent);
     }
 
+    /// 设置窗口整体不透明度（`0.0` = 完全透明，`1.0` = 不透明）。值会被钳制到 `[0, 1]`。
+    ///
+    /// vireo 自实现（Electron `setOpacity` 语义；winit 无对应 API）。
+    ///
+    /// ## Platform-specific
+    /// - Windows：经 `SetLayeredWindowAttributes`（自动补 `WS_EX_LAYERED` 扩展样式；
+    ///   与 `WS_EX_TRANSPARENT` 无关，点击穿透请用 [`VireoWindow::set_cursor_hittest`]）。
+    /// - macOS：经 `NSWindow.alphaValue`（需窗口已加入 key window / 已显示，alpha 才生效）。
+    /// - 其他平台：无操作。
+    pub fn set_opacity(&self, opacity: f64) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        #[cfg(target_os = "windows")]
+        {
+            let Some(hwnd) = win_hwnd(&self.inner) else {
+                return;
+            };
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
+                LWA_ALPHA, WS_EX_LAYERED,
+            };
+            unsafe {
+                let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED as isize);
+                let alpha = (opacity * 255.0).round() as u8;
+                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(wh) = self.inner.window_handle() {
+                if let RawWindowHandle::AppKit(h) = wh.as_raw() {
+                    use objc2_app_kit::NSView;
+                    let view = h.ns_view.as_ptr() as *mut NSView;
+                    unsafe {
+                        if let Some(window) = (&*view).window() {
+                            window.setAlphaValue(opacity as objc2_foundation::CGFloat);
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let _ = opacity;
+        }
+    }
+
     /// 设置窗口外层位置（含边框）。两参意图同 [`VireoWindow::set_size`]（`Pp`）。
     /// ## Platform-specific
     /// - Android / Wayland 不支持。
@@ -3323,7 +3422,7 @@ impl VireoWindow {
             + ((area.width as f64 - size.width.px.0) / 2.0).round();
         let y = origin.y as f64
             + ((area.height as f64 - size.height.px.0) / 2.0).round();
-        self.set_outer_position(x as i64, y as i64);
+        self.set_outer_position(Px(x), Px(y));
     }
 
     /// 当前是否最小化。`None` 表示平台无法查询。

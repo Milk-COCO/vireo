@@ -413,6 +413,18 @@ pub(crate) enum ShapeVertexLayout {
     GeoInstance = 2,
 }
 
+/// 把 `TextureFormat` 折叠成管线缓存键用的低位数值。
+/// `TextureFormat` 含带字段变体（`Astc { .. }`），不能用 `as` cast 取判别值；
+/// 改用其 `Hash` 实现取低 12 位。每个 GpuContext 同时只活一种格式（窗口 surface
+/// 与 offscreen 均派生自 `surface_format`），缓存键只需区分「同步前默认格式」与
+/// 「同步后真实格式」的条目；同步时还会清空共享 `pipelines` 表兜底。
+fn surface_format_bits(format: wgpu::TextureFormat) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    format.hash(&mut h);
+    (h.finish() as u32) & 0x0FFF
+}
+
 fn material_pipeline_key(
     target: MaterialTarget,
     sample_count: u32,
@@ -421,6 +433,7 @@ fn material_pipeline_key(
     stencil_mode: bool,
     stencil_op: u32,
     shape_layout: ShapeVertexLayout,
+    format: wgpu::TextureFormat,
 ) -> u64 {
     let ssaa = ssaa && target == MaterialTarget::Shape;
     let layout_bits = if target == MaterialTarget::Shape {
@@ -435,6 +448,7 @@ fn material_pipeline_key(
         | ((ssaa as u64) << 14)
         | ((stencil_op.min(4) as u64) << 16)
         | (layout_bits << 6)
+        | ((surface_format_bits(format) as u64) << 20)
 }
 
 /// 共享 GPU 资源 —— 多个窗口/离屏纹理共用同一套 device/queue/pipeline
@@ -457,7 +471,7 @@ pub struct GpuContext {
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub(crate) instance_quad_vertex_buf: wgpu::Buffer,
     pub(crate) instance_quad_index_buf: wgpu::Buffer,
-    pub surface_format: wgpu::TextureFormat,
+    pub surface_format: Mutex<wgpu::TextureFormat>,
     pub text_ctx: Mutex<TextContext>,
     /// 跨材质 bind group 复用池。
     pub(crate) bind_group_pool: crate::material::BindGroupPool,
@@ -547,7 +561,10 @@ impl GeoInstance {
 
 impl GpuContext {
     /// 创建 GPU 上下文（不依赖 surface）。
-    /// format 默认为 Rgba8UnormSrgb，首窗口创建时通过 ensure_pipeline_format 调整。
+    /// format 默认为 Rgba8UnormSrgb；首窗口创建时把真实 surface 格式写入
+    /// `self.surface_format`（macOS Metal 常为 Bgra8UnormSrgb）。管线缓存键均含
+    /// format 位（`ensure_pipeline`/instance/geo/material），格式不同的旧条目
+    /// 永不命中；同步时还会清空共享管线表兜底。
     pub fn new(instance: &wgpu::Instance) -> Self {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -931,7 +948,7 @@ impl GpuContext {
         ));
 
         let mut pipelines = FxHashMap::default();
-        pipelines.insert(1, render_pipeline.clone());
+        pipelines.insert(1 | surface_format_bits(surface_format), render_pipeline.clone());
 
         // 查询 adapter 对 surface_format 的 sample_count；若未开
         // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES，pipeline 只接受 WebGPU 保底 [1, 4]。
@@ -968,7 +985,7 @@ impl GpuContext {
             transform_dummy_buf,
             instance_quad_vertex_buf,
             instance_quad_index_buf,
-            surface_format,
+            surface_format: Mutex::new(surface_format),
             text_ctx,
             bind_group_pool: crate::material::BindGroupPool::new(),
             adapter,
@@ -1022,11 +1039,14 @@ impl GpuContext {
     /// 无 DS attachment 的热路径管线（无 `clips_children` 时使用）。
     /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 ssaa 参数。
     pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool, ssaa: bool, geometry: bool) -> wgpu::RenderPipeline {
-        // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突
+        // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突。
+        // bits4-15 = surface format（macOS Metal 为 Bgra8UnormSrgb），格式不同
+        // 的管线键不同，避免复用首窗口同步前的默认 Rgba8 管线。
         let key = sample_count
             | ((alpha_to_coverage as u32) << 16)
             | ((ssaa as u32) << 17)
-            | ((geometry as u32) << 18);
+            | ((geometry as u32) << 18)
+            | surface_format_bits(self.surface_format());
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1060,7 +1080,7 @@ impl GpuContext {
                 module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.surface_format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1096,13 +1116,14 @@ impl GpuContext {
         stencil_op: u32,
     ) -> wgpu::RenderPipeline {
         let op = stencil_op.min(4);
-        // bit19 = use_stencil=1；bits20-22 = stencil_op
+        // bit19 = use_stencil=1；bits20-22 = stencil_op；bits4-15 = surface format
         let key = sample_count
             | ((alpha_to_coverage as u32) << 16)
             | ((ssaa as u32) << 17)
             | ((geometry as u32) << 18)
             | (1u32 << 19)
-            | (op << 20);
+            | (op << 20)
+            | surface_format_bits(self.surface_format());
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1129,13 +1150,13 @@ impl GpuContext {
         let frag_entry = "fs_main";
         let color_target = if no_color {
             Some(wgpu::ColorTargetState {
-                format: self.surface_format,
+                format: self.surface_format(),
                 blend: None,
                 write_mask: wgpu::ColorWrites::empty(),
             })
         } else {
             Some(wgpu::ColorTargetState {
-                format: self.surface_format,
+                format: self.surface_format(),
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })
@@ -1233,7 +1254,8 @@ impl GpuContext {
             | ((ssaa as u32) << 17)
             | ((use_stencil as u32) << 19)
             | (op << 20)
-            | (1u32 << 23);
+            | (1u32 << 23)
+            | surface_format_bits(self.surface_format());
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1296,7 +1318,7 @@ impl GpuContext {
                 module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.surface_format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1335,7 +1357,8 @@ impl GpuContext {
             | ((ssaa as u32) << 17)
             | ((use_stencil as u32) << 19)
             | (op << 20)
-            | (2u32 << 23);
+            | (2u32 << 23)
+            | surface_format_bits(self.surface_format());
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1394,7 +1417,7 @@ impl GpuContext {
                 module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.surface_format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1466,6 +1489,22 @@ impl GpuContext {
     /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
     /// - `Some(d)`：超过 d 未使用则过期
     /// - `None`：永不按时间自动回收
+    /// 清空共享管线缓存表。`surface_format` 从默认值同步为窗口真实格式时调用，
+    /// 丢弃同步前预置的默认格式管线（键含格式位，正常不会命中；清表是兜底）。
+    pub(crate) fn clear_pipelines(&self) {
+        self.pipelines.lock().unwrap().clear();
+    }
+
+    /// 当前生效的 surface 格式（首次建窗同步前为默认 `Rgba8UnormSrgb`）。
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        *self.surface_format.lock().unwrap()
+    }
+
+    /// 首次建窗时把真实 surface 格式同步进来（macOS Metal 为 Bgra8UnormSrgb）。
+    pub(crate) fn set_surface_format(&self, fmt: wgpu::TextureFormat) {
+        *self.surface_format.lock().unwrap() = fmt;
+    }
+
     pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
         self.text_ctx.lock().unwrap().set_shape_cache_ttl(ttl);
     }
@@ -1650,7 +1689,7 @@ impl GpuContext {
                 layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0, layout),
+                material_pipeline_key(target, 1, false, false, false, 0, layout, self.surface_format()),
                 Arc::new(pipeline),
             );
         }
@@ -1712,7 +1751,7 @@ impl GpuContext {
                 layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0, layout),
+                material_pipeline_key(target, 1, false, false, false, 0, layout, self.surface_format()),
                 Arc::new(pipeline),
             );
         }
@@ -1748,6 +1787,7 @@ impl GpuContext {
             stencil_mode,
             stencil_op,
             shape_layout,
+            self.surface_format(),
         );
         let mut pipes = material.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
@@ -1927,7 +1967,7 @@ impl GpuContext {
             label: Some("material shape pipeline"), layout: Some(&layout),
             vertex: wgpu::VertexState { module: &vertex, entry_point: Some("vs_main"), buffers: &buffers, compilation_options: Default::default() },
             fragment: Some(wgpu::FragmentState { module: &fragment, entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState {
-                format: self.surface_format,
+                format: self.surface_format(),
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: if stencil_op == 3 || stencil_op == 4 { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL },
             })], compilation_options: Default::default() }),
@@ -1944,8 +1984,8 @@ mod custom_material_tests {
 
     #[test]
     fn target_pipeline_keys_are_distinct() {
-        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh);
-        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh);
+        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
         assert_ne!(shape, text);
     }
 
@@ -1953,49 +1993,49 @@ mod custom_material_tests {
     fn material_stencil_key_ignores_unused_flags() {
         // 同 sample/atc/op 必须同 key
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh)
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2, ShapeVertexLayout::Mesh)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh)
+            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
         );
         // 不同 target 必须不同 key
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1, ShapeVertexLayout::Mesh)
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
         );
     }
 
     #[test]
     fn material_shape_ssaa_pipeline_key_is_distinct() {
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
         );
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0, ShapeVertexLayout::Mesh),
+            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
         );
     }
 
     #[test]
     fn material_shape_layout_pipeline_keys_are_distinct() {
         // Mesh / SdfInstance / GeoInstance 必须产生不同 key（shape target）
-        let mesh = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh);
-        let sdf = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance);
-        let geo = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::GeoInstance);
+        let mesh = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let sdf = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let geo = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::GeoInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
         assert_ne!(mesh, sdf);
         assert_ne!(mesh, geo);
         assert_ne!(sdf, geo);
         // Text target 不受 layout 影响
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::Mesh),
-            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance),
+            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb),
         );
     }
 
@@ -2003,6 +2043,22 @@ mod custom_material_tests {
     fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
         assert!(default_shape_vertex_wgsl(true).contains("@interpolate(linear, sample)"));
         assert!(!default_shape_vertex_wgsl(false).contains("@interpolate(linear, sample)"));
+    }
+
+    #[test]
+    fn material_pipeline_key_distinguishes_surface_format() {
+        // 不同 surface format（macOS Bgra8 vs 默认 Rgba8）必须产生不同 key，
+        // 否则首窗同步后可能复用旧格式管线导致 Validation panic。
+        let rgba = material_pipeline_key(
+            MaterialTarget::Shape, 1, false, false, false, 0,
+            ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let bgra = material_pipeline_key(
+            MaterialTarget::Shape, 1, false, false, false, 0,
+            ShapeVertexLayout::Mesh, wgpu::TextureFormat::Bgra8UnormSrgb,
+        );
+        assert_ne!(rgba, bgra);
+        assert_eq!(rgba, rgba);
     }
 
     #[test]

@@ -29,6 +29,12 @@
 //! - `Z`：窗口在当前显示器居中（center，vireo 自实现，跨平台）
 //! - `Y` / `U`：窗口置顶 / 提到 z 序顶层（move_top / move_above，Windows
 //!   `vireo::platform::windows::WindowExtWindows` 扩展方法，vireo 自实现）
+//! - `P`：循环任务栏进度 None → Normal 50% → Indeterminate → Paused 30% → Error 70%
+//!   （set_progress_bar）
+//! - `;`：切换任务栏缩略图按钮（set_thumbar_buttons，3 个演示按钮）；
+//!   点击按钮触发 `on_thumb_button(id)` 回调，HUD 显示最近点击的按钮 id
+//! - `,`：切换任务栏 overlay 图标（set_overlay_icon，8×8 半透明箭头）
+//! - `.`：切换任务栏 AppUserModelID（set_app_user_model_id）
 //!
 //! HUD 中 `PixelSize` / `PixelPos` 同时给出物理（`px`）与 vireo 逻辑（`dp`）双视图，
 //! 展示统一像素 API：getter 返回双表示快照，裸数值写入默认按逻辑像素。
@@ -44,6 +50,8 @@ use vireo::prelude::*;
 struct WinState {
     moved: Option<(i32, i32)>,
     theme: Option<Theme>,
+    #[cfg(target_os = "windows")]
+    thumb: Option<u32>,
 }
 
 fn main() {
@@ -53,6 +61,8 @@ fn main() {
     let st = Arc::new(Mutex::new(WinState {
         moved: None,
         theme: None,
+        #[cfg(target_os = "windows")]
+        thumb: None,
     }));
 
     let mut registered = false;
@@ -73,6 +83,7 @@ fn main() {
     let mut inc_mode: u8 = 0; // 0=None 1=8px 2=32px
     let mut protect = false;
     let mut reqsize: Option<(u32, u32)> = None;
+    let mut opacity: f64 = 1.0;
     #[cfg(target_os = "windows")]
     let mut win_enable = true;
     #[cfg(target_os = "windows")]
@@ -89,6 +100,14 @@ fn main() {
     let mut title_text_mode: u8 = 0; // 0=系统 1=白 2=黑
     #[cfg(target_os = "windows")]
     let mut corner_mode: u8 = 0; // 0=Default 1=Round 2=RoundSmall 3=DoNotRound
+    #[cfg(target_os = "windows")]
+    let mut progress_mode: u8 = 0; // 0=None 1=Normal 2=Indeterminate 3=Paused 4=Error
+    #[cfg(target_os = "windows")]
+    let mut thumbar_on = false;
+    #[cfg(target_os = "windows")]
+    let mut overlay_on = false;
+    #[cfg(target_os = "windows")]
+    let mut appid_on = false;
     #[cfg(target_os = "macos")]
     let mut mac_fullscreen = false;
     #[cfg(target_os = "macos")]
@@ -113,6 +132,13 @@ fn main() {
             win.on_theme_changed(move |theme| {
                 st_t.lock().unwrap().theme = Some(theme);
             });
+            #[cfg(target_os = "windows")]
+            {
+                let st_th = Arc::clone(&st);
+                win.on_thumb_button(move |id| {
+                    st_th.lock().unwrap().thumb = Some(id);
+                });
+            }
         }
 
         // 按键下降沿辅助
@@ -234,6 +260,14 @@ fn main() {
         if edge(KeyCode::KeyZ) {
             win.center();
         }
+        if edge(KeyCode::KeyB) {
+            opacity = match opacity {
+                1.0 => 0.5,
+                0.5 => 0.0,
+                _ => 1.0,
+            };
+            win.set_opacity(opacity);
+        }
         #[cfg(target_os = "windows")]
         {
             use vireo::platform::windows::{Color as WinColor, WindowExtWindows};
@@ -309,6 +343,99 @@ fn main() {
                     _ => vireo::platform::windows::CornerPreference::DoNotRound,
                 };
                 win.set_corner_preference(cp);
+            }
+            if edge(KeyCode::KeyP) {
+                progress_mode = (progress_mode + 1) % 5;
+                let st = match progress_mode {
+                    1 => vireo::platform::windows::TaskbarProgress::Normal(0.5),
+                    2 => vireo::platform::windows::TaskbarProgress::Indeterminate,
+                    3 => vireo::platform::windows::TaskbarProgress::Paused(0.3),
+                    4 => vireo::platform::windows::TaskbarProgress::Error(0.7),
+                    _ => vireo::platform::windows::TaskbarProgress::None,
+                };
+                win.set_progress_bar(st);
+            }
+            if edge(KeyCode::Semicolon) {
+                thumbar_on = !thumbar_on;
+                if thumbar_on {
+                    use vireo::platform::windows::{TaskbarIcon, ThumbarButton};
+                    let make_icon = |r: u8, g: u8, b: u8| TaskbarIcon {
+                        rgba: vec![r, g, b, 255].repeat(32 * 32),
+                        width: 32,
+                        height: 32,
+                    };
+                    let buttons = vec![
+                        ThumbarButton {
+                            id: 1,
+                            icon: Some(make_icon(90, 200, 120)),
+                            tooltip: Some("播放 (id=1)".to_string()),
+                            dismiss_on_click: false,
+                            disabled: false,
+                            hidden: false,
+                            no_background: false,
+                            non_interactive: false,
+                        },
+                        ThumbarButton {
+                            id: 2,
+                            icon: Some(make_icon(220, 150, 60)),
+                            tooltip: Some("暂停 (id=2)".to_string()),
+                            dismiss_on_click: true,
+                            disabled: false,
+                            hidden: false,
+                            no_background: false,
+                            non_interactive: false,
+                        },
+                        ThumbarButton {
+                            id: 3,
+                            icon: Some(make_icon(200, 90, 90)),
+                            tooltip: Some("停止 (id=3)".to_string()),
+                            dismiss_on_click: false,
+                            disabled: false,
+                            hidden: false,
+                            no_background: false,
+                            non_interactive: false,
+                        },
+                    ];
+                    win.set_thumbar_buttons(Some(&buttons));
+                } else {
+                    win.set_thumbar_buttons(None);
+                }
+            }
+            if edge(KeyCode::Comma) {
+                overlay_on = !overlay_on;
+                if overlay_on {
+                    use vireo::platform::windows::{TaskbarIcon, TaskbarOverlay};
+                    // 8×8 半透明绿色箭头（RGBA 手动填充下三角）。
+                    let mut rgba = vec![0u8; 8 * 8 * 4];
+                    for y in 0..8u32 {
+                        for x in 0..8u32 {
+                            let idx = ((y * 8 + x) * 4) as usize;
+                            let in_tri = x >= y && x < 8 - y;
+                            rgba[idx] = if in_tri { 40 } else { 0 };
+                            rgba[idx + 1] = if in_tri { 220 } else { 0 };
+                            rgba[idx + 2] = if in_tri { 90 } else { 0 };
+                            rgba[idx + 3] = if in_tri { 200 } else { 0 };
+                        }
+                    }
+                    win.set_overlay_icon(Some(TaskbarOverlay {
+                        icon: TaskbarIcon {
+                            rgba,
+                            width: 8,
+                            height: 8,
+                        },
+                        description: "下载进行中".to_string(),
+                    }));
+                } else {
+                    win.set_overlay_icon(None);
+                }
+            }
+            if edge(KeyCode::Period) {
+                appid_on = !appid_on;
+                win.set_app_user_model_id(if appid_on {
+                    Some("com.example.vireo.window-api")
+                } else {
+                    None
+                });
             }
         }
         #[cfg(target_os = "macos")]
@@ -403,8 +530,9 @@ fn main() {
         lines.push(format!("content_protected={}  monitor_current={:?}  primary={:?}  available={}", protect, cur_mon.is_some(), prim_mon.is_some(), avail_n));
         lines.push(format!("on_moved=({}, {})  on_theme_changed={:?}", moved_x, moved_y, evt_theme));
         lines.push(format!(
-            "dpi_override={:?}  metrics logical={}x{} physical={}x{} sf={:.2}",
+            "dpi_override={:?}  opacity={:.2}  metrics logical={}x{} physical={}x{} sf={:.2}",
             dpi_override,
+            opacity,
             win.metrics().width,
             win.metrics().height,
             win.metrics().physical_width,
@@ -420,6 +548,15 @@ fn main() {
             match title_bg_mode { 1 => "dark", 2 => "light", _ => "None" },
             match title_text_mode { 1 => "white", 2 => "black", _ => "system" },
             match corner_mode { 1 => "Round", 2 => "RoundSmall", 3 => "DoNotRound", _ => "Default" },
+        ));
+        #[cfg(target_os = "windows")]
+        lines.push(format!(
+            "taskbar: progress={} thumbar={} overlay={} appid={} click={:?}",
+            match progress_mode { 1 => "Normal50", 2 => "Indeterminate", 3 => "Paused30", 4 => "Error70", _ => "None" },
+            thumbar_on,
+            overlay_on,
+            appid_on,
+            st.lock().unwrap().thumb,
         ));
         #[cfg(target_os = "macos")]
         lines.push(format!(
@@ -449,7 +586,7 @@ fn main() {
         );
         draw_text(
             &mut b.texts,
-            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 显示器 · K dead-key重置 · Z 居中",
+            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 透明度 · K dead-key重置 · Z 居中",
             Pos::new(20.0, 462.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
@@ -457,7 +594,7 @@ fn main() {
         #[cfg(target_os = "windows")]
         draw_text(
             &mut b.texts,
-            "Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 任务栏图标 · A 背景 · W 边框色 · X 标题栏底色 · V 标题文字色 · J 圆角 [Windows]",
+            "Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 任务栏图标 · A 背景 · W 边框色 · X 标题栏底色 · V 标题文字色 · J 圆角 · P 进度 · ; 缩略图按钮 · , overlay · . AppID [Windows]",
             Pos::new(20.0, 486.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),

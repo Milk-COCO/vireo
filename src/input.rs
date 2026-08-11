@@ -155,6 +155,9 @@ pub struct InputCallbacks {
     /// 窗口尺寸（物理像素）变化。模态循环期间可能滞后（渲染线程逐帧轮询兜底）。
     /// 运行在 winit 线程。
     pub on_resized: Vec<Box<dyn FnMut(winit::dpi::PhysicalSize<u32>)>>,
+    /// 任务栏缩略图按钮点击（参数 = 按钮 `id`）。仅 Windows 上报；依赖
+    /// `set_thumbar_buttons` 安装的 `WM_COMMAND`/`THBN_CLICKED` 子类。运行在 winit 线程。
+    pub on_thumb_button: Vec<Box<dyn FnMut(u32)>>,
 }
 
 // SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。
@@ -181,6 +184,7 @@ impl Default for InputCallbacks {
             on_moved: Vec::new(),
             on_theme_changed: Vec::new(),
             on_resized: Vec::new(),
+            on_thumb_button: Vec::new(),
         }
     }
 }
@@ -441,6 +445,7 @@ mod tests {
     assert!(cb.on_moved.is_empty());
     assert!(cb.on_theme_changed.is_empty());
     assert!(cb.on_resized.is_empty());
+    assert!(cb.on_thumb_button.is_empty());
     }
 
     #[test]
@@ -455,6 +460,7 @@ mod tests {
     cb.on_moved.push(Box::new(|_| {}));
     cb.on_theme_changed.push(Box::new(|_| {}));
     cb.on_resized.push(Box::new(|_| {}));
+    cb.on_thumb_button.push(Box::new(|_| {}));
         assert_eq!(cb.on_key_down.len(), 1);
         assert_eq!(cb.on_mouse_down.len(), 1);
         assert_eq!(cb.on_ime.len(), 1);
@@ -464,5 +470,6 @@ mod tests {
     assert_eq!(cb.on_moved.len(), 1);
     assert_eq!(cb.on_theme_changed.len(), 1);
     assert_eq!(cb.on_resized.len(), 1);
+    assert_eq!(cb.on_thumb_button.len(), 1);
     }
 }

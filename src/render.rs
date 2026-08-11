@@ -1584,7 +1584,7 @@ impl Renderer {
         // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
         let mut shape_draw_calls: u32 = 0;
         if has_any_content || clear_color.is_some() {
-            let msaa_view = self.msaa_view(self.gpu.surface_format);
+            let msaa_view = self.msaa_view(self.gpu.surface_format());
             let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) = match &msaa_view {
                 Some(msaa) => (msaa, Some(target_view)),
                 None => (target_view, None),
