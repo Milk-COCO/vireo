@@ -26,6 +26,9 @@
 //!   其它平台 no-op）
 //! - `B`：刷新显示器查询（current / primary / available 数量）
 //! - `K`：重置键盘 dead key 状态（reset_dead_keys，macOS/Windows）
+//! - `Z`：窗口在当前显示器居中（center，vireo 自实现，跨平台）
+//! - `Y` / `U`：窗口置顶 / 提到 z 序顶层（move_top / move_above，Windows
+//!   `vireo::platform::windows::WindowExtWindows` 扩展方法，vireo 自实现）
 //!
 //! HUD 中 `PixelSize` / `PixelPos` 同时给出物理（`px`）与 vireo 逻辑（`dp`）双视图，
 //! 展示统一像素 API：getter 返回双表示快照，裸数值写入默认按逻辑像素。
@@ -70,6 +73,32 @@ fn main() {
     let mut inc_mode: u8 = 0; // 0=None 1=8px 2=32px
     let mut protect = false;
     let mut reqsize: Option<(u32, u32)> = None;
+    #[cfg(target_os = "windows")]
+    let mut win_enable = true;
+    #[cfg(target_os = "windows")]
+    let mut win_skip_taskbar = false;
+    #[cfg(target_os = "windows")]
+    let mut win_taskbar_icon = false;
+    #[cfg(target_os = "windows")]
+    let mut backdrop_mode: u8 = 0; // 0=None 1=Mica 2=Acrylic 3=Tabbed
+    #[cfg(target_os = "windows")]
+    let mut border_color_mode: u8 = 0; // 0=None 1=红 2=绿
+    #[cfg(target_os = "windows")]
+    let mut title_bg_mode: u8 = 0; // 0=None 1=深灰 2=浅灰
+    #[cfg(target_os = "windows")]
+    let mut title_text_mode: u8 = 0; // 0=系统 1=白 2=黑
+    #[cfg(target_os = "windows")]
+    let mut corner_mode: u8 = 0; // 0=Default 1=Round 2=RoundSmall 3=DoNotRound
+    #[cfg(target_os = "macos")]
+    let mut mac_fullscreen = false;
+    #[cfg(target_os = "macos")]
+    let mut mac_shadow = true;
+    #[cfg(target_os = "macos")]
+    let mut mac_edited = false;
+    #[cfg(target_os = "macos")]
+    let mut mac_game = false;
+    #[cfg(target_os = "macos")]
+    let mut mac_alt: u8 = 0; // 0=Both 1=OnlyLeft 2=OnlyRight
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
@@ -202,6 +231,115 @@ fn main() {
         if edge(KeyCode::KeyK) {
             win.reset_dead_keys();
         }
+        if edge(KeyCode::KeyZ) {
+            win.center();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use vireo::platform::windows::{Color as WinColor, WindowExtWindows};
+            if edge(KeyCode::KeyY) {
+                win.move_top();
+            }
+            if edge(KeyCode::KeyU) {
+                win.move_above();
+            }
+            if edge(KeyCode::KeyE) {
+                win_enable = !win_enable;
+                win.set_enable(win_enable);
+            }
+            if edge(KeyCode::KeyS) {
+                win_skip_taskbar = !win_skip_taskbar;
+                win.set_skip_taskbar(win_skip_taskbar);
+            }
+            if edge(KeyCode::KeyL) {
+                win_taskbar_icon = !win_taskbar_icon;
+                if win_taskbar_icon {
+                    // 8×8 纯红方块，演示 set_taskbar_icon
+                    let rgba = vec![255u8, 0, 0, 255].repeat(8 * 8);
+                    if let Ok(icon) = winit::window::Icon::from_rgba(rgba, 8, 8) {
+                        win.set_taskbar_icon(Some(icon));
+                    }
+                } else {
+                    win.set_taskbar_icon(None);
+                }
+            }
+            if edge(KeyCode::KeyA) {
+                backdrop_mode = (backdrop_mode + 1) % 4;
+                let bt = match backdrop_mode {
+                    0 => vireo::platform::windows::BackdropType::None,
+                    1 => vireo::platform::windows::BackdropType::MainWindow,
+                    2 => vireo::platform::windows::BackdropType::TransientWindow,
+                    _ => vireo::platform::windows::BackdropType::TabbedWindow,
+                };
+                win.set_system_backdrop(bt);
+            }
+            if edge(KeyCode::KeyW) {
+                border_color_mode = (border_color_mode + 1) % 3;
+                let c = match border_color_mode {
+                    0 => None,
+                    1 => Some(WinColor::from_rgb(220, 40, 40)),
+                    _ => Some(WinColor::from_rgb(40, 200, 90)),
+                };
+                win.set_border_color(c);
+            }
+            if edge(KeyCode::KeyX) {
+                title_bg_mode = (title_bg_mode + 1) % 3;
+                let c = match title_bg_mode {
+                    0 => None,
+                    1 => Some(WinColor::from_rgb(30, 40, 60)),
+                    _ => Some(WinColor::from_rgb(60, 40, 30)),
+                };
+                win.set_title_background_color(c);
+            }
+            if edge(KeyCode::KeyV) {
+                title_text_mode = (title_text_mode + 1) % 3;
+                let c = match title_text_mode {
+                    0 => WinColor::SYSTEM_DEFAULT,
+                    1 => WinColor::from_rgb(255, 255, 255),
+                    _ => WinColor::from_rgb(10, 10, 10),
+                };
+                win.set_title_text_color(c);
+            }
+            if edge(KeyCode::KeyJ) {
+                corner_mode = (corner_mode + 1) % 4;
+                let cp = match corner_mode {
+                    0 => vireo::platform::windows::CornerPreference::Default,
+                    1 => vireo::platform::windows::CornerPreference::Round,
+                    2 => vireo::platform::windows::CornerPreference::RoundSmall,
+                    _ => vireo::platform::windows::CornerPreference::DoNotRound,
+                };
+                win.set_corner_preference(cp);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use vireo::platform::macos::{OptionAsAlt, WindowExtMacOS};
+            if edge(KeyCode::KeyA) {
+                mac_fullscreen = !mac_fullscreen;
+                win.set_simple_fullscreen(mac_fullscreen);
+            }
+            if edge(KeyCode::KeyS) {
+                mac_shadow = !mac_shadow;
+                win.set_has_shadow(mac_shadow);
+            }
+            if edge(KeyCode::KeyE) {
+                mac_edited = !mac_edited;
+                win.set_document_edited(mac_edited);
+            }
+            if edge(KeyCode::KeyV) {
+                mac_game = !mac_game;
+                win.set_borderless_game(mac_game);
+            }
+            if edge(KeyCode::KeyP) {
+                mac_alt = (mac_alt + 1) % 3;
+                let a = match mac_alt {
+                    0 => OptionAsAlt::Both,
+                    1 => OptionAsAlt::OnlyLeft,
+                    _ => OptionAsAlt::OnlyRight,
+                };
+                win.set_option_as_alt(a);
+            }
+        }
 
         // 拖「标题栏」区域（顶部 36px）拖动窗口。
         // 只能在「左键按下沿」且按下点在区域内时调用一次 drag_window()；
@@ -273,6 +411,22 @@ fn main() {
             win.metrics().physical_height,
             win.metrics().scale_factor,
         ));
+        #[cfg(target_os = "windows")]
+        lines.push(format!(
+            "win: enable={} skip_taskbar={} taskbar_icon={} backdrop={:?} border={:?} title_bg={:?} title_text={:?} corner={:?}",
+            win_enable, win_skip_taskbar, win_taskbar_icon,
+            match backdrop_mode { 1 => "Mica", 2 => "Acrylic", 3 => "Tabbed", _ => "None" },
+            match border_color_mode { 1 => "red", 2 => "green", _ => "None" },
+            match title_bg_mode { 1 => "dark", 2 => "light", _ => "None" },
+            match title_text_mode { 1 => "white", 2 => "black", _ => "system" },
+            match corner_mode { 1 => "Round", 2 => "RoundSmall", 3 => "DoNotRound", _ => "Default" },
+        ));
+        #[cfg(target_os = "macos")]
+        lines.push(format!(
+            "mac: simple_fullscreen={} shadow={} edited={} game={} alt={:?}",
+            mac_fullscreen, mac_shadow, mac_edited, mac_game,
+            match mac_alt { 1 => "OnlyLeft", 2 => "OnlyRight", _ => "Both" },
+        ));
 
         let mut y = 60.0f32;
         for line in lines {
@@ -295,8 +449,24 @@ fn main() {
         );
         draw_text(
             &mut b.texts,
-            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 显示器 · K dead-key重置",
+            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 显示器 · K dead-key重置 · Z 居中",
             Pos::new(20.0, 462.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
+        );
+        #[cfg(target_os = "windows")]
+        draw_text(
+            &mut b.texts,
+            "Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 任务栏图标 · A 背景 · W 边框色 · X 标题栏底色 · V 标题文字色 · J 圆角 [Windows]",
+            Pos::new(20.0, 486.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
+        );
+        #[cfg(target_os = "macos")]
+        draw_text(
+            &mut b.texts,
+            "A 简单全屏 · S 阴影 · E 已编辑 · V 无边框游戏 · P Option键 [macOS]",
+            Pos::new(20.0, 486.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
         );

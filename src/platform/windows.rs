@@ -36,6 +36,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SM_CXSIZEFRAME, SM_CYSIZEFRAME,
 };
 
+pub use winit::platform::windows::BackdropType;
+pub use winit::platform::windows::Color;
+pub use winit::platform::windows::CornerPreference;
+
 const WM_NCCALCSIZE: u32 = 131;
 // WVR_HREDRAW(0x0100) | WVR_VREDRAW(0x0200)，windows-sys 0.52.0 未定义。
 const WVR_REDRAW: u32 = 0x0300;
@@ -204,6 +208,46 @@ pub trait WindowExtWindows {
     /// 客户区顶部下移 1px 留阴影位（窗口顶部出现 1px 细线为已知副作用）。
     /// `HiddenTitlebar`（vireo 子类接管 `WM_NCCALCSIZE`）下不生效。
     fn set_undecorated_shadow(&self, shadow: bool);
+
+    /// 启用/禁用窗口的鼠标与键盘输入。窗口必须先启用才能被激活。
+    /// （winit `WindowExtWindows::set_enable`）
+    fn set_enable(&self, enabled: bool);
+
+    /// 设置任务栏图标（`ICON_BIG`，256×256 为合理上限）。`None` 恢复默认。
+    /// （winit `WindowExtWindows::set_taskbar_icon`）
+    fn set_taskbar_icon(&self, taskbar_icon: Option<winit::window::Icon>);
+
+    /// 是否在任务栏显示/隐藏窗口图标。（winit `WindowExtWindows::set_skip_taskbar`）
+    fn set_skip_taskbar(&self, skip: bool);
+
+    /// 设置系统自绘背景材料（`Auto`/`None`/`Mica`/`Acrylic`/`Tabbed`）。
+    /// 需 Windows 11 22523+。（winit `WindowExtWindows::set_system_backdrop`）
+    fn set_system_backdrop(&self, backdrop_type: BackdropType);
+
+    /// 设置窗口边框颜色（Windows 11 22000+）。`None` 恢复系统默认。
+    /// （winit `WindowExtWindows::set_border_color`）
+    fn set_border_color(&self, color: Option<Color>);
+
+    /// 设置标题栏背景颜色（Windows 11 22000+）。`None` 恢复系统默认；
+    /// 传 `Some(Color::NONE)` 可绕过「在标题栏/边框上显示强调色」系统选项。
+    /// （winit `WindowExtWindows::set_title_background_color`）
+    fn set_title_background_color(&self, color: Option<Color>);
+
+    /// 设置标题文字颜色（Windows 11 22000+）。
+    /// （winit `WindowExtWindows::set_title_text_color`）
+    fn set_title_text_color(&self, color: Color);
+
+    /// 设置窗口圆角偏好（`Default`/`DoNotRound`/`Round`/`RoundSmall`）。
+    /// 需 Windows 11 22000+。（winit `WindowExtWindows::set_corner_preference`）
+    fn set_corner_preference(&self, preference: CornerPreference);
+
+    /// 把窗口置顶（`HWND_TOPMOST`）。vireo 自实现（Electron `moveTop` 语义，
+    /// winit 无对应 API）。重复调用为幂等置顶。
+    fn move_top(&self);
+
+    /// 把窗口移到 z 序顶层（`HWND_TOP`，普通置顶，不设 TOPMOST 状态）。
+    /// vireo 自实现（Electron `moveAbove` 语义，winit 无对应 API）。
+    fn move_above(&self);
 }
 
 impl WindowExtWindows for crate::window::VireoWindow {
@@ -211,6 +255,95 @@ impl WindowExtWindows for crate::window::VireoWindow {
         winit::platform::windows::WindowExtWindows::set_undecorated_shadow(
             &*self.inner,
             shadow,
+        );
+    }
+
+    fn set_enable(&self, enabled: bool) {
+        winit::platform::windows::WindowExtWindows::set_enable(&*self.inner, enabled);
+    }
+
+    fn set_taskbar_icon(&self, taskbar_icon: Option<winit::window::Icon>) {
+        winit::platform::windows::WindowExtWindows::set_taskbar_icon(
+            &*self.inner,
+            taskbar_icon,
+        );
+    }
+
+    fn set_skip_taskbar(&self, skip: bool) {
+        winit::platform::windows::WindowExtWindows::set_skip_taskbar(&*self.inner, skip);
+    }
+
+    fn set_system_backdrop(&self, backdrop_type: BackdropType) {
+        winit::platform::windows::WindowExtWindows::set_system_backdrop(
+            &*self.inner,
+            backdrop_type,
+        );
+    }
+
+    fn set_border_color(&self, color: Option<Color>) {
+        winit::platform::windows::WindowExtWindows::set_border_color(
+            &*self.inner,
+            color,
+        );
+    }
+
+    fn set_title_background_color(&self, color: Option<Color>) {
+        winit::platform::windows::WindowExtWindows::set_title_background_color(
+            &*self.inner,
+            color,
+        );
+    }
+
+    fn set_title_text_color(&self, color: Color) {
+        winit::platform::windows::WindowExtWindows::set_title_text_color(
+            &*self.inner,
+            color,
+        );
+    }
+
+    fn set_corner_preference(&self, preference: CornerPreference) {
+        winit::platform::windows::WindowExtWindows::set_corner_preference(
+            &*self.inner,
+            preference,
+        );
+    }
+
+    fn move_top(&self) {
+        move_zorder(&*self.inner, true);
+    }
+
+    fn move_above(&self) {
+        move_zorder(&*self.inner, false);
+    }
+}
+
+/// 用 `SetWindowPos` 调整窗口 z 序（`move_top` / `move_above` 共用）。
+/// 尺寸/位置/激活状态均保持不动；`topmost` 时设 `HWND_TOPMOST`，否则 `HWND_TOP`。
+/// 需在窗口所属线程调用（winit 会 `maybe_queue_on_main` 转发）。
+fn move_zorder(window: &winit::window::Window, topmost: bool) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::HWND as SysHWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    let Ok(wh) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = wh.as_raw() else {
+        return;
+    };
+    let hwnd: SysHWND = h.hwnd.get();
+    let insert_after = if topmost { HWND_TOPMOST } else { HWND_TOP };
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            insert_after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }

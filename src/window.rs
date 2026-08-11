@@ -210,25 +210,40 @@ pub enum FrameStyle {
     /// - **Windows**：唯一真正「只去标题栏」的模式——保留 `WS_SIZEBOX` +
     ///   `WM_NCCALCSIZE` 非客户区 insets（约 8px），系统默认边缘 hit-test
     ///   自动接管缩放热区。
+    /// - **macOS**：保留红绿灯按钮 + 隐藏原生标题栏（`with_titlebar_hidden` +
+    ///   `with_titlebar_transparent` + `with_fullsize_content_view`），内容区
+    ///   延伸到红绿灯下。
     /// - **其它平台：与 [`FrameStyle::Frameless`] 行为相同**（winit 无法只去
     ///   标题栏，边框随装饰整体移除）。
     HiddenTitlebar,
 }
 
 impl FrameStyle {
-    /// 是否保留系统装饰整体（winit `set_decorations` 参数）。`Normal` 才保留；
-    /// 非 Windows 平台上 `Frameless`/`HiddenTitlebar` 都整体去装饰（winit 无法
-    /// 只去标题栏）。
+    /// 是否保留系统装饰整体（winit `set_decorations` 参数）。
+    /// - Windows / 其它平台：`Normal` 才保留；`Frameless`/`HiddenTitlebar`
+    ///   都整体去装饰（winit 无法只去标题栏）。
+    /// - **macOS**：`HiddenTitlebar` **保留**装饰（红绿灯按钮），配合原生
+    ///   `with_titlebar_hidden` + `with_titlebar_transparent` +
+    ///   `with_fullsize_content_view` 实现 Electron `titleBarStyle: 'hidden'`。
     pub(crate) fn decorated(self) -> bool {
-        matches!(self, FrameStyle::Normal)
+        #[cfg(target_os = "macos")]
+        {
+            matches!(self, FrameStyle::Normal | FrameStyle::HiddenTitlebar)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            matches!(self, FrameStyle::Normal)
+        }
     }
 
     /// Windows 内部布尔：是否绘制系统标题栏。
+    #[cfg(target_os = "windows")]
     pub(crate) fn has_titlebar(self) -> bool {
         matches!(self, FrameStyle::Normal)
     }
 
     /// Windows 内部布尔：是否保留系统 resize 边框。
+    #[cfg(target_os = "windows")]
     pub(crate) fn has_border(self) -> bool {
         !matches!(self, FrameStyle::Frameless)
     }
@@ -1999,6 +2014,20 @@ impl App {
                     use winit::platform::windows::WindowAttributesExtWindows;
                     attrs = attrs.with_undecorated_shadow(desc.undecorated_shadow);
                 }
+                #[cfg(target_os = "macos")]
+                {
+                    use winit::platform::macos::WindowAttributesExtMacOS;
+                    // `HiddenTitlebar` = 保留装饰（红绿灯）+ 隐藏原生标题栏 +
+                    // 透明标题栏 + 内容区延伸到红绿灯下（Electron
+                    // `titleBarStyle: 'hidden'` 语义）。winit 只有构造期属性，
+                    // 运行时无 `set_titlebar_hidden` → 只能在构造期实现。
+                    if desc.frame_style == FrameStyle::HiddenTitlebar {
+                        attrs = attrs
+                            .with_titlebar_hidden(true)
+                            .with_titlebar_transparent(true)
+                            .with_fullsize_content_view(true);
+                    }
+                }
                 attrs
             }
         }
@@ -3275,6 +3304,26 @@ impl VireoWindow {
     pub fn outer_size(&self) -> PixelSize {
         let s = self.inner.outer_size();
         to_pixel_size(s.width as f64, s.height as f64, self.scale.get() as f64)
+    }
+
+    /// 把窗口在**当前所在显示器**上居中。vireo 自实现（Electron / Tauri `center`
+    /// 语义；winit 无对应 API）。
+    ///
+    /// 用物理像素手算：`目标外沿左上角 = 显示器工作区中心 − 窗口外沿尺寸一半`，
+    /// 然后走 [`VireoWindow::set_outer_position`]。窗口尺寸用当前外沿尺寸，
+    /// 不改变大小。无可用显示器（Android / Wayland 等）时静默跳过。
+    pub fn center(&self) {
+        let Some(monitor) = self.current_monitor() else {
+            return;
+        };
+        let origin = monitor.position();
+        let area = monitor.size();
+        let size = self.outer_size();
+        let x = origin.x as f64
+            + ((area.width as f64 - size.width.px.0) / 2.0).round();
+        let y = origin.y as f64
+            + ((area.height as f64 - size.height.px.0) / 2.0).round();
+        self.set_outer_position(x as i64, y as i64);
     }
 
     /// 当前是否最小化。`None` 表示平台无法查询。
