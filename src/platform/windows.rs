@@ -15,10 +15,10 @@
 //!
 //! **`Normal` 与 `Frameless` 完全不装子类，放行给 winit 原生**：
 //! `Frameless` 用 winit `set_decorations(false)` + `WM_NCCALCSIZE` 返回 0
-//! （客户区 = 整个窗口），行为与 vireo 旧实现逐位一致，且 winit 的
-//! `undecorated_shadow`（`event_loop.rs` 里 `rgrc[0].top += 1`）不再被绕过。
-//! 注意 winit 阴影**默认关闭**（`decoration_shadow: false`），需显式
-//! `set_undecorated_shadow(true)` 才启用。
+//! （客户区 = 整个窗口），行为与 vireo 旧实现逐位一致。
+//! 注意：vireo **不**暴露 winit 的 `undecorated_shadow`（那 1px 非客户区 hack
+//! 与 DWM 圆角耦合，开启会让无边框窗口既带阴影又可圆角，语义混乱）；需要
+//! 阴影/圆角时请用 `set_transparent` + SDF 自绘。
 //!
 //! 子类化用独立链表挂新 WNDPROC（`SetWindowSubclass`），`DefSubclassProc`
 //! 自动调用原 wndproc，**不**触碰 winit 的 `GWL_WNDPROC` / `GWL_USERDATA`。
@@ -55,7 +55,36 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub use winit::platform::windows::BackdropType;
 pub use winit::platform::windows::Color;
-pub use winit::platform::windows::CornerPreference;
+
+/// 窗口圆角偏好（Windows 11 22000+，DWM `DWMWCP_*`）。
+///
+/// vireo 自带枚举（镜像 winit `CornerPreference`，不 re-export winit 类型），
+/// 供 [`WindowExtWindows::set_corner_preference`] 与 [`VireoWindow::set_frame_style`]
+/// 的 `Frameless` 钳制/恢复逻辑共用同一类型。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CornerPreference {
+    /// 由系统决定是否圆角（默认）。
+    #[default]
+    Default,
+    /// 不圆角。
+    DoNotRound,
+    /// 圆角。
+    Round,
+    /// 小圆角。
+    RoundSmall,
+}
+
+impl CornerPreference {
+    /// 转回 winit 类型（调用 winit `set_corner_preference` 用）。
+    pub(crate) fn into_winit(self) -> winit::platform::windows::CornerPreference {
+        match self {
+            CornerPreference::Default => winit::platform::windows::CornerPreference::Default,
+            CornerPreference::DoNotRound => winit::platform::windows::CornerPreference::DoNotRound,
+            CornerPreference::Round => winit::platform::windows::CornerPreference::Round,
+            CornerPreference::RoundSmall => winit::platform::windows::CornerPreference::RoundSmall,
+        }
+    }
+}
 
 const KW_HRESULT_OK: i32 = 0;
 
@@ -385,6 +414,11 @@ fn encode_refdata(titlebar: bool, border: bool) -> usize {
 
 /// 安装装饰子类。幂等：同一 (proc, SUBCLASS_ID) 重复调用会更新 dwRefData。
 /// 必须在窗口所属线程（winit 事件线程）调用。
+///
+/// 安装后必须 `SWP_FRAMECHANGED` 强制重发 `WM_NCCALCSIZE`：创建期的
+/// `WM_NCCALCSIZE` 在 `SetWindowSubclass` 之前已被 winit 消费（undecorated
+/// 返回 0 → 客户区 = 整个窗口，无任何 resize 热区），不重发的话子类永远
+/// 等不到消息，`HiddenTitlebar` 会退化得像 `Frameless` 一样不可缩放。
 pub fn install(hwnd: HWND, titlebar: bool, border: bool) {
     unsafe {
         SetWindowSubclass(
@@ -394,6 +428,7 @@ pub fn install(hwnd: HWND, titlebar: bool, border: bool) {
             encode_refdata(titlebar, border),
         );
     }
+    force_nccalc_recalc(hwnd);
 }
 
 /// 更新装饰分档（运行期切换 `titlebar`/`border`）。重调 `SetWindowSubclass`
@@ -462,7 +497,7 @@ unsafe extern "system" fn frame_subclass_proc(
     let border = dwrefdata & REF_BORDER != 0;
     if titlebar || !border {
         // Normal（有标题栏）或 Frameless（无边框）交给 winit 原生处理，
-        // 保留其 undecorated_shadow / 最大化 clamp 逻辑。
+        // 保留其最大化 clamp 逻辑。
         return unsafe { DefSubclassProc(hwnd, umsg, wparam, lparam) };
     }
 
@@ -522,17 +557,11 @@ fn monitor_work_rect(rect: RECT) -> Option<RECT> {
 /// 需要显式导入后调用：
 /// ```no_run
 /// use vireo::platform::windows::WindowExtWindows;
-/// win.set_undecorated_shadow(true);
+/// win.set_corner_preference(vireo::platform::windows::CornerPreference::Round);
 /// ```
 ///
 /// 非 Windows 平台本模块不存在（`#[cfg(target_os = "windows")]` 门控）。
 pub trait WindowExtWindows {
-    /// 无装饰窗口的背景阴影（winit `undecorated_shadow`）。
-    /// 对 `FrameStyle::Frameless` 生效；开启后 winit 在 `WM_NCCALCSIZE` 里把
-    /// 客户区顶部下移 1px 留阴影位（窗口顶部出现 1px 细线为已知副作用）。
-    /// `HiddenTitlebar`（vireo 子类接管 `WM_NCCALCSIZE`）下不生效。
-    fn set_undecorated_shadow(&self, shadow: bool);
-
     /// 启用/禁用窗口的鼠标与键盘输入。窗口必须先启用才能被激活。
     /// （winit `WindowExtWindows::set_enable`）
     fn set_enable(&self, enabled: bool);
@@ -563,6 +592,11 @@ pub trait WindowExtWindows {
 
     /// 设置窗口圆角偏好（`Default`/`DoNotRound`/`Round`/`RoundSmall`）。
     /// 需 Windows 11 22000+。（winit `WindowExtWindows::set_corner_preference`）
+    ///
+    /// **始终记录用户偏好**：即使当前 `FrameStyle::Frameless`（无边框）下
+    /// DWM 无法圆角、本设置不立即生效，该偏好也会被记住，待 `set_frame_style`
+    /// 切回 Normal / HiddenTitlebar 时自动恢复。需要真正独立控制时请用
+    /// `set_transparent` + SDF 自绘阴影/圆角。
     fn set_corner_preference(&self, preference: CornerPreference);
 
     /// 把窗口置顶（`HWND_TOPMOST`）。vireo 自实现（Electron `moveTop` 语义，
@@ -658,13 +692,6 @@ pub struct TaskbarOverlay {
 }
 
 impl WindowExtWindows for crate::window::VireoWindow {
-    fn set_undecorated_shadow(&self, shadow: bool) {
-        winit::platform::windows::WindowExtWindows::set_undecorated_shadow(
-            &*self.inner,
-            shadow,
-        );
-    }
-
     fn set_enable(&self, enabled: bool) {
         winit::platform::windows::WindowExtWindows::set_enable(&*self.inner, enabled);
     }
@@ -709,10 +736,20 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn set_corner_preference(&self, preference: CornerPreference) {
-        winit::platform::windows::WindowExtWindows::set_corner_preference(
-            &*self.inner,
-            preference,
-        );
+        self.user_corner_pref.set(preference);
+        // Frameless 无边框时 DWM 无法圆角，钳回 Default（偏好已记录，
+        // 待 set_frame_style 切回 Normal/HiddenTitlebar 时恢复）。
+        if self.frame_style.get() == crate::window::FrameStyle::Frameless {
+            winit::platform::windows::WindowExtWindows::set_corner_preference(
+                &*self.inner,
+                winit::platform::windows::CornerPreference::Default,
+            );
+        } else {
+            winit::platform::windows::WindowExtWindows::set_corner_preference(
+                &*self.inner,
+                preference.into_winit(),
+            );
+        }
     }
 
     fn move_top(&self) {

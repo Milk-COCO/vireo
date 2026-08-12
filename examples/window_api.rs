@@ -1,40 +1,28 @@
 //! 窗口控制 API 演示：1:1 封装 winit 的窗口状态命令/查询
 //!
-//! 键位：
-//! - `D`：循环窗口边框样式 Normal → HiddenTitlebar → Frameless（set_frame_style）；
-//!   无标题栏后可拖顶部「标题栏」区域拖动窗口
-//! - `1`：切换可调大小（set_resizable）
-//! - `2`：切换光标可见（set_cursor_visible）
-//! - `3`：切换光标抓取 Locked（set_cursor_grab）
-//! - `4`：切换标题栏按钮 = 仅关闭 / 全部（set_enabled_buttons）
-//! - `5`：请求用户注意 Critical（request_user_attention）
-//! - `6`：循环主题 None / Dark / Light（set_theme）
-//! - `F`：切换全屏 Borderless
-//! - `G`：光标移动到窗口中心（set_cursor_position，裸数 = vireo 逻辑像素）
-//! - `R`：重置外层位置到 (80, 80)（set_outer_position，裸数 = vireo 逻辑像素）
-//! - `T`：循环窗口标题（set_title）
-//! - `M` / `N`：最大化 / 最小化（set_maximized / set_minimized）
-//! - `H`：显示 / 隐藏（set_visible）
-//! - `O`：循环 vireo 自定义 dpi 覆盖 None / 1.0 / 1.5（set_dpi_override）。
-//!   `None` = vireo 逻辑即 winit 逻辑（OS 缩放参与）；`Some(v)` = vireo 全自持像素，
-//!   物理 = 逻辑 × v（忽略 OS 缩放）。切换保持 vireo 逻辑尺寸、调整物理窗口大小。
-//! - `7` / `8` / `9`：预设大小 300×200 / 600×400 / 900×600（set_size，vireo 逻辑像素）
-//! - `I`：请求把当前逻辑尺寸缩到 0.66×（request_resize，请求尺寸并回告是否当场生效）
-//! - `[` / `]`：循环 resize_increments 无 / 8px / 32px（set_resize_increments，Px 意图）
-//! - `Q`：切换光标穿透（set_cursor_hittest）
-//! - `C`：切换内容保护 / 模糊（set_content_protected / set_blur，仅 macOS / Wayland 生效，
-//!   其它平台 no-op）
-//! - `B`：刷新显示器查询（current / primary / available 数量）
-//! - `K`：重置键盘 dead key 状态（reset_dead_keys，macOS/Windows）
-//! - `Z`：窗口在当前显示器居中（center，vireo 自实现，跨平台）
-//! - `Y` / `U`：窗口置顶 / 提到 z 序顶层（move_top / move_above，Windows
-//!   `vireo::platform::windows::WindowExtWindows` 扩展方法，vireo 自实现）
-//! - `P`：循环任务栏进度 None → Normal 50% → Indeterminate → Paused 30% → Error 70%
-//!   （set_progress_bar）
-//! - `;`：切换任务栏缩略图按钮（set_thumbar_buttons，3 个演示按钮）；
-//!   点击按钮触发 `on_thumb_button(id)` 回调，HUD 显示最近点击的按钮 id
-//! - `,`：切换任务栏 overlay 图标（set_overlay_icon，8×8 半透明箭头）
-//! - `.`：切换任务栏 AppUserModelID（set_app_user_model_id）
+//! HUD 按类别分组展示当前窗口状态，布局随窗口尺寸自适应（不再硬编码坐标）。
+//! 各类可编辑属性均有对应按键，键位在底部提示行按类别排列。
+//!
+//! ## 通用键位
+//! 状态：`D` 装饰 · `1` 可调 · `2` 光标可见 · `3` 抓取 · `4` 标题栏按钮 ·
+//! `5` 注意 · `6` 主题 · `F` 全屏 · `M`/`N` 最大/最小 · `H` 显隐 · `T` 标题
+//! 尺寸：`G` 光标到中心 · `R` 外层位置 · `7`/`8`/`9` 预设尺寸 · `I` 异步改尺寸 ·
+//! `O` dpi 覆盖 · `-` 最小尺寸 · `=` 最大尺寸 · `[`/`]` resize 增量 · `Z` 居中
+//! 其它：`Q` 光标穿透 · `C` 内容保护/模糊 · `B` 透明度 · `K` dead-key 重置 ·
+//! `0` 窗口层级 · `\` 透明 · `'` 运行期图标 · `Enter` 拖边缩放
+//!
+//! ## 平台专属键位
+//! Windows（`vireo::platform::windows::WindowExtWindows`）：`Y` 置顶 · `U` 顶层 ·
+//! `E` 启用 · `S` 跳过任务栏 · `L` 任务栏图标 · `A` 背景 · `W` 边框色 ·
+//! `X` 标题栏底色 · `V` 标题文字色 · `J` 圆角 · `P` 任务栏进度 ·
+//! `;` 缩略图按钮 · `,` overlay 图标 · `.` AppUserModelID · `` ` `` 无边框阴影
+//! macOS（`vireo::platform::macos::WindowExtMacOS`）：`A` 简单全屏 · `S` 阴影 ·
+//! `E` 已编辑 · `V` 无边框游戏 · `P` Option 键
+//!
+//! ## 渲染/性能属性（有专门示例，本示例不重复）
+//! - present mode / frame latency / max fps / MSAA → [`frame_stats`](crate::frame_stats)（另有 `window_present` / `window_aa` / `msaa_clamp`）
+//! - resize 刷新策略 / debounce / layout follow / smoothing → [`window_resize`](crate::window_resize) / [`layout_follow`](crate::layout_follow)
+//! - IME → [`input_ime`](crate::input_ime)；自定义光标 → [`window_create`](crate::window_create)
 //!
 //! HUD 中 `PixelSize` / `PixelPos` 同时给出物理（`px`）与 vireo 逻辑（`dp`）双视图，
 //! 展示统一像素 API：getter 返回双表示快照，裸数值写入默认按逻辑像素。
@@ -54,9 +42,57 @@ struct WinState {
     thumb: Option<u32>,
 }
 
+const ROW_H: f32 = 20.0;
+const GROUP_H: f32 = 26.0;
+const GROUP_GAP: f32 = 8.0;
+const NAME_W: f32 = 158.0;
+
+fn group(b: &mut DrawBatch, x: f32, y: f32, in_view: bool, name: &str) -> f32 {
+    if in_view {
+        draw_text(
+            &mut b.texts,
+            name,
+            Pos::new(x, y),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.42, 0.82, 0.95, 1.0)),
+        );
+    }
+    GROUP_H
+}
+
+fn row(b: &mut DrawBatch, x: f32, y: f32, in_view: bool, name: &str, value: &str) -> f32 {
+    if in_view {
+        draw_text(
+            &mut b.texts,
+            name,
+            Pos::new(x, y),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.55, 0.62, 0.72, 1.0)),
+        );
+        draw_text(
+            &mut b.texts,
+            value,
+            Pos::new(x + NAME_W, y),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.92, 0.95, 1.0, 1.0)),
+        );
+    }
+    ROW_H
+}
+
+fn hint(b: &mut DrawBatch, x: f32, y: f32, text: &str) {
+    draw_text(
+        &mut b.texts,
+        text,
+        Pos::new(x, y),
+        TextDef::default().font_size(12.0),
+        TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
+    );
+}
+
 fn main() {
     let mut app = App::new();
-    let idx = app.window(WindowDesc::new("Window Control", 960, 540), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Window Control", 960, 600), None::<fn()>);
 
     let st = Arc::new(Mutex::new(WinState {
         moved: None,
@@ -76,6 +112,7 @@ fn main() {
     let mut fullsc = false;
     let mut lb_was_down = false;
     let mut visible = true;
+    let mut hidden_at: Option<std::time::Instant> = None;
     let mut dpi_override: Option<f64> = None;
     let titles = ["Window API", "标题已换!", "Vireo Window"];
     let mut title_i = 0usize;
@@ -84,6 +121,13 @@ fn main() {
     let mut protect = false;
     let mut reqsize: Option<(u32, u32)> = None;
     let mut opacity: f64 = 1.0;
+    let mut min_mode: u8 = 0; // 0=None 1=400x300 2=800x600
+    let mut max_mode: u8 = 0; // 0=None 1=1280x800 2=1920x1080
+    let mut level_mode: u8 = 0; // 0=Normal 1=AlwaysOnTop 2=AlwaysOnBottom
+    let mut transparent = false;
+    let mut icon_mode: u8 = 0; // 0=红 1=绿
+    let mut drag_dir: u8 = 0; // 0=East 1=South 2=West 3=North
+    let mut last_attention = false;
     #[cfg(target_os = "windows")]
     let mut win_enable = true;
     #[cfg(target_os = "windows")]
@@ -174,6 +218,7 @@ fn main() {
             win.set_enabled_buttons(if buttons_all { WindowButtons::all() } else { WindowButtons::CLOSE });
         }
         if edge(KeyCode::Digit5) {
+            last_attention = true;
             win.request_user_attention(Some(UserAttentionType::Critical));
         }
         if edge(KeyCode::Digit6) {
@@ -210,8 +255,18 @@ fn main() {
             win.set_minimized(true);
         }
         if edge(KeyCode::KeyH) {
-            visible = !visible;
-            win.set_visible(visible);
+            if visible {
+                visible = false;
+                win.set_visible(false);
+                hidden_at = Some(std::time::Instant::now());
+            }
+        }
+        if let Some(h) = hidden_at {
+            if h.elapsed().as_secs_f64() >= 3.0 {
+                hidden_at = None;
+                visible = true;
+                win.set_visible(true);
+            }
         }
         if edge(KeyCode::KeyO) {
             dpi_override = match dpi_override {
@@ -267,6 +322,57 @@ fn main() {
                 _ => 1.0,
             };
             win.set_opacity(opacity);
+        }
+        // ---- 新增：尺寸约束 / 层级 / 透明 / 图标 / 拖边 ----
+        if edge(KeyCode::Minus) {
+            min_mode = (min_mode + 1) % 3;
+            match min_mode {
+                0 => win.set_min_size::<f64, f64>(None, None),
+                1 => win.set_min_size(Some(400.0f64), Some(300.0f64)),
+                _ => win.set_min_size(Some(800.0f64), Some(600.0f64)),
+            }
+        }
+        if edge(KeyCode::Equal) {
+            max_mode = (max_mode + 1) % 3;
+            match max_mode {
+                0 => win.set_max_size::<f64, f64>(None, None),
+                1 => win.set_max_size(Some(1280.0f64), Some(800.0f64)),
+                _ => win.set_max_size(Some(1920.0f64), Some(1080.0f64)),
+            }
+        }
+        if edge(KeyCode::Digit0) {
+            level_mode = (level_mode + 1) % 3;
+            let lvl = match level_mode {
+                0 => WindowLevel::Normal,
+                1 => WindowLevel::AlwaysOnTop,
+                _ => WindowLevel::AlwaysOnBottom,
+            };
+            win.set_window_level(lvl);
+        }
+        if edge(KeyCode::Backslash) {
+            transparent = !transparent;
+            win.set_transparent(transparent);
+        }
+        if edge(KeyCode::Quote) {
+            icon_mode = (icon_mode + 1) % 2;
+            let (r, g, bl) = match icon_mode {
+                0 => (230, 60, 60),
+                _ => (60, 200, 110),
+            };
+            let rgba = vec![r, g, bl, 255].repeat(16 * 16);
+            if let Ok(icon) = winit::window::Icon::from_rgba(rgba, 16, 16) {
+                win.set_icon(icon);
+            }
+        }
+        if edge(KeyCode::Enter) {
+            drag_dir = (drag_dir + 1) % 4;
+            let dir = match drag_dir {
+                0 => ResizeDirection::East,
+                1 => ResizeDirection::South,
+                2 => ResizeDirection::West,
+                _ => ResizeDirection::North,
+            };
+            let _ = win.drag_resize_window(dir);
         }
         #[cfg(target_os = "windows")]
         {
@@ -483,7 +589,6 @@ fn main() {
         // ---- 查询（直接转发 winit）----
         let is_min = win.is_minimized().unwrap_or(false);
         let is_max = win.is_maximized();
-        let is_vis = win.is_visible().unwrap_or(true);
         let full = win.fullscreen().is_some();
         let outer_size = win.outer_size();
         let inner_pos = win.inner_position().map(|p| p.logical()).unwrap_or((0.0, 0.0));
@@ -500,12 +605,23 @@ fn main() {
         let evt_theme = st_guard.theme;
         drop(st_guard);
 
-        // ---- 绘制 ----
+        // ---- 绘制：分类分组 + 自适应布局 ----
+        let m = win.metrics();
+        let win_w = m.width as f32;
+        let win_h = m.height as f32;
+        let title_h = 36.0;
+        let hint_h = 5.0 * 18.0 + 8.0;
+        let area_bottom = (win_h - hint_h - 10.0).max(title_h + 12.0);
+        let col_w = (win_w - 32.0 - 24.0) / 2.0;
+        let left_x = 16.0;
+        let right_x = left_x + col_w + 24.0;
+        let in_view = |y: f32| y < area_bottom;
+
         let mut b = DrawBatch::new();
 
         // 模拟标题栏
         b.set_color(Color::new(0.16, 0.18, 0.24, 1.0));
-        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 960.0, 36.0, None);
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), win_w, title_h, None);
         draw_text(
             &mut b.texts,
             "拖这里拖动窗口（drag_window）",
@@ -514,101 +630,77 @@ fn main() {
             TextOverride::from_color(Color::new(0.85, 0.9, 1.0, 1.0)),
         );
 
-        let mut lines = Vec::new();
-        lines.push(format!("frame={:?}  resizable={}  cursor_visible={}  grab={}", win.frame_style(), resizable, cursor_visible, grab));
-        lines.push(format!("enabled_buttons={}  fullscreen={}", if buttons_all { "all" } else { "close-only" }, full));
-        lines.push(format!("theme(set)={:?}  theme(query)={:?}", match theme_mode { 1 => Some(Theme::Dark), 2 => Some(Theme::Light), _ => None }, cur_theme));
-        lines.push(format!("minimized={}  maximized={}  visible={}", is_min, is_max, is_vis));
-        lines.push(format!(
-            "inner_pos px={:.0},{:.0} dp={:.0},{:.0}  outer_pos(dp)={:?}  outer_size px={:.0}x{:.0} dp(logical)={:.0}x{:.0}",
-            inner_pos_px.0, inner_pos_px.1, inner_pos.0, inner_pos.1,
-            outer_pos,
-            outer_size.physical().0, outer_size.physical().1,
-            outer_size.logical().0, outer_size.logical().1,
-        ));
-        lines.push(format!("hittest={}  reqsize={:?}  resize_increments={:?}", hittest, reqsize, inc_q.map(|p| p.logical())));
-        lines.push(format!("content_protected={}  monitor_current={:?}  primary={:?}  available={}", protect, cur_mon.is_some(), prim_mon.is_some(), avail_n));
-        lines.push(format!("on_moved=({}, {})  on_theme_changed={:?}", moved_x, moved_y, evt_theme));
-        lines.push(format!(
-            "dpi_override={:?}  opacity={:.2}  metrics logical={}x{} physical={}x{} sf={:.2}",
-            dpi_override,
-            opacity,
-            win.metrics().width,
-            win.metrics().height,
-            win.metrics().physical_width,
-            win.metrics().physical_height,
-            win.metrics().scale_factor,
-        ));
-        #[cfg(target_os = "windows")]
-        lines.push(format!(
-            "win: enable={} skip_taskbar={} taskbar_icon={} backdrop={:?} border={:?} title_bg={:?} title_text={:?} corner={:?}",
-            win_enable, win_skip_taskbar, win_taskbar_icon,
-            match backdrop_mode { 1 => "Mica", 2 => "Acrylic", 3 => "Tabbed", _ => "None" },
-            match border_color_mode { 1 => "red", 2 => "green", _ => "None" },
-            match title_bg_mode { 1 => "dark", 2 => "light", _ => "None" },
-            match title_text_mode { 1 => "white", 2 => "black", _ => "system" },
-            match corner_mode { 1 => "Round", 2 => "RoundSmall", 3 => "DoNotRound", _ => "Default" },
-        ));
-        #[cfg(target_os = "windows")]
-        lines.push(format!(
-            "taskbar: progress={} thumbar={} overlay={} appid={} click={:?}",
-            match progress_mode { 1 => "Normal50", 2 => "Indeterminate", 3 => "Paused30", 4 => "Error70", _ => "None" },
-            thumbar_on,
-            overlay_on,
-            appid_on,
-            st.lock().unwrap().thumb,
-        ));
-        #[cfg(target_os = "macos")]
-        lines.push(format!(
-            "mac: simple_fullscreen={} shadow={} edited={} game={} alt={:?}",
-            mac_fullscreen, mac_shadow, mac_edited, mac_game,
-            match mac_alt { 1 => "OnlyLeft", 2 => "OnlyRight", _ => "Both" },
-        ));
+        // 左栏：外观·状态 / 尺寸·位置
+        let mut ly = title_h + 12.0;
+        ly += group(&mut b, left_x, ly, in_view(ly), "外观 · 状态") + GROUP_GAP;
+        ly += row(&mut b, left_x, ly, in_view(ly), "frame_style", &format!("{:?}", win.frame_style()));
+        ly += row(&mut b, left_x, ly, in_view(ly), "enabled_buttons", if buttons_all { "all" } else { "close-only" });
+        ly += row(&mut b, left_x, ly, in_view(ly), "theme", &format!("set={:?} query={:?}", match theme_mode { 1 => Some(Theme::Dark), 2 => Some(Theme::Light), _ => None }, cur_theme));
+        ly += row(&mut b, left_x, ly, in_view(ly), "fullscreen", &full.to_string());
+        let vis_desc = if let Some(h) = hidden_at {
+            format!("hidden, {:.0}s auto-restore", (3.0 - h.elapsed().as_secs_f64()).max(0.0))
+        } else if visible {
+            "visible".to_string()
+        } else {
+            "hidden".to_string()
+        };
+        ly += row(&mut b, left_x, ly, in_view(ly), "min/max/visible", &format!("{}/{}/{}", is_min, is_max, vis_desc));
+        ly += row(&mut b, left_x, ly, in_view(ly), "window_level", match level_mode { 0 => "Normal", 1 => "AlwaysOnTop", _ => "AlwaysOnBottom" });
+        ly += row(&mut b, left_x, ly, in_view(ly), "transparent", &format!("{}", transparent));
+        ly += row(&mut b, left_x, ly, in_view(ly), "opacity", &format!("{:.2}", opacity));
+        ly += row(&mut b, left_x, ly, in_view(ly), "title", titles[title_i]);
 
-        let mut y = 60.0f32;
-        for line in lines {
-            draw_text(
-                &mut b.texts,
-                &line,
-                Pos::new(20.0, y),
-                TextDef::default().font_size(16.0),
-                TextOverride::from_color(Color::new(0.9, 0.95, 1.0, 1.0)),
-            );
-            y += 28.0;
+        ly += GROUP_GAP;
+        ly += group(&mut b, left_x, ly, in_view(ly), "尺寸 · 位置") + GROUP_GAP;
+        ly += row(&mut b, left_x, ly, in_view(ly), "inner_pos", &format!("px={:.0},{:.0} dp={:.0},{:.0}", inner_pos_px.0, inner_pos_px.1, inner_pos.0, inner_pos.1));
+        ly += row(&mut b, left_x, ly, in_view(ly), "outer", &format!("pos={:?} size px={:.0}x{:.0}", outer_pos, outer_size.physical().0, outer_size.physical().1));
+        ly += row(&mut b, left_x, ly, in_view(ly), "metrics", &format!("logical={}x{} physical={}x{} sf={:.2}", m.width, m.height, m.physical_width, m.physical_height, m.scale_factor));
+        ly += row(&mut b, left_x, ly, in_view(ly), "dpi_override", &format!("{:?}", dpi_override));
+        ly += row(&mut b, left_x, ly, in_view(ly), "min/max_size", &format!("{}/{}", match min_mode { 1 => "400x300", 2 => "800x600", _ => "None" }, match max_mode { 1 => "1280x800", 2 => "1920x1080", _ => "None" }));
+        ly += row(&mut b, left_x, ly, in_view(ly), "reqsize", &format!("{:?}", reqsize));
+        ly += row(&mut b, left_x, ly, in_view(ly), "resize_incr/hittest", &format!("{:?} / {}", inc_q.map(|p| p.logical()), hittest));
+        row(&mut b, left_x, ly, in_view(ly), "monitors", &format!("cur={} prim={} avail={}", cur_mon.is_some(), prim_mon.is_some(), avail_n));
+
+        // 右栏：光标·输入 / 平台
+        let mut ry = title_h + 12.0;
+        ry += group(&mut b, right_x, ry, in_view(ry), "光标 · 输入") + GROUP_GAP;
+        ry += row(&mut b, right_x, ry, in_view(ry), "cursor/grab", &format!("visible={} grab={}", cursor_visible, grab));
+        ry += row(&mut b, right_x, ry, in_view(ry), "attention", &last_attention.to_string());
+        ry += row(&mut b, right_x, ry, in_view(ry), "protect/blur", &protect.to_string());
+        ry += row(&mut b, right_x, ry, in_view(ry), "moved/theme", &format!("({}, {}) / {:?}", moved_x, moved_y, evt_theme));
+
+        ry += GROUP_GAP;
+        #[cfg(target_os = "windows")]
+        {
+            ry += group(&mut b, right_x, ry, in_view(ry), "Windows 平台") + GROUP_GAP;
+            ry += row(&mut b, right_x, ry, in_view(ry), "enable/skip/icon", &format!("{}/{}/{}", win_enable, win_skip_taskbar, win_taskbar_icon));
+            ry += row(&mut b, right_x, ry, in_view(ry), "backdrop", match backdrop_mode { 1 => "Mica", 2 => "Acrylic", 3 => "Tabbed", _ => "None" });
+            ry += row(&mut b, right_x, ry, in_view(ry), "border/title", &format!("{} {} {}", match border_color_mode { 1 => "red", 2 => "green", _ => "None" }, match title_bg_mode { 1 => "dark", 2 => "light", _ => "None" }, match title_text_mode { 1 => "white", 2 => "black", _ => "system" }));
+            ry += row(&mut b, right_x, ry, in_view(ry), "corner", match corner_mode { 1 => "Round", 2 => "RoundSmall", 3 => "DoNotRound", _ => "Default" });
+            ry += row(&mut b, right_x, ry, in_view(ry), "progress", match progress_mode { 1 => "Normal50", 2 => "Indeterminate", 3 => "Paused30", 4 => "Error70", _ => "None" });
+            row(&mut b, right_x, ry, in_view(ry), "thumb/overlay/appid", &format!("{}/{}/{} click={:?}", thumbar_on, overlay_on, appid_on, st.lock().unwrap().thumb));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            ry += group(&mut b, right_x, ry, in_view(ry), "macOS 平台") + GROUP_GAP;
+            ry += row(&mut b, right_x, ry, in_view(ry), "fullscreen/shadow", &format!("{}/{}", mac_fullscreen, mac_shadow));
+            row(&mut b, right_x, ry, in_view(ry), "edited/game/alt", &format!("{}/{}/{}", mac_edited, mac_game, match mac_alt { 1 => "OnlyLeft", 2 => "OnlyRight", _ => "Both" }));
         }
 
-        draw_text(
-            &mut b.texts,
-            "D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · G 中心 · R 位置 · T 标题 · M/N 最大/最小 · H 显隐 · O dpi覆盖 · 7/8/9 尺寸",
-            Pos::new(20.0, 438.0),
-            TextDef::default().font_size(13.0),
-            TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),
-        );
-        draw_text(
-            &mut b.texts,
-            "I 异步改尺寸 · [ ] resize增量 · Q 光标穿透 · C 内容保护 · B 透明度 · K dead-key重置 · Z 居中",
-            Pos::new(20.0, 462.0),
-            TextDef::default().font_size(13.0),
-            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
-        );
+        // 底部键位提示（自适应，按类别分行）
+        let hy = area_bottom + 10.0;
+        hint(&mut b, 16.0, hy, "通用·状态: D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · M/N 最大/最小 · H 显隐 · T 标题");
+        hint(&mut b, 16.0, hy + 18.0, "通用·尺寸: G 中心 · R 位置 · 7/8/9 尺寸 · I 异步 · O dpi覆盖 · - 最小 · = 最大 · [ ] 增量 · Z 居中");
+        hint(&mut b, 16.0, hy + 36.0, "通用·其它: Q 穿透 · C 保护 · B 透明度 · K dead键 · 0 层级 · \\ 透明 · ' 图标 · Enter 拖边");
         #[cfg(target_os = "windows")]
-        draw_text(
-            &mut b.texts,
-            "Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 任务栏图标 · A 背景 · W 边框色 · X 标题栏底色 · V 标题文字色 · J 圆角 · P 进度 · ; 缩略图按钮 · , overlay · . AppID [Windows]",
-            Pos::new(20.0, 486.0),
-            TextDef::default().font_size(13.0),
-            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
-        );
+        hint(&mut b, 16.0, hy + 54.0, "Windows: Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 图标 · A 背景 · W 边框 · X 标题栏底 · V 标题文字 · J 圆角 · P 进度 · ; 缩略图 · , overlay · . AppID · 注: 无边框下 J圆角 不生效(DWM 无法圆角)，会记住偏好·切回有边框恢复");
         #[cfg(target_os = "macos")]
-        draw_text(
-            &mut b.texts,
-            "A 简单全屏 · S 阴影 · E 已编辑 · V 无边框游戏 · P Option键 [macOS]",
-            Pos::new(20.0, 486.0),
-            TextDef::default().font_size(13.0),
-            TextOverride::from_color(Color::new(0.55, 0.65, 0.75, 1.0)),
-        );
+        hint(&mut b, 16.0, hy + 54.0, "macOS: A 简单全屏 · S 阴影 · E 已编辑 · V 无边框游戏 · P Option 键");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        hint(&mut b, 16.0, hy + 54.0, "本平台无额外专属属性");
+        hint(&mut b, 16.0, hy + 72.0, "渲染/性能(AA/present/latency/cap)→ frame_stats · resize 策略/follow → window_resize/layout_follow · IME → input_ime · 自定义光标 → window_create");
 
-        win.draw(Color::new(0.07, 0.08, 0.12, 1.0), &[&b]);
+        win.draw(Color::new(0.07, 0.08, 0.12, if transparent { 0.55 } else { 1.0 }), &[&b]);
         true
     });
 }

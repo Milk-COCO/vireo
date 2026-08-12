@@ -320,13 +320,6 @@ pub struct WindowDesc {
     pub cursor: Cursor,
     pub enabled_buttons: winit::window::WindowButtons,
     pub blur: bool,
-    /// 无装饰窗口的背景阴影。仅 Windows 有效（winit `undecorated_shadow`）：
-    /// 对 `Frameless` 生效；`Normal` 无意义。默认 `false`（winit 默认关闭）。
-    /// ## Platform-specific
-    /// - **Windows**：开启后 winit 在 `WM_NCCALCSIZE` 里把客户区顶部下移 1px
-    ///   留阴影位（`undecorated_shadow` 的已知副作用：窗口顶部出现 1px 细线）。
-    /// - 其它平台 no-op。
-    pub undecorated_shadow: bool,
     pub present_mode: wgpu::PresentMode,
     pub anti_aliasing: AntiAliasing,
     /// 期望最大在途帧（`SurfaceConfiguration::desired_maximum_frame_latency`）。
@@ -364,7 +357,6 @@ impl WindowDesc {
             cursor: Cursor::default(),
             enabled_buttons: winit::window::WindowButtons::all(),
             blur: false,
-            undecorated_shadow: false,
             present_mode: wgpu::PresentMode::AutoVsync,
             anti_aliasing: AntiAliasing::None,
             frame_latency: 2,
@@ -516,16 +508,6 @@ impl WindowDesc {
 
     pub fn blur(mut self, blur: bool) -> Self {
         self.blur = blur;
-        self
-    }
-
-    /// 无装饰窗口的背景阴影（仅 Windows 有效，默认 `false`）。
-    ///
-    /// 对 `FrameStyle::Frameless` 生效（配合 winit `undecorated_shadow`）；
-    /// 开启后 winit 在 `WM_NCCALCSIZE` 里把客户区顶部下移 1px 留阴影位，
-    /// 副作用是窗口顶部出现 1px 细线。其它平台 no-op。
-    pub fn undecorated_shadow(mut self, shadow: bool) -> Self {
-        self.undecorated_shadow = shadow;
         self
     }
 
@@ -780,7 +762,11 @@ pub struct VireoWindow {
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
     /// 窗口边框样式（供 `frame_style()` 查询；运行时经 `set_frame_style` 切换）。
-    frame_style: std::cell::Cell<FrameStyle>,
+    pub(crate) frame_style: std::cell::Cell<FrameStyle>,
+    /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
+    /// Frameless 无边框时 DWM 无法圆角，`set_frame_style` 离幀前钳 / 恢复用。
+    #[cfg(target_os = "windows")]
+    pub(crate) user_corner_pref: std::cell::Cell<crate::platform::windows::CornerPreference>,
     /// 关窗事件已到达（关闭中，draw 跳过）
     closing: std::cell::Cell<bool>,
     /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
@@ -867,6 +853,10 @@ impl VireoWindow {
             pending_aa: std::cell::Cell::new(None),
             handle,
             frame_style: std::cell::Cell::new(frame_style),
+            #[cfg(target_os = "windows")]
+            user_corner_pref: std::cell::Cell::new(
+                crate::platform::windows::CornerPreference::Default,
+            ),
             closing: std::cell::Cell::new(false),
             gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
             last_gpu_secs: Arc::new(Mutex::new(None)),
@@ -1932,6 +1922,11 @@ impl App {
         let (cb_tx, cb_rx) = mpsc::channel::<(usize, crate::input::InputCallbacks)>();
         // 渲染线程 → winit 线程的终止请求（on_frame 返回 false / 设备丢失）。
         let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        // 渲染线程 → winit 线程：运行期边框样式切换。SetWindowSubclass /
+        // RemoveWindowSubclass 必须在窗口 owner（winit 事件）线程调用（见
+        // platform::windows::install 注释），而 set_frame_style 从渲染线程发出，
+        // 故通过本 channel 转发到 Runner::about_to_wait 在 winit 线程执行。
+        let (frame_style_tx, frame_style_rx) = mpsc::channel::<(isize, FrameStyle)>();
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
@@ -1948,6 +1943,7 @@ impl App {
                     event_rx,
                     cb_tx,
                     exit_tx,
+                    frame_style_tx,
                     device_lost,
                     expected_windows,
                 );
@@ -1961,6 +1957,8 @@ impl App {
     cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
     /// 接收渲染线程发来的终止请求
     exit_rx: mpsc::Receiver<()>,
+    /// 接收渲染线程发来的运行期边框样式切换（在 winit 线程执行 Win32 子类操作）
+    frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
             window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
             close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
@@ -2024,11 +2022,6 @@ impl App {
                 if let Some(ph) = desc.parent_window {
                     attrs = unsafe { attrs.with_parent_window(Some(ph.0)) };
                 }
-                #[cfg(target_os = "windows")]
-                {
-                    use winit::platform::windows::WindowAttributesExtWindows;
-                    attrs = attrs.with_undecorated_shadow(desc.undecorated_shadow);
-                }
                 #[cfg(target_os = "macos")]
                 {
                     use winit::platform::macos::WindowAttributesExtMacOS;
@@ -2066,7 +2059,7 @@ impl App {
                     // Windows：仅 `HiddenTitlebar` 需子类化拦截 WM_NCCALCSIZE
                     // （去标题栏、保留系统 resize 边框、顶部不留 inset）。
                     // `Normal`/`Frameless` 不装子类，完全放行 winit 原生：
-                    // Frameless 由 winit 处理客户区 + 可选 undecorated_shadow。
+                    // Frameless 由 winit 处理客户区（客户区 = 窗口矩形）。
                     // 必须在 winit 事件线程、窗口创建后安装。
                     #[cfg(target_os = "windows")]
                     if let Some(hwnd) = win_hwnd(&window) {
@@ -2209,6 +2202,21 @@ impl App {
                         cbs.on_theme_changed.extend(reg.on_theme_changed.drain(..));
                     }
                 }
+                // 运行期边框样式切换：SetWindowSubclass / RemoveWindowSubclass
+                // 必须在窗口 owner（winit 事件）线程执行，这里 drain 渲染线程
+                // 发来的请求（见 platform::windows::install 注释）。
+                #[cfg(target_os = "windows")]
+                while let Ok((hwnd, style)) = self.frame_style_rx.try_recv() {
+                    // 只有 HiddenTitlebar 需要子类；切到 Normal/Frameless
+                    // 时卸载，让 winit 原生接管（Frameless 客户区/阴影）。
+                    if !style.has_titlebar() && style.has_border() {
+                        crate::platform::windows::set_frame(hwnd, false, true);
+                    } else {
+                        crate::platform::windows::remove(hwnd);
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                while self.frame_style_rx.try_recv().is_ok() {}
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
             }
 
@@ -2368,6 +2376,7 @@ impl App {
             event_tx,
             cb_rx,
             exit_rx,
+            frame_style_rx,
             window_descs,
             id_to_handle: FxHashMap::default(),
             close_hooks,
@@ -2393,12 +2402,15 @@ fn render_on_frame<F>(
     rx: mpsc::Receiver<WinitEvent>,
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     exit_tx: mpsc::Sender<()>,
+    frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
 )
 where F: FnMut(&App) -> bool + Send + 'static
 {
     let mut created_windows = 0usize;
+    #[cfg(not(target_os = "windows"))]
+    let _ = &frame_style_tx;
     let request_exit = || {
         let _ = exit_tx.send(());
     };
@@ -2606,15 +2618,12 @@ where F: FnMut(&App) -> bool + Send + 'static
                     if let Some(Some(win)) = app.windows.get(handle) {
                         win.frame_style.set(style);
                         win.inner.set_decorations(style.decorated());
+                        // SetWindowSubclass / RemoveWindowSubclass 必须在 winit
+                        // 事件线程调用（见 platform::windows::install 注释），
+                        // 这里仅转发到 winit 线程，由 Runner::about_to_wait 执行。
                         #[cfg(target_os = "windows")]
                         if let Some(hwnd) = win_hwnd(&win.inner) {
-                            // 只有 HiddenTitlebar 需要子类；切到 Normal/Frameless
-                            // 时卸载，让 winit 原生接管（Frameless 客户区/阴影）。
-                            if !style.has_titlebar() && style.has_border() {
-                                crate::platform::windows::set_frame(hwnd, false, true);
-                            } else {
-                                crate::platform::windows::remove(hwnd);
-                            }
+                            let _ = frame_style_tx.send((hwnd, style));
                         }
                     }
                 }
@@ -3083,8 +3092,31 @@ impl VireoWindow {
     ///
     /// 见 [`FrameStyle`] 各变体文档；非 Windows 平台上 [`FrameStyle::HiddenTitlebar`]
     /// 与 [`FrameStyle::Frameless`] 行为相同（都整体去装饰）。
+    ///
+    /// **Windows 圆角钳制/恢复**：进入 [`FrameStyle::Frameless`]（无边框）时
+    /// DWM 无法圆角，圆角偏好被钳为 `Default`；切回 `Normal`/`HiddenTitlebar`
+    /// 时自动恢复用户上次经 `set_corner_preference` 设置的偏好。
     pub fn set_frame_style(&self, style: FrameStyle) {
+        let prev = self.frame_style.get();
         self.frame_style.set(style);
+        #[cfg(target_os = "windows")]
+        {
+            use crate::platform::windows::CornerPreference;
+            let prev_frameless = prev == FrameStyle::Frameless;
+            let new_frameless = style == FrameStyle::Frameless;
+            if prev_frameless != new_frameless {
+                // 进入/离开 Frameless 时与偏好对齐（钳 Default / 恢复偏好）。
+                let target = if new_frameless {
+                    CornerPreference::Default
+                } else {
+                    self.user_corner_pref.get()
+                };
+                winit::platform::windows::WindowExtWindows::set_corner_preference(
+                    &*self.inner,
+                    target.into_winit(),
+                );
+            }
+        }
         let _ = self.event_tx.send(WinitEvent::SetFrameStyle {
             handle: self.handle(),
             style,
