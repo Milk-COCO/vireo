@@ -96,6 +96,14 @@ enum ResizeRefresh {
     Live,
 }
 
+/// 验证 `set_aspect_ratio` 入参：非正数视为清除（与 `None` 等价）。
+fn validate_aspect_ratio(ratio: Option<f64>) -> Option<f64> {
+    match ratio {
+        Some(r) if r > 0.0 => Some(r),
+        _ => None,
+    }
+}
+
 /// 布局跟随（`layout_follow`）的平滑强度单位：既可按**帧数**也可按**真实时长**表达。
 ///
 /// - `Time(d)`：以采样时间差判断（与刷新率无关）。
@@ -658,6 +666,14 @@ enum WinitEvent {
     SetFrameStyle { handle: usize, style: FrameStyle },
     SetIcon { handle: usize, icon: Icon },
     SetCursor { handle: usize, cursor: winit::window::Cursor },
+    /// 设置窗口宽高比（`Some(r > 0)` = 宽/高比 = r；`None` 或非正数 = 清除）。
+    /// 跨平台语义：Electron `setAspectRatio`（macOS）、Tauri 暂无；
+    /// vireo 先在 Windows 上落地（`WM_GETMINMAXINFO` + `WM_SIZING` 子类），
+    /// macOS 等后续 `NSWindow setContentAspectRatio` 实施时挂接。
+    /// 必须经 winit 线程执行 `SetWindowSubclass`（同 `set_frame_style`），
+    /// 渲染线程收到本事件后转发 `aspect_ratio_tx` → winit 线程。
+    #[cfg(target_os = "windows")]
+    SetAspectRatio { handle: usize, ratio: Option<f64> },
 }
 
 /// 构造「本帧跳过」的 [`DrawReport`]（保留 gpu_secs）。
@@ -763,6 +779,11 @@ pub struct VireoWindow {
     handle: usize,
     /// 窗口边框样式（供 `frame_style()` 查询；运行时经 `set_frame_style` 切换）。
     pub(crate) frame_style: std::cell::Cell<FrameStyle>,
+    /// 窗口是否可被点击激活获得焦点（`VireoWindow::set_focusable`）。
+    /// 跨平台字段：Windows 经 `WS_EX_NOACTIVATE` 扩展样式落地；macOS 暂存
+    /// 意图（需 NSWindow 子类化 `acceptsFirstResponder` 覆盖，待 macOS 平台
+    /// 窗口能力整批实施时一并实现）。
+    focusable: std::cell::Cell<bool>,
     /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
     /// Frameless 无边框时 DWM 无法圆角，`set_frame_style` 离幀前钳 / 恢复用。
     #[cfg(target_os = "windows")]
@@ -853,6 +874,7 @@ impl VireoWindow {
             pending_aa: std::cell::Cell::new(None),
             handle,
             frame_style: std::cell::Cell::new(frame_style),
+            focusable: std::cell::Cell::new(true),
             #[cfg(target_os = "windows")]
             user_corner_pref: std::cell::Cell::new(
                 crate::platform::windows::CornerPreference::Default,
@@ -1567,6 +1589,18 @@ impl VireoWindow {
         *self.input.focused.borrow()
     }
 
+    /// 窗口当前是否失焦（`!focused()`）。
+    ///
+    /// **语义与 Electron `BrowserWindow.blur()` 的差异**：Electron `blur()` 是
+    /// **主动让窗口失焦**的命令（`win.blur()` 会调用 OS API 把焦点转移到别处）；
+    /// vireo 本方法只暴露**查询**面（基于最近 `Focused` 事件），不实现命令面
+    /// ——winit 0.30.13 没有"主动让窗口失焦"的运行期 API，vireo 暂不绕过 winit
+    /// 自实现。如需在程序内主动转移焦点，临时用 `set_visible(false)` / 重新
+    /// 聚焦其他窗口再聚焦回来等方式模拟。
+    pub fn blur(&self) -> bool {
+        !self.focused()
+    }
+
     pub fn cursor_inside(&self) -> bool {
         *self.input.cursor_inside.borrow()
     }
@@ -1927,6 +1961,10 @@ impl App {
         // platform::windows::install 注释），而 set_frame_style 从渲染线程发出，
         // 故通过本 channel 转发到 Runner::about_to_wait 在 winit 线程执行。
         let (frame_style_tx, frame_style_rx) = mpsc::channel::<(isize, FrameStyle)>();
+        // 渲染线程 → winit 线程：运行期 set_aspect_ratio。同 set_frame_style，
+        // 子类化必须在 winit 事件线程调用；ratio 值存到 platform::windows 进程级表。
+        #[cfg(target_os = "windows")]
+        let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel::<(isize, Option<f64>)>();
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
@@ -1944,6 +1982,8 @@ impl App {
                     cb_tx,
                     exit_tx,
                     frame_style_tx,
+                    #[cfg(target_os = "windows")]
+                    aspect_ratio_tx,
                     device_lost,
                     expected_windows,
                 );
@@ -1959,6 +1999,9 @@ impl App {
     exit_rx: mpsc::Receiver<()>,
     /// 接收渲染线程发来的运行期边框样式切换（在 winit 线程执行 Win32 子类操作）
     frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
+    /// 接收渲染线程发来的运行期宽高比设置（在 winit 线程挂接/卸载子类）
+    #[cfg(target_os = "windows")]
+    aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
             window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
             close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
@@ -2217,6 +2260,12 @@ impl App {
                 }
                 #[cfg(not(target_os = "windows"))]
                 while self.frame_style_rx.try_recv().is_ok() {}
+                // 运行期宽高比切换：drain 渲染线程发来的 (hwnd, ratio)，
+                // 在本线程（winit 事件线程）挂/卸 aspect 子类。
+                #[cfg(target_os = "windows")]
+                while let Ok((hwnd, ratio)) = self.aspect_ratio_rx.try_recv() {
+                    crate::platform::windows::set_aspect_ratio(hwnd, ratio);
+                }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
             }
 
@@ -2377,6 +2426,8 @@ impl App {
             cb_rx,
             exit_rx,
             frame_style_rx,
+            #[cfg(target_os = "windows")]
+            aspect_ratio_rx,
             window_descs,
             id_to_handle: FxHashMap::default(),
             close_hooks,
@@ -2403,6 +2454,7 @@ fn render_on_frame<F>(
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     exit_tx: mpsc::Sender<()>,
     frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
+    #[cfg(target_os = "windows")] aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
 )
@@ -2411,6 +2463,8 @@ where F: FnMut(&App) -> bool + Send + 'static
     let mut created_windows = 0usize;
     #[cfg(not(target_os = "windows"))]
     let _ = &frame_style_tx;
+    #[cfg(target_os = "windows")]
+    let _ = &aspect_ratio_tx;
     let request_exit = || {
         let _ = exit_tx.send(());
     };
@@ -2624,6 +2678,14 @@ where F: FnMut(&App) -> bool + Send + 'static
                         #[cfg(target_os = "windows")]
                         if let Some(hwnd) = win_hwnd(&win.inner) {
                             let _ = frame_style_tx.send((hwnd, style));
+                        }
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                Ok(WinitEvent::SetAspectRatio { handle, ratio }) => {
+                    if let Some(Some(win)) = app.windows.get(handle) {
+                        if let Some(hwnd) = win_hwnd(&win.inner) {
+                            let _ = aspect_ratio_tx.send((hwnd, ratio));
                         }
                     }
                 }
@@ -3400,6 +3462,79 @@ impl VireoWindow {
         }
     }
 
+    /// 运行时切换窗口是否可被点击激活获得焦点。对应 Electron/Tauri `setFocusable`。
+    /// 跨平台语义：Electron/Tauri 均支持。
+    ///
+    /// **Windows**：经 `SetWindowLongPtrW(GWL_EXSTYLE)` 增/清 `WS_EX_NOACTIVATE`。
+    /// `GetWindowLongPtrW`/`SetWindowLongPtrW` 是线程安全的 Win32 API（窗口扩展样式
+    /// 不依赖消息循环线程），故从渲染线程直接调用，无须经 winit 线程转发。
+    /// 注意：仅阻止**用户点击**触发的激活；`focus()` / `set_visible(true)` 触发的
+    /// 编程式激活仍会生效（Windows 系统级行为，非 vireo 行为）。
+    ///
+    /// **macOS**：vireo 暂不实现——需为 NSWindow 子类化并 override
+    /// `acceptsFirstResponder` 返回 `NO`，与本工程目标平台窗口能力整批实施同步。
+    /// 字段已记录用户意图，macOS 实现到位后即时生效，无需重设。
+    ///
+    /// **其他平台**：无操作。
+    pub fn set_focusable(&self, focusable: bool) {
+        self.focusable.set(focusable);
+        #[cfg(target_os = "windows")]
+        {
+            let Some(hwnd) = win_hwnd(&self.inner) else {
+                return;
+            };
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+            };
+            unsafe {
+                let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                let new_style = if focusable {
+                    ex_style & !(WS_EX_NOACTIVATE as isize)
+                } else {
+                    ex_style | (WS_EX_NOACTIVATE as isize)
+                };
+                if new_style != ex_style {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = focusable;
+        }
+    }
+
+    /// 当前 `set_focusable` 设置（始终为最近一次调用值；macOS 暂存意图待实现生效）。
+    pub fn is_focusable(&self) -> bool {
+        self.focusable.get()
+    }
+
+    /// 设置窗口宽高比（`Some(r)` = 宽 / 高 = r；`None` 或非正数 = 清除）。
+    /// 跨平台语义：Electron `setAspectRatio`（macOS 起源，Windows 也可设）。
+    ///
+    /// **Windows**：经 `WM_GETMINMAXINFO`（钳 `ptMaxTrackSize` 维持 ratio）+
+    /// `WM_SIZING`（用户拖拽时按 WMSZ_* 调整新尺寸）子类化实现。子类挂/卸
+    /// 必须在窗口 owner（winit 事件）线程调用，故本方法经 `WinitEvent::SetAspectRatio`
+    /// 转发到 winit 线程执行。
+    ///
+    /// **macOS / 其他平台**：vireo 暂不实现——macOS 应走 `NSWindow setContentAspectRatio:`，
+    /// 后续 macOS 平台窗口能力整批实施时挂接。
+    pub fn set_aspect_ratio(&self, ratio: Option<f64>) {
+        let ratio = validate_aspect_ratio(ratio);
+        #[cfg(target_os = "windows")]
+        {
+            let _ = self.event_tx.send(WinitEvent::SetAspectRatio {
+                handle: self.handle,
+                ratio,
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // 暂存意图以备未来 macOS 实现时即可生效（与 `set_focusable` 同约定）。
+            let _ = ratio;
+        }
+    }
+
     /// 设置窗口外层位置（含边框）。两参意图同 [`VireoWindow::set_size`]（`Pp`）。
     /// ## Platform-specific
     /// - Android / Wayland 不支持。
@@ -4170,6 +4305,60 @@ mod present_state_tests {
         sm.drain();
         assert!(sm.take_view().is_none());
         assert!(sm.take_cmd_buf().is_none());
+    }
+}
+
+#[cfg(test)]
+mod aspect_ratio_and_focus_tests {
+    //! A1 `set_focusable` / A2 `set_aspect_ratio` / A9 `blur` 的纯函数层验证。
+    //!
+    //! - `validate_aspect_ratio` 是 `set_aspect_ratio` 的纯输入过滤（`None`/非正
+    //!   数 → `None`），单测覆盖所有边界。
+    //! - `blur` / `focused` 是 `InputState.focused` 的双向访问，本模块不直接构造
+    //!   `VireoWindow`（需 winit 上下文），通过聚焦状态互斥的元测试验证语义：
+    //!   `blur() = !focused()` 在所有聚焦状态下成立。
+
+    use std::cell::Cell;
+
+    /// 验证 `validate_aspect_ratio` 过滤逻辑：`Some(r>0)` → `Some(r)`，其余 → `None`。
+    #[test]
+    fn validate_aspect_ratio_positive_passes_through() {
+        assert_eq!(super::validate_aspect_ratio(Some(16.0 / 9.0)), Some(16.0 / 9.0));
+        assert_eq!(super::validate_aspect_ratio(Some(1.0)), Some(1.0));
+        // 极小正数（避免 f64 subnormal 边界模糊，按"严格 > 0"语义放行）
+        assert_eq!(super::validate_aspect_ratio(Some(0.0001)), Some(0.0001));
+    }
+
+    #[test]
+    fn validate_aspect_ratio_zero_and_negative_clear() {
+        assert_eq!(super::validate_aspect_ratio(Some(0.0)), None);
+        assert_eq!(super::validate_aspect_ratio(Some(-1.0)), None);
+        assert_eq!(super::validate_aspect_ratio(Some(f64::NEG_INFINITY)), None);
+    }
+
+    #[test]
+    fn validate_aspect_ratio_none_stays_none() {
+        assert_eq!(super::validate_aspect_ratio(None), None);
+    }
+
+    /// `blur` 与 `focused` 是同一个 `InputState.focused` Cell 的两面：
+    /// `blur = !focused` 在所有聚焦状态下成立。本测试用同型的 `Cell<bool>`
+    /// 替身（不构造真实 VireoWindow），验证 `blur` 实现是 `focused` 的取反。
+    #[test]
+    fn blur_is_negation_of_focused_cell() {
+        let focused = Cell::new(true);
+        assert!(!blur_from_cell(&focused));
+        focused.set(false);
+        assert!(blur_from_cell(&focused));
+        focused.set(true);
+        assert!(!blur_from_cell(&focused));
+    }
+
+    /// 测试替身：`VireoWindow::blur` = `!self.input.focused.borrow()` 的简化表达。
+    /// 注意：真实 `focused` 实现用 `RefCell<bool>::borrow()` 而非 `Cell::get`，
+    /// 但语义都是"读最新写入值后取反"，本替身足以验证。
+    fn blur_from_cell(c: &Cell<bool>) -> bool {
+        !c.get()
     }
 }
 

@@ -27,6 +27,7 @@
 //! 但作为普通函数调用（传 `HWND = isize`）无碍。
 
 use std::ffi::c_void;
+use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -50,7 +51,9 @@ use windows_sys::Win32::UI::Shell::PropertiesSystem::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIconFromResourceEx, DefWindowProcW, DestroyIcon, GetSystemMetrics, IsZoomed,
     NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, WM_COMMAND,
-    IMAGE_FLAGS, LR_DEFAULTCOLOR,
+    IMAGE_FLAGS, LR_DEFAULTCOLOR, MINMAXINFO, WM_GETMINMAXINFO, WM_SIZING,
+    WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
+    WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
 };
 
 pub use winit::platform::windows::BackdropType;
@@ -549,6 +552,126 @@ fn monitor_work_rect(rect: RECT) -> Option<RECT> {
             return None;
         }
         Some(info.rcWork)
+    }
+}
+
+/// 宽高比子类标识符（与装饰/缩略图子类区分）。`"V"` `"A"` `"R"`。
+const ASPECT_SUBCLASS_ID: usize = 0x0056_4152;
+
+/// 每窗口当前宽高比（r > 0）。`HWND → ratio` 映射在进程内全局共享。
+/// 子类 proc 读本表，外部用 `set_aspect_ratio` 写入；写入前无须线程间同步——
+/// 表本身 `Mutex` 保护，子类 proc 在窗口 owner（winit 事件）线程被调用，
+/// `set_aspect_ratio` 经 `WinitEvent` 转发后也在 winit 线程执行，无并发。
+static ASPECT_RATIOS: LazyLock<Mutex<HashMap<HWND, f64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `WM_GETMINMAXINFO` + `WM_SIZING` 子类回调：拦截最大/最小追踪尺寸与用户拖拽
+/// 时的尺寸提议，按 `ASPECT_RATIOS[hwnd]` 维持宽高比。
+///
+/// 必须由 [`set_aspect_ratio`] 在 winit 事件线程安装/卸载（`SetWindowSubclass`
+/// 不可跨线程调用，与 `set_frame` 同一约束）。
+unsafe extern "system" fn aspect_subclass_proc(
+    hwnd: HWND,
+    umsg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    _dwrefdata: usize,
+) -> LRESULT {
+    if umsg == WM_GETMINMAXINFO {
+        if let Ok(map) = ASPECT_RATIOS.lock() {
+            if let Some(&ratio) = map.get(&hwnd) {
+                if ratio > 0.0 {
+                    let info = lparam as *mut MINMAXINFO;
+                    if !info.is_null() {
+                        let info = unsafe { &mut *info };
+                        // Windows 按 ptMaxTrackSize 限制拖拽最大尺寸；
+                        // 这里按 ratio 把"宽为主"换算成高，避免 Windows 给一对
+                        // 与 ratio 矛盾的最大宽/高后用户拖出非 ratio 窗口。
+                        if info.ptMaxTrackSize.x > 0 {
+                            let max_h_from_w =
+                                (info.ptMaxTrackSize.x as f64 / ratio).round() as i32;
+                            if max_h_from_w > 0 && max_h_from_w < info.ptMaxTrackSize.y {
+                                info.ptMaxTrackSize.y = max_h_from_w;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if umsg == WM_SIZING {
+        if let Ok(map) = ASPECT_RATIOS.lock() {
+            if let Some(&ratio) = map.get(&hwnd) {
+                if ratio > 0.0 {
+                    let rc = lparam as *mut RECT;
+                    if !rc.is_null() {
+                        let r = unsafe { &mut *rc };
+                        let w = (r.right - r.left) as f64;
+                        let wmsz = wparam as u32;
+                        // 按 WMSZ_* 决定以哪条边为基准调整另一条：
+                        //   左右拖动 → 高度按 width / ratio 调整，固定 top+bottom
+                        //   上下拖动 → 宽度按 height * ratio 调整，固定 left+right
+                        //   角拖动 → 锚对角，按新宽算高
+                        match wmsz {
+                            WMSZ_LEFT | WMSZ_RIGHT => {
+                                let new_h = (w / ratio).round() as i32;
+                                r.bottom = r.top + new_h;
+                            }
+                            WMSZ_TOP | WMSZ_BOTTOM => {
+                                let h = (r.bottom - r.top) as f64;
+                                let new_w = (h * ratio).round() as i32;
+                                r.right = r.left + new_w;
+                            }
+                            WMSZ_TOPLEFT => {
+                                // 锚定 right + bottom（窗口右下角不动）
+                                let new_h = (w / ratio).round() as i32;
+                                r.top = r.bottom - new_h;
+                            }
+                            WMSZ_BOTTOMRIGHT => {
+                                // 锚定 left + top（左上角不动）
+                                let new_h = (w / ratio).round() as i32;
+                                r.bottom = r.top + new_h;
+                            }
+                            WMSZ_TOPRIGHT => {
+                                // 锚定 left + bottom
+                                let new_h = (w / ratio).round() as i32;
+                                r.top = r.bottom - new_h;
+                            }
+                            WMSZ_BOTTOMLEFT => {
+                                // 锚定 right + top
+                                let new_h = (w / ratio).round() as i32;
+                                r.bottom = r.top + new_h;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unsafe { DefSubclassProc(hwnd, umsg, wparam, lparam) }
+}
+
+/// 设置/清除窗口宽高比。`Some(r > 0)` = 维持 w/h = r；`None` 或非正数 = 清除。
+///
+/// **必须由 winit 事件线程调用**（同 `set_frame`，`SetWindowSubclass` 不可跨线程）。
+/// 重复设置同一正数 ratio 幂等（`SetWindowSubclass` 重复挂同 proc+id 是 no-op）；
+/// 重复清除幂等（`RemoveWindowSubclass` 对未挂子类是 no-op）。
+pub fn set_aspect_ratio(hwnd: HWND, ratio: Option<f64>) {
+    let mut map = ASPECT_RATIOS.lock().unwrap();
+    match ratio {
+        Some(r) if r > 0.0 => {
+            map.insert(hwnd, r);
+            unsafe {
+                SetWindowSubclass(hwnd, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID, 0);
+            }
+        }
+        _ => {
+            map.remove(&hwnd);
+            unsafe {
+                RemoveWindowSubclass(hwnd, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID);
+            }
+        }
     }
 }
 

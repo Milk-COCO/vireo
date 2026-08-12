@@ -9,7 +9,8 @@
 //! 尺寸：`G` 光标到中心 · `R` 外层位置 · `7`/`8`/`9` 预设尺寸 · `I` 异步改尺寸 ·
 //! `O` dpi 覆盖 · `-` 最小尺寸 · `=` 最大尺寸 · `[`/`]` resize 增量 · `Z` 居中
 //! 其它：`Q` 光标穿透 · `C` 内容保护/模糊 · `B` 透明度 · `K` dead-key 重置 ·
-//! `0` 窗口层级 · `\` 透明 · `'` 运行期图标 · `Enter` 拖边缩放
+//! `0` 窗口层级 · `\` 透明 · `'` 运行期图标 · `Enter` 拖边缩放 ·
+//! `F1` 可聚焦 · `F2` 宽高比
 //!
 //! ## 平台专属键位
 //! Windows（`vireo::platform::windows::WindowExtWindows`）：`Y` 置顶 · `U` 顶层 ·
@@ -105,6 +106,8 @@ fn main() {
     let mut was_down: HashMap<KeyCode, bool> = HashMap::new();
     let mut resizable = true;
     let mut cursor_visible = true;
+    let mut focusable_enabled = true;
+    let mut aspect_ratio: Option<f64> = None;
     let mut grab = false;
     let mut buttons_all = true;
     let mut theme_mode: u8 = 0; // 0=None 1=Dark 2=Light
@@ -208,6 +211,19 @@ fn main() {
         if edge(KeyCode::Digit2) {
             cursor_visible = !cursor_visible;
             win.set_cursor_visible(cursor_visible);
+        }
+        if edge(KeyCode::F1) {
+            focusable_enabled = !focusable_enabled;
+            win.set_focusable(focusable_enabled);
+        }
+        if edge(KeyCode::F2) {
+            aspect_ratio = match aspect_ratio {
+                None => Some(16.0 / 9.0),
+                Some(v) if (v - 16.0 / 9.0).abs() < 0.01 => Some(4.0 / 3.0),
+                Some(v) if (v - 4.0 / 3.0).abs() < 0.01 => Some(1.0),
+                _ => None,
+            };
+            win.set_aspect_ratio(aspect_ratio);
         }
         if edge(KeyCode::Digit3) {
             grab = !grab;
@@ -659,6 +675,7 @@ fn main() {
         ly += row(&mut b, left_x, ly, in_view(ly), "min/max_size", &format!("{}/{}", match min_mode { 1 => "400x300", 2 => "800x600", _ => "None" }, match max_mode { 1 => "1280x800", 2 => "1920x1080", _ => "None" }));
         ly += row(&mut b, left_x, ly, in_view(ly), "reqsize", &format!("{:?}", reqsize));
         ly += row(&mut b, left_x, ly, in_view(ly), "resize_incr/hittest", &format!("{:?} / {}", inc_q.map(|p| p.logical()), hittest));
+        ly += row(&mut b, left_x, ly, in_view(ly), "aspect_ratio", &format!("{:?}", aspect_ratio));
         row(&mut b, left_x, ly, in_view(ly), "monitors", &format!("cur={} prim={} avail={}", cur_mon.is_some(), prim_mon.is_some(), avail_n));
 
         // 右栏：光标·输入 / 平台
@@ -667,6 +684,7 @@ fn main() {
         ry += row(&mut b, right_x, ry, in_view(ry), "cursor/grab", &format!("visible={} grab={}", cursor_visible, grab));
         ry += row(&mut b, right_x, ry, in_view(ry), "attention", &last_attention.to_string());
         ry += row(&mut b, right_x, ry, in_view(ry), "protect/blur", &protect.to_string());
+        ry += row(&mut b, right_x, ry, in_view(ry), "focusable/focused", &format!("{}/{}", win.is_focusable(), win.focused()));
         ry += row(&mut b, right_x, ry, in_view(ry), "moved/theme", &format!("({}, {}) / {:?}", moved_x, moved_y, evt_theme));
 
         ry += GROUP_GAP;
@@ -691,7 +709,7 @@ fn main() {
         let hy = area_bottom + 10.0;
         hint(&mut b, 16.0, hy, "通用·状态: D 装饰 · 1 可调 · 2 光标 · 3 抓取 · 4 按钮 · 5 注意 · 6 主题 · F 全屏 · M/N 最大/最小 · H 显隐 · T 标题");
         hint(&mut b, 16.0, hy + 18.0, "通用·尺寸: G 中心 · R 位置 · 7/8/9 尺寸 · I 异步 · O dpi覆盖 · - 最小 · = 最大 · [ ] 增量 · Z 居中");
-        hint(&mut b, 16.0, hy + 36.0, "通用·其它: Q 穿透 · C 保护 · B 透明度 · K dead键 · 0 层级 · \\ 透明 · ' 图标 · Enter 拖边");
+        hint(&mut b, 16.0, hy + 36.0, "通用·其它: Q 穿透 · C 保护 · B 透明度 · K dead键 · 0 层级 · \\ 透明 · ' 图标 · Enter 拖边 · F1 可聚焦 · F2 宽高比");
         #[cfg(target_os = "windows")]
         hint(&mut b, 16.0, hy + 54.0, "Windows: Y 置顶 · U 顶层 · E 启用 · S 跳过任务栏 · L 图标 · A 背景 · W 边框 · X 标题栏底 · V 标题文字 · J 圆角 · P 进度 · ; 缩略图 · , overlay · . AppID · 注: 无边框下 J圆角 不生效(DWM 无法圆角)，会记住偏好·切回有边框恢复");
         #[cfg(target_os = "macos")]
