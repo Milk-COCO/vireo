@@ -30,15 +30,18 @@ use std::ffi::c_void;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL,
+    GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL, ScreenToClient,
 };
 use windows_sys::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows_sys::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows_sys::Win32::System::Variant::{VT_EMPTY, VT_LPWSTR};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture,
+};
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, TBPF_ERROR, TBPF_INDETERMINATE,
     TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, THB_FLAGS, THB_ICON, THB_TOOLTIP,
@@ -55,9 +58,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
     WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
 };
+// 非客户区消息（§7.6）。windows-sys 0.52.0 未定义，手写补齐。
+const WM_NCHITTEST: u32 = 0x0084;
+const WM_NCCALCSIZE: u32 = 131;
+const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CAPTURECHANGED: u32 = 0x0215;
+const WM_SYSCOMMAND: u32 = 0x0112;
+const HTCLIENT: i32 = 1;
+const HTMINBUTTON: i32 = 8;
+const HTMAXBUTTON: i32 = 9;
+const HTCLOSE: i32 = 20;
+const SC_MINIMIZE: usize = 0xF020;
+const SC_MAXIMIZE: usize = 0xF030;
+const SC_RESTORE: usize = 0xF120;
+const SC_CLOSE: usize = 0xF060;
 
 pub use winit::platform::windows::BackdropType;
 pub use winit::platform::windows::Color;
+pub use winit::dpi::PhysicalPosition;
+pub use winit::dpi::PhysicalSize;
 
 /// 窗口圆角偏好（Windows 11 22000+，DWM `DWMWCP_*`）。
 ///
@@ -319,7 +339,6 @@ fn drop_overlay_icons(hwnd: HWND) {
     }
 }
 
-const WM_NCCALCSIZE: u32 = 131;
 // WVR_HREDRAW(0x0100) | WVR_VREDRAW(0x0200)，windows-sys 0.52.0 未定义。
 const WVR_REDRAW: u32 = 0x0300;
 
@@ -484,6 +503,11 @@ fn force_nccalc_recalc(hwnd: HWND) {
 /// - `wparam == 0`：无 insets 调整请求，`DefWindowProc`。
 /// - 最大化：客户区钳到所在显示器 `rcWork`。
 /// - `border=true`：客户区 = 窗口矩形 - 系统边框宽度（顶部不加 inset）。
+///
+/// **不调 `DefSubclassProc`**：阻止 winit/DefWindowProc 恢复系统标题栏。
+/// nc_subclass（如果已装）在 frame_subclass **之前**运行（LIFO），它通过
+/// `DefSubclassProc` 把消息传给 frame_subclass，frame_subclass 修改 `rgrc[0]`
+/// 后直接返回 `WVR_REDRAW`，nc_subclass 在返回的 `rgrc[0]` 上叠加用户 insets。
 unsafe extern "system" fn frame_subclass_proc(
     hwnd: HWND,
     umsg: u32,
@@ -530,9 +554,12 @@ unsafe extern "system" fn frame_subclass_proc(
     };
     let r = unsafe { &mut (*params).rgrc[0] };
     // top 不加 inset（Electron titleBarStyle:'hidden' 语义）：
-    // 客户区顶到窗口最上沿，DWM 无顶部非客户区可画 → 消除 Windows 10/11
-    // 把顶部边框画成不透明白条的残留。代价是顶部边缘失去系统 resize 热区
-    // （左/右/下三边仍保留，由系统默认 WM_NCHITTEST 接管）。
+    // 用户 `set_non_client_size(top,...)` 单独控制顶 inset；frame_subclass
+    // 只负责左/右/下三边的系统边框。
+    // 不调 DefSubclassProc：阻止 winit/DefWindowProc 恢复系统标题栏；
+    // nc_subclass（如果已装）在 frame_subclass 之前运行，已通过
+    // DefSubclassProc 把消息传到这里，frame_subclass 修改 rgrc[0] 后
+    // 返回，nc_subclass 在此基础上叠加用户 insets。
     r.left += sx;
     r.right -= sx;
     r.bottom -= sy;
@@ -673,6 +700,327 @@ pub fn set_aspect_ratio(hwnd: HWND, ratio: Option<f64>) {
             }
         }
     }
+}
+
+// ====== §7.6 非客户区管理（4 套 WM_NC* 消息）============================
+
+/// NC 子类标识符（与 frame / aspect / thumb 区分）。`"V"` `"N"` `"C"`。
+const NC_SUBCLASS_ID: usize = 0x0056_4E43;
+
+/// 回调 newtype（绕开 orphan rules：本地类型 + 单一 `Box<dyn FnMut>` 字段，
+/// 对内安全地 `unsafe impl Send`/`Sync`）。`ThumbCallback` 同模式。
+pub(crate) struct HitTestCallback(
+    pub(crate) Box<dyn FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit>,
+);
+
+impl std::ops::Deref for HitTestCallback {
+    type Target = Box<dyn FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for HitTestCallback {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+unsafe impl Send for HitTestCallback {}
+
+/// 每窗口非客户区状态。
+struct NcState {
+    /// 声明式 hit-test 区域（客户端逻辑像素，与 DrawBatch 绘制坐标一致）。
+    /// 命中规则：**后声明优先**（z 序在上）。
+    regions: Vec<crate::nc::NonClientRegion>,
+    /// 命令式 `set_hit_test_callback`。
+    hit_test_cb: Option<HitTestCallback>,
+    /// 按下中的标题栏按钮（HTCLOSE/HTMINBUTTON/HTMAXBUTTON）。`Some` 表示
+    /// 捕获鼠标已建立，`WM_NCLBUTTONDOWN` 已被接管（阻止 DefWindowProc 渲染
+    /// 经典按下按钮），等 `WM_LBUTTONUP` 释放时在同一按钮上发 `WM_SYSCOMMAND`。
+    pressed_ht: Option<i32>,
+}
+
+static NC_STATES: LazyLock<Mutex<HashMap<HWND, NcState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 应用 NC 状态变更（在 winit 事件线程调用，与 `set_aspect_ratio` 同模式）。
+///
+/// 子类只装 `WM_NCHITTEST` + `WM_NCLBUTTONDOWN`（标题栏按钮自管），**不接管
+/// `WM_NCCALCSIZE` / `WM_NCPAINT` / `WM_NCACTIVATE`**。`WM_NCCALCSIZE` 放行给
+/// `frame_subclass`（HiddenTitlebar 保留系统边框 + Win11 圆角）或 winit 原生
+/// （Frameless 客户区 = 全窗口）。不产生 NC 标题栏区域，系统不画标准标题栏/
+/// 按钮。按钮外观由用户在客户端用 DrawBatch 自绘，`WM_NCHITTEST` 返回 `HT*`
+/// 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮行为）。
+pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
+    let mut states = NC_STATES.lock().unwrap();
+    let state = states.entry(hwnd).or_insert_with(|| NcState {
+        regions: Vec::new(),
+        hit_test_cb: None,
+        pressed_ht: None,
+    });
+
+    match update {
+        NcUpdate::SetRegions(regions) => state.regions = regions,
+        NcUpdate::SetHitTestCb(cb) => state.hit_test_cb = Some(cb),
+        NcUpdate::ClearHitTestCb => state.hit_test_cb = None,
+        NcUpdate::ClearAll => {
+            *state = NcState {
+                regions: Vec::new(),
+                hit_test_cb: None,
+                pressed_ht: None,
+            };
+        }
+    }
+
+    let has_regions = !state.regions.is_empty();
+    let has_cb = state.hit_test_cb.is_some();
+    drop(states);
+
+    if has_regions || has_cb {
+        unsafe {
+            SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0);
+            force_nccalc_recalc(hwnd);
+        }
+    } else {
+        unsafe {
+            RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
+            force_nccalc_recalc(hwnd);
+        }
+    }
+}
+
+/// 卸载窗口的整个 NC 状态（窗口销毁时调用，避免 stale 表项）。
+pub fn nc_remove(hwnd: HWND) {
+    NC_STATES.lock().unwrap().remove(&hwnd);
+    unsafe {
+        RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
+    }
+}
+
+/// 读取当前 hit-test regions（VireoWindow::non_client_regions 用）。
+pub fn nc_get_regions(hwnd: isize) -> Option<Vec<crate::nc::NonClientRegion>> {
+    NC_STATES
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&(hwnd as HWND)).map(|s| s.regions.clone()))
+}
+
+/// NC 状态更新事件（render thread → winit thread，载荷所有权移交给 winit thread）。
+#[allow(dead_code)]
+pub(crate) enum NcUpdate {
+    SetRegions(Vec<crate::nc::NonClientRegion>),
+    SetHitTestCb(HitTestCallback),
+    ClearHitTestCb,
+    ClearAll,
+}
+
+/// NC 子类 proc：处理 `WM_NCHITTEST` + 标题栏按钮点击。
+///
+/// **不接管 `WM_NCCALCSIZE`**：放行给 `frame_subclass`（若 HiddenTitlebar 已装，
+/// LIFO 链中先跑的本子类不拦，`DefSubclassProc` 会传到 frame_subclass），由它
+/// 保留左/右/下系统边框 → Win11 圆角与 resize 边框不消失。`Frameless` 则落回
+/// winit 原生（`WM_NCCALCSIZE` 返回 0，客户区 = 全窗口）。
+///
+/// 标题栏按钮：`WM_NCHITTEST` 返回 `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE` 后，
+/// 若把 `WM_NCLBUTTONDOWN` 放给 `DefWindowProc`，它会**渲染经典样式的按下
+/// 按钮**盖在用户自绘按钮上（Chromium 注释「for some insane reason ... ick!」）。
+/// 这里拦截按下：阻止 DefWindowProc 渲染 + 自己发 `WM_SYSCOMMAND` 完成动作，
+/// 交互行为（snap/双击/右键菜单）仍由系统自动接管。
+unsafe extern "system" fn nc_subclass_proc(
+    hwnd: HWND,
+    umsg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    _dwrefdata: usize,
+) -> LRESULT {
+    match umsg {
+        WM_NCHITTEST => nc_handle_hit_test(hwnd, lparam),
+        WM_NCLBUTTONDOWN => nc_handle_button_down(hwnd, wparam, lparam),
+        WM_LBUTTONUP => nc_handle_button_up(hwnd, wparam),
+        WM_CAPTURECHANGED => nc_handle_capture_changed(hwnd, wparam, lparam),
+        _ => unsafe { DefSubclassProc(hwnd, umsg, wparam, lparam) },
+    }
+}
+
+/// `WM_NCLBUTTONDOWN`：若命中标题栏按钮，拦截并自管（阻止 DefWindowProc 渲染
+/// 经典按下按钮），否则放行（标题栏拖动 / 系统按钮都靠放行）。
+fn nc_handle_button_down(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let ht = (wparam & 0xFFFF) as i32;
+    if !matches!(ht, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) {
+        return unsafe { DefSubclassProc(hwnd, WM_NCLBUTTONDOWN, wparam, lparam) };
+    }
+
+    // 进入按下状态：记 HT + 捕获鼠标，等 WM_LBUTTONUP 决定是否触发动作。
+    // 不调 DefSubclassProc/DefWindowProc → 经典按下按钮不渲染。
+    if let Ok(mut map) = NC_STATES.lock() {
+        if let Some(s) = map.get_mut(&hwnd) {
+            s.pressed_ht = Some(ht);
+        }
+    }
+    unsafe {
+        SetCapture(hwnd);
+    }
+    0
+}
+
+/// `WM_LBUTTONUP`：若处于按钮按下状态，判断释放位置是否仍命中同一按钮；
+/// 是则发 `WM_SYSCOMMAND` 完成最小化/最大化/关闭，然后解除捕获。
+fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
+    let pressed = {
+        let map = NC_STATES.lock().unwrap();
+        map.get(&hwnd).and_then(|s| s.pressed_ht)
+    };
+    let Some(ht) = pressed else {
+        return unsafe { DefSubclassProc(hwnd, WM_LBUTTONUP, wparam, 0) };
+    };
+
+    // 释放位置（屏幕物理坐标）是否仍落在同一按钮 region 内。
+    let mut pt = POINT { x: 0, y: 0 };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+    }
+    let hit = nc_hit_test_regions(hwnd, pt.x, pt.y, 0) as i32;
+
+    // 清按下状态并解除捕获（无论是否触发）。
+    if let Ok(mut map) = NC_STATES.lock() {
+        if let Some(s) = map.get_mut(&hwnd) {
+            s.pressed_ht = None;
+        }
+    }
+    unsafe {
+        ReleaseCapture();
+    }
+
+    if hit == ht {
+        let cmd = match ht {
+            HTMINBUTTON => SC_MINIMIZE,
+            HTMAXBUTTON => {
+                if unsafe { IsZoomed(hwnd) } != 0 {
+                    SC_RESTORE
+                } else {
+                    SC_MAXIMIZE
+                }
+            }
+            HTCLOSE => SC_CLOSE,
+            _ => 0,
+        };
+        if cmd != 0 {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+                    hwnd,
+                    WM_SYSCOMMAND,
+                    cmd,
+                    0,
+                );
+            }
+        }
+    }
+    0
+}
+
+/// `WM_CAPTURECHANGED`：捕获被系统剥夺（如点开系统菜单）时清按下状态。
+fn nc_handle_capture_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if let Ok(mut map) = NC_STATES.lock() {
+        if let Some(s) = map.get_mut(&hwnd) {
+            s.pressed_ht = None;
+        }
+    }
+    unsafe { DefSubclassProc(hwnd, WM_CAPTURECHANGED, wparam, lparam) }
+}
+
+fn nc_handle_hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    // lparam = 屏幕物理坐标（低 16 = x，高 16 = y，有符号）。
+    let screen_x = (lparam & 0xFFFF) as i16 as i32;
+    let screen_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+
+    // 最大化时不允许 resize。
+    if unsafe { IsZoomed(hwnd) } != 0 {
+        return nc_hit_test_regions(hwnd, screen_x, screen_y, lparam);
+    }
+
+    // 获取窗口物理矩形。
+    let mut wr: RECT = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr) };
+
+    let sx = unsafe { GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
+    let sy = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
+
+    // 窗口边缘 resize 热区（物理像素）。
+    let left = screen_x >= wr.left && screen_x < wr.left + sx;
+    let right = screen_x < wr.right && screen_x >= wr.right - sx;
+    let top = screen_y >= wr.top && screen_y < wr.top + sy;
+    let bottom = screen_y < wr.bottom && screen_y >= wr.bottom - sy;
+
+    let hit = if top && left { 13 }          // HTTOPLEFT
+        else if top && right { 14 }           // HTTOPRIGHT
+        else if bottom && left { 16 }         // HTBOTTOMLEFT
+        else if bottom && right { 17 }        // HTBOTTOMRIGHT
+        else if top { 12 }                    // HTTOP
+        else if bottom { 15 }                 // HTBOTTOM
+        else if left { 10 }                   // HTLEFT
+        else if right { 11 }                  // HTRIGHT
+        else { 0 }; // 0 = 未命中边框
+
+    if hit != 0 {
+        return hit as LRESULT;
+    }
+
+    nc_hit_test_regions(hwnd, screen_x, screen_y, lparam)
+}
+
+/// 检查用户声明的 regions；未命中则返回 HTCLIENT。
+fn nc_hit_test_regions(hwnd: HWND, screen_x: i32, screen_y: i32, lparam: LPARAM) -> LRESULT {
+    let mut pt = POINT { x: screen_x, y: screen_y };
+    let ok = unsafe { ScreenToClient(hwnd, &mut pt) };
+    if ok == 0 {
+        return unsafe { DefSubclassProc(hwnd, WM_NCHITTEST, 0, lparam) };
+    }
+
+    let dpi = get_effective_dpi(hwnd);
+    let lx = pt.x as f32 / dpi as f32;
+    let ly = pt.y as f32 / dpi as f32;
+
+    if let Ok(mut map) = NC_STATES.lock() {
+        if let Some(state) = map.get_mut(&hwnd) {
+            for region in state.regions.iter().rev() {
+                if region.rect.contains([lx, ly]) {
+                    return region.hit_test.to_win32() as LRESULT;
+                }
+            }
+            if let Some(cb) = state.hit_test_cb.as_mut() {
+                let input = crate::nc::HitTestInput {
+                    pos: crate::math::Pos::new(lx, ly),
+                    state: get_window_state(hwnd),
+                    dpi_scale: dpi,
+                };
+                let hit = cb(input);
+                if hit != crate::nc::NonClientHit::Client {
+                    return hit.to_win32() as LRESULT;
+                }
+            }
+        }
+    }
+
+    HTCLIENT as LRESULT
+}
+
+fn get_window_state(hwnd: HWND) -> crate::nc::WindowState {
+    let mut state = crate::nc::WindowState::default();
+    unsafe {
+        state.maximized = IsZoomed(hwnd) != 0;
+    }
+    state.active = hwnd_is_active(hwnd);
+    state
+}
+
+fn hwnd_is_active(hwnd: HWND) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow() == hwnd }
+}
+
+fn get_effective_dpi(hwnd: HWND) -> f64 {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    let dpi = unsafe { GetDpiForWindow(hwnd) } as f64;
+    if dpi <= 0.0 {
+        return 1.0;
+    }
+    dpi / 96.0
 }
 
 /// Windows 专属窗口扩展（镜像 winit `WindowExtWindows` 的可复用子集）。
@@ -1157,6 +1505,7 @@ fn move_zorder(window: &winit::window::Window, topmost: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nc::{NonClientHit, NonClientRegion};
 
     /// GUID 手写错误会导致 `CoCreateInstance` 返回 `E_NOINTERFACE`（0x80004002），
     /// 这类问题极易静默发生。这里逐个校验任务栏相关 GUID 的字节序列与权威值一致。
@@ -1235,5 +1584,104 @@ mod tests {
             panic!("CreateIconFromResourceEx 失败, GetLastError={}", err);
         }
         unsafe { DestroyIcon(icon) };
+    }
+
+    // ====== §7.6 NC API 单元测试（无窗口，state 存储/读取）======
+
+    #[test]
+    fn nc_get_regions_default_empty() {
+        let hwnd: HWND = 0xDEAD_BEEF_isize;
+        nc_remove(hwnd);
+        assert!(nc_get_regions(hwnd as isize).is_none());
+    }
+
+    #[test]
+    fn nc_set_regions_roundtrip() {
+        let hwnd: HWND = 0xC0FF_EE01_isize;
+        nc_remove(hwnd);
+
+        let regions = vec![
+            NonClientRegion {
+                rect: crate::math::Rect::new(0.0, 0.0, 600.0, 32.0),
+                hit_test: NonClientHit::Caption,
+            },
+            NonClientRegion {
+                rect: crate::math::Rect::new(8.0, 0.0, 46.0, 32.0),
+                hit_test: NonClientHit::Close,
+            },
+        ];
+        NC_STATES.lock().unwrap().insert(
+            hwnd,
+            NcState {
+                regions: regions.clone(),
+                hit_test_cb: None,
+                pressed_ht: None,
+            },
+        );
+        let read = nc_get_regions(hwnd as isize).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].hit_test, NonClientHit::Caption);
+        assert_eq!(read[1].hit_test, NonClientHit::Close);
+        nc_remove(hwnd);
+    }
+
+    #[test]
+    fn nc_regions_last_declared_wins() {
+        let regions = vec![
+            NonClientRegion {
+                rect: crate::math::Rect::new(0.0, 0.0, 600.0, 32.0),
+                hit_test: NonClientHit::Caption,
+            },
+            NonClientRegion {
+                rect: crate::math::Rect::new(8.0, 0.0, 46.0, 32.0),
+                hit_test: NonClientHit::Close,
+            },
+        ];
+        let lx = 24.0_f32;
+        let ly = 16.0_f32;
+        let hit = regions
+            .iter()
+            .rev()
+            .find(|r| r.rect.contains([lx, ly]))
+            .map(|r| r.hit_test);
+        assert_eq!(hit, Some(NonClientHit::Close));
+
+        let lx2 = 200.0_f32;
+        let hit2 = regions
+            .iter()
+            .rev()
+            .find(|r| r.rect.contains([lx2, ly]))
+            .map(|r| r.hit_test);
+        assert_eq!(hit2, Some(NonClientHit::Caption));
+    }
+
+    #[test]
+    fn nc_clear_all_resets_state() {
+        let hwnd: HWND = 0xC0FF_EE02_isize;
+        nc_remove(hwnd);
+
+        NC_STATES.lock().unwrap().insert(
+            hwnd,
+            NcState {
+                regions: vec![NonClientRegion {
+                    rect: crate::math::Rect::new(0.0, 0.0, 10.0, 10.0),
+                    hit_test: NonClientHit::Close,
+                }],
+                hit_test_cb: None,
+                pressed_ht: None,
+            },
+        );
+        assert_eq!(nc_get_regions(hwnd as isize).unwrap().len(), 1);
+
+        NC_STATES.lock().unwrap().insert(
+            hwnd,
+            NcState {
+                regions: Vec::new(),
+                hit_test_cb: None,
+                pressed_ht: None,
+            },
+        );
+        assert!(nc_get_regions(hwnd as isize).unwrap().is_empty());
+        nc_remove(hwnd);
     }
 }

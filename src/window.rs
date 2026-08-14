@@ -739,6 +739,9 @@ pub struct VireoWindow {
     event_tx: mpsc::Sender<WinitEvent>,
     /// 向 winit 线程注册输入回调
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
+    /// NC 状态变更通道（§7.6）。
+    #[cfg(target_os = "windows")]
+    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
@@ -821,6 +824,7 @@ impl VireoWindow {
         frame_style: FrameStyle,
         event_tx: mpsc::Sender<WinitEvent>,
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
+        #[cfg(target_os = "windows")] nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
         handle: usize,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
@@ -875,6 +879,8 @@ impl VireoWindow {
             handle,
             frame_style: std::cell::Cell::new(frame_style),
             focusable: std::cell::Cell::new(true),
+            #[cfg(target_os = "windows")]
+            nc_tx,
             #[cfg(target_os = "windows")]
             user_corner_pref: std::cell::Cell::new(
                 crate::platform::windows::CornerPreference::Default,
@@ -1965,6 +1971,11 @@ impl App {
         // 子类化必须在 winit 事件线程调用；ratio 值存到 platform::windows 进程级表。
         #[cfg(target_os = "windows")]
         let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel::<(isize, Option<f64>)>();
+        // 渲染线程 → winit 线程：非客户区管理（§7.6 4 套消息）。
+        // SetWindowSubclass 不可跨线程；state 经本 channel 转发到 winit 线程
+        // 安装/卸载 nc_subclass。
+        #[cfg(target_os = "windows")]
+        let (nc_tx, nc_rx) = mpsc::channel::<(isize, crate::platform::windows::NcUpdate)>();
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
@@ -1984,6 +1995,8 @@ impl App {
                     frame_style_tx,
                     #[cfg(target_os = "windows")]
                     aspect_ratio_tx,
+                    #[cfg(target_os = "windows")]
+                    nc_tx,
                     device_lost,
                     expected_windows,
                 );
@@ -2002,6 +2015,12 @@ impl App {
     /// 接收渲染线程发来的运行期宽高比设置（在 winit 线程挂接/卸载子类）
     #[cfg(target_os = "windows")]
     aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
+/// 接收渲染线程发来的运行期非客户区管理（§7.6；在 winit 线程装/卸 nc_subclass）
+            #[cfg(target_os = "windows")]
+            nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
+            /// 已创建窗口的 hwnd（按 handle 索引），窗口关闭时用于清理 NC 状态。
+            #[cfg(target_os = "windows")]
+            hwnds: Vec<isize>,
             window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
             close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
@@ -2117,6 +2136,10 @@ impl App {
                                 crate::platform::windows::set_thumbar_callback(hwnd, cb);
                             }
                         }
+                        if self.hwnds.len() <= handle {
+                            self.hwnds.resize(handle + 1, 0);
+                        }
+                        self.hwnds[handle] = hwnd;
                     }
                     let surface = self.instance.create_surface(window.clone()).unwrap();
                     let window_id = window.id();
@@ -2266,6 +2289,15 @@ impl App {
                 while let Ok((hwnd, ratio)) = self.aspect_ratio_rx.try_recv() {
                     crate::platform::windows::set_aspect_ratio(hwnd, ratio);
                 }
+                // 非客户区 hit-test（§7.6）：drain 渲染线程发来的 (hwnd, NcUpdate)，
+                // 在本线程应用 state（有 regions 或 callback 时装 nc_subclass）。
+                #[cfg(target_os = "windows")]
+                while let Ok((hwnd, upd)) = self.nc_rx.try_recv() {
+                    crate::platform::windows::nc_apply(
+                        hwnd as windows_sys::Win32::Foundation::HWND,
+                        upd,
+                    );
+                }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
             }
 
@@ -2281,6 +2313,13 @@ impl App {
                     WindowEvent::CloseRequested => {
                         if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
                             if let Some(h) = hook_opt.take() { h(); }
+                        }
+                        // 清理 NC 状态表，避免 hwnd 被系统复用后串扰到新窗口。
+                        #[cfg(target_os = "windows")]
+                        if let Some(&hwnd) = self.hwnds.get(handle) {
+                            if hwnd != 0 {
+                                crate::platform::windows::nc_remove(hwnd);
+                            }
                         }
                         // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present。
                         // owner 只发送关闭请求；最后一个 VireoWindow 由渲染线程 drop 后，
@@ -2428,6 +2467,10 @@ impl App {
             frame_style_rx,
             #[cfg(target_os = "windows")]
             aspect_ratio_rx,
+            #[cfg(target_os = "windows")]
+            nc_rx,
+            #[cfg(target_os = "windows")]
+            hwnds: Vec::new(),
             window_descs,
             id_to_handle: FxHashMap::default(),
             close_hooks,
@@ -2455,6 +2498,9 @@ fn render_on_frame<F>(
     exit_tx: mpsc::Sender<()>,
     frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
     #[cfg(target_os = "windows")] aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
+    // NC 状态变更通道（§7.6，render thread → winit thread）。
+    #[cfg(target_os = "windows")]
+    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
 )
@@ -2490,11 +2536,13 @@ where F: FnMut(&App) -> bool + Send + 'static
                         dpi_scale,
                         dpi_override,
                         init_duration,
-                        frame_style,
-                        event_tx.clone(),
-                        cb_tx.clone(),
-                        handle,
-                    );
+                    frame_style,
+                    event_tx.clone(),
+                    cb_tx.clone(),
+                    #[cfg(target_os = "windows")]
+                    nc_tx.clone(),
+                    handle,
+                );
                     while app.windows.len() <= handle {
                         app.windows.push(None);
                     }
@@ -3183,6 +3231,73 @@ impl VireoWindow {
             handle: self.handle(),
             style,
         });
+    }
+
+    // ------ §7.6 非客户区 hit-test（客户端坐标 + WM_NCHITTEST）------
+
+    /// 声明式 hit-test 区域（客户端逻辑像素，与 DrawBatch 绘制坐标一致）。
+    ///
+    /// 按钮外观由用户在 `on_frame` 里用 DrawBatch 画在客户端；`WM_NCHITTEST` 返回
+    /// `HT*` 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击 /
+    /// Aero Snap）。不产生 NC 区域，系统不画标准标题栏/按钮。
+    ///
+    /// 命中规则：**后声明优先**（z 序在上）——允许按钮叠在标题栏上仍命中按钮。
+    pub fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.win_hwnd();
+            let _ = self.nc_tx.send((
+                hwnd as isize,
+                crate::platform::windows::NcUpdate::SetRegions(regions.to_vec()),
+            ));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = regions;
+        }
+    }
+
+    /// 读取当前 hit-test regions。
+    pub fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
+        #[cfg(target_os = "windows")]
+        {
+            crate::platform::windows::nc_get_regions(self.win_hwnd() as isize)
+                .unwrap_or_default()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// 命令式 hit-test 回调。**优先级高于** `set_non_client_regions`。
+    /// 返回 `NonClientHit::Client` 时继续走默认（让系统处理 border resize 等）。
+    /// 传 `None` 清除。
+    pub fn set_hit_test_callback(
+        &self,
+        callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
+    ) {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.win_hwnd();
+            let upd = match callback {
+                Some(f) => crate::platform::windows::NcUpdate::SetHitTestCb(
+                    crate::platform::windows::HitTestCallback(Box::new(f)),
+                ),
+                None => crate::platform::windows::NcUpdate::ClearHitTestCb,
+            };
+            let _ = self.nc_tx.send((hwnd as isize, upd));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = callback;
+        }
+    }
+
+    /// 跨线程取 hwnd（Windows 专用，render thread 用）。
+    #[cfg(target_os = "windows")]
+    fn win_hwnd(&self) -> isize {
+        win_hwnd(&self.inner).unwrap_or(0)
     }
 
     // ------ 事件订阅 API（通过 cb_tx 异步发送到 winit 线程，无需 +Send）------

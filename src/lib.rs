@@ -21,6 +21,7 @@ pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
+pub mod nc;
 pub mod dpi;
 pub mod math;
 pub mod offscreen;
@@ -136,6 +137,11 @@ pub mod prelude {
     pub use crate::window::WindowIndex;
     pub use crate::window::WindowLevel;
     pub use crate::window::WindowMetrics;
+    // 非客户区管理（§7.6）
+    pub use crate::nc::HitTestInput;
+    pub use crate::nc::NonClientHit;
+    pub use crate::nc::NonClientRegion;
+    pub use crate::nc::WindowState;
     pub use crate::dpi::Dp;
     pub use crate::dpi::Pp;
     pub use crate::dpi::Px;

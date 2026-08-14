@@ -6,14 +6,18 @@
 //!
 //! - **W1**：默认逻辑像素尺寸 + `dpi_override(Some(1.0))`（vireo 全自持像素，
 //!   逻辑 = 物理）。`min_size`/`max_size`/`resize_increments` 用裸数（= 逻辑像素）。
-//! - **W2**：`size(Px, Px)` 显式物理像素 + `position` 定位 +
-//!   `FrameStyle::HiddenTitlebar` 无标题栏但保留系统 resize 边框
-//!   （= Electron `titleBarStyle:'hidden'`；**保留边框仅 Windows 生效，其它平台
-//!   整体去装饰**）。**自定义装饰**：
-//!   顶部自绘标题栏拖动窗口（`drag_window`）+ 更宽的边/角缩放手势
-//!   （`drag_resize_window`），跟原生窗口一样有系统吸附/Aero Snap/拖动阴影。
-//!   顶部无系统 resize 热区（`WM_NCCALCSIZE` top inset=0，避免 DWM 顶部白条），
-//!   顶部缩放交给自绘 `drag_resize_window(North*)` 手势。
+//! - **W2**：`FrameStyle::HiddenTitlebar` 无标题栏但保留系统 resize 边框。
+//!   （按钮画在客户端，`WM_NCHITTEST` 返回 `HT*` 让
+//!   Windows 自动接管交互）：
+//!   - `frame_subclass` 保留左/右/下 8px 系统边框（Win11 圆角 + resize 热区）。
+//!   - 顶部 32px 客户端标题栏：`set_non_client_regions` 声明整条 Caption +
+//!     右上角 3 个按钮（Close / Max / Min）。
+//!   - 点击按钮由 NC 子类拦截 `WM_NCLBUTTONDOWN` 自管（阻止 DefWindowProc
+//!     渲染经典按下按钮），自己发 `WM_SYSCOMMAND` 完成最小化/最大化/关闭。
+//!   - 顶部 32px 其余区域 = Caption region → Windows 自动接管拖动 /snap layout/
+//!     双击最大化/右键系统菜单。
+//!   - 8px 系统边框由 `WM_NCHITTEST` 手动命中热区（HTTOP/HTLEFT/...）接管 resize。
+//!   - 按钮位置随窗口宽度变化（`metrics().width` 变化时重设）。
 //! - **W3**：`present_mode` / `frame_latency` / `anti_aliasing` / `theme` 等
 //!   GPU 与外观选项 + `maximized`。
 //!
@@ -28,96 +32,15 @@
 //! - `icon_from_path("logo.png")` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
 //! - 关闭窗口时触发 `on_close` 回调；三个窗口全部关闭后进程退出。
 //! - 键盘 `T`：切换 W1 与 W2 的可见性（`set_visible`）。
-//! - W2 无标题栏的拖动/缩放为 Windows 演示（`drag_window`/`drag_resize_window` macOS 不支持）。
+//! - W2 NC 视觉全由客户端 DrawBatch 自绘（标题栏背景 + Win10/11 风格按钮）；
+//!   交互由 `WM_NCHITTEST` 返回 `HT*` + 按钮点击自管让 Windows 自动接管。
+//!   按钮位置逻辑：`metrics().width` 变化时重设，缓存上一帧宽度避免每帧
+//!   spam `nc_tx`。hover 由 `mouse_pos()` 驱动（普通按钮淡灰、关闭按钮红）。
 
 use vireo::prelude::*;
-use vireo::window::Cursor;
-use winit::window::CursorIcon;
 
-// W2 无边框窗口的「自定义装饰」热区尺寸（逻辑像素）：
-// - 顶部 0..TITLE_H：标题栏，拖动窗口
-// - 四边 EDGE_HIT 厚、四角 CORNER_HIT×CORNER_HIT：缩放（优先级：角 > 边）
-// - 其余内容区：无手势
-//
-// 关键：命中区（EDGE_HIT/CORNER_HIT）比画出来的边框（EDGE_VISUAL/CORNER_VISUAL）
-// 宽 —— 这就是原生窗口那种「离内容几像素也能抓」的隐形抓取带：外沿部分
-// 看不见、摸得着。
 const TITLE_H: f32 = 32.0;
-const EDGE_HIT: f32 = 8.0;
-const CORNER_HIT: f32 = 16.0;
-const EDGE_VISUAL: f32 = 1.0;
-const CORNER_VISUAL: f32 = 6.0;
-
-/// 命中测试：把光标位置映射为无边框窗口的缩放手势（None = 内容区/标题栏）。
-/// 角判定用 `CORNER_HIT`，边判定用 `EDGE_HIT`（都比视觉边框宽）。
-fn w2_resize_direction(w: f32, h: f32, mx: f32, my: f32) -> Option<ResizeDirection> {
-    let left = mx <= EDGE_HIT;
-    let right = mx >= w - EDGE_HIT;
-    let top = my <= EDGE_HIT;
-    let bottom = my >= h - EDGE_HIT;
-    let nw = mx <= CORNER_HIT && my <= CORNER_HIT;
-    let ne = mx >= w - CORNER_HIT && my <= CORNER_HIT;
-    let sw = mx <= CORNER_HIT && my >= h - CORNER_HIT;
-    let se = mx >= w - CORNER_HIT && my >= h - CORNER_HIT;
-    match (nw, ne, sw, se) {
-        (true, _, _, _) => Some(ResizeDirection::NorthWest),
-        (_, true, _, _) => Some(ResizeDirection::NorthEast),
-        (_, _, true, _) => Some(ResizeDirection::SouthWest),
-        (_, _, _, true) => Some(ResizeDirection::SouthEast),
-        _ => match (left, right, top, bottom) {
-            (true, _, _, _) => Some(ResizeDirection::West),
-            (_, true, _, _) => Some(ResizeDirection::East),
-            (_, _, true, _) => Some(ResizeDirection::North),
-            (_, _, _, true) => Some(ResizeDirection::South),
-            _ => None,
-        },
-    }
-}
-
-/// 无边框窗口的「自定义装饰」处理：返回按下时应调用的手势，并设置缩放光标。
-fn handle_custom_decoration(
-    win: &vireo::window::VireoWindow,
-    lb_pressed: bool,
-    last_cursor: &mut Option<Cursor>,
-) -> Option<ResizeDirection> {
-    let m = win.metrics();
-    let w = m.width as f32;
-    let h = m.height as f32;
-    let (mx, my) = win.mouse_pos();
-
-    // 先判四边/四角缩放（角 > 边 > 标题栏，与原生一致）
-    let dir = w2_resize_direction(w, h, mx, my);
-    if let Some(dir) = dir {
-        if lb_pressed {
-            let _ = win.drag_resize_window(dir);
-        }
-        let cursor = Some(Cursor::Icon(CursorIcon::from(dir)));
-        if cursor != *last_cursor {
-            *last_cursor = cursor.clone();
-            win.set_cursor(cursor.unwrap());
-        }
-        return Some(dir);
-    }
-
-    // 顶部标题栏：拖动窗口
-    if my >= 0.0 && my < TITLE_H && mx >= 0.0 && mx < w {
-        if lb_pressed {
-            let _ = win.drag_window();
-        }
-        if last_cursor.is_some() {
-            *last_cursor = None;
-            win.set_cursor(Cursor::default());
-        }
-        return None;
-    }
-
-    // 内容区：恢复默认光标
-    if last_cursor.is_some() {
-        *last_cursor = None;
-        win.set_cursor(Cursor::default());
-    }
-    None
-}
+const BTN_W: f32 = 46.0;
 
 fn main() {
     let mut app = App::new();
@@ -133,18 +56,21 @@ fn main() {
         Some(|| println!("W1 已关闭")),
     );
 
-    // ---- W2：显式物理像素 + 定位 + 无标题栏但保留系统边框（HiddenTitlebar）----
+    // ---- W2：物理像素 + 定位 + 自管标题栏（HiddenTitlebar + §7.6 NC API）----
     // `px(...)` 是物理像素意图：物理尺寸固定，逻辑 = 物理 ÷ OS DPI。
     // 高 DPI（如 200%）下逻辑会变小，故物理尺寸要比 W1 大不少才看着相当。
     // `FrameStyle::HiddenTitlebar` = Electron `titleBarStyle:'hidden'`：
-    // 系统 resize 边框（≈8px）由 Windows 自动接管缩放，无需手写命中测试；
-    // 下方自定义装饰仅演示「顶部自绘标题栏拖动 + 更宽的边/角缩放热区」。
+    // 系统 resize 边框（≈8px）由 `frame_subclass` 保留 + `WM_NCHITTEST`
+    // 手动命中热区（HTTOP/HTLEFT/...）接管 resize。
+    // §7.6 NC API 在 on_frame 闭包里设置（需 hwnd 已就绪）：
+    //   set_non_client_regions([Caption 全条 + 3 buttons]) → 拖动/snap + 按钮命中
+    //   客户端标题栏 + 按钮外观由 DrawBatch 自绘；点击按钮自管发 WM_SYSCOMMAND
     let w2 = app.window(
-        WindowDesc::new("Vireo Window 2 — 物理像素 + 无边框", 480, 320)
-            .size(px(1024.0), px(640.0)) // 物理像素意图；W1/W3 用裸数 = 逻辑像素
+        WindowDesc::new("Vireo Window 2 — 物理像素 + 自管标题栏 + 3 按钮", 480, 320)
+            .size(px(1024.0), px(640.0))
             .position(px(80.0), px(60.0))
             .resizable(true)
-            .frame_style(FrameStyle::HiddenTitlebar), // 无标题栏 + 保留系统 resize 边框
+            .frame_style(FrameStyle::HiddenTitlebar),
         Some(|| println!("W2 已关闭")),
     );
 
@@ -161,8 +87,8 @@ fn main() {
 
     let mut visible = true;
     let mut t_was_down = false;
-    let mut w2_lb_was_down = false;
-    let mut w2_last_cursor: Option<Cursor> = None;
+    // W2 NC 状态：regions 随宽度变化重设（按钮位置跟随窗口宽度）。
+    let mut w2_last_width: u32 = 0;
 
     app.run(move |app| {
         let (win1, win2, win3) = match (
@@ -174,6 +100,35 @@ fn main() {
             _ => return false,
         };
 
+        // W2 NC hit-test regions：按钮外观画在客户端，WM_NCHITTEST 返回 HT* 让
+        // Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击）。
+        let m2 = win2.metrics();
+        if m2.width != w2_last_width {
+            w2_last_width = m2.width;
+            let w = m2.width as f32;
+            let close_x = w - BTN_W;
+            let max_x = w - 2.0 * BTN_W;
+            let min_x = w - 3.0 * BTN_W;
+            win2.set_non_client_regions(&[
+                NonClientRegion {
+                    rect: Rect::new(0.0, 0.0, w, TITLE_H),
+                    hit_test: NonClientHit::Caption,
+                },
+                NonClientRegion {
+                    rect: Rect::new(close_x, 0.0, BTN_W, TITLE_H),
+                    hit_test: NonClientHit::Close,
+                },
+                NonClientRegion {
+                    rect: Rect::new(max_x, 0.0, BTN_W, TITLE_H),
+                    hit_test: NonClientHit::MaxButton,
+                },
+                NonClientRegion {
+                    rect: Rect::new(min_x, 0.0, BTN_W, TITLE_H),
+                    hit_test: NonClientHit::MinButton,
+                },
+            ]);
+        }
+
         // `T` 切换 W1/W2 可见性（下降沿：仅在按下瞬间翻转一次）
         let t_down = win1.key_down(KeyCode::KeyT);
         if t_down && !t_was_down {
@@ -183,73 +138,92 @@ fn main() {
         }
         t_was_down = t_down;
 
-        // W2 无边框：自定义装饰——顶部标题栏拖动、四边四角缩放。
-        // 手势只在「左键按下沿」调一次；按住期间每帧调会让 winit 重发
-        // WM_NCLBUTTONDOWN，把窗口吸附到鼠标。
-        if win2.frame_style() != FrameStyle::Normal {
-            let lb_down = win2.mouse_left();
-            let lb_pressed = lb_down && !w2_lb_was_down;
-            handle_custom_decoration(win2, lb_pressed, &mut w2_last_cursor);
-            w2_lb_was_down = lb_down;
-        }
-
-        draw_window(win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑");
-        draw_window(win2, 2, "W2", "size(Px) · position · HiddenTitlebar · 保留系统边框");
-        draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized");
+        // W2 标题栏画在客户端 y=0..32（DrawBatch 自绘），WM_NCHITTEST 返回 HT* 让
+        // Windows 自动接管交互（拖动 / 双击 / 右键 / snap layout / 按钮点击）。
+        draw_window(win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑", 0.0);
+        draw_window(
+            win2,
+            2,
+            "W2",
+            "Px · HiddenTitlebar · 客户端标题栏 · HT* 自动交互",
+            TITLE_H,
+        );
+        draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
     });
 }
 
-fn draw_window(win: &vireo::window::VireoWindow, id: u8, name: &str, cfg: &str) {
+fn draw_window(
+    win: &vireo::window::VireoWindow,
+    id: u8,
+    name: &str,
+    cfg: &str,
+    content_top: f32,
+) {
     let m = win.metrics();
     let w = m.width as f32;
     let h = m.height as f32;
 
-    // 无边框窗口（W2）自绘了 32px 标题栏，内容区要向下让出
-    let content_top = if win.frame_style() != FrameStyle::Normal { 32.0 } else { 0.0 };
-
     let mut b = DrawBatch::new();
 
-    // 无边框窗口（W2）顶部画一条「标题栏」示意可拖动区域（拖动逻辑在 main 闭包）
-    if win.frame_style() != FrameStyle::Normal {
-        b.set_color(Color::new(0.18, 0.2, 0.28, 1.0));
-        draw_rectangle(&mut b, Pos::new(0.0, 0.0), w, TITLE_H, None);
-        draw_text(
-            &mut b.texts,
-            "无标题栏 · 拖这里移动 · 边/角可缩放（系统边框+自定义热区）",
-            Pos::new(12.0, 8.0),
-            TextDef::default().font_size(14.0),
-            TextOverride::from_color(Color::new(0.85, 0.9, 1.0, 1.0)),
-        );
-
-        // 缩放热区视觉提示：只画 1px 细边框线 + 小角块。
-        // 命中区（EDGE_HIT/CORNER_HIT）比这宽得多 —— 外沿「看不见但能抓」。
+    // W2 客户端标题栏：画背景 + 3 按钮（Win10/11 系统风格，几何绘制）。
+    // WM_NCHITTEST 返回 HT* 让 Windows 自动处理点击行为。
+    if content_top > 0.0 && id == 2 {
+        let bg = Color::new(0.12, 0.12, 0.14, 1.0);
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), w, TITLE_H, Some(bg));
+        let close_x = w - BTN_W;
+        let max_x = w - 2.0 * BTN_W;
+        let min_x = w - 3.0 * BTN_W;
+        // 鼠标位置（客户端逻辑像素）驱动 hover 背景
         let (mx, my) = win.mouse_pos();
-        let hover = w2_resize_direction(w, h, mx, my).is_some();
-        let edge_c = if hover {
-            Color::new(0.9, 0.7, 0.2, 0.8)
+        let maxed = win.is_maximized();
+        let hover = |bx: f32| my >= 0.0 && my < TITLE_H && mx >= bx && mx < bx + BTN_W;
+        // hover 背景（Win11 风格：普通按钮淡灰、关闭按钮红）
+        let normal_hover = Color::new(0.22, 0.22, 0.25, 1.0);
+        let close_hover = Color::new(0.70, 0.11, 0.11, 1.0);
+        if hover(min_x) {
+            draw_rectangle(&mut b, Pos::new(min_x, 0.0), BTN_W, TITLE_H, Some(normal_hover));
+        }
+        if hover(max_x) {
+            draw_rectangle(&mut b, Pos::new(max_x, 0.0), BTN_W, TITLE_H, Some(normal_hover));
+        }
+        if hover(close_x) {
+            draw_rectangle(&mut b, Pos::new(close_x, 0.0), BTN_W, TITLE_H, Some(close_hover));
+        }
+        // 符号颜色：hover 关闭按钮时用白色，其余用浅灰
+        let sym_white = Color::new(1.0, 1.0, 1.0, 1.0);
+        let sym_gray = Color::new(0.82, 0.82, 0.84, 1.0);
+        let close_col = if hover(close_x) { sym_white } else { sym_gray };
+        let max_col = if hover(max_x) { sym_white } else { sym_gray };
+        let min_col = if hover(min_x) { sym_white } else { sym_gray };
+        // 几何符号（模仿 Win11 系统标题栏按钮，居中在 BTN_W×TITLE_H 内）
+        // 最小化：一条短横线
+        let cy = TITLE_H / 2.0;
+        let cx = |bx: f32| bx + BTN_W / 2.0;
+        draw_line(&mut b, cx(min_x) - 5.0, cy, cx(min_x) + 5.0, cy, 1.2, Some(min_col));
+        // 最大化/还原：空心方框（还原 = 前后两个错位方框）
+        let box_sz = 10.0;
+        if maxed {
+            let bx = cx(max_x) - box_sz / 2.0 + 2.0;
+            let by = cy - box_sz / 2.0 - 1.0;
+            draw_rect_outline(&mut b, Pos::new(bx, by), box_sz, box_sz, 1.0, Some(max_col));
+            draw_rect_outline(&mut b, Pos::new(bx - 2.0, by + 2.0), box_sz, box_sz, 1.0, Some(max_col));
         } else {
-            Color::new(0.5, 0.6, 0.7, 0.4)
-        };
-        b.set_color(edge_c);
-        // 边：1px 细线（贴着最外沿）
-        draw_rectangle(&mut b, Pos::new(0.0, 0.0), w, EDGE_VISUAL, None);
-        draw_rectangle(&mut b, Pos::new(0.0, h - EDGE_VISUAL), w, EDGE_VISUAL, None);
-        draw_rectangle(&mut b, Pos::new(0.0, 0.0), EDGE_VISUAL, h, None);
-        draw_rectangle(&mut b, Pos::new(w - EDGE_VISUAL, 0.0), EDGE_VISUAL, h, None);
-        // 角：小方块（提示可对角缩放）
-        b.set_color(Color::new(0.75, 0.55, 0.15, 0.6));
-        draw_rectangle(&mut b, Pos::new(0.0, 0.0), CORNER_VISUAL, CORNER_VISUAL, None);
-        draw_rectangle(&mut b, Pos::new(w - CORNER_VISUAL, 0.0), CORNER_VISUAL, CORNER_VISUAL, None);
-        draw_rectangle(&mut b, Pos::new(0.0, h - CORNER_VISUAL), CORNER_VISUAL, CORNER_VISUAL, None);
-        draw_rectangle(&mut b, Pos::new(w - CORNER_VISUAL, h - CORNER_VISUAL), CORNER_VISUAL, CORNER_VISUAL, None);
+            let bx = cx(max_x) - box_sz / 2.0;
+            let by = cy - box_sz / 2.0;
+            draw_rect_outline(&mut b, Pos::new(bx, by), box_sz, box_sz, 1.0, Some(max_col));
+        }
+        // 关闭：两条交叉斜线（X）
+        let d = 5.0;
+        draw_line(&mut b, cx(close_x) - d, cy - d, cx(close_x) + d, cy + d, 1.2, Some(close_col));
+        draw_line(&mut b, cx(close_x) + d, cy - d, cx(close_x) - d, cy + d, 1.2, Some(close_col));
     }
 
-    // ---- 文本区：标题栏下依次三行，行距充足 ----
+    // ---- 文本区：依次三行 ----
     let mut ty = content_top + 8.0;
     draw_text(
         &mut b.texts,
-        &format!("{name} — 拖动窗口边缘/移动窗口观察"),
+        name,
         Pos::new(16.0, ty),
         TextDef::default().font_size(16.0),
         TextOverride::from_color(Color::new(0.9, 0.95, 1.0, 1.0)),
@@ -274,7 +248,7 @@ fn draw_window(win: &vireo::window::VireoWindow, id: u8, name: &str, cfg: &str) 
         TextOverride::from_color(Color::new(0.7, 0.8, 0.9, 1.0)),
     );
 
-    // ---- 色块：填充文本区下方的剩余空间，不盖文字 ----
+    // ---- 色块 ----
     let c = match id {
         1 => Color::new(0.15, 0.35, 0.55, 1.0),
         2 => Color::new(0.55, 0.35, 0.15, 1.0),
