@@ -2757,6 +2757,10 @@ where F: FnMut(&App) -> bool + Send + 'static
         // The winit thread may have already exited after the final close
         // event. Do not enter user code or block in another frame wait.
         if created_windows >= expected_windows && app.window_count() == 0 {
+            // 防御：即使不是经 CloseRequested 路径（例如零窗口 App::run、窗口被
+            // 外部丢弃），也要通知 winit 线程退出，否则 winit 线程会在 run_app 里
+            // 永久空转（Poll 无窗口）。send 失败（winit 线程已退出）无副作用。
+            request_exit();
             return;
         }
 
