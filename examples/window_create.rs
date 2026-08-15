@@ -38,6 +38,8 @@
 //!   spam `nc_tx`。hover 由 `mouse_pos()` 驱动（普通按钮淡灰、关闭按钮红）。
 
 use vireo::prelude::*;
+#[cfg(target_os = "windows")]
+use vireo::platform::windows::WindowExtWindows;
 
 const TITLE_H: f32 = 32.0;
 const BTN_W: f32 = 46.0;

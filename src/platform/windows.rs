@@ -1103,6 +1103,31 @@ pub trait WindowExtWindows {
     /// `IPropertyStore::SetValue` + `Commit`，`PKEY_AppUserModel_ID`）。
     /// 对应 Electron `setAppDetails({ appId })`。`None` 清除该属性（写 `VT_EMPTY`）。
     fn set_app_user_model_id(&self, app_id: Option<&str>);
+
+    /// 声明式 hit-test 区域（客户端逻辑像素，与 DrawBatch 绘制坐标一致）。
+    ///
+    /// 按钮外观由用户在 `on_frame` 里用 DrawBatch 画在客户端；`WM_NCHITTEST` 返回
+    /// `HT*` 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击 /
+    /// Aero Snap）。不产生 NC 区域，系统不画标准标题栏/按钮。
+    ///
+    /// 命中规则：**后声明优先**（z 序在上）——允许按钮叠在标题栏上仍命中按钮。
+    fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]);
+
+    /// 读取当前 hit-test regions。
+    fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion>;
+
+    /// 命令式 hit-test 回调。**优先级高于** `set_non_client_regions`。
+    /// 返回 `NonClientHit::Client` 时继续走默认（让系统处理 border resize 等）。
+    /// 传 `None` 清除。
+    ///
+    /// # Send
+    /// 回调经 `nc_tx`（`mpsc::Sender`）从渲染线程发到 winit 线程；`NcUpdate` 载荷由
+    /// `HitTestCallback` newtype（`unsafe impl Send`，与 `InputCallbacks` 同约定）兜底，
+    /// 用户传非 `Send` 闭包也无需处理。
+    fn set_hit_test_callback(
+        &self,
+        callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
+    );
 }
 
 /// 任务栏进度状态（`set_progress_bar`）。
@@ -1449,6 +1474,27 @@ impl WindowExtWindows for crate::window::VireoWindow {
             let _ = _release(pstore);
         }
     }
+
+    fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
+        let hwnd = win_hwnd(&self.inner).unwrap_or(0);
+        let _ = self.nc_tx.send((hwnd, NcUpdate::SetRegions(regions.to_vec())));
+    }
+
+    fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
+        nc_get_regions(win_hwnd(&self.inner).unwrap_or(0)).unwrap_or_default()
+    }
+
+    fn set_hit_test_callback(
+        &self,
+        callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
+    ) {
+        let hwnd = win_hwnd(&self.inner).unwrap_or(0);
+        let upd = match callback {
+            Some(f) => NcUpdate::SetHitTestCb(HitTestCallback(Box::new(f))),
+            None => NcUpdate::ClearHitTestCb,
+        };
+        let _ = self.nc_tx.send((hwnd, upd));
+    }
 }
 
 /// 取 winit 窗口的原生 HWND，**跨线程可用**（渲染线程安全）。
@@ -1469,6 +1515,12 @@ fn window_hwnd(window: &winit::window::Window) -> Option<HWND> {
         return None;
     };
     Some(h.hwnd.get())
+}
+
+/// 取 winit 窗口的原生 HWND（`isize`）。`window_hwnd` 的 `pub(crate)` 别名，
+/// 供核心 window.rs 的渲染线程调用点与 `WindowExtWindows` NC 方法使用。
+pub(crate) fn win_hwnd(window: &winit::window::Window) -> Option<isize> {
+    window_hwnd(window)
 }
 
 fn clamp_progress(v: f64, denom: u64) -> (u64, u64) {

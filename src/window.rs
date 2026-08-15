@@ -24,15 +24,7 @@ use crate::input::InputState;
 /// `window_handle_any_thread()` 逃生通道。调用方负责只把 handle 传给线程安全的
 /// Win32 API（本模块的调用点均为线程安全操作）。
 #[cfg(target_os = "windows")]
-fn win_hwnd(window: &winit::window::Window) -> Option<isize> {
-    use winit::platform::windows::WindowExtWindows;
-    use winit::raw_window_handle::RawWindowHandle;
-    let wh = unsafe { window.window_handle_any_thread() }.ok()?;
-    let RawWindowHandle::Win32(h) = wh.as_raw() else {
-        return None;
-    };
-    Some(h.hwnd.get())
-}
+use crate::platform::windows::win_hwnd;
 
 pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
@@ -739,9 +731,10 @@ pub struct VireoWindow {
     event_tx: mpsc::Sender<WinitEvent>,
     /// 向 winit 线程注册输入回调
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
-    /// NC 状态变更通道（§7.6）。
+    /// NC 状态变更通道（§7.6）。`pub(crate)` 供 `platform::windows::WindowExtWindows`
+    /// 的 NC 方法使用。
     #[cfg(target_os = "windows")]
-    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    pub(crate) nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
@@ -3236,73 +3229,6 @@ impl VireoWindow {
             handle: self.handle(),
             style,
         });
-    }
-
-    // ------ §7.6 非客户区 hit-test（客户端坐标 + WM_NCHITTEST）------
-
-    /// 声明式 hit-test 区域（客户端逻辑像素，与 DrawBatch 绘制坐标一致）。
-    ///
-    /// 按钮外观由用户在 `on_frame` 里用 DrawBatch 画在客户端；`WM_NCHITTEST` 返回
-    /// `HT*` 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击 /
-    /// Aero Snap）。不产生 NC 区域，系统不画标准标题栏/按钮。
-    ///
-    /// 命中规则：**后声明优先**（z 序在上）——允许按钮叠在标题栏上仍命中按钮。
-    pub fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
-        #[cfg(target_os = "windows")]
-        {
-            let hwnd = self.win_hwnd();
-            let _ = self.nc_tx.send((
-                hwnd as isize,
-                crate::platform::windows::NcUpdate::SetRegions(regions.to_vec()),
-            ));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = regions;
-        }
-    }
-
-    /// 读取当前 hit-test regions。
-    pub fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
-        #[cfg(target_os = "windows")]
-        {
-            crate::platform::windows::nc_get_regions(self.win_hwnd() as isize)
-                .unwrap_or_default()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            Vec::new()
-        }
-    }
-
-    /// 命令式 hit-test 回调。**优先级高于** `set_non_client_regions`。
-    /// 返回 `NonClientHit::Client` 时继续走默认（让系统处理 border resize 等）。
-    /// 传 `None` 清除。
-    pub fn set_hit_test_callback(
-        &self,
-        callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
-    ) {
-        #[cfg(target_os = "windows")]
-        {
-            let hwnd = self.win_hwnd();
-            let upd = match callback {
-                Some(f) => crate::platform::windows::NcUpdate::SetHitTestCb(
-                    crate::platform::windows::HitTestCallback(Box::new(f)),
-                ),
-                None => crate::platform::windows::NcUpdate::ClearHitTestCb,
-            };
-            let _ = self.nc_tx.send((hwnd as isize, upd));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = callback;
-        }
-    }
-
-    /// 跨线程取 hwnd（Windows 专用，render thread 用）。
-    #[cfg(target_os = "windows")]
-    fn win_hwnd(&self) -> isize {
-        win_hwnd(&self.inner).unwrap_or(0)
     }
 
     // ------ 事件订阅 API（通过 cb_tx 异步发送到 winit 线程，无需 +Send）------
