@@ -3257,7 +3257,9 @@ impl DrawBatch {
             self.sdf_feather = parent.sdf_feather;
         }
         if flags.uv {
-            self.uv = parent.uv;
+            // 必须走 set_uv（传播到 texts.texture_state.uv 并 bump generation），
+            // 与 set_uv/clear_uv 语义一致；否则子 batch 文字画笔仍默认 UV。
+            self.set_uv(parent.uv.u0, parent.uv.v0, parent.uv.u1, parent.uv.v1);
         }
         if flags.transform {
             let p = parent.transform.unwrap_or(Transform::IDENTITY);
@@ -5422,6 +5424,36 @@ mod tests {
         batch.clear_uv();
         let reset = batch.uv();
         assert_eq!((reset.u0, reset.v0, reset.u1, reset.v1), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn inherit_uv_propagates_to_child_text_brush() {
+        // 回归：apply_inherit_from 的 uv 分支必须走 set_uv（传播到 texts.texture_state.uv），
+        // 否则 child 继承 uv 后文字画笔仍默认 UV，形状/文字 UV 不一致。
+        let mut parent = DrawBatch::new();
+        parent.set_uv(0.25, 0.25, 0.75, 0.75);
+
+        let mut child = DrawBatch::new();
+        child.inherit = InheritFromParent::ALL;
+        parent.push_child(child);
+
+        // 继承后入队文字，冻结的画笔 UV 应为父值
+        let mut inherited = DrawBatch::new();
+        inherited.inherit = InheritFromParent::ALL;
+        let mut p2 = DrawBatch::new();
+        p2.set_uv(0.25, 0.25, 0.75, 0.75);
+        p2.push_child(inherited);
+        p2.children[0].texts.push(
+            "H",
+            Pos::ZERO,
+            Default::default(),
+            Default::default(),
+        );
+        let expected = UvRect { u0: 0.25, v0: 0.25, u1: 0.75, v1: 0.75 };
+        let frozen = p2.children[0].texts.entries[0].texture_state().uv;
+        assert_eq!((frozen.u0, frozen.u1), (expected.u0, expected.u1),
+            "uv 继承必须同步到子 batch 文字画笔");
+        _ = parent;
     }
 
     #[test]
