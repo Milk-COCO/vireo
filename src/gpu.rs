@@ -1700,7 +1700,6 @@ impl GpuContext {
                 &self.device,
                 &bgl,
                 &raw_resources,
-                &self.white_texture_view,
                 &self.default_sampler,
                 &self.non_filtering_sampler,
                 &self.comparison_sampler,

@@ -130,7 +130,7 @@ fn slot_fingerprint(kind: &SlotKind) -> u64 {
             p.wrapping_mul(6364136223846793005)
         }
         SlotKind::Texture { view, sampler, .. } => {
-            let vp = std::ptr::from_ref(view) as u64;
+            let vp = view.as_ref().map_or(0, |v| std::ptr::from_ref(v) as u64);
             let sp = std::ptr::from_ref(sampler) as u64;
             vp.wrapping_mul(6364136223846793005).wrapping_add(sp)
         }
@@ -219,7 +219,8 @@ pub(crate) struct ResourceSlot {
 #[derive(Debug)]
 pub(crate) enum SlotKind {
     Texture {
-        view: wgpu::TextureView,
+        /// `None` = 尚未 `set_texture`（不提供白色兜底，绘制时整批跳过）。
+        view: Option<wgpu::TextureView>,
         sampler: wgpu::Sampler,
         #[allow(dead_code)]
         tex_kind: TexKind,
@@ -252,10 +253,12 @@ pub(crate) enum MaterialState {
         bgl: wgpu::BindGroupLayout,
         slots: Mutex<FxHashMap<String, ResourceSlot>>,
         cache_policy: CachePolicy,
-        bind_group: Mutex<wgpu::BindGroup>,
+        bind_group: Mutex<Option<wgpu::BindGroup>>,
         #[allow(dead_code)]
         fingerprints: Mutex<FxHashMap<String, u64>>,
         dirty: AtomicBool,
+        /// 已对「纹理槽未填」打过一次 error 日志（避免每帧刷屏）。
+        notified_unset: AtomicBool,
         device: wgpu::Device,
     },
     B {
@@ -319,7 +322,7 @@ impl Material {
     pub(crate) fn new_a(
         bgl: wgpu::BindGroupLayout,
         slots: FxHashMap<String, ResourceSlot>,
-        init_bind_group: wgpu::BindGroup,
+        init_bind_group: Option<wgpu::BindGroup>,
         cache_policy: CachePolicy,
         source: String,
         shape_vertex_source: Option<String>,
@@ -335,6 +338,7 @@ impl Material {
                 bind_group: Mutex::new(init_bind_group),
                 fingerprints: Mutex::new(fingerprints),
                 dirty: AtomicBool::new(false),
+                notified_unset: AtomicBool::new(false),
                 device,
             },
             source,
@@ -401,19 +405,39 @@ impl Material {
                 cache_policy,
                 bind_group,
                 dirty,
+                notified_unset,
                 ..
             } => {
                 let mut bg_guard = bind_group.lock().unwrap();
-                if *cache_policy == CachePolicy::AlwaysRebuild || dirty.load(Ordering::Acquire) {
+                if *cache_policy == CachePolicy::AlwaysRebuild
+                    || dirty.load(Ordering::Acquire)
+                    || bg_guard.is_none()
+                {
                     let slots_guard = slots.lock().unwrap();
-                    let new_bg = pool.resolve(bgl, &slots_guard, || {
-                        build_bind_group_from_slots(device, bgl, &slots_guard)
-                    });
-                    drop(slots_guard);
-                    *bg_guard = new_bg;
-                    dirty.store(false, Ordering::Release);
+                    let has_unset = slots_guard.values().any(
+                        |s| matches!(s.kind, SlotKind::Texture { view: None, .. }),
+                    );
+                    if has_unset {
+                        drop(slots_guard);
+                        if !notified_unset.swap(true, Ordering::AcqRel) {
+                            eprintln!(
+                                "vireo: material_with_resources: one or more texture resources \
+                                 were never set via set_texture(); batches using this material \
+                                 will be skipped. Call set_texture() for every declared Texture \
+                                 resource before drawing."
+                            );
+                        }
+                        // 未填槽：不缓存，返回 None；填齐后（dirty=true）会自动重建。
+                    } else {
+                        let new_bg = pool.resolve(bgl, &slots_guard, || {
+                            build_bind_group_from_slots(device, bgl, &slots_guard).unwrap()
+                        });
+                        drop(slots_guard);
+                        *bg_guard = Some(new_bg);
+                        dirty.store(false, Ordering::Release);
+                    }
                 }
-                Some(bg_guard.clone())
+                bg_guard.clone()
             }
             MaterialState::B {
                 provider,
@@ -514,7 +538,7 @@ impl Material {
         let slot = slots_guard.get_mut(name).expect("set_texture: unknown resource name");
         match &mut slot.kind {
             SlotKind::Texture { view: tex_view, sampler: samp_ref, .. } => {
-                *tex_view = view.clone();
+                *tex_view = Some(view.clone());
                 *samp_ref = samp.clone();
             }
             _ => panic!("set_texture: '{}' is not a Texture resource", name),
@@ -812,17 +836,23 @@ pub fn inject_wgsl_resources(source: &str, resources: &[MaterialResource<'_>]) -
 // ---------------------------------------------------------------------------
 
 /// 构建初始 slot 表 + 初始 bind group（`material_with_resources` 内部使用）。
+///
+/// 纹理槽初始 `view: None`（未设置，不提供白色兜底）。因此：
+/// - 存在任何纹理槽 → 初始 bind group 为 `None`（懒建，须先 `set_texture` 填充所有纹理槽）；
+/// - 纯 Storage/Uniform 槽 → 急切建初始 bind group。
 pub(crate) fn build_auto_defaults(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
     resources: &[MaterialResource<'_>],
-    white_view: &wgpu::TextureView,
     filtering_sampler: &wgpu::Sampler,
     non_filtering_sampler: &wgpu::Sampler,
     comparison_sampler: &wgpu::Sampler,
-) -> (FxHashMap<String, ResourceSlot>, wgpu::BindGroup) {
+) -> (FxHashMap<String, ResourceSlot>, Option<wgpu::BindGroup>) {
     let mut slots = FxHashMap::default();
     slots.reserve(resources.len());
+
+    // 任何纹理槽存在 → 不能急切建 bind group（view 未填，创建即校验失败）。
+    let mut has_texture_slot = false;
 
     let mut binding: u32 = 0;
 
@@ -833,18 +863,12 @@ pub(crate) fn build_auto_defaults(
                 let tex_kind = *view;
                 let samp_kind = *sampler;
 
-                let has_default = matches!(tex_kind, TexKind::D2(TexSample::Float))
-                    && matches!(samp_kind, SampKind::Filtering);
+                has_texture_slot = true;
 
-                let (tex_view, samp) = if has_default {
-                    (white_view.clone(), filtering_sampler.clone())
-                } else {
-                    let samp = match samp_kind {
-                        SampKind::Filtering => filtering_sampler.clone(),
-                        SampKind::NonFiltering => non_filtering_sampler.clone(),
-                        SampKind::Comparison => comparison_sampler.clone(),
-                    };
-                    (white_view.clone(), samp)
+                let samp = match samp_kind {
+                    SampKind::Filtering => filtering_sampler.clone(),
+                    SampKind::NonFiltering => non_filtering_sampler.clone(),
+                    SampKind::Comparison => comparison_sampler.clone(),
                 };
 
                 let tex_binding = binding;
@@ -856,7 +880,7 @@ pub(crate) fn build_auto_defaults(
                     name,
                     ResourceSlot {
                         binding: tex_binding,
-                        kind: SlotKind::Texture { view: tex_view, sampler: samp, tex_kind },
+                        kind: SlotKind::Texture { view: None, sampler: samp, tex_kind },
                     },
                 );
             }
@@ -910,7 +934,7 @@ pub(crate) fn build_auto_defaults(
         .flat_map(|(_name, slot)| {
             let mut entries: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(2);
             match &slot.kind {
-                SlotKind::Texture { view, sampler, .. } => {
+                SlotKind::Texture { view: Some(view), sampler, .. } => {
                     entries.push(wgpu::BindGroupEntry {
                         binding: slot.binding,
                         resource: wgpu::BindingResource::TextureView(view),
@@ -920,6 +944,8 @@ pub(crate) fn build_auto_defaults(
                         resource: wgpu::BindingResource::Sampler(sampler),
                     });
                 }
+                // 急切建 bg 只在无纹理槽时走；有纹理槽且未填时 view 为 None（不可达）。
+                SlotKind::Texture { view: None, .. } => {}
                 SlotKind::Uniform { buffer, .. } => {
                     entries.push(wgpu::BindGroupEntry {
                         binding: slot.binding,
@@ -937,28 +963,33 @@ pub(crate) fn build_auto_defaults(
         })
         .collect();
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("material auto-defaults bind group"),
-        layout: bgl,
-        entries: &bg_entries,
-    });
+    let bind_group = if !has_texture_slot {
+        Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material auto-defaults bind group"),
+            layout: bgl,
+            entries: &bg_entries,
+        }))
+    } else {
+        None
+    };
 
     (slots, bind_group)
 }
 
-// 从 slots 重建 bind group
+// 从 slots 重建 bind group；有未填纹理槽时返回 None。
 fn build_bind_group_from_slots(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
     slots: &FxHashMap<String, ResourceSlot>,
-) -> wgpu::BindGroup {
+) -> Option<wgpu::BindGroup> {
     let mut entries: Vec<(u32, wgpu::BindingResource)> = Vec::with_capacity(slots.len() * 2);
     for slot in slots.values() {
         match &slot.kind {
-            SlotKind::Texture { view, sampler, .. } => {
+            SlotKind::Texture { view: Some(view), sampler, .. } => {
                 entries.push((slot.binding, wgpu::BindingResource::TextureView(view)));
                 entries.push((slot.binding + 1, wgpu::BindingResource::Sampler(sampler)));
             }
+            SlotKind::Texture { view: None, .. } => return None,
             SlotKind::Uniform { buffer, min_bind, .. } => {
                 if let Some(mb) = min_bind {
                     entries.push((slot.binding, wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -989,11 +1020,11 @@ fn build_bind_group_from_slots(
         .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
         .collect();
 
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("material rebuilt bind group"),
         layout: bgl,
         entries: &bind_entries,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------

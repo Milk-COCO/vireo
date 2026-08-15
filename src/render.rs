@@ -1675,6 +1675,24 @@ impl Renderer {
                     pass.set_scissor_rect(cx, cy, cw, ch);
                 }
 
+                // 整批材质 bind group：有 group 3（非 ZeroResource）的材质若绑定失败
+                // （纹理槽未 set_texture 等），整批跳过——custom pipeline 引用 group 3，
+                // 不绑会触发 wgpu validation error。ZeroResource 无 group 3，None 合法。
+                let custom_bg: Option<wgpu::BindGroup> = match info.custom_material.as_ref() {
+                    Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &self.gpu.bind_group_pool,
+                    ),
+                    _ => None,
+                };
+                if info.custom_material.is_some()
+                    && info.custom_material.as_ref().map_or(false, |m| m.bgl().is_some())
+                    && custom_bg.is_none()
+                {
+                    continue;
+                }
+
                 if let Some(ref shape) = info.shape {
                     // Area 事件：op 3/4 来自 area_op；普通 batch/StencilPop：op 0..3 来自 stencil_op。
                     let pipe_op = info.area_op.unwrap_or(info.stencil_op);
@@ -1742,13 +1760,8 @@ impl Renderer {
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
                                         if use_custom {
-                                            let mat = info.custom_material.as_ref().unwrap();
-                                            if let Some(bg) = mat.ensure_bind_group(
-                                                &self.gpu.device,
-                                                &self.gpu.queue,
-                                                &self.gpu.bind_group_pool,
-                                            ) {
-                                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                            if let Some(bg) = custom_bg.as_ref() {
+                                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                             }
                                         }
                                         pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
@@ -1790,12 +1803,8 @@ impl Renderer {
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if let Some(bg) = mat.ensure_bind_group(
-                                            &self.gpu.device,
-                                            &self.gpu.queue,
-                                            &self.gpu.bind_group_pool,
-                                        ) {
-                                            pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                        if let Some(bg) = custom_bg.as_ref() {
+                                            pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                         }
                                         pass.set_vertex_buffer(
                                             0,
@@ -1874,12 +1883,8 @@ impl Renderer {
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if let Some(bg) = mat.ensure_bind_group(
-                                            &self.gpu.device,
-                                            &self.gpu.queue,
-                                            &self.gpu.bind_group_pool,
-                                        ) {
-                                            pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                                        if let Some(bg) = custom_bg.as_ref() {
+                                            pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                         }
                                         pass.set_vertex_buffer(
                                             0,
@@ -2002,9 +2007,8 @@ impl Renderer {
                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                         pass.set_bind_group(2, engine_bg, &[]);
                         if use_custom {
-                            let mat = info.custom_material.as_ref().unwrap();
-                            if let Some(bg) = mat.ensure_bind_group(&self.gpu.device, &self.gpu.queue, &self.gpu.bind_group_pool) {
-                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            if let Some(bg) = custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                         }
                         if let Some(vb) = vbuf.as_ref() {
@@ -2047,12 +2051,8 @@ impl Renderer {
                             pass.set_pipeline(&custom_pipe);
                             pass.set_bind_group(0, &self.camera_bind_group, &[]);
                             pass.set_bind_group(2, engine_bg, &[]);
-                            if let Some(bg) = mat.ensure_bind_group(
-                                &self.gpu.device,
-                                &self.gpu.queue,
-                                &self.gpu.bind_group_pool,
-                            ) {
-                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            if let Some(bg) = custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                             pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
                             pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
@@ -2123,12 +2123,8 @@ impl Renderer {
                             pass.set_pipeline(&custom_pipe);
                             pass.set_bind_group(0, &self.camera_bind_group, &[]);
                             pass.set_bind_group(2, engine_bg, &[]);
-                            if let Some(bg) = mat.ensure_bind_group(
-                                &self.gpu.device,
-                                &self.gpu.queue,
-                                &self.gpu.bind_group_pool,
-                            ) {
-                                pass.set_bind_group(3, &bg, &info.dynamic_offsets);
+                            if let Some(bg) = custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                             pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
                             pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
@@ -2213,8 +2209,8 @@ impl Renderer {
                     };
                     // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
                     // 否则部分后端会把 ref 重置为 0。
-                    let material_bg = info.custom_material.as_ref()
-                        .and_then(|m| m.ensure_bind_group(&self.gpu.device, &self.gpu.queue, &self.gpu.bind_group_pool));
+                    // 复用循环顶部已计算的整批材质 bind group（ZeroResource 无 group 3 → None）。
+                    let material_bg = custom_bg.as_ref();
                     for segment in &info.text {
                         let _ = text_ctx.text_renderer.render_range_with_material(
                             &text_ctx.text_atlas,
@@ -2226,7 +2222,7 @@ impl Renderer {
                             if uses_stencil { Some(text_ref) } else { None },
                             segment.bind_group.as_ref(),
                             info.custom_text_pipeline.as_deref(),
-                            material_bg.as_ref(),
+                            material_bg,
                             &info.dynamic_offsets,
                         );
                     }

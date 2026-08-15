@@ -998,3 +998,167 @@ fn device_lost_flag_is_shared_and_clear_by_default() {
     assert!(gpu.is_device_lost(), "设置返回的 Arc 后 GpuContext 应观测到 lost");
     assert!(flag.load(std::sync::atomic::Ordering::Acquire), "同一 Arc 应被置位");
 }
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_non_default_texture_kind_creates_lazily() {
+    println!("\n=== 非默认 texture kind（D2 Sint + NonFiltering）材质创建不再 panic（懒构建初始 bind group）===");
+    const WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    let v = textureLoad(tex, vec2<i32>(0, 0), 0);
+    return vec4<f32>(f32(v.x) / 255.0, 0.1, 0.1, 1.0);
+}
+
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    let resources = vireo::material::MaterialResources(&[
+        vireo::material::MaterialResource {
+            name: "tex",
+            kind: vireo::material::MaterialResourceKind::Texture {
+                view: vireo::material::TexKind::D2(vireo::material::TexSample::Sint),
+                sampler: vireo::material::SampKind::NonFiltering,
+            },
+        },
+    ]);
+    // 修复前：build_auto_defaults 用 white_view（Rgba8UnormSrgb float）绑 Sint 槽，
+    // create_bind_group 在创建期校验 sample type 不匹配 → validation panic。
+    // 修复后：placeholder_ok=false → 初始 bind group 懒构建，创建成功。
+    let material = gpu
+        .create_material_with_resources(WGSL, resources)
+        .expect("非默认 kind 材质创建不应 panic");
+
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sint tex"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Sint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &200_i32.to_le_bytes(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    material.set_texture(&gpu.device, "tex", &view, &sampler);
+
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material.clone());
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+
+    let pixels = canvas.read_pixels();
+    let mut red: u32 = 0;
+    for y in 8..24 {
+        for x in 8..24 {
+            let idx = ((y * 64 + x) * 4) as usize;
+            red += pixels[idx] as u32;
+        }
+    }
+    let red = red / (16 * 16);
+    println!("  region red channel (linear 200 / 255; sRGB surface 输出应 ~229) = {red}");
+    assert!(region_has_color(&pixels, 64, 8, 8, 24, 24), "区域应有内容");
+    assert!((red as i32 - 229).abs() < 24, "Sint 纹理 200 经 sRGB 编码应显示为红 ~229，实际 {red}");
+}
+
+/// 移除材质纹理槽白色兜底后的回归：
+/// - float 纹理槽未 set_texture 时：创建/绘制不 panic，整批跳过（区域为 clear 色，无色）。
+/// - set_texture 填齐后：整批正常绘制（区域有色）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_unset_texture_slot_skips_batch() {
+    println!("\n=== 未填 float 纹理槽：整批跳过 + 填齐后恢复绘制 ===");
+    const WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    let c = textureLoad(tex, vec2<i32>(0, 0), 0);
+    return vec4<f32>(c.rgb, in.color.a);
+}
+"#;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    let resources = vireo::material::MaterialResources(&[
+        vireo::material::MaterialResource {
+            name: "tex",
+            kind: vireo::material::MaterialResourceKind::Texture {
+                view: vireo::material::TexKind::D2(vireo::material::TexSample::Float),
+                sampler: vireo::material::SampKind::NonFiltering,
+            },
+        },
+    ]);
+    let material = gpu
+        .create_material_with_resources(WGSL, resources)
+        .expect("材质创建不应 panic（纹理槽未填时不再用 white fallback 绑组）");
+
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    // 1) 未填纹理槽：整批跳过，不应 panic，区域应为 clear 色（黑）无色
+    let mut b = DrawBatch::new();
+    b.custom_material = Some(material.clone());
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    assert!(
+        !region_has_color(&pixels, 64, 8, 8, 24, 24),
+        "未填纹理槽：整批应跳过，区域应保持 clear 背景色"
+    );
+
+    // 2) 填齐纹理后：整批正常绘制，区域有色
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("float tex"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255_u8, 0, 0, 255],
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    material.set_texture(&gpu.device, "tex", &view, &sampler);
+
+    let mut b2 = DrawBatch::new();
+    b2.custom_material = Some(material.clone());
+    draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b2]);
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 64, 8, 8, 24, 24),
+        "填齐纹理槽后：整批应正常绘制，区域应有内容"
+    );
+}
