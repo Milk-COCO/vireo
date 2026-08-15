@@ -748,6 +748,15 @@ static NC_STATES: LazyLock<Mutex<HashMap<isize, NcState>>> =
 /// （Frameless 客户区 = 全窗口）。不产生 NC 标题栏区域，系统不画标准标题栏/
 /// 按钮。按钮外观由用户在客户端用 DrawBatch 自绘，`WM_NCHITTEST` 返回 `HT*`
 /// 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮行为）。
+///
+/// **不调 `force_nccalc_recalc`**：本子类不处理 `WM_NCCALCSIZE`，regions 只
+/// 在 `WM_NCHITTEST` 时从 `NC_STATES` 直读，`SetWindowSubclass` 后下一次
+/// hit-test 即生效，无需重算非客户区。而 `SWP_FRAMECHANGED` 会强制重发
+/// `WM_NCCALCSIZE` 给 `frame_subclass`（HiddenTitlebar 时改写 `rgrc[0]`），
+/// 进而扰动 `inner_size()`——若用户像 `window_create` W2 那样在每次逻辑宽度
+/// 变化时重发 regions，每次重发都触发一次 `SetWindowPos`，形成「重发 → 尺寸
+/// 扰动 → 逻辑宽度又变 → 再重发」的自激环，松手后残留约 1 秒抽搐（死区
+/// `RESIZE_DRIFT_EPSILON` 无法吸收，因为扰动每步都在重置计时器）。
 pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
     let mut states = NC_STATES.lock().unwrap();
     let state = states.entry(hwnd as isize).or_insert_with(|| NcState {
@@ -776,12 +785,10 @@ pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
     if has_regions || has_cb {
         unsafe {
             SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0);
-            force_nccalc_recalc(hwnd as isize);
         }
     } else {
         unsafe {
             RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
-            force_nccalc_recalc(hwnd as isize);
         }
     }
 }

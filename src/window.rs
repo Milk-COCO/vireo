@@ -60,6 +60,21 @@ const PRESENT_SAMPLE_CAP: usize = 30;
 /// 用户可经 `VireoWindow::set_resize_debounce` 覆盖。
 const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// resize 尺寸漂移容差（物理像素，每轴）。
+///
+/// 快速拖动窗口边缘缩放松手后，Windows 可能把 `inner_size()` 短暂报成相邻像素
+/// 的抖动（约 ±1~2px，持续约 1s）。若按精确比较：
+/// - `moved` 每帧都为真 → `pending_resize_at` 永不过期 → debounce 永不触发 →
+///   snap 永不执行；
+/// - follow-layout 持续把抖动的尺寸写进 camera / 文字 viewport → 画面反复左右
+///   拉伸（抽搐）。
+///
+/// 加此容差后，物理尺寸变化不超过 `RESIZE_DRIFT_EPSILON` 时视为「未移动」：
+/// 去抖计时开始老化、松手即一次性 snap；snap 后的小抖动也不再重新触发
+/// follow/configure。可调大以更抗抖动（代价：极小尺寸的真实 resize 不再立即
+/// 重配，内容做 ≤ 容差的不可见拉伸）。
+const RESIZE_DRIFT_EPSILON: u32 = 2;
+
 /// 拖动窗口时的 resize 尺寸刷新策略（`VireoWindow::set_resize_refresh_policy`）。
 /// 目标是把「拖动中是否实时跟踪尺寸」的选择权交给用户：每帧/周期刷新在 wgpu-hal
 /// DX12 上每次 `surface.configure` 都要阻塞等 present queue 排空（实测 ~50-80ms），
@@ -160,6 +175,32 @@ fn resize_refresh(
         }
     }
     ResizeRefresh::None
+}
+
+/// 物理尺寸是否「显著」漂移（任一轴超出 `eps` 才算）。快速拖动松手后 Windows
+/// 会短暂把 `inner_size()` 报成相邻像素抖动，精确比较会把 ±1~2px 的小抖动当成
+/// 真漂移，导致去抖/snap 永不触发、follow 持续跟随抖动（画面抽搐）。
+fn size_drifted_beyond(configured: (u32, u32), observed: (u32, u32), eps: u32) -> bool {
+    configured.0.abs_diff(observed.0) > eps || configured.1.abs_diff(observed.1) > eps
+}
+
+/// 观测值相对锚点（上次显著变化位置）是否「移动」。
+///
+/// 物理或逻辑尺寸变化 > `eps`（逻辑 = 物理/scale，scale ≥ 1 时物理在容差内 ⇒
+/// 逻辑必在容差内，故同一 `eps` 可同时约束两者），或 `scale` 变化，才算移动。
+/// 锚点只在移动时推进（`draw` 里维护）——松手后尺寸在锚点 ±`eps` 内抖动时返回
+/// `false`，使去抖计时能老化并触发一次性 snap。
+#[allow(clippy::type_complexity)]
+fn observed_moved(
+    anchor: (u32, u32, u32, u32, f32),
+    observed: (u32, u32, u32, u32, f32),
+    eps: u32,
+) -> bool {
+    anchor.0.abs_diff(observed.0) > eps
+        || anchor.1.abs_diff(observed.1) > eps
+        || anchor.2.abs_diff(observed.2) > eps
+        || anchor.3.abs_diff(observed.3) > eps
+        || anchor.4 != observed.4
 }
 
 /// 窗口描述符（用于配置待创建窗口）
@@ -1068,22 +1109,32 @@ impl VireoWindow {
         let mut follow_pending = false;
         {
             let sc = self.surface_config.borrow();
-            let size_drifted = sc.width != size.width
-                || sc.height != size.height
-                || logical_w != self.logical_width.get()
-                || logical_h != self.logical_height.get()
+            let size_drifted = size_drifted_beyond(
+                (sc.width, sc.height),
+                (size.width, size.height),
+                RESIZE_DRIFT_EPSILON,
+            ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
+                || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
                 || new_scale != self.scale.get();
             let mode_drifted = sc.present_mode != self.applied_present_mode.get();
             let latency_drifted =
                 sc.desired_maximum_frame_latency != self.applied_frame_latency.get();
             drop(sc);
             let now = std::time::Instant::now();
-            // 「移动」= 相对上一帧观测值有变化。只有移动才刷新去抖计时；松手后
-            // 尺寸不变 → 计时器不再刷新 → 开始老化，满去抖时长即 snap。
+            // 「移动」= 相对锚点（`last_observed`，上次显著变化位置）的变化，物理轴
+            // 超容差 `RESIZE_DRIFT_EPSILON` 或逻辑/缩放变化才算；锚点只在移动时推进。
+            // 快速拖动松手后 Windows 会把 inner_size 短暂报成相邻像素抖动（约 1s）：
+            // 若按上一帧精确比较，`moved` 每帧都真 → 去抖计时永不过期 → snap 永不
+            // 触发，follow 持续跟随抖动 → 画面反复左右拉伸（抽搐）。带容差的锚点
+            // 比较让小抖动不再刷新计时：计时开始老化，满去抖时长即一次性 snap。
             let moved = size_drifted
-                && self.last_observed.get() != (size.width, size.height, logical_w, logical_h, new_scale);
-            self.last_observed.set((size.width, size.height, logical_w, logical_h, new_scale));
+                && observed_moved(
+                    self.last_observed.get(),
+                    (size.width, size.height, logical_w, logical_h, new_scale),
+                    RESIZE_DRIFT_EPSILON,
+                );
             if moved {
+                self.last_observed.set((size.width, size.height, logical_w, logical_h, new_scale));
                 self.pending_resize_at.set(Some(now));
             }
             let refresh = resize_refresh(
@@ -1244,10 +1295,12 @@ impl VireoWindow {
             let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
             let still_drifted = {
                 let sc = self.surface_config.borrow();
-                sc.width != size.width
-                    || sc.height != size.height
-                    || logical_w != self.logical_width.get()
-                    || logical_h != self.logical_height.get()
+                size_drifted_beyond(
+                    (sc.width, sc.height),
+                    (size.width, size.height),
+                    RESIZE_DRIFT_EPSILON,
+                ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
+                    || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
                     || new_scale != self.scale.get()
             };
             if still_drifted && size.width != 0 && size.height != 0 {
@@ -1469,10 +1522,12 @@ impl VireoWindow {
         let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
         let drift = {
             let sc = self.surface_config.borrow();
-            sc.width != size.width
-                || sc.height != size.height
-                || logical_w != self.logical_width.get()
-                || logical_h != self.logical_height.get()
+            size_drifted_beyond(
+                (sc.width, sc.height),
+                (size.width, size.height),
+                RESIZE_DRIFT_EPSILON,
+            ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
+                || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
                 || scale != self.scale.get()
         };
         if self.layout_follow.get() && drift {
@@ -1491,9 +1546,11 @@ impl VireoWindow {
         let scale = dpi_override.unwrap_or(sf) as f32;
         let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
         let config = self.surface_config.borrow();
-        config.width != size.width
-            || config.height != size.height
-            || self.configured_layout.get() != (logical_w, logical_h, scale, sf as f32)
+        size_drifted_beyond(
+            (config.width, config.height),
+            (size.width, size.height),
+            RESIZE_DRIFT_EPSILON,
+        ) || self.configured_layout.get() != (logical_w, logical_h, scale, sf as f32)
     }
 
     /// Number of successful `queue.present` calls made by this window.
@@ -4687,6 +4744,51 @@ mod metrics_tests {
     #[test]
     fn default_resize_debounce_is_100ms() {
         assert_eq!(super::DEFAULT_RESIZE_DEBOUNCE, std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn size_drifted_within_epsilon_not_drifted() {
+        // ±RESIZE_DRIFT_EPSILON 内的小抖动不算漂移（松手后 Windows 短暂抖动不重配）
+        let eps = super::RESIZE_DRIFT_EPSILON;
+        assert!(!super::size_drifted_beyond((800, 600), (800 + eps, 600), eps));
+        assert!(!super::size_drifted_beyond((800, 600), (800 - eps, 600), eps));
+        assert!(!super::size_drifted_beyond((800, 600), (800, 600 + eps), eps));
+        assert!(!super::size_drifted_beyond((800, 600), (800, 600 - eps), eps));
+        assert!(!super::size_drifted_beyond((800, 600), (800, 600), eps));
+    }
+
+    #[test]
+    fn size_drifted_beyond_epsilon_drifted() {
+        // 任一轴超出容差 → 真漂移（真实 resize）
+        let eps = super::RESIZE_DRIFT_EPSILON;
+        assert!(super::size_drifted_beyond((800, 600), (800 + eps + 1, 600), eps));
+        assert!(super::size_drifted_beyond((800, 600), (800 - eps - 1, 600), eps));
+        assert!(super::size_drifted_beyond((800, 600), (800, 600 + eps + 1), eps));
+    }
+
+    #[test]
+    fn observed_moved_ignores_oscillation_within_epsilon() {
+        // 松手后 800↔802 抖动（eps=2）相对锚点不算移动 → 去抖计时老化 → snap
+        let eps = 2u32;
+        let anchor = (800, 600, 800, 600, 1.0);
+        for w in [800u32, 802, 800, 801, 799, 800] {
+            assert!(
+                !super::observed_moved(anchor, (w, 600, w, 600, 1.0), eps),
+                "w={w} 应在容差内视为未移动"
+            );
+        }
+    }
+
+    #[test]
+    fn observed_moved_tracks_accumulated_drift() {
+        // 锚点=上次显著位置：物理/逻辑累计超出容差才算移动（单调慢拖也能及时刷新去抖计时）
+        let eps = 2u32;
+        let anchor = (800, 600, 800, 600, 1.0);
+        assert!(super::observed_moved(anchor, (800 + eps + 1, 600, 801, 600, 1.0), eps));
+        // 逻辑宽高变化超容差（scale ≥ 1 时物理未变、逻辑却变了）也算移动
+        assert!(super::observed_moved(anchor, (800, 600, 800 - eps - 1, 600, 1.0), eps));
+        // scale 变化即便物理/逻辑都在容差内也算移动（需要重配）
+        assert!(super::observed_moved(anchor, (800, 600, 800, 600, 2.0), eps));
     }
 
     #[test]
