@@ -2266,6 +2266,7 @@ impl App {
                         cbs.on_file_hover_cancelled.extend(reg.on_file_hover_cancelled.drain(..));
                         cbs.on_moved.extend(reg.on_moved.drain(..));
                         cbs.on_theme_changed.extend(reg.on_theme_changed.drain(..));
+                        cbs.on_resized.extend(reg.on_resized.drain(..));
                     }
                 }
                 // 运行期边框样式切换：SetWindowSubclass / RemoveWindowSubclass
