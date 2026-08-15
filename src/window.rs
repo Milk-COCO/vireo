@@ -3205,6 +3205,7 @@ impl VireoWindow {
     /// DWM 无法圆角，圆角偏好被钳为 `Default`；切回 `Normal`/`HiddenTitlebar`
     /// 时自动恢复用户上次经 `set_corner_preference` 设置的偏好。
     pub fn set_frame_style(&self, style: FrameStyle) {
+        #[cfg(target_os = "windows")]
         let prev = self.frame_style.get();
         self.frame_style.set(style);
         #[cfg(target_os = "windows")]
@@ -3480,11 +3481,12 @@ impl VireoWindow {
                 GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
                 LWA_ALPHA, WS_EX_LAYERED,
             };
+            use windows_sys::Win32::Foundation::HWND;
             unsafe {
-                let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED as isize);
+                let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, ex_style | WS_EX_LAYERED as isize);
                 let alpha = (opacity * 255.0).round() as u8;
-                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                SetLayeredWindowAttributes(hwnd as HWND, 0, alpha, LWA_ALPHA);
             }
         }
         #[cfg(target_os = "macos")]
@@ -3496,7 +3498,7 @@ impl VireoWindow {
                     let view = h.ns_view.as_ptr() as *mut NSView;
                     unsafe {
                         if let Some(window) = (&*view).window() {
-                            window.setAlphaValue(opacity as objc2_foundation::CGFloat);
+                            window.setAlphaValue(opacity as objc2_core_foundation::CGFloat);
                         }
                     }
                 }
@@ -3532,15 +3534,16 @@ impl VireoWindow {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
             };
+            use windows_sys::Win32::Foundation::HWND;
             unsafe {
-                let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
                 let new_style = if focusable {
                     ex_style & !(WS_EX_NOACTIVATE as isize)
                 } else {
                     ex_style | (WS_EX_NOACTIVATE as isize)
                 };
                 if new_style != ex_style {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+                    SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, new_style);
                 }
             }
         }

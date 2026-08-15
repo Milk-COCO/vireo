@@ -23,14 +23,18 @@
 //! 子类化用独立链表挂新 WNDPROC（`SetWindowSubclass`），`DefSubclassProc`
 //! 自动调用原 wndproc，**不**触碰 winit 的 `GWL_WNDPROC` / `GWL_USERDATA`。
 //!
-//! 注意：这里 `windows-sys` 与 winit 各自独立的 windows-sys 版本类型不互通，
-//! 但作为普通函数调用（传 `HWND = isize`）无碍。
+//! 注意：这里 `windows-sys` 与 winit 各自独立的 windows-sys 版本类型不互通。
+//! vireo 内部统一用 `isize` 表示窗口句柄（`win_hwnd` 返回 `Option<isize>`、
+//! `nc_tx` 通道是 `(isize, ...)`），仅在调用 windows-sys 0.61 的 FFI 函数时
+//! 用 `hwnd as HWND`（`isize as *mut c_void`）转换。
 
 use std::ffi::c_void;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    PROPERTYKEY, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL, ScreenToClient,
 };
@@ -48,11 +52,9 @@ use windows_sys::Win32::UI::Shell::{
     THBF_DISABLED, THBF_DISMISSONCLICK, THBF_ENABLED, THBF_HIDDEN, THBF_NOBACKGROUND,
     THBF_NONINTERACTIVE, THBN_CLICKED, THUMBBUTTON, THUMBBUTTONMASK,
 };
-use windows_sys::Win32::UI::Shell::PropertiesSystem::{
-    SHGetPropertyStoreForWindow, PROPERTYKEY,
-};
+use windows_sys::Win32::UI::Shell::PropertiesSystem::SHGetPropertyStoreForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, DefWindowProcW, DestroyIcon, GetSystemMetrics, IsZoomed,
+    CreateIconFromResourceEx, DefWindowProcW, DestroyIcon, GetSystemMetrics, HICON, IsZoomed,
     NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, WM_COMMAND,
     IMAGE_FLAGS, LR_DEFAULTCOLOR, MINMAXINFO, WM_GETMINMAXINFO, WM_SIZING,
     WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
@@ -232,10 +234,10 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
             height as i32,
             LR_DEFAULTCOLOR as IMAGE_FLAGS,
         );
-        if icon == 0 {
+        if icon.is_null() {
             eprintln!("vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})", width, height);
         }
-        icon
+        icon as isize
     }
 }
 
@@ -282,7 +284,7 @@ type HrFn0 = unsafe extern "system" fn(*mut c_void) -> Hr;
 type HrFnProgress = unsafe extern "system" fn(*mut c_void, HWND, u64, u64) -> Hr;
 type HrFnState = unsafe extern "system" fn(*mut c_void, HWND, i32) -> Hr;
 type HrFnButtons = unsafe extern "system" fn(*mut c_void, HWND, u32, *const THUMBBUTTON) -> Hr;
-type HrFnOverlay = unsafe extern "system" fn(*mut c_void, HWND, isize, *const u16) -> Hr;
+type HrFnOverlay = unsafe extern "system" fn(*mut c_void, HWND, HICON, *const u16) -> Hr;
 type HrFnSetValue =
     unsafe extern "system" fn(*mut c_void, *const PROPERTYKEY, *const PROPVARIANT) -> Hr;
 type HrFnCommit = unsafe extern "system" fn(*mut c_void) -> Hr;
@@ -304,37 +306,37 @@ struct WindowIcons {
     overlay: Vec<isize>,
 }
 
-static WINDOW_ICONS: LazyLock<Mutex<std::collections::HashMap<HWND, WindowIcons>>> =
+static WINDOW_ICONS: LazyLock<Mutex<std::collections::HashMap<isize, WindowIcons>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// 记录窗口持有的一组缩略图按钮 HICON。
-fn set_thumbar_icons(hwnd: HWND, icons: Vec<isize>) {
+fn set_thumbar_icons(hwnd: isize, icons: Vec<isize>) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     w.entry(hwnd).or_default().thumb_bar = icons;
 }
 
 /// 记录窗口持有的 overlay HICON。
-fn set_overlay_icons(hwnd: HWND, icons: Vec<isize>) {
+fn set_overlay_icons(hwnd: isize, icons: Vec<isize>) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     w.entry(hwnd).or_default().overlay = icons;
 }
 
 /// 销毁窗口此前的缩略图按钮 HICON。
-fn drop_thumbar_icons(hwnd: HWND) {
+fn drop_thumbar_icons(hwnd: isize) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     if let Some(icons) = w.get_mut(&hwnd) {
         for icon in icons.thumb_bar.drain(..) {
-            unsafe { DestroyIcon(icon) };
+            unsafe { DestroyIcon(icon as HICON) };
         }
     }
 }
 
 /// 销毁窗口此前的 overlay HICON。
-fn drop_overlay_icons(hwnd: HWND) {
+fn drop_overlay_icons(hwnd: isize) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     if let Some(icons) = w.get_mut(&hwnd) {
         for icon in icons.overlay.drain(..) {
-            unsafe { DestroyIcon(icon) };
+            unsafe { DestroyIcon(icon as HICON) };
         }
     }
 }
@@ -373,25 +375,25 @@ impl std::ops::DerefMut for ThumbCallback {
 // 静态表用 Mutex 保护跨线程注册/取用；与 `InputCallbacks::unsafe impl Send` 同约定。
 unsafe impl Send for ThumbCallback {}
 
-static THUMB_CALLBACKS: LazyLock<Mutex<std::collections::HashMap<HWND, Vec<ThumbCallback>>>> =
+static THUMB_CALLBACKS: LazyLock<Mutex<std::collections::HashMap<isize, Vec<ThumbCallback>>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// 注册/覆盖窗口的缩略图按钮点击回调（追加；`None` 不清）。
 /// 幂等：重复调用只追加；无回调时卸载点击子类。
-pub(crate) fn set_thumbar_callback(hwnd: HWND, cb: Box<dyn FnMut(u32)>) {
+pub(crate) fn set_thumbar_callback(hwnd: isize, cb: Box<dyn FnMut(u32)>) {
     let mut map = THUMB_CALLBACKS.lock().unwrap();
     map.entry(hwnd).or_default().push(ThumbCallback(cb));
     unsafe {
-        SetWindowSubclass(hwnd, Some(thumb_subclass_proc), THUMB_SUBCLASS_ID, 0);
+        SetWindowSubclass(hwnd as HWND, Some(thumb_subclass_proc), THUMB_SUBCLASS_ID, 0);
     }
 }
 
 /// 卸载窗口的全部缩略图点击回调（`set_thumbar_buttons(None)` 时调用）。
-fn clear_thumbar_callback(hwnd: HWND) {
+fn clear_thumbar_callback(hwnd: isize) {
     let mut map = THUMB_CALLBACKS.lock().unwrap();
     if map.remove(&hwnd).is_some() {
         unsafe {
-            RemoveWindowSubclass(hwnd, Some(thumb_subclass_proc), THUMB_SUBCLASS_ID);
+            RemoveWindowSubclass(hwnd as HWND, Some(thumb_subclass_proc), THUMB_SUBCLASS_ID);
         }
     }
 }
@@ -412,7 +414,7 @@ unsafe extern "system" fn thumb_subclass_proc(
         if hi as u32 == THBN_CLICKED {
             let id = (wparam as u32) & 0xFFFF;
             if let Ok(mut map) = THUMB_CALLBACKS.lock() {
-                if let Some(cbs) = map.get_mut(&hwnd) {
+                if let Some(cbs) = map.get_mut(&(hwnd as isize)) {
                     for cb in cbs.iter_mut() {
                         cb(id);
                     }
@@ -441,10 +443,10 @@ fn encode_refdata(titlebar: bool, border: bool) -> usize {
 /// `WM_NCCALCSIZE` 在 `SetWindowSubclass` 之前已被 winit 消费（undecorated
 /// 返回 0 → 客户区 = 整个窗口，无任何 resize 热区），不重发的话子类永远
 /// 等不到消息，`HiddenTitlebar` 会退化得像 `Frameless` 一样不可缩放。
-pub fn install(hwnd: HWND, titlebar: bool, border: bool) {
+pub fn install(hwnd: isize, titlebar: bool, border: bool) {
     unsafe {
         SetWindowSubclass(
-            hwnd,
+            hwnd as HWND,
             Some(frame_subclass_proc),
             SUBCLASS_ID,
             encode_refdata(titlebar, border),
@@ -455,10 +457,10 @@ pub fn install(hwnd: HWND, titlebar: bool, border: bool) {
 
 /// 更新装饰分档（运行期切换 `titlebar`/`border`）。重调 `SetWindowSubclass`
 /// 刷新 refdata，然后强制重算非客户区。
-pub fn set_frame(hwnd: HWND, titlebar: bool, border: bool) {
+pub fn set_frame(hwnd: isize, titlebar: bool, border: bool) {
     unsafe {
         SetWindowSubclass(
-            hwnd,
+            hwnd as HWND,
             Some(frame_subclass_proc),
             SUBCLASS_ID,
             encode_refdata(titlebar, border),
@@ -468,19 +470,19 @@ pub fn set_frame(hwnd: HWND, titlebar: bool, border: bool) {
 }
 
 /// 卸载装饰子类。
-pub fn remove(hwnd: HWND) {
+pub fn remove(hwnd: isize) {
     unsafe {
-        RemoveWindowSubclass(hwnd, Some(frame_subclass_proc), SUBCLASS_ID);
+        RemoveWindowSubclass(hwnd as HWND, Some(frame_subclass_proc), SUBCLASS_ID);
     }
     force_nccalc_recalc(hwnd);
 }
 
 /// 强制系统重发 `WM_NCCALCSIZE`（`SetWindowPos(SWP_FRAMECHANGED)`）。
-fn force_nccalc_recalc(hwnd: HWND) {
+fn force_nccalc_recalc(hwnd: isize) {
     unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
-            hwnd,
-            0,
+            hwnd as HWND,
+            std::ptr::null_mut(),
             0,
             0,
             0,
@@ -570,7 +572,7 @@ unsafe extern "system" fn frame_subclass_proc(
 fn monitor_work_rect(rect: RECT) -> Option<RECT> {
     unsafe {
         let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
-        if monitor == 0 {
+        if monitor.is_null() {
             return None;
         }
         let mut info: MONITORINFO = std::mem::zeroed();
@@ -589,7 +591,7 @@ const ASPECT_SUBCLASS_ID: usize = 0x0056_4152;
 /// 子类 proc 读本表，外部用 `set_aspect_ratio` 写入；写入前无须线程间同步——
 /// 表本身 `Mutex` 保护，子类 proc 在窗口 owner（winit 事件）线程被调用，
 /// `set_aspect_ratio` 经 `WinitEvent` 转发后也在 winit 线程执行，无并发。
-static ASPECT_RATIOS: LazyLock<Mutex<HashMap<HWND, f64>>> =
+static ASPECT_RATIOS: LazyLock<Mutex<HashMap<isize, f64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `WM_GETMINMAXINFO` + `WM_SIZING` 子类回调：拦截最大/最小追踪尺寸与用户拖拽
@@ -607,7 +609,7 @@ unsafe extern "system" fn aspect_subclass_proc(
 ) -> LRESULT {
     if umsg == WM_GETMINMAXINFO {
         if let Ok(map) = ASPECT_RATIOS.lock() {
-            if let Some(&ratio) = map.get(&hwnd) {
+            if let Some(&ratio) = map.get(&(hwnd as isize)) {
                 if ratio > 0.0 {
                     let info = lparam as *mut MINMAXINFO;
                     if !info.is_null() {
@@ -628,7 +630,7 @@ unsafe extern "system" fn aspect_subclass_proc(
         }
     } else if umsg == WM_SIZING {
         if let Ok(map) = ASPECT_RATIOS.lock() {
-            if let Some(&ratio) = map.get(&hwnd) {
+            if let Some(&ratio) = map.get(&(hwnd as isize)) {
                 if ratio > 0.0 {
                     let rc = lparam as *mut RECT;
                     if !rc.is_null() {
@@ -684,19 +686,19 @@ unsafe extern "system" fn aspect_subclass_proc(
 /// **必须由 winit 事件线程调用**（同 `set_frame`，`SetWindowSubclass` 不可跨线程）。
 /// 重复设置同一正数 ratio 幂等（`SetWindowSubclass` 重复挂同 proc+id 是 no-op）；
 /// 重复清除幂等（`RemoveWindowSubclass` 对未挂子类是 no-op）。
-pub fn set_aspect_ratio(hwnd: HWND, ratio: Option<f64>) {
+pub fn set_aspect_ratio(hwnd: isize, ratio: Option<f64>) {
     let mut map = ASPECT_RATIOS.lock().unwrap();
     match ratio {
         Some(r) if r > 0.0 => {
             map.insert(hwnd, r);
             unsafe {
-                SetWindowSubclass(hwnd, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID, 0);
+                SetWindowSubclass(hwnd as HWND, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID, 0);
             }
         }
         _ => {
             map.remove(&hwnd);
             unsafe {
-                RemoveWindowSubclass(hwnd, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID);
+                RemoveWindowSubclass(hwnd as HWND, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID);
             }
         }
     }
@@ -735,7 +737,7 @@ struct NcState {
     pressed_ht: Option<i32>,
 }
 
-static NC_STATES: LazyLock<Mutex<HashMap<HWND, NcState>>> =
+static NC_STATES: LazyLock<Mutex<HashMap<isize, NcState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 应用 NC 状态变更（在 winit 事件线程调用，与 `set_aspect_ratio` 同模式）。
@@ -748,7 +750,7 @@ static NC_STATES: LazyLock<Mutex<HashMap<HWND, NcState>>> =
 /// 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮行为）。
 pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
     let mut states = NC_STATES.lock().unwrap();
-    let state = states.entry(hwnd).or_insert_with(|| NcState {
+    let state = states.entry(hwnd as isize).or_insert_with(|| NcState {
         regions: Vec::new(),
         hit_test_cb: None,
         pressed_ht: None,
@@ -774,21 +776,21 @@ pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
     if has_regions || has_cb {
         unsafe {
             SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0);
-            force_nccalc_recalc(hwnd);
+            force_nccalc_recalc(hwnd as isize);
         }
     } else {
         unsafe {
             RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
-            force_nccalc_recalc(hwnd);
+            force_nccalc_recalc(hwnd as isize);
         }
     }
 }
 
 /// 卸载窗口的整个 NC 状态（窗口销毁时调用，避免 stale 表项）。
-pub fn nc_remove(hwnd: HWND) {
+pub fn nc_remove(hwnd: isize) {
     NC_STATES.lock().unwrap().remove(&hwnd);
     unsafe {
-        RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
+        RemoveWindowSubclass(hwnd as HWND, Some(nc_subclass_proc), NC_SUBCLASS_ID);
     }
 }
 
@@ -797,7 +799,7 @@ pub fn nc_get_regions(hwnd: isize) -> Option<Vec<crate::nc::NonClientRegion>> {
     NC_STATES
         .lock()
         .ok()
-        .and_then(|m| m.get(&(hwnd as HWND)).map(|s| s.regions.clone()))
+        .and_then(|m| m.get(&hwnd).map(|s| s.regions.clone()))
 }
 
 /// NC 状态更新事件（render thread → winit thread，载荷所有权移交给 winit thread）。
@@ -849,7 +851,7 @@ fn nc_handle_button_down(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT 
     // 进入按下状态：记 HT + 捕获鼠标，等 WM_LBUTTONUP 决定是否触发动作。
     // 不调 DefSubclassProc/DefWindowProc → 经典按下按钮不渲染。
     if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&hwnd) {
+        if let Some(s) = map.get_mut(&(hwnd as isize)) {
             s.pressed_ht = Some(ht);
         }
     }
@@ -864,7 +866,7 @@ fn nc_handle_button_down(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT 
 fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
     let pressed = {
         let map = NC_STATES.lock().unwrap();
-        map.get(&hwnd).and_then(|s| s.pressed_ht)
+        map.get(&(hwnd as isize)).and_then(|s| s.pressed_ht)
     };
     let Some(ht) = pressed else {
         return unsafe { DefSubclassProc(hwnd, WM_LBUTTONUP, wparam, 0) };
@@ -879,7 +881,7 @@ fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
 
     // 清按下状态并解除捕获（无论是否触发）。
     if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&hwnd) {
+        if let Some(s) = map.get_mut(&(hwnd as isize)) {
             s.pressed_ht = None;
         }
     }
@@ -917,7 +919,7 @@ fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
 /// `WM_CAPTURECHANGED`：捕获被系统剥夺（如点开系统菜单）时清按下状态。
 fn nc_handle_capture_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&hwnd) {
+        if let Some(s) = map.get_mut(&(hwnd as isize)) {
             s.pressed_ht = None;
         }
     }
@@ -977,7 +979,7 @@ fn nc_hit_test_regions(hwnd: HWND, screen_x: i32, screen_y: i32, lparam: LPARAM)
     let ly = pt.y as f32 / dpi as f32;
 
     if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(state) = map.get_mut(&hwnd) {
+        if let Some(state) = map.get_mut(&(hwnd as isize)) {
             for region in state.regions.iter().rev() {
                 if region.rect.contains([lx, ly]) {
                     return region.hit_test.to_win32() as LRESULT;
@@ -1274,13 +1276,13 @@ impl WindowExtWindows for crate::window::VireoWindow {
                 TaskbarProgress::Error(v) => (TBPF_ERROR, Some(clamp_progress(v, 10_000))),
             };
             let f: HrFnState = slot_fn(taskbar, taskbar::SET_PROGRESS_STATE);
-            let hr = f(taskbar, hwnd, flag);
+            let hr = f(taskbar, hwnd as HWND, flag);
             if hr != KW_HRESULT_OK {
                 eprintln!("vireo taskbar: SetProgressState hr=0x{:08X}", hr as u32);
             }
             if let Some((n, d)) = value {
                 let f: HrFnProgress = slot_fn(taskbar, taskbar::SET_PROGRESS_VALUE);
-                let hr = f(taskbar, hwnd, n, d);
+                let hr = f(taskbar, hwnd as HWND, n, d);
                 if hr != KW_HRESULT_OK {
                     eprintln!("vireo taskbar: SetProgressValue hr=0x{:08X}", hr as u32);
                 }
@@ -1300,17 +1302,17 @@ impl WindowExtWindows for crate::window::VireoWindow {
         let Some(buttons) = buttons else {
             // 空 = 清除全部按钮。
             clear_thumbar_callback(hwnd);
-            unsafe {
-                let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
-                f(taskbar, hwnd, 0, std::ptr::null());
-            }
-            return;
-        };
-        if buttons.is_empty() {
+unsafe {
+            let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
+            f(taskbar, hwnd as HWND, 0, std::ptr::null());
+        }
+        return;
+    };
+if buttons.is_empty() {
             clear_thumbar_callback(hwnd);
             unsafe {
                 let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
-                f(taskbar, hwnd, 0, std::ptr::null());
+                f(taskbar, hwnd as HWND, 0, std::ptr::null());
             }
             return;
         }
@@ -1362,7 +1364,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
                 dwMask: mask,
                 iId: b.id,
                 iBitmap: 0,
-                hIcon: icon,
+                hIcon: icon as HICON,
                 szTip: sz_tip,
                 dwFlags: flags,
             });
@@ -1370,7 +1372,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
         set_thumbar_icons(hwnd, icons);
         unsafe {
             let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
-            let hr = f(taskbar, hwnd, count, tb.as_ptr());
+            let hr = f(taskbar, hwnd as HWND, count, tb.as_ptr());
             if hr != KW_HRESULT_OK {
                 eprintln!("vireo taskbar: ThumbBarAddButtons hr=0x{:08X}", hr as u32);
             }
@@ -1413,7 +1415,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
         };
         unsafe {
             let f: HrFnOverlay = slot_fn(taskbar, taskbar::SET_OVERLAY_ICON);
-            let hr = f(taskbar, hwnd, hicon, desc_ptr);
+            let hr = f(taskbar, hwnd as HWND, hicon as HICON, desc_ptr);
             if hr != KW_HRESULT_OK {
                 eprintln!("vireo taskbar: SetOverlayIcon hr=0x{:08X}", hr as u32);
             }
@@ -1427,7 +1429,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
         unsafe {
             let mut pstore: *mut c_void = std::ptr::null_mut();
             let hr = SHGetPropertyStoreForWindow(
-                hwnd,
+                hwnd as HWND,
                 &IID_IPROPERTY_STORE,
                 &mut pstore,
             );
@@ -1506,7 +1508,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
 /// # Safety
 /// 该通道把线程安全责任交给调用方。本模块的调用点（ITaskbarList3 / SetWindowPos）
 /// 均为线程安全的 Win32 API，满足约定。
-fn window_hwnd(window: &winit::window::Window) -> Option<HWND> {
+fn window_hwnd(window: &winit::window::Window) -> Option<isize> {
     use winit::platform::windows::WindowExtWindows;
     use winit::raw_window_handle::RawWindowHandle;
     let wh = unsafe { window.window_handle_any_thread() }.ok()?;
@@ -1543,7 +1545,7 @@ fn move_zorder(window: &winit::window::Window, topmost: bool) {
     let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
     unsafe {
         SetWindowPos(
-            hwnd,
+            hwnd as HWND,
             insert_after,
             0,
             0,
@@ -1635,21 +1637,21 @@ mod tests {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             panic!("CreateIconFromResourceEx 失败, GetLastError={}", err);
         }
-        unsafe { DestroyIcon(icon) };
+        unsafe { DestroyIcon(icon as HICON) };
     }
 
     // ====== §7.6 NC API 单元测试（无窗口，state 存储/读取）======
 
     #[test]
     fn nc_get_regions_default_empty() {
-        let hwnd: HWND = 0xDEAD_BEEF_isize;
+        let hwnd: isize = 0xDEAD_BEEF_isize;
         nc_remove(hwnd);
-        assert!(nc_get_regions(hwnd as isize).is_none());
+        assert!(nc_get_regions(hwnd).is_none());
     }
 
     #[test]
     fn nc_set_regions_roundtrip() {
-        let hwnd: HWND = 0xC0FF_EE01_isize;
+        let hwnd: isize = 0xC0FF_EE01_isize;
         nc_remove(hwnd);
 
         let regions = vec![
@@ -1670,7 +1672,7 @@ mod tests {
                 pressed_ht: None,
             },
         );
-        let read = nc_get_regions(hwnd as isize).unwrap();
+        let read = nc_get_regions(hwnd).unwrap();
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].hit_test, NonClientHit::Caption);
         assert_eq!(read[1].hit_test, NonClientHit::Close);
@@ -1709,7 +1711,7 @@ mod tests {
 
     #[test]
     fn nc_clear_all_resets_state() {
-        let hwnd: HWND = 0xC0FF_EE02_isize;
+        let hwnd: isize = 0xC0FF_EE02_isize;
         nc_remove(hwnd);
 
         NC_STATES.lock().unwrap().insert(
@@ -1723,7 +1725,7 @@ mod tests {
                 pressed_ht: None,
             },
         );
-        assert_eq!(nc_get_regions(hwnd as isize).unwrap().len(), 1);
+        assert_eq!(nc_get_regions(hwnd).unwrap().len(), 1);
 
         NC_STATES.lock().unwrap().insert(
             hwnd,
@@ -1733,7 +1735,7 @@ mod tests {
                 pressed_ht: None,
             },
         );
-        assert!(nc_get_regions(hwnd as isize).unwrap().is_empty());
+        assert!(nc_get_regions(hwnd).unwrap().is_empty());
         nc_remove(hwnd);
     }
 }

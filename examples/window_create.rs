@@ -90,6 +90,7 @@ fn main() {
     let mut visible = true;
     let mut t_was_down = false;
     // W2 NC 状态：regions 随宽度变化重设（按钮位置跟随窗口宽度）。
+    #[cfg(target_os = "windows")]
     let mut w2_last_width: u32 = 0;
 
     app.run(move |app| {
@@ -104,31 +105,34 @@ fn main() {
 
         // W2 NC hit-test regions：按钮外观画在客户端，WM_NCHITTEST 返回 HT* 让
         // Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击）。
-        let m2 = win2.metrics();
-        if m2.width != w2_last_width {
-            w2_last_width = m2.width;
-            let w = m2.width as f32;
-            let close_x = w - BTN_W;
-            let max_x = w - 2.0 * BTN_W;
-            let min_x = w - 3.0 * BTN_W;
-            win2.set_non_client_regions(&[
-                NonClientRegion {
-                    rect: Rect::new(0.0, 0.0, w, TITLE_H),
-                    hit_test: NonClientHit::Caption,
-                },
-                NonClientRegion {
-                    rect: Rect::new(close_x, 0.0, BTN_W, TITLE_H),
-                    hit_test: NonClientHit::Close,
-                },
-                NonClientRegion {
-                    rect: Rect::new(max_x, 0.0, BTN_W, TITLE_H),
-                    hit_test: NonClientHit::MaxButton,
-                },
-                NonClientRegion {
-                    rect: Rect::new(min_x, 0.0, BTN_W, TITLE_H),
-                    hit_test: NonClientHit::MinButton,
-                },
-            ]);
+        #[cfg(target_os = "windows")]
+        {
+            let m2 = win2.metrics();
+            if m2.width != w2_last_width {
+                w2_last_width = m2.width;
+                let w = m2.width as f32;
+                let close_x = w - BTN_W;
+                let max_x = w - 2.0 * BTN_W;
+                let min_x = w - 3.0 * BTN_W;
+                win2.set_non_client_regions(&[
+                    NonClientRegion {
+                        rect: Rect::new(0.0, 0.0, w, TITLE_H),
+                        hit_test: NonClientHit::Caption,
+                    },
+                    NonClientRegion {
+                        rect: Rect::new(close_x, 0.0, BTN_W, TITLE_H),
+                        hit_test: NonClientHit::Close,
+                    },
+                    NonClientRegion {
+                        rect: Rect::new(max_x, 0.0, BTN_W, TITLE_H),
+                        hit_test: NonClientHit::MaxButton,
+                    },
+                    NonClientRegion {
+                        rect: Rect::new(min_x, 0.0, BTN_W, TITLE_H),
+                        hit_test: NonClientHit::MinButton,
+                    },
+                ]);
+            }
         }
 
         // `T` 切换 W1/W2 可见性（下降沿：仅在按下瞬间翻转一次）
