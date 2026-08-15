@@ -214,9 +214,13 @@ pub enum FrameStyle {
     /// - **Windows**：唯一真正「只去标题栏」的模式——保留 `WS_SIZEBOX` +
     ///   `WM_NCCALCSIZE` 非客户区 insets（约 8px），系统默认边缘 hit-test
     ///   自动接管缩放热区。
-    /// - **macOS**：保留红绿灯按钮 + 隐藏原生标题栏（`with_titlebar_hidden` +
-    ///   `with_titlebar_transparent` + `with_fullsize_content_view`），内容区
-    ///   延伸到红绿灯下。
+    /// - **macOS**：隐藏标题栏文本 + 透明标题栏 + 内容区延伸到红绿灯下，
+    ///   红绿灯保留并由系统自动接管（`with_title_hidden` +
+    ///   `with_titlebar_transparent` + `with_fullsize_content_view` =
+    ///   Electron `titleBarStyle: 'hidden'`）。
+    ///   **注意**：winit 0.30 的 `with_titlebar_hidden` 实现为 `Borderless`
+    ///   （红绿灯/边框全部消失），与 `Frameless` 等效，**不是**本变体想要的
+    ///   语义——故此处用 `with_title_hidden`（只藏文本、保留红绿灯）。
     /// - **其它平台：与 [`FrameStyle::Frameless`] 行为相同**（winit 无法只去
     ///   标题栏，边框随装饰整体移除）。
     HiddenTitlebar,
@@ -227,8 +231,9 @@ impl FrameStyle {
     /// - Windows / 其它平台：`Normal` 才保留；`Frameless`/`HiddenTitlebar`
     ///   都整体去装饰（winit 无法只去标题栏）。
     /// - **macOS**：`HiddenTitlebar` **保留**装饰（红绿灯按钮），配合原生
-    ///   `with_titlebar_hidden` + `with_titlebar_transparent` +
-    ///   `with_fullsize_content_view` 实现 Electron `titleBarStyle: 'hidden'`。
+    ///   `with_title_hidden` + `with_titlebar_transparent` +
+    ///   `with_fullsize_content_view` 实现 Electron `titleBarStyle: 'hidden'`
+    ///   （`with_titlebar_hidden` 在 winit 0.30 实为 `Borderless`，不采用）。
     pub(crate) fn decorated(self) -> bool {
         #[cfg(target_os = "macos")]
         {
@@ -2080,13 +2085,15 @@ impl App {
                 #[cfg(target_os = "macos")]
                 {
                     use winit::platform::macos::WindowAttributesExtMacOS;
-                    // `HiddenTitlebar` = 保留装饰（红绿灯）+ 隐藏原生标题栏 +
-                    // 透明标题栏 + 内容区延伸到红绿灯下（Electron
-                    // `titleBarStyle: 'hidden'` 语义）。winit 只有构造期属性，
-                    // 运行时无 `set_titlebar_hidden` → 只能在构造期实现。
+                    // `HiddenTitlebar` = 隐藏标题栏文本 + 透明标题栏 + 内容区
+                    // 延伸到红绿灯下（Electron `titleBarStyle: 'hidden'` 语义）。
+                    // 用 `with_title_hidden`（只藏文本，红绿灯保留并由系统接管）
+                    // 而不是 `with_titlebar_hidden`（winit 0.30 将其实现为
+                    // `Borderless`，红绿灯/边框全部消失，效果等同 `Frameless`）。
+                    // 这些只有构造期属性，运行时无 setter → 只能在构造期实现。
                     if desc.frame_style == FrameStyle::HiddenTitlebar {
                         attrs = attrs
-                            .with_titlebar_hidden(true)
+                            .with_title_hidden(true)
                             .with_titlebar_transparent(true)
                             .with_fullsize_content_view(true);
                     }
@@ -3198,8 +3205,11 @@ impl VireoWindow {
 
     /// 设置窗口边框样式（通过 winit 线程异步操作）。
     ///
-    /// 见 [`FrameStyle`] 各变体文档；非 Windows 平台上 [`FrameStyle::HiddenTitlebar`]
-    /// 与 [`FrameStyle::Frameless`] 行为相同（都整体去装饰）。
+    /// 见 [`FrameStyle`] 各变体文档。
+    /// 非 Windows 平台上：`set_decorations` 是 winit 运行时方法，但
+    /// `HiddenTitlebar` 的构造期属性（`with_title_hidden`/透明/全尺寸）
+    /// 无法在运行时设置——macOS 上运行时切换到 `HiddenTitlebar` 只会有
+    /// `decorated()=true` 的标准装饰，等于 `Normal`；`Frameless` 可运行时生效。
     ///
     /// **Windows 圆角钳制/恢复**：进入 [`FrameStyle::Frameless`]（无边框）时
     /// DWM 无法圆角，圆角偏好被钳为 `Default`；切回 `Normal`/`HiddenTitlebar`

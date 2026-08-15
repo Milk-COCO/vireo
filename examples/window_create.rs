@@ -41,7 +41,9 @@ use vireo::prelude::*;
 #[cfg(target_os = "windows")]
 use vireo::platform::windows::WindowExtWindows;
 
+#[cfg(target_os = "windows")]
 const TITLE_H: f32 = 32.0;
+#[cfg(target_os = "windows")]
 const BTN_W: f32 = 46.0;
 
 fn main() {
@@ -92,6 +94,12 @@ fn main() {
     // W2 NC 状态：regions 随宽度变化重设（按钮位置跟随窗口宽度）。
     #[cfg(target_os = "windows")]
     let mut w2_last_width: u32 = 0;
+    // W2 客户端标题栏高度：仅 Windows（自绘按钮 + WM_NCHITTEST 接管交互）；
+    // macOS `HiddenTitlebar` 由系统自管红绿灯、不自绘，内容从顶部开始。
+    #[cfg(target_os = "windows")]
+    let w2_top = TITLE_H;
+    #[cfg(not(target_os = "windows"))]
+    let w2_top = 0.0;
 
     app.run(move |app| {
         let (win1, win2, win3) = match (
@@ -152,7 +160,7 @@ fn main() {
             2,
             "W2",
             "Px · HiddenTitlebar · 客户端标题栏 · HT* 自动交互",
-            TITLE_H,
+            w2_top,
         );
         draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
@@ -174,6 +182,8 @@ fn draw_window(
 
     // W2 客户端标题栏：画背景 + 3 按钮（Win10/11 系统风格，几何绘制）。
     // WM_NCHITTEST 返回 HT* 让 Windows 自动处理点击行为。
+    // （仅 Windows：macOS `HiddenTitlebar` 红绿灯由系统自管，不自绘按钮。）
+    #[cfg(target_os = "windows")]
     if content_top > 0.0 && id == 2 {
         let bg = Color::new(0.12, 0.12, 0.14, 1.0);
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), w, TITLE_H, Some(bg));

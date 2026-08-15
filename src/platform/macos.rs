@@ -10,9 +10,10 @@
 //! 本机（Windows）无法编译验证，需 macOS 实机验证。
 //!
 //! 注意：winit 的 `WindowExtMacOS` **运行时**只暴露本模块转发的方法；
-//! 隐藏标题栏 / 透明标题栏 / 全尺寸内容区等**构造期**能力走
+//! 隐藏标题栏文本 / 透明标题栏 / 全尺寸内容区等**构造期**能力走
 //! `FrameStyle::HiddenTitlebar`（见 `src/window.rs` `create_attrs`），
-//! 不在本 trait 内。
+//! 不在本 trait 内。macOS 用 `with_title_hidden`（红绿灯保留、系统接管），
+//! 与 Electron `titleBarStyle: 'hidden'` 一致。
 
 pub use winit::platform::macos::OptionAsAlt;
 
