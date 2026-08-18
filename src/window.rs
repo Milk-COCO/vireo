@@ -796,6 +796,10 @@ pub struct VireoWindow {
     /// 上一帧观测到的窗口状态 (phys_w, phys_h, log_w, log_h, scale)——
     /// 用于判断尺寸是否仍在**移动**（相对上一帧变化才算移动，松手即停）。
     last_observed: std::cell::Cell<(u32, u32, u32, u32, f32)>,
+    /// 拖动开始时缓存的显示器刷新率（Hz）。acquire 在拖动期失去 vsync 节流时，
+    /// 渲染循环用它把 `max_fps` 临时压到刷新率（防空转）；松手 snap（configure）
+    /// 后清空。只查询一次，避免拖动中每帧 `current_monitor()`。
+    drag_refresh_mhz: std::cell::Cell<Option<u32>>,
     /// 拖动中的 resize 尺寸刷新策略。见 [`ResizeRefreshPolicy`]。
     resize_policy: std::cell::Cell<ResizeRefreshPolicy>,
     /// resize 去抖时长：尺寸稳定满此时间才一次性 configure（松手 snap）。默认
@@ -839,6 +843,11 @@ pub struct VireoWindow {
     pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
     /// Outcome recorded by this window's draw call in the current update iteration.
     last_draw_outcome: std::cell::Cell<Option<DrawOutcome>>,
+    /// 本窗口最近一次 draw 的完整报告（timings + outcome），供
+    /// `VIREO_PACING_STATS=1` 采集器读取。
+    last_draw_report: std::cell::Cell<Option<DrawReport>>,
+    /// 本窗口最近一次 present 的相位样本（`VIREO_PHASE_STATS=1` 采集器读取）。
+    last_phase_sample: std::cell::Cell<Option<PhaseSample>>,
     presented_frames: std::cell::Cell<u64>,
     skipped_frames: std::cell::Cell<u64>,
     /// 最近成功 present 的间隔（秒），滑动窗口，用于 [`VireoWindow::presented_fps`]。
@@ -908,6 +917,7 @@ impl VireoWindow {
                 logical_height,
                 scale,
             )),
+            drag_refresh_mhz: std::cell::Cell::new(None),
             resize_policy: std::cell::Cell::new(ResizeRefreshPolicy::OnRelease),
             resize_debounce: std::cell::Cell::new(DEFAULT_RESIZE_DEBOUNCE),
             layout_follow: std::cell::Cell::new(true),
@@ -929,6 +939,8 @@ impl VireoWindow {
             last_gpu_secs: Arc::new(Mutex::new(None)),
             pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             last_draw_outcome: std::cell::Cell::new(None),
+            last_draw_report: std::cell::Cell::new(None),
+            last_phase_sample: std::cell::Cell::new(None),
             presented_frames: std::cell::Cell::new(0),
             skipped_frames: std::cell::Cell::new(0),
             present_intervals: std::cell::RefCell::new(Vec::with_capacity(PRESENT_SAMPLE_CAP)),
@@ -961,6 +973,7 @@ impl VireoWindow {
         self.configured_layout.set((logical_w, logical_h, scale, dpi_scale));
         self.last_configure.set(now);
         self.pending_resize_at.set(None);
+        self.drag_refresh_mhz.set(None);
         self.last_observed.set((size.width, size.height, logical_w, logical_h, scale));
         self.renderer.borrow_mut().resize(
             logical_w,
@@ -996,6 +1009,7 @@ impl VireoWindow {
     ) -> DrawReport {
         let report = self.draw_frame(clear_color, batches);
         self.last_draw_outcome.set(Some(report.outcome));
+        self.last_draw_report.set(Some(report));
         match report.outcome {
             DrawOutcome::Presented { .. } => {
                 self.presented_frames.set(self.presented_frames.get().saturating_add(1));
@@ -1135,7 +1149,15 @@ impl VireoWindow {
                 );
             if moved {
                 self.last_observed.set((size.width, size.height, logical_w, logical_h, new_scale));
+                let drag_starting = self.pending_resize_at.get().is_none();
                 self.pending_resize_at.set(Some(now));
+                if drag_starting {
+                    // 拖动开始：缓存显示器刷新率（acquire 失去 vsync 节流时用它
+                    // 临时压 cap 防空转）。只查一次；monitor 不跨屏时刷新率稳定。
+                    // 原样存 milli-Hz（winit 返回值），换算只发生在 drag_effective_cap。
+                    self.drag_refresh_mhz
+                        .set(self.current_monitor().and_then(|m| m.refresh_rate_millihertz()));
+                }
             }
             let refresh = resize_refresh(
                 size_drifted,
@@ -1395,6 +1417,27 @@ impl VireoWindow {
         let t3 = std::time::Instant::now();
         self.gpu.queue.present(st);
         let present_secs = t3.elapsed().as_secs_f64();
+
+        if std::env::var_os("VIREO_PHASE_STATS").is_some() {
+            if let Some((qpc_vblank, qpc_period)) = dwm_timing() {
+                let now = qpc_now();
+                let per_sec = qpc_ticks_per_sec() as f64;
+                let vblank_ms = qpc_period as f64 / per_sec * 1e3;
+                // phase = 距最近 vblank 的时间 / 周期（0~1，0=刚过 vblank）。
+                // 注意：qpcVBlank 是 vblank 网格上的**某个**采样点，可能在 now 之前/之后
+                // 甚至离 now 好几帧（Firefox 源码分析证实），直接相减没有意义。
+                // 用 rem_euclid 归一到 [0, period)，无论采样在过去/未来都得到正确的相位。
+                let period = qpc_period.max(1) as i128;
+                let phase_ticks = (now as i128 - qpc_vblank as i128).rem_euclid(period);
+                let phase = phase_ticks as f64 / period as f64;
+                self.last_phase_sample.set(Some(PhaseSample {
+                    phase,
+                    vblank_ms,
+                    stretch: suboptimal,
+                    dragging: self.pending_resize_at.get().is_some(),
+                }));
+            }
+        }
 
         if trace {
             eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us gpu={:?} suboptimal={}",
@@ -1711,6 +1754,11 @@ pub struct App {
     /// 用 sleep 把 CPU 循环拉回目标频率，避免空转。默认 `Some(240)`：给足余量，
     /// 正常 vsync 下 acquire 更早卡住、cap 不生效；仅在空转时兜底。
     max_fps: std::cell::Cell<Option<u32>>,
+    /// 拖动期帧率上限开关（`App::set_drag_cap`）。与 `set_max_fps` 解耦：开启时
+    /// resize 拖动中即使 `max_fps(None)` 也压到显示器刷新率（省资源但画面内容
+    /// 变化实测易卡）；关闭则拖动期不额外压制、渲染循环全速产帧，画面内容随
+    /// 窗口尺寸变化更平滑。默认开启。
+    drag_cap: std::cell::Cell<bool>,
     /// 下一次帧循环「开始」的目标时刻（相位锁）。每帧推进一个 stride；落后（中途
     /// 耗时已超 stride）时不追赶、直接跳到 now+stride，避免攒出 33ms 双帧。
     pacing_deadline: std::cell::Cell<Option<std::time::Instant>>,
@@ -1782,6 +1830,7 @@ impl App {
             last_frame: std::time::Instant::now(),
             deferred_tasks: RefCell::new(Vec::new()),
             max_fps: std::cell::Cell::new(Some(240)),
+            drag_cap: std::cell::Cell::new(true),
             pacing_deadline: std::cell::Cell::new(None),
         }
     }
@@ -2547,6 +2596,205 @@ impl App {
 }
 
 /// 渲染线程主循环：处理 winit 事件 → 调用用户 on_frame → 重复。
+/// 帧节奏诊断样本（`VIREO_PACING_STATS=1` 时在 `render_on_frame` 内采集）。
+#[derive(Clone, Copy)]
+struct PacingSample {
+    /// 本帧循环起点到上一帧起点的间隔（CPU 帧节奏）
+    interval_ms: f64,
+    /// `get_current_texture` 耗时（swapchain 阻塞则大；拖动拉伸时不阻塞 → 小）
+    acquire_ms: f64,
+    /// `queue.present` 耗时（异步 → 通常 ~20µs）
+    present_ms: f64,
+    /// 本帧是否 stretch present（`Presented { suboptimal: true }`）
+    stretch: bool,
+    /// 拖动中（`pending_resize_at` 非空）
+    dragging: bool,
+}
+
+/// 把 `VIREO_PACING_STATS` 样本输出摘要（stderr）。按 stretch / 正常分两组，
+/// 各报 interval/acquire/present 的 min/p50/p95/max，定位「CPU 帧节奏是否均匀、
+/// 是否阻塞在 acquire/present」。
+fn pacing_summary(samples: &[PacingSample]) {
+    fn pct(sorted: &[f64], q: f64) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let i = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+        sorted[i]
+    }
+    fn line(tag: &str, v: &mut Vec<f64>) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        eprintln!(
+            "  {:<12} min={:7.3} p50={:7.3} p95={:7.3} max={:7.3} (ms)",
+            tag,
+            v.first().copied().unwrap_or(0.0),
+            pct(v, 0.50),
+            pct(v, 0.95),
+            v.last().copied().unwrap_or(0.0),
+        );
+    }
+
+    let n_stretch = samples.iter().filter(|s| s.stretch).count();
+    let n_normal = samples.len().saturating_sub(n_stretch);
+    let n_drag = samples.iter().filter(|s| s.dragging).count();
+    eprintln!(
+        "[pacing] n={} stretch={} normal={} drag={}",
+        samples.len(),
+        n_stretch,
+        n_normal,
+        n_drag
+    );
+
+    let mut iv = samples.iter().map(|s| s.interval_ms).collect::<Vec<_>>();
+    let mut iv_st = samples.iter().filter(|s| s.stretch).map(|s| s.interval_ms).collect::<Vec<_>>();
+    let mut iv_nm = samples.iter().filter(|s| !s.stretch).map(|s| s.interval_ms).collect::<Vec<_>>();
+    line("interval", &mut iv);
+    line("interval*st", &mut iv_st);
+    line("interval*norm", &mut iv_nm);
+
+    let mut aq = samples.iter().map(|s| s.acquire_ms).collect::<Vec<_>>();
+    line("acquire", &mut aq);
+    let mut pr = samples.iter().map(|s| s.present_ms).collect::<Vec<_>>();
+    line("present", &mut pr);
+}
+
+/// 相位诊断样本（`VIREO_PHASE_STATS=1`，`draw_frame` 内 present 后采集）。
+#[derive(Clone, Copy)]
+struct PhaseSample {
+    /// present 相对最近一次 vblank 的相位（0~1，0=vblank 刚过，1=马上到下一个 vblank）
+    phase: f64,
+    /// 两次相邻 vblank 的间隔（QPC ticks → ms），判断 DWM 合成时钟是否均匀
+    vblank_ms: f64,
+    /// 本帧是否 stretch present
+    stretch: bool,
+    /// 拖动中
+    dragging: bool,
+}
+
+/// 相位诊断摘要：phase 的 min/p50/p95/max + 直方图（分 10 桶），
+/// 验证「present 相位在拖动时漂移」的拍频假说。
+fn phase_summary(samples: &[PhaseSample]) {
+    let n_st = samples.iter().filter(|s| s.stretch).count();
+    let n_drag = samples.iter().filter(|s| s.dragging).count();
+    eprintln!(
+        "[phase] n={} stretch={} drag={}",
+        samples.len(),
+        n_st,
+        n_drag
+    );
+    let mut ph = samples.iter().map(|s| s.phase).collect::<Vec<_>>();
+    ph.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct = |q: f64| {
+        if ph.is_empty() {
+            return 0.0;
+        }
+        let i = ((ph.len() as f64 - 1.0) * q).round() as usize;
+        ph[i]
+    };
+    eprintln!(
+        "  phase       min={:.3} p50={:.3} p95={:.3} max={:.3}",
+        ph.first().copied().unwrap_or(0.0),
+        pct(0.50),
+        pct(0.95),
+        ph.last().copied().unwrap_or(0.0),
+    );
+    let mut vb = samples.iter().map(|s| s.vblank_ms).collect::<Vec<_>>();
+    vb.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct_vb = |q: f64| {
+        if vb.is_empty() {
+            return 0.0;
+        }
+        let i = ((vb.len() as f64 - 1.0) * q).round() as usize;
+        vb[i]
+    };
+    eprintln!(
+        "  vblank_ms   min={:.3} p50={:.3} p95={:.3} max={:.3}",
+        vb.first().copied().unwrap_or(0.0),
+        pct_vb(0.50),
+        pct_vb(0.95),
+        vb.last().copied().unwrap_or(0.0),
+    );
+    let mut hist = [0usize; 10];
+    for s in samples {
+        let b = ((s.phase * 10.0) as usize).min(9);
+        hist[b] += 1;
+    }
+    for (i, c) in hist.iter().enumerate() {
+        let pct = *c as f64 / samples.len().max(1) as f64 * 100.0;
+        let bar = "*".repeat((pct / 2.0).round() as usize);
+        eprintln!(
+            "  phase {:0.1}-{:0.1} | {:>3} 帧 {:5.1}% {}",
+            i as f64 * 0.1,
+            (i + 1) as f64 * 0.1,
+            c,
+            pct,
+            bar
+        );
+    }
+}
+
+/// 读取 DWM 合成时钟：返回 `(qpcVBlank, qpcRefreshPeriod)`（QPC ticks）。
+/// `qpcVBlank` = 最近一次 vblank 的 QPC 时间；`qpcRefreshPeriod` = 刷新周期。
+/// 失败返回 `None`（非 Windows / DWM 不可用 / 远程会话）。
+fn dwm_timing() -> Option<(u64, u64)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+        unsafe {
+            let mut ti: DWM_TIMING_INFO = std::mem::zeroed();
+            ti.cbSize = std::mem::size_of::<DWM_TIMING_INFO>() as u32;
+            if DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut ti) == 0 {
+                if ti.qpcRefreshPeriod > 0 {
+                    return Some((ti.qpcVBlank, ti.qpcRefreshPeriod));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// 当前 QPC 计数（`QueryPerformanceCounter`）。
+fn qpc_now() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
+        let mut v: i64 = 0;
+        unsafe {
+            let _ = QueryPerformanceCounter(&mut v);
+        }
+        v as u64
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+/// QPC 频率（每类 QPC tick 的纳秒数），用于把 ticks 转成 ms。
+fn qpc_ticks_per_sec() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
+        static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *FREQ.get_or_init(|| {
+            let mut v: i64 = 0;
+            unsafe {
+                let _ = QueryPerformanceFrequency(&mut v);
+            }
+            v.max(1) as u64
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        1
+    }
+}
+
+
 fn render_on_frame<F>(
     mut app: App,
     mut on_frame: F,
@@ -2572,7 +2820,19 @@ where F: FnMut(&App) -> bool + Send + 'static
     let request_exit = || {
         let _ = exit_tx.send(());
     };
+    // `VIREO_PACING_STATS=1`：帧节奏诊断（仅诊断用，默认零开销）。
+    let pacing = std::env::var_os("VIREO_PACING_STATS").is_some();
+    let mut pacing_samples: Vec<PacingSample> = Vec::new();
+    let mut pacing_prev: Option<std::time::Instant> = None;
+    // `VIREO_PHASE_STATS=1`：present 相对 vblank 相位诊断（需 Windows + DWM）。
+    let phase_diag = std::env::var_os("VIREO_PHASE_STATS").is_some();
+    let mut phase_samples: Vec<PhaseSample> = Vec::new();
     loop {
+        let frame_start = std::time::Instant::now();
+        let interval_ms = pacing_prev
+            .map(|p| frame_start.duration_since(p).as_secs_f64() * 1e3)
+            .unwrap_or(0.0);
+        pacing_prev = Some(frame_start);
         // 处理所有待处理事件
         loop {
             match rx.try_recv() {
@@ -2873,6 +3133,37 @@ where F: FnMut(&App) -> bool + Send + 'static
                 request_exit();
                 break;
             }
+            if pacing {
+                for win in app.windows.iter().flatten() {
+                    if let Some(rep) = win.last_draw_report.get() {
+                        pacing_samples.push(PacingSample {
+                            interval_ms,
+                            acquire_ms: rep.timings.acquire_secs * 1e3,
+                            present_ms: rep.timings.present_secs * 1e3,
+                            stretch: matches!(
+                                rep.outcome,
+                                DrawOutcome::Presented { suboptimal: true }
+                            ),
+                            dragging: win.pending_resize_at.get().is_some(),
+                        });
+                    }
+                }
+                if pacing_samples.len() >= 240 {
+                    pacing_summary(&pacing_samples);
+                    pacing_samples.clear();
+                }
+            }
+            if phase_diag {
+                for win in app.windows.iter().flatten() {
+                    if let Some(ps) = win.last_phase_sample.get() {
+                        phase_samples.push(ps);
+                    }
+                }
+                if phase_samples.len() >= 240 {
+                    phase_summary(&phase_samples);
+                    phase_samples.clear();
+                }
+            }
             if should_backoff_after_draws(
                 app.windows.iter().flatten().map(|win| win.last_draw_outcome.get()),
             ) {
@@ -2891,8 +3182,9 @@ where F: FnMut(&App) -> bool + Send + 'static
         // 下一帧 sleep 到「绝对 deadline」，且落后不追赶（跳 slot），避免双帧。
         // 有 vsync 阻塞（acquire 自然到刷新率）时 stride 早已过去，deadline 总是
         // 落后 → 直接跳 now+stride 不睡，cap 不干预 vsync。精确 vsync 由 present 保证。
-        let (next_deadline, sleep) =
-            pac_advance(std::time::Instant::now(), app.pacing_deadline.get(), app.max_fps.get());
+        let now = std::time::Instant::now();
+        let effective_cap = app.effective_max_fps();
+        let (next_deadline, sleep) = pac_advance(now, app.pacing_deadline.get(), effective_cap);
         app.pacing_deadline.set(next_deadline);
         if let Some(s) = sleep {
             std::thread::sleep(s);
@@ -2923,6 +3215,35 @@ fn pac_advance(
         Some(d) if d > now => (Some(d + stride), Some(d - now)),
         _ => (Some(now + stride), None),
     }
+}
+
+/// resize 拖动期间把用户帧率上限压到显示器刷新率（acquire 失去 vsync 节流时
+/// 防空转）。`user` 为 `Some(u)` → `min(u, hz)`；`None`（用户不限制）→ 也压到
+/// `hz`（与 `set_max_fps` 解耦，见 [`drag_cap_effective`]）。`hz` 下限 1 防除零。
+/// `drag_refresh_mhz` 是 winit 返回的 milli-Hz（120Hz → 120_000），必须转 Hz 再比，
+/// 否则 `min(240, 120_000) = 240`，cap 永远压不下去。
+fn drag_effective_cap(user: Option<u32>, drag_refresh_mhz: u32) -> Option<u32> {
+    let hz = mhz_to_hz(drag_refresh_mhz).max(1);
+    Some(match user {
+        Some(u) => u.min(hz),
+        None => hz,
+    })
+}
+
+/// 拖动期帧率上限的最终决策：`drag_cap` 开启（默认）→ 压到显示器刷新率
+/// （`user=None` 也压，与 `set_max_fps` 解耦）；关闭 → 原样返回 `user`。
+fn drag_cap_effective(user: Option<u32>, drag_cap: bool, drag_refresh_mhz: u32) -> Option<u32> {
+    if drag_cap {
+        drag_effective_cap(user, drag_refresh_mhz)
+    } else {
+        user
+    }
+}
+
+/// 把 winit `refresh_rate_millihertz()` 的 milli-Hz 转成 Hz（四舍五入）。
+/// 单位不匹配会导致 `min(240, 120_000) = 240`，cap 永远压不下去。
+fn mhz_to_hz(millihertz: u32) -> u32 {
+    (millihertz + 500) / 1000
 }
 
 fn should_backoff_after_draws(
@@ -3041,6 +3362,44 @@ impl App {
     /// 当前帧率上限（`App::set_max_fps` 所设）。
     pub fn max_fps(&self) -> Option<u32> {
         self.max_fps.get()
+    }
+
+    /// 设置「拖动期帧率上限」独立开关。与 `set_max_fps` **解耦**：开启（默认）时，
+    /// resize 拖动期间（acquire 失去 vsync 节流、渲染循环会全速空转）即使
+    /// `set_max_fps(None)` 也会把实际上限压到该窗口显示器刷新率；关闭则拖动期
+    /// 不做任何额外压制（完全跟随 `set_max_fps`）。松手 snap 后自动恢复。
+    ///
+    /// **何时关闭**：如果你希望**缩放窗口时画面内容的变化平滑流畅**，请设为
+    /// `false`。开启时拖动期被压到刷新率，渲染循环只按显示器节奏产出帧，窗口
+    /// 拉伸期间没有多余帧可供合成器选择，画面随尺寸变化时容易卡/顿（配合 vsync
+    /// 时尤其明显）。关闭后拖动期不做帧率压制，渲染循环全速产帧（上限仅由
+    /// `set_max_fps` 决定），合成器每帧都有新鲜帧可选，画面内容变化更平滑——
+    /// 代价是拖动期间 CPU/GPU 空转、发热略高。资源敏感场景（笔记本省电/持续拖动）
+    /// 可保持开启；以观感为先时建议关闭。
+    pub fn set_drag_cap(&self, enabled: bool) {
+        self.drag_cap.set(enabled);
+    }
+
+    /// 当前「拖动期帧率上限」开关（`App::set_drag_cap`）。默认 `true`。
+    /// 希望缩放窗口时画面内容变化平滑 → 设为 `false`。
+    pub fn drag_cap(&self) -> bool {
+        self.drag_cap.get()
+    }
+
+    /// 实际生效的帧率上限。用户设的值（`set_max_fps`）基础上，若任一窗口正在
+    /// resize 拖动（acquire 失去 vsync 节流）且 `drag_cap` 开启，则压到该窗口
+    /// 显示器的刷新率，避免渲染循环全速空转；松手 snap（configure）后自动恢复。
+    /// 拖动中不额外压（`drag_cap` 关）或非拖动时返回用户值。纯决策，供渲染循环帧末调用。
+    fn effective_max_fps(&self) -> Option<u32> {
+        let user = self.max_fps.get();
+        for win in self.windows.iter().flatten() {
+            if win.pending_resize_at.get().is_some() {
+                if let Some(mhz) = win.drag_refresh_mhz.get() {
+                    return drag_cap_effective(user, self.drag_cap.get(), mhz);
+                }
+            }
+        }
+        user
     }
 
 pub fn windows(&self) -> Vec<&VireoWindow> {
@@ -4789,6 +5148,44 @@ mod metrics_tests {
         assert!(super::observed_moved(anchor, (800, 600, 800 - eps - 1, 600, 1.0), eps));
         // scale 变化即便物理/逻辑都在容差内也算移动（需要重配）
         assert!(super::observed_moved(anchor, (800, 600, 800, 600, 2.0), eps));
+    }
+
+    #[test]
+    fn drag_effective_cap_keeps_user_cap_when_higher_than_refresh() {
+        // 用户 240、刷新率 120（milli-Hz 120_000）→ 压到 120
+        assert_eq!(super::drag_effective_cap(Some(240), 120_000), Some(120));
+        // 用户 60、刷新率 120 → 保持 60（不抬升）
+        assert_eq!(super::drag_effective_cap(Some(60), 120_000), Some(60));
+        // 用户 144、刷新率 120 → 压到 120
+        assert_eq!(super::drag_effective_cap(Some(144), 120_000), Some(120));
+    }
+
+    #[test]
+    fn drag_effective_cap_respects_explicit_none_and_zero_refresh() {
+        // 用户显式不限制 → 拖动期也压到刷新率（与 set_max_fps 解耦）
+        assert_eq!(super::drag_effective_cap(None, 120_000), Some(120));
+        // 刷新率 0（查询异常）→ 下限 1，min 后用户值被压到 1 以下为 1
+        assert_eq!(super::drag_effective_cap(Some(240), 0), Some(1));
+        assert_eq!(super::drag_effective_cap(Some(1), 0), Some(1));
+    }
+
+    #[test]
+    fn drag_cap_switch_disables_dragging_cap_and_enabled_caps_even_with_none() {
+        // 开关关闭 → 原样返回用户值（不额外压制）
+        assert_eq!(super::drag_cap_effective(Some(240), false, 120_000), Some(240));
+        assert_eq!(super::drag_cap_effective(None, false, 120_000), None);
+        // 开关开启 → 用户 Some 压到刷新率；用户 None 也压（解耦）
+        assert_eq!(super::drag_cap_effective(Some(240), true, 120_000), Some(120));
+        assert_eq!(super::drag_cap_effective(None, true, 120_000), Some(120));
+    }
+
+    #[test]
+    fn drag_refresh_mhz_converts_millihertz_to_hertz() {
+        // refresh_rate_millihertz() 返回 milli-Hz（120Hz → 120_000）。
+        // 换算在 drag_effective_cap 内做，否则 min(240, 120_000) = 240 压不下去。
+        assert_eq!(super::mhz_to_hz(120_000), 120);
+        assert_eq!(super::mhz_to_hz(59_950), 60); // 四舍五入
+        assert_eq!(super::mhz_to_hz(0), 0);
     }
 
     #[test]
