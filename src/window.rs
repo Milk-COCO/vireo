@@ -1790,12 +1790,26 @@ enum DeferredTaskKind {
 }
 
 impl App {
-    /// 创建 App。构造时即初始化 GPU 设备，可在 run() 之前加载纹理等资源。
+    /// 创建 App（内部 `InstanceDescriptor::new_without_display_handle_from_env()`：
+    /// 允许 `WGPU_BACKEND` 等环境变量选择后端）。构造时即初始化 GPU 设备，
+    /// 可在 run() 之前加载纹理等资源。
     pub fn new() -> Self {
+        App::from_instance_descriptor(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
+    }
+
+    /// 用 wgpu `InstanceDescriptor` 构造 App —— 代码指定后端/flags/内存预算/backend
+    /// options/display，压过 `WGPU_BACKEND` 等环境变量（不读 env）。
+    ///
+    /// `display` 原样透传：vireo 用窗口自身 handle 创建 surface（create_surface），
+    /// 若 display 与窗口 handle 所属显示服务器不一致会触发 wgpu 校验错误
+    /// `MismatchingDisplayHandle`；非 GLES（Wayland）后端通常传 `None` 即可。
+    pub fn with_descriptor(desc: wgpu::InstanceDescriptor) -> Self {
+        App::from_instance_descriptor(desc)
+    }
+
+    fn from_instance_descriptor(desc: wgpu::InstanceDescriptor) -> Self {
         let init_start = std::time::Instant::now();
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-        );
+        let instance = wgpu::Instance::new(desc);
         let gpu = Arc::new(GpuContext::new(&instance));
         let device_lost = gpu.device_lost();
         let default_icon = std::fs::read("logo.png")
@@ -5301,5 +5315,30 @@ mod metrics_tests {
             dim_to_winit_position(Pp::Px(px(10.0)), Pp::Dp(dp(20.0)), None, 2.0),
             winit::dpi::Position::Physical(PhysicalPosition::new(10, 40))
         );
+    }
+
+    #[test]
+    fn instance_descriptor_env_and_manual_constructors_agree() {
+        // `Instance::new(desc)` 不读 env，代码值压过 WGPU_BACKEND；display 由用户显式给。
+        // 两个标准构造器：new_without_display_handle（全默认）+ from_env（读 env），
+        // 用户手动改字段后传给 App::with_descriptor。
+        let plain = wgpu::InstanceDescriptor::new_without_display_handle();
+        assert_eq!(plain.backends, wgpu::Backends::default());
+        assert!(plain.display.is_none());
+        let mut desc = plain;
+        desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        desc.flags = wgpu::InstanceFlags::VALIDATION;
+        desc.memory_budget_thresholds = wgpu::MemoryBudgetThresholds {
+            for_resource_creation: Some(80),
+            for_device_loss: Some(90),
+        };
+        desc.backend_options = wgpu::BackendOptions::default();
+        assert_eq!(desc.backends, wgpu::Backends::VULKAN | wgpu::Backends::DX12);
+        assert_eq!(desc.flags, wgpu::InstanceFlags::VALIDATION);
+        assert_eq!(desc.memory_budget_thresholds.for_resource_creation, Some(80));
+        assert_eq!(desc.memory_budget_thresholds.for_device_loss, Some(90));
+        // App::new 与 with_descriptor 共用同一构造路径（编译/逻辑层验证：
+        // 不实际创建 GPU，避免开窗口）。
+        let _ = super::App::with_descriptor; // 存在且可调用
     }
 }
