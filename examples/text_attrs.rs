@@ -19,7 +19,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let idx = app.window(
         WindowDesc::new("Text Attributes", 700, 600).dpi_override(Some(1.0)),

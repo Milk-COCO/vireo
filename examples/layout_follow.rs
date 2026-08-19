@@ -26,7 +26,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Layout Follow Smoothing", 720, 480).present_mode(PresentMode::AutoVsync),
         None::<fn()>,

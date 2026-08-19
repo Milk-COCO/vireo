@@ -47,7 +47,7 @@ const TITLE_H: f32 = 32.0;
 const BTN_W: f32 = 46.0;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     // ---- W1：默认逻辑尺寸 + vireo 全自持像素 ----
     let w1 = app.window(

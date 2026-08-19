@@ -48,7 +48,7 @@ fn wobble_blocks(batch: &mut DrawBatch, t: f32, phase0: f32, use_brush: bool) {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Batch Inherit + Partial Unclip", 960, 520).dpi_override(Some(1.0)),
         None::<fn()>,

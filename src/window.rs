@@ -1713,8 +1713,19 @@ impl VireoWindow {
 
 /// 应用管理器 —— 管理 GPU 上下文、窗口、纹理。
 /// 构造后在 `run()` 之前配置窗口/纹理/离屏画布，`run()` 将 `self` 移动到渲染线程。
+/// 渲染线程 → winit 线程的运行期窗口创建请求（`App::window` 在 on_frame 里调用时）。
+/// winit 线程在 `about_to_wait` drain 后执行窗口创建。
+struct CreateWindowRequest {
+    handle: u64,
+    desc: WindowDesc,
+    init_duration: f64,
+    on_close: Option<Box<dyn FnOnce() + Send>>,
+}
+
 pub struct App {
-    pub window_descs: Vec<WindowDesc>,
+    /// run() 前由 `App::window` 入队的待建窗口描述；run() 取出给 winit 线程。
+    /// 运行期（run 中）的 `App::window` 改走 `create_tx` 通道，不再写本字段。
+    pub(crate) window_descs: RefCell<Vec<WindowDesc>>,
     /// `Vec<Option<VireoWindow>>`，以 handle 为索引。关闭的窗口为 `None`。
     pub windows: Vec<Option<VireoWindow>>,
     pub gpu: Arc<GpuContext>,
@@ -1726,8 +1737,8 @@ pub struct App {
     /// 在 run() 中被取出给 winit 线程用。
     handle_to_id: FxHashMap<u64, WindowId>,
     /// 下一个待分配的 handle（单调递增；`App::window()` 自增）。
-    next_handle: u64,
-    close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
+    next_handle: std::cell::Cell<u64>,
+    close_hooks: RefCell<FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>>,
     /// 输入事件回调集合（按 handle 索引，run() 后迁移到 winit 线程）
     callbacks: FxHashMap<u64, crate::input::InputCallbacks>,
     default_icon: Option<Icon>,
@@ -1745,7 +1756,7 @@ pub struct App {
     pub init_duration: f64,
     /// 各 `app.window()` 调用的 init_duration（秒），按调用顺序入队。
     /// run() 中按序出队给 winit 线程用。
-    window_init_durations: Vec<f64>,
+    window_init_durations: RefCell<Vec<f64>>,
     /// 最近若干帧的间隔，用于平滑 FPS。
     fps_samples: Vec<f64>,
     last_frame: std::time::Instant,
@@ -1762,6 +1773,12 @@ pub struct App {
     /// 下一次帧循环「开始」的目标时刻（相位锁）。每帧推进一个 stride；落后（中途
     /// 耗时已超 stride）时不追赶、直接跳到 now+stride，避免攒出 33ms 双帧。
     pacing_deadline: std::cell::Cell<Option<std::time::Instant>>,
+    /// 运行期窗口创建通道：run() 内设置（取 create_rx 给 winit 线程），
+    /// 之后 `App::window` 通过它把创建请求发给 winit 线程。
+    create_tx: Option<mpsc::Sender<CreateWindowRequest>>,
+    /// 运行期已发出、尚未收到 `WindowCreated` 的窗口数（渲染线程维护）。
+    /// 退出判定用它防止「请求在途但窗口尚未出现」时提前退出。
+    pending_creates: std::cell::Cell<usize>,
 }
 
 /// 延迟执行的任务，由 [`App::after_frames`] / [`App::after_secs`] 注册。
@@ -1823,14 +1840,14 @@ impl App {
             .flatten();
         let init_duration = init_start.elapsed().as_secs_f64();
         Self {
-            window_descs: Vec::new(),
+            window_descs: RefCell::new(Vec::new()),
             windows: Vec::new(),
             gpu,
             instance: Some(instance),
             device_lost,
             handle_to_id: FxHashMap::default(),
-            next_handle: 0,
-            close_hooks: FxHashMap::default(),
+            next_handle: std::cell::Cell::new(0),
+            close_hooks: RefCell::new(FxHashMap::default()),
             callbacks: FxHashMap::default(),
             default_icon,
             textures: Vec::new(),
@@ -1839,13 +1856,15 @@ impl App {
             frame_time: 0.0,
             fps: 0.0,
             init_duration,
-            window_init_durations: Vec::new(),
+            window_init_durations: RefCell::new(Vec::new()),
             fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
             last_frame: std::time::Instant::now(),
             deferred_tasks: RefCell::new(Vec::new()),
             max_fps: std::cell::Cell::new(Some(240)),
             drag_cap: std::cell::Cell::new(true),
             pacing_deadline: std::cell::Cell::new(None),
+            create_tx: None,
+            pending_creates: std::cell::Cell::new(0),
         }
     }
 
@@ -1886,10 +1905,15 @@ impl App {
         self.textures.get(index)
     }
 
-    /// 配置一个待创建的窗口。可选 on_close 钩子在窗口被关闭时调用。必须在 run() 之前调用。
+    /// 配置一个待创建的窗口。可选 on_close 钩子在窗口被关闭时调用。
     /// 同步预热窗口 AA 对应的 SDF + geo 管线，并把 AA clamp 到硬件上限（避免 wgpu panic）。
     /// 构造耗时在 `App::run` 创建窗口后由 `VireoWindow::init_duration()` 暴露。
-    pub fn window(&mut self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + Send + 'static>) -> WindowIndex {
+    ///
+    /// **run() 之前调用**（`&mut App`）→ 入队，由 `App::run` 的 winit 线程在
+    /// `resumed` 创建。
+    /// **run() 之后（on_frame 里）调用** → 经内部通道发给 winit 线程异步创建，
+    /// 下一轮 `about_to_wait` 生效；创建完成前 `App::window_ref` 返回 `None`。
+    pub fn window(&self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + Send + 'static>) -> WindowIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(desc.anti_aliasing, self.gpu.supported_sample_counts());
         desc.anti_aliasing = aa;
@@ -1899,11 +1923,27 @@ impl App {
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
         let init_duration = start.elapsed().as_secs_f64();
-        self.window_init_durations.push(init_duration);
-        let handle = self.next_handle;
-        self.next_handle += 1;
-        self.window_descs.push(desc);
-        self.close_hooks.insert(handle, on_close.map(|f| Box::new(f) as Box<dyn FnOnce() + Send>));
+        let handle = self.next_handle.get();
+        self.next_handle.set(handle + 1);
+        let on_close = on_close.map(|f| Box::new(f) as Box<dyn FnOnce() + Send>);
+        match &self.create_tx {
+            // 运行期：发请求给 winit 线程异步创建。
+            Some(tx) => {
+                let _ = tx.send(CreateWindowRequest {
+                    handle,
+                    desc,
+                    init_duration,
+                    on_close,
+                });
+                self.pending_creates.set(self.pending_creates.get() + 1);
+            }
+            // run() 前：入队，run() 取出交给 winit 线程在 resumed 创建。
+            None => {
+                self.window_init_durations.borrow_mut().push(init_duration);
+                self.window_descs.borrow_mut().push(desc);
+                self.close_hooks.borrow_mut().insert(handle, on_close);
+            }
+        }
         WindowIndex::new(handle)
     }
 
@@ -2056,9 +2096,9 @@ impl App {
     pub fn run<F: FnMut(&App) -> bool + Send + 'static>(mut self, on_frame: F) {
         let event_loop = EventLoop::new().unwrap();
 
-        let window_init_durations = std::mem::take(&mut self.window_init_durations);
-        let window_descs: Vec<_> = self.window_descs.drain(..).collect();
-        let close_hooks = std::mem::take(&mut self.close_hooks);
+        let window_init_durations = std::mem::take(&mut *self.window_init_durations.borrow_mut());
+        let window_descs: Vec<_> = self.window_descs.borrow_mut().drain(..).collect();
+        let close_hooks = std::mem::take(&mut *self.close_hooks.borrow_mut());
         let default_icon = self.default_icon.take();
         // 保留 self.instance（渲染线程重建 surface 需要）；Runner 拿 clone。
         let instance = self.instance.clone().expect("instance already taken");
@@ -2094,6 +2134,11 @@ impl App {
         // 安装/卸载 nc_subclass。
         #[cfg(target_os = "windows")]
         let (nc_tx, nc_rx) = mpsc::channel::<(isize, crate::platform::windows::NcUpdate)>();
+        // 运行期窗口创建：渲染线程 `App::window`（on_frame 里）→ winit 线程
+        // `about_to_wait` drain 后执行窗口创建。render 端 sender 存进 self，
+        // 随 self move 到渲染线程；winit 端 receiver 给 Runner。
+        let (create_tx, create_rx) = mpsc::channel::<CreateWindowRequest>();
+        self.create_tx = Some(create_tx);
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
@@ -2136,6 +2181,8 @@ impl App {
 /// 接收渲染线程发来的运行期非客户区管理（§7.6；在 winit 线程装/卸 nc_subclass）
             #[cfg(target_os = "windows")]
             nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
+            /// 接收渲染线程发来的运行期窗口创建请求（on_frame 里 `App::window`）
+            create_rx: mpsc::Receiver<CreateWindowRequest>,
             /// 已创建窗口的 hwnd（按 handle 索引），窗口关闭时用于清理 NC 状态。
             #[cfg(target_os = "windows")]
             hwnds: Vec<isize>,
@@ -2220,6 +2267,150 @@ impl App {
                 }
                 attrs
             }
+
+            /// 在 winit 线程创建并初始化一个窗口（预建 resumed / 运行期 create_rx 共用）。
+            /// 注意 `window_callbacks` / `hwnds` 需先扩到 handle+1（运行期 handle 可能
+            /// 超过预建数量），否则 cb_rx drain 的 `get_mut(handle)` 返回 None 会吞掉回调。
+            fn create_window(
+                &mut self,
+                event_loop: &ActiveEventLoop,
+                handle: usize,
+                desc: &WindowDesc,
+                init_duration: f64,
+                on_close: Option<Box<dyn FnOnce() + Send>>,
+            ) {
+                // 运行期窗口：window_callbacks 扩到 handle+1，否则注册到该窗口的
+                // 输入/事件回调在 cb_rx drain 时因 get_mut 越界被静默丢弃。
+                if self.window_callbacks.len() <= handle {
+                    self.window_callbacks.resize_with(handle + 1, crate::input::InputCallbacks::default);
+                }
+                let os_scale = event_loop
+                    .primary_monitor()
+                    .map(|m| m.scale_factor())
+                    .unwrap_or(1.0);
+                let attrs = Self::create_attrs(desc, &self.default_icon, os_scale);
+                let window = Arc::new(
+                    event_loop.create_window(attrs).unwrap(),
+                );
+                // Windows：仅 `HiddenTitlebar` 需子类化拦截 WM_NCCALCSIZE
+                // （去标题栏、保留系统 resize 边框、顶部不留 inset）。
+                // `Normal`/`Frameless` 不装子类，完全放行 winit 原生：
+                // Frameless 由 winit 处理客户区（客户区 = 窗口矩形）。
+                // 必须在 winit 事件线程、窗口创建后安装。
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = win_hwnd(&window) {
+                    let fs = desc.frame_style;
+                    if !fs.has_titlebar() && fs.has_border() {
+                        crate::platform::windows::install(hwnd, false, true);
+                    }
+                    // run 前注册的缩略图按钮点击回调（App::on_thumb_button）：
+                    // 移出（take）注册到进程级拦截子类，避免重复注册。
+                    if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+                        for cb in std::mem::take(&mut cbs.on_thumb_button) {
+                            crate::platform::windows::set_thumbar_callback(hwnd, cb);
+                        }
+                    }
+                    if self.hwnds.len() <= handle {
+                        self.hwnds.resize(handle + 1, 0);
+                    }
+                    self.hwnds[handle] = hwnd;
+                }
+                // 运行期创建的窗口 on_close 钩子经通道送来，需补进 close_hooks。
+                if let Some(h) = on_close {
+                    self.close_hooks.insert(handle as u64, Some(h));
+                }
+                let surface = self.instance.create_surface(window.clone()).unwrap();
+                let window_id = window.id();
+
+                // ---- 在 winit 线程上创建 surface + 初始 configure ----
+                // surface 的 create_surface 必须紧跟窗口创建；首次 configure 在此建立
+                // 合法 swapchain。后续尺寸同步/重新 configure 由渲染线程 draw() 完成。
+                // `SurfaceTexture` 从不跨线程：acquire→present 全在渲染线程 draw() 内，
+                // 满足 wgpu-hal 同线程约束（第三十三/三十四轮的 handoff 失败不重演）。
+                let scale = desc.dpi_override.unwrap_or(window.scale_factor()) as f32;
+                let dpi = window.scale_factor() as f32;
+                let (logical_w, logical_h) = logical_size(
+                    window.inner_size().width,
+                    window.inner_size().height,
+                    desc.dpi_override,
+                    dpi as f64,
+                );
+                let renderer = Renderer::new(
+                    self.gpu.clone(),
+                    logical_w,
+                    logical_h,
+                    window.inner_size().width,
+                    window.inner_size().height,
+                    scale,
+                    desc.anti_aliasing,
+                    dpi,
+                );
+
+                let caps = surface.get_capabilities(&self.gpu.adapter);
+                let alpha_mode = if desc.transparent {
+                    if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+                        wgpu::CompositeAlphaMode::PostMultiplied
+                    } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                        wgpu::CompositeAlphaMode::PreMultiplied
+                    } else {
+                        wgpu::CompositeAlphaMode::Auto
+                    }
+                } else {
+                    wgpu::CompositeAlphaMode::Auto
+                };
+                let fmt = if caps.formats.contains(&self.gpu.surface_format()) {
+                    self.gpu.surface_format()
+                } else {
+                    caps.formats[0]
+                };
+                // 首次建窗时把真实 surface 格式同步进 GpuContext（macOS Metal
+                // surface 无 Rgba8UnormSrgb，只提供 Bgra8UnormSrgb）。管线缓存键
+                // 均含 format 位（gpu.rs），旧 Rgba8 条目永不命中，并清空共享管线
+                // 表兜底；文字 atlas 格式 + 管线一并刷新。offscreen 纹理亦派生
+                // 自此格式，保持一致。
+                if self.gpu.surface_format() != fmt {
+                    self.gpu.set_surface_format(fmt);
+                    self.gpu.clear_pipelines();
+                    self.gpu
+                        .text_ctx
+                        .lock()
+                        .unwrap()
+                        .ensure_text_format(&self.gpu.device, fmt);
+                }
+                let surface_config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: fmt,
+                    width: window.inner_size().width.max(1),
+                    height: window.inner_size().height.max(1),
+                    present_mode: desc.present_mode,
+                    alpha_mode,
+                    view_formats: vec![],
+                    // 在途帧上限：默认 2（DX12 → 3 buffer，CPU 可超前 2 帧、
+                    // 无 vsync 峰值更高）；设 1 → 2 buffer（vsync 拖动时 camera
+                    // 时差更小）。经 `WindowDesc::frame_latency` / `set_frame_latency`。
+                    desired_maximum_frame_latency: desc.frame_latency,
+                    color_space: wgpu::SurfaceColorSpace::Auto,
+                };
+                surface.configure(&self.gpu.device, &surface_config);
+
+                self.id_to_handle.insert(window_id, handle);
+                self.alive_handles += 1;
+
+                self.send(WinitEvent::WindowCreated {
+                    handle,
+                    window,
+                    surface,
+                    surface_config,
+                    renderer,
+                    logical_width: logical_w,
+                    logical_height: logical_h,
+                    scale,
+                    dpi_scale: dpi,
+                    dpi_override: desc.dpi_override,
+                    init_duration,
+                    frame_style: desc.frame_style,
+                });
+            }
         }
 
         impl ApplicationHandler for Runner {
@@ -2229,135 +2420,16 @@ impl App {
                 }
                 self.created = true;
 
-                for (handle, desc) in self.window_descs.iter().enumerate() {
-                    let os_scale = event_loop
-                        .primary_monitor()
-                        .map(|m| m.scale_factor())
-                        .unwrap_or(1.0);
-                    let attrs = Self::create_attrs(desc, &self.default_icon, os_scale);
-                    let window = Arc::new(
-                        event_loop.create_window(attrs).unwrap(),
-                    );
-                    // Windows：仅 `HiddenTitlebar` 需子类化拦截 WM_NCCALCSIZE
-                    // （去标题栏、保留系统 resize 边框、顶部不留 inset）。
-                    // `Normal`/`Frameless` 不装子类，完全放行 winit 原生：
-                    // Frameless 由 winit 处理客户区（客户区 = 窗口矩形）。
-                    // 必须在 winit 事件线程、窗口创建后安装。
-                    #[cfg(target_os = "windows")]
-                    if let Some(hwnd) = win_hwnd(&window) {
-                        let fs = desc.frame_style;
-                        if !fs.has_titlebar() && fs.has_border() {
-                            crate::platform::windows::install(hwnd, false, true);
-                        }
-                        // run 前注册的缩略图按钮点击回调（App::on_thumb_button）：
-                        // 移出（take）注册到进程级拦截子类，避免重复注册。
-                        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                            for cb in std::mem::take(&mut cbs.on_thumb_button) {
-                                crate::platform::windows::set_thumbar_callback(hwnd, cb);
-                            }
-                        }
-                        if self.hwnds.len() <= handle {
-                            self.hwnds.resize(handle + 1, 0);
-                        }
-                        self.hwnds[handle] = hwnd;
-                    }
-                    let surface = self.instance.create_surface(window.clone()).unwrap();
-                    let window_id = window.id();
-
-                    // ---- 在 winit 线程上创建 surface + 初始 configure ----
-                    // surface 的 create_surface 必须紧跟窗口创建；首次 configure 在此建立
-                    // 合法 swapchain。后续尺寸同步/重新 configure 由渲染线程 draw() 完成。
-                    // `SurfaceTexture` 从不跨线程：acquire→present 全在渲染线程 draw() 内，
-                    // 满足 wgpu-hal 同线程约束（第三十三/三十四轮的 handoff 失败不重演）。
-                    let scale = desc.dpi_override.unwrap_or(window.scale_factor()) as f32;
-                    let dpi = window.scale_factor() as f32;
-                    let (logical_w, logical_h) = logical_size(
-                        window.inner_size().width,
-                        window.inner_size().height,
-                        desc.dpi_override,
-                        dpi as f64,
-                    );
-                    let renderer = Renderer::new(
-                        self.gpu.clone(),
-                        logical_w,
-                        logical_h,
-                        window.inner_size().width,
-                        window.inner_size().height,
-                        scale,
-                        desc.anti_aliasing,
-                        dpi,
-                    );
-
-                    let caps = surface.get_capabilities(&self.gpu.adapter);
-                    let alpha_mode = if desc.transparent {
-                        if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
-                            wgpu::CompositeAlphaMode::PostMultiplied
-                        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-                            wgpu::CompositeAlphaMode::PreMultiplied
-                        } else {
-                            wgpu::CompositeAlphaMode::Auto
-                        }
-                    } else {
-                        wgpu::CompositeAlphaMode::Auto
-                    };
-                    let fmt = if caps.formats.contains(&self.gpu.surface_format()) {
-                        self.gpu.surface_format()
-                    } else {
-                        caps.formats[0]
-                    };
-                    // 首次建窗时把真实 surface 格式同步进 GpuContext（macOS Metal
-                    // surface 无 Rgba8UnormSrgb，只提供 Bgra8UnormSrgb）。管线缓存键
-                    // 均含 format 位（gpu.rs），旧 Rgba8 条目永不命中，并清空共享管线
-                    // 表兜底；文字 atlas 格式 + 管线一并刷新。offscreen 纹理亦派生
-                    // 自此格式，保持一致。
-                    if self.gpu.surface_format() != fmt {
-                        self.gpu.set_surface_format(fmt);
-                        self.gpu.clear_pipelines();
-                        self.gpu
-                            .text_ctx
-                            .lock()
-                            .unwrap()
-                            .ensure_text_format(&self.gpu.device, fmt);
-                    }
-                    let surface_config = wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: fmt,
-                        width: window.inner_size().width.max(1),
-                        height: window.inner_size().height.max(1),
-                        present_mode: desc.present_mode,
-                        alpha_mode,
-                        view_formats: vec![],
-                        // 在途帧上限：默认 2（DX12 → 3 buffer，CPU 可超前 2 帧、
-                        // 无 vsync 峰值更高）；设 1 → 2 buffer（vsync 拖动时 camera
-                        // 时差更小）。经 `WindowDesc::frame_latency` / `set_frame_latency`。
-                        desired_maximum_frame_latency: desc.frame_latency,
-                        color_space: wgpu::SurfaceColorSpace::Auto,
-                    };
-                    surface.configure(&self.gpu.device, &surface_config);
-
+                // 预建窗口：与运行期创建共用 create_window。取走 window_descs
+                // 避免循环内 &mut self 方法调用与字段借用冲突（resumed 只跑一次）。
+                let window_descs = std::mem::take(&mut self.window_descs);
+                for (handle, desc) in window_descs.iter().enumerate() {
                     let init_duration = if handle < self.window_init_durations.len() {
                         self.window_init_durations[handle]
                     } else {
                         0.0
                     };
-
-                    self.id_to_handle.insert(window_id, handle);
-                    self.alive_handles += 1;
-
-                    self.send(WinitEvent::WindowCreated {
-                        handle,
-                        window,
-                        surface,
-                        surface_config,
-                        renderer,
-                        logical_width: logical_w,
-                        logical_height: logical_h,
-                        scale,
-                        dpi_scale: dpi,
-                        dpi_override: desc.dpi_override,
-                        init_duration,
-                        frame_style: desc.frame_style,
-                    });
+                    self.create_window(event_loop, handle, desc, init_duration, None);
                 }
             }
 
@@ -2417,6 +2489,17 @@ impl App {
                     crate::platform::windows::nc_apply(
                         hwnd as windows_sys::Win32::Foundation::HWND,
                         upd,
+                    );
+                }
+                // 运行期窗口创建：drain 渲染线程（on_frame 里 `App::window`）
+                // 发来的请求，在本线程（winit 事件线程）创建窗口。
+                while let Ok(req) = self.create_rx.try_recv() {
+                    self.create_window(
+                        event_loop,
+                        req.handle as usize,
+                        &req.desc,
+                        req.init_duration,
+                        req.on_close,
                     );
                 }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -2590,6 +2673,7 @@ impl App {
             aspect_ratio_rx,
             #[cfg(target_os = "windows")]
             nc_rx,
+            create_rx,
             #[cfg(target_os = "windows")]
             hwnds: Vec::new(),
             window_descs,
@@ -2827,6 +2911,9 @@ fn render_on_frame<F>(
 where F: FnMut(&App) -> bool + Send + 'static
 {
     let mut created_windows = 0usize;
+    // 用户 on_frame 至少跑过一次后，才允许「零窗口退出」判定生效。
+    // 否则 expected_windows==0（纯 run 内创建窗口）会在首帧 on_frame 前就退出。
+    let mut on_frame_called = false;
     #[cfg(not(target_os = "windows"))]
     let _ = &frame_style_tx;
     #[cfg(target_os = "windows")]
@@ -2880,6 +2967,10 @@ where F: FnMut(&App) -> bool + Send + 'static
                     }
                     app.windows[handle] = Some(vw);
                     created_windows += 1;
+                    // 运行期创建的窗口：pending 计数递减（退出判定依赖它）。
+                    if handle >= expected_windows {
+                        app.pending_creates.set(app.pending_creates.get().saturating_sub(1));
+                    }
                 }
 
                 Ok(WinitEvent::Resized { handle, width, height }) => {
@@ -3087,7 +3178,14 @@ where F: FnMut(&App) -> bool + Send + 'static
 
         // The winit thread may have already exited after the final close
         // event. Do not enter user code or block in another frame wait.
-        if created_windows >= expected_windows && app.window_count() == 0 {
+        // 需 on_frame 至少跑过一次 + 无运行期在途创建请求，才退出：
+        // 否则零窗口 App（纯 run 内创建）首帧就退出；或运行期请求已发
+        // 但 WindowCreated 未到，提前退出会漏掉刚创建的窗口。
+        if on_frame_called
+            && created_windows >= expected_windows
+            && app.pending_creates.get() == 0
+            && app.window_count() == 0
+        {
             // 防御：即使不是经 CloseRequested 路径（例如零窗口 App::run、窗口被
             // 外部丢弃），也要通知 winit 线程退出，否则 winit 线程会在 run_app 里
             // 永久空转（Poll 无窗口）。send 失败（winit 线程已退出）无副作用。
@@ -3147,6 +3245,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                 request_exit();
                 break;
             }
+            on_frame_called = true;
             if pacing {
                 for win in app.windows.iter().flatten() {
                     if let Some(rep) = win.last_draw_report.get() {

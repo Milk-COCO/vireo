@@ -2,7 +2,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let idx = app.window(
         WindowDesc::new("Text Stress Test", 800, 600),

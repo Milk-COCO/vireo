@@ -9,7 +9,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Vireo Input Demo", 800, 600), None::<fn()>);
 
     // 方块状态

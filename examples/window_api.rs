@@ -92,7 +92,7 @@ fn hint(b: &mut DrawBatch, x: f32, y: f32, text: &str) {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Window Control", 960, 600), None::<fn()>);
 
     let st = Arc::new(Mutex::new(WinState {

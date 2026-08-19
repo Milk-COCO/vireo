@@ -7,7 +7,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("图形覆盖文本", 520, 180), None::<fn()>);
 
     app.run(move |app| {

@@ -18,7 +18,7 @@ fn try_load(app: &App, path: &str) -> bool {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     // load_font_file：系统 TTF
     let consolas = try_load(&app, r"C:\Windows\Fonts\consola.ttf");

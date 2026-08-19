@@ -3,7 +3,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let idx = app.window(
         WindowDesc::new("Text Transform Demo", 600, 320),

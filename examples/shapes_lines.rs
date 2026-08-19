@@ -6,7 +6,7 @@ use std::f32::consts::TAU;
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Shapes — Lines", 900, 480), None::<fn()>);
 
     let mut t: f32 = 0.0;

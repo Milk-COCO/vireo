@@ -3,7 +3,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Text Clip & Align", 720, 420).dpi_override(Some(1.0)), None::<fn()>);
 
     let mut t: f32 = 0.0;

@@ -3,7 +3,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Color Palette", 720, 400), None::<fn()>);
 
     let mut t: f32 = 0.0;

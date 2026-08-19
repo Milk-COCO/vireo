@@ -19,7 +19,7 @@ fn main() {
     );
 
     let t0 = Instant::now();
-    let mut app = App::new();
+    let app = App::new();
     let mut desc = WindowDesc::new("frame_time_probe", 600, 400)
         .anti_aliasing(AntiAliasing::None)
         .active(true);

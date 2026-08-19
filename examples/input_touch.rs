@@ -13,7 +13,7 @@ struct TouchLog {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate), None::<fn()>);
 
     let log = Arc::new(Mutex::new(TouchLog {

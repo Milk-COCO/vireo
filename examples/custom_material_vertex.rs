@@ -59,7 +59,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 "#;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Custom Vertex Shader", 640, 420),
         None::<fn()>,

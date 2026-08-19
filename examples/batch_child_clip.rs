@@ -7,7 +7,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Batch Clip — Circle Stencil", 900, 480).dpi_override(Some(1.0)),
         None::<fn()>,

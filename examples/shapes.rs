@@ -7,7 +7,7 @@ use vireo::prelude::*;
 use std::f32::consts::PI;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Vireo Shapes Demo", 1000, 450),
         None::<fn()>,

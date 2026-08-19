@@ -26,7 +26,7 @@ struct ImeState {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("IME Input + Drag Drop", 800, 560), None::<fn()>);
 
     let st = Arc::new(Mutex::new(ImeState {

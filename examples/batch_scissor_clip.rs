@@ -22,7 +22,7 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("scissor Scissor Demo", 900, 540).dpi_override(Some(1.0)),
         None::<fn()>,

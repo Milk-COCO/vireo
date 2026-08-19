@@ -99,7 +99,7 @@ fn policy_label(p: ResizeRefreshPolicy) -> String {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     // `new` 裸宽高恒为 vireo 逻辑像素；尺寸族/位置 builder 收 `impl ToPx`（裸数 = 逻辑）。
     let idx = app.window(
         WindowDesc::new("Resize Refresh Policy", 640, 360)

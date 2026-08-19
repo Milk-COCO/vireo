@@ -24,7 +24,7 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let ssaa = app.window(
         WindowDesc::new("SSAA x4", 320, 240)

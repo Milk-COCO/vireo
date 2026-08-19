@@ -8,7 +8,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(WindowDesc::new("Transform Stack", 900, 420), None::<fn()>);
 
     let mut t: f32 = 0.0;

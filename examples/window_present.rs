@@ -16,7 +16,7 @@ fn mode_name(m: PresentMode) -> &'static str {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Present Mode", 640, 360).present_mode(PresentMode::AutoVsync),
         None::<fn()>,

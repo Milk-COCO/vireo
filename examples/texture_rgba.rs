@@ -39,7 +39,7 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let check = Texture::from_rgba(64, 64, &checkerboard(64, 64, 8), &app.gpu);
     let grad = Texture::from_rgba(128, 64, &gradient(128, 64), &app.gpu);

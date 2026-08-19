@@ -46,7 +46,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 "#;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let aa = match std::env::var("VIREO_AA").as_deref() {
         Ok("msaa4") => AntiAliasing::Msaa { samples: 4, alpha_to_coverage: false },
         Ok("ssaa4") => AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },

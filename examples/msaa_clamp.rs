@@ -12,7 +12,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
 
     let supported = app.gpu.supported_sample_counts().to_vec();
     let max_sc = app.gpu.max_sample_count();

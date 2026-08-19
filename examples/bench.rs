@@ -15,7 +15,7 @@ const SCENES: &[(&str, fn(&mut DrawBatch))] = &[
 ];
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Vireo Performance Benchmark", 900, 700),
         None::<fn()>,

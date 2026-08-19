@@ -28,7 +28,7 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
 }
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let window = app.window(
         WindowDesc::new("One Material: Shape + Text", 640, 400),
         None::<fn()>,

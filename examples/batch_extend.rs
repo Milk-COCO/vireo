@@ -10,7 +10,7 @@
 use vireo::prelude::*;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("增量渲染", 500, 200).present_mode(PresentMode::Immediate),
         None::<fn()>,

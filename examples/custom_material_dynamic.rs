@@ -28,7 +28,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 "#;
 
 fn main() {
-    let mut app = App::new();
+    let app = App::new();
     let idx = app.window(
         WindowDesc::new("Custom Material Dynamic Offset", 600, 400),
         None::<fn()>,
