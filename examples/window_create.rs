@@ -31,7 +31,11 @@
 //! 说明：
 //! - `icon_from_path("logo.png")` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
 //! - 关闭窗口时触发 `on_close` 回调；三个窗口全部关闭后进程退出。
-//! - 键盘 `T`：切换 W1 与 W2 的可见性（`set_visible`）。
+//! - 键盘 `B`：在 W1 检测。在鼠标位置弹出一个无边框小窗（`FrameStyle::Frameless`），
+//!   在发送创建窗口的 1 秒后自动关闭。创建窗口到渲染实际内容有不定长的耗时，期间可能会闪白窗口。
+//!   Vireo 提供在 [`WindowDesc`] 中提供了选项 [`WindowDesc::preparable`] (默认开)
+//!   来使窗口在此过程隐藏自己，直到第一次发送渲染呈现。然而，不能覆盖 100% 闪白情况。
+//!   规避方案：预创建隐藏的窗口，放着，需要用的时候用对象池思想来复用已经创建的窗口。
 //! - W2 NC 视觉全由客户端 DrawBatch 自绘（标题栏背景 + Win10/11 风格按钮）；
 //!   交互由 `WM_NCHITTEST` 返回 `HT*` + 按钮点击自管让 Windows 自动接管。
 //!   按钮位置逻辑：`metrics().width` 变化时重设，缓存上一帧宽度避免每帧
@@ -89,8 +93,8 @@ fn main() {
         Some(|| println!("W3 已关闭")),
     );
 
-    let mut visible = true;
-    let mut t_was_down = false;
+    let mut popup: Option<(WindowIndex, std::time::Instant)> = None;
+    let mut b_was_down = false;
     // W2 NC 状态：regions 随宽度变化重设（按钮位置跟随窗口宽度）。
     #[cfg(target_os = "windows")]
     let mut w2_last_width: u32 = 0;
@@ -143,14 +147,59 @@ fn main() {
             }
         }
 
-        // `T` 切换 W1/W2 可见性（下降沿：仅在按下瞬间翻转一次）
-        let t_down = win1.key_down(KeyCode::KeyT);
-        if t_down && !t_was_down {
-            visible = !visible;
-            win1.set_visible(visible);
-            win2.set_visible(visible);
+        // `B` 键（下降沿）：在鼠标位置弹出无边框小窗，1 秒后自动 close()。
+        // 屏幕坐标 = W1 窗口外沿物理位置 + 鼠标（客户端逻辑）× scale_factor。
+        let b_down = win1.key_down(KeyCode::KeyB);
+        if b_down && !b_was_down {
+            let (mx, my) = win1.mouse_pos();
+            let sf = win1.metrics().scale_factor as f64;
+            let (ox, oy) = win1
+                .outer_position()
+                .map(|p| p.physical())
+                .unwrap_or((0.0, 0.0));
+            let idx = app.window(
+                WindowDesc::new("popup (1s)", 220, 120)
+                    .frame_style(FrameStyle::Frameless)
+                    .position(px(ox + mx as f64 * sf), px(oy + my as f64 * sf)),
+                Some(|| println!("popup 已关闭")),
+            );
+            popup = Some((idx, std::time::Instant::now()));
         }
-        t_was_down = t_down;
+        b_was_down = b_down;
+
+        // popup：每帧画内容；满 1 秒后 close()（程序化关窗，走完整路径）。
+        if let Some((idx, born)) = popup {
+            if let Some(win) = app.window_ref(&idx) {
+                let mut pb = DrawBatch::new();
+                draw_rectangle(
+                    &mut pb,
+                    Pos::new(0.0, 0.0),
+                    220.0,
+                    120.0,
+                    Some(Color::new(0.12, 0.25, 0.45, 1.0)),
+                );
+                draw_text(
+                    &mut pb.texts,
+                    "popup · Frameless",
+                    Pos::new(8.0, 10.0),
+                    TextDef::default().font_size(14.0),
+                    TextOverride::from_color(Color::new(0.9, 0.95, 1.0, 1.0)),
+                );
+                let left = (1.0 - born.elapsed().as_secs_f64()).max(0.0);
+                draw_text(
+                    &mut pb.texts,
+                    &format!("closing in {:.1}s", left),
+                    Pos::new(8.0, 34.0),
+                    TextDef::default().font_size(12.0),
+                    TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),
+                );
+                win.draw(Color::new(0.04, 0.05, 0.08, 1.0), &[&pb]);
+                if born.elapsed() >= std::time::Duration::from_secs(1) {
+                    win.close();
+                    popup = None;
+                }
+            }
+        }
 
         // W2 标题栏画在客户端 y=0..32（DrawBatch 自绘），WM_NCHITTEST 返回 HT* 让
         // Windows 自动接管交互（拖动 / 双击 / 右键 / snap layout / 按钮点击）。

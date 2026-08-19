@@ -351,6 +351,11 @@ pub struct WindowDesc {
     pub fullscreen: Option<Fullscreen>,
     pub maximized: bool,
     pub visible: bool,
+    /// 创建时先隐藏，首帧渲染完成后再显示（`visible=true` 时）。默认 `true`——
+    /// winit 建窗是先以默认尺寸+边框显示、再改尺寸/去边框，`preparable` 让窗口
+    /// 第一次出现即「正确尺寸 + 无边框 + 已渲染内容」，消除 4 阶段闪烁。
+    /// 设 `false` 回到旧行为（创建即显示，可能短暂闪烁）。
+    pub preparable: bool,
     pub transparent: bool,
     /// 窗口边框样式（标题栏 + resize 边框的组合语义）。默认 [`FrameStyle::Normal`]。
     ///
@@ -392,6 +397,7 @@ impl WindowDesc {
             fullscreen: None,
             maximized: false,
             visible: true,
+            preparable: true,
             transparent: false,
             frame_style: FrameStyle::Normal,
             window_level: WindowLevel::default(),
@@ -483,6 +489,13 @@ impl WindowDesc {
 
     pub fn visible(mut self, visible: bool) -> Self {
         self.visible = visible;
+        self
+    }
+
+    /// 创建时先隐藏、首帧渲染完成后再显示（`visible=true` 时生效）。默认 `true`。
+    /// 见字段文档；设 `false` 回到创建即显示的旧行为。
+    pub fn preparable(mut self, preparable: bool) -> Self {
+        self.preparable = preparable;
         self
     }
 
@@ -677,6 +690,8 @@ enum WinitEvent {
         dpi_override: Option<f64>,
         init_duration: f64,
         frame_style: FrameStyle,
+        /// 首帧渲染后是否自动显示（`desc.visible && desc.preparable`）。
+        pending_show: bool,
     },
     Resized { handle: usize, width: u32, height: u32 },
     ScaleFactorChanged { handle: usize, scale: f64 },
@@ -746,6 +761,12 @@ pub struct VireoWindow {
     pub(crate) surface: std::cell::RefCell<wgpu::Surface<'static>>,
     instance: wgpu::Instance,
     surface_config: std::cell::RefCell<wgpu::SurfaceConfiguration>,
+    /// 首次 draw 前 surface 尚未 `surface.configure`（建窗时推迟到渲染线程）：
+    /// 置 true 强制首帧走 configure 路径，建立合法 swapchain 后再 acquire。
+    needs_initial_configure: std::cell::Cell<bool>,
+    /// 首帧渲染成功后是否自动显示窗口（`WindowDesc::preparable`）：建窗时隐藏，
+    /// 首次 `Presented` 后 `set_visible(true)`，让窗口第一次出现即完整形态。
+    pending_show: std::cell::Cell<bool>,
     renderer: std::cell::RefCell<crate::render::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
@@ -781,6 +802,8 @@ pub struct VireoWindow {
     /// 的 NC 方法使用。
     #[cfg(target_os = "windows")]
     pub(crate) nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    /// 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
+    close_tx: mpsc::Sender<usize>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
@@ -870,9 +893,11 @@ impl VireoWindow {
         dpi_override: Option<f64>,
         init_duration: f64,
         frame_style: FrameStyle,
+        pending_show: bool,
         event_tx: mpsc::Sender<WinitEvent>,
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
         #[cfg(target_os = "windows")] nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+        close_tx: mpsc::Sender<usize>,
         handle: usize,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
@@ -882,6 +907,8 @@ impl VireoWindow {
             surface: std::cell::RefCell::new(surface),
             instance,
             surface_config: std::cell::RefCell::new(surface_config),
+            needs_initial_configure: std::cell::Cell::new(true),
+            pending_show: std::cell::Cell::new(pending_show),
             renderer: std::cell::RefCell::new(renderer),
             inner,
             gpu,
@@ -904,6 +931,7 @@ impl VireoWindow {
             init_duration,
             event_tx,
             cb_tx,
+            close_tx,
             pending_mode: std::cell::Cell::new(None),
             applied_present_mode: std::cell::Cell::new(initial_present_mode),
             pending_frame_latency: std::cell::Cell::new(None),
@@ -971,6 +999,7 @@ impl VireoWindow {
         self.scale.set(scale);
         self.dpi_scale.set(dpi_scale);
         self.configured_layout.set((logical_w, logical_h, scale, dpi_scale));
+        self.needs_initial_configure.set(false);
         self.last_configure.set(now);
         self.pending_resize_at.set(None);
         self.drag_refresh_mhz.set(None);
@@ -1167,7 +1196,8 @@ impl VireoWindow {
                 self.resize_policy.get(),
                 self.last_configure.get(),
             );
-            let need_configure = size_drifted && refresh != ResizeRefresh::None
+            let need_configure = self.needs_initial_configure.get()
+                || (size_drifted && refresh != ResizeRefresh::None)
                 || mode_drifted || latency_drifted;
             if need_configure {
                 configured_this_frame = true;
@@ -1248,9 +1278,13 @@ impl VireoWindow {
                 };
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
+                // `preparable` 兜底：首帧若持续走 skip，窗口会永远隐藏——显示它
+                // （宁可无内容一帧，不可永不出现）。
+                self.maybe_show_prepared_window();
                 return skip_report(gpu_secs, DrawSkipReason::Timeout);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                self.maybe_show_prepared_window();
                 return skip_report(gpu_secs, DrawSkipReason::Occluded);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -1450,6 +1484,11 @@ impl VireoWindow {
                 suboptimal);
         }
 
+        // `preparable`：首帧渲染成功（已 present）后显示窗口。此时 surface 已
+        // configure、内容已渲染，窗口第一次出现即完整形态，消除 winit 建窗的
+        // 4 阶段闪烁。winit `set_visible` 线程安全（排队到 winit 线程）。
+        self.maybe_show_prepared_window();
+
         DrawReport {
             outcome: DrawOutcome::Presented { suboptimal },
             timings: DrawTimings {
@@ -1459,6 +1498,17 @@ impl VireoWindow {
                 present_secs,
                 gpu_secs,
             },
+        }
+    }
+
+    /// `preparable` 建窗：首帧后显示窗口（消除 winit 建窗 4 阶段闪烁）。
+    /// 只在 `pending_show` 置位时触发一次——首帧成功 `Presented` 后，或
+    /// 首次 draw 走 skip 路径（Timeout/Occluded 等）时兜底，避免窗口永远隐藏。
+    /// winit `set_visible` 线程安全（排队到 winit 线程）。
+    fn maybe_show_prepared_window(&self) {
+        if self.pending_show.get() {
+            self.inner.set_visible(true);
+            self.pending_show.set(false);
         }
     }
 
@@ -2139,6 +2189,11 @@ impl App {
         // 随 self move 到渲染线程；winit 端 receiver 给 Runner。
         let (create_tx, create_rx) = mpsc::channel::<CreateWindowRequest>();
         self.create_tx = Some(create_tx);
+        // 渲染线程 → winit 线程：程序化关闭窗口（`VireoWindow::close`）。
+        // 与 `WindowEvent::CloseRequested` 同路径：close_hooks / NC 清理 /
+        // alive_handles 递减 / 发 `WinitEvent::CloseRequested` 都在 winit 线程
+        // 执行，故经本 channel 转发。载荷 = 窗口 handle。
+        let (close_tx, close_rx) = mpsc::channel::<usize>();
 
         // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
         let expected_windows = window_descs.len();
@@ -2160,6 +2215,7 @@ impl App {
                     aspect_ratio_tx,
                     #[cfg(target_os = "windows")]
                     nc_tx,
+                    close_tx,
                     device_lost,
                     expected_windows,
                 );
@@ -2183,6 +2239,8 @@ impl App {
             nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
             /// 接收渲染线程发来的运行期窗口创建请求（on_frame 里 `App::window`）
             create_rx: mpsc::Receiver<CreateWindowRequest>,
+            /// 接收渲染线程发来的程序化关窗请求（`VireoWindow::close`；载荷 = handle）。
+            close_rx: mpsc::Receiver<usize>,
             /// 已创建窗口的 hwnd（按 handle 索引），窗口关闭时用于清理 NC 状态。
             #[cfg(target_os = "windows")]
             hwnds: Vec<isize>,
@@ -2209,13 +2267,38 @@ impl App {
                 let _ = self.event_tx.send(event);
             }
 
+            /// 完整关窗路径：close_hooks / NC 状态清理 / alive_handles 递减 /
+            /// 发 `WinitEvent::CloseRequested`。用户点关闭按钮与
+            /// `VireoWindow::close`（经 close_rx drain）共用。
+            fn request_close(&mut self, handle: usize) {
+                if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
+                    if let Some(h) = hook_opt.take() { h(); }
+                }
+                // 清理 NC 状态表，避免 hwnd 被系统复用后串扰到新窗口。
+                #[cfg(target_os = "windows")]
+                if let Some(&hwnd) = self.hwnds.get(handle) {
+                    if hwnd != 0 {
+                        crate::platform::windows::nc_remove(hwnd);
+                    }
+                }
+                // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present。
+                // owner 只发送关闭请求；最后一个 VireoWindow 由渲染线程 drop 后，
+                // 渲染线程会通过 exit_tx 确认退出。此处不能先退出 event loop 再
+                // join，否则 owner 可能无期限等待仍在同步 wgpu 调用中的渲染线程。
+                self.send(WinitEvent::CloseRequested { handle });
+                self.alive_handles -= 1;
+            }
+
             fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>, os_scale: f64) -> WindowAttributes {
                 let mut attrs = WindowAttributes::default()
                     .with_title(&desc.title)
                     .with_inner_size(dim_to_winit_size(desc.size.0, desc.size.1, desc.dpi_override, os_scale))
                     .with_resizable(desc.resizable)
                     .with_maximized(desc.maximized)
-                    .with_visible(desc.visible)
+                    // `preparable`：创建隐藏、首帧渲染后显示。winit 建窗是「先以默认
+                    // 尺寸+边框显示、再改尺寸/去边框」，首帧渲染后才显示可避免 4 阶段
+                    // 闪烁。preparable=false 时保持旧行为（创建即显示）。
+                    .with_visible(desc.visible && !desc.preparable)
                     .with_transparent(desc.transparent)
                     .with_decorations(desc.frame_style.decorated())
                     .with_window_level(desc.window_level)
@@ -2322,9 +2405,13 @@ impl App {
                 let surface = self.instance.create_surface(window.clone()).unwrap();
                 let window_id = window.id();
 
-                // ---- 在 winit 线程上创建 surface + 初始 configure ----
-                // surface 的 create_surface 必须紧跟窗口创建；首次 configure 在此建立
-                // 合法 swapchain。后续尺寸同步/重新 configure 由渲染线程 draw() 完成。
+                // ---- 在 winit 线程上创建 surface；初始 configure 推迟到渲染线程 ----
+                // surface 的 create_surface 必须紧跟窗口创建；**初始 `surface.configure`
+                // 不再在此执行**——DX12 的 configure 会 `wait_for_present_queue_idle`
+                // 无限等 present queue 排空（主窗口每帧 present，阻塞可达几十 ms），
+                // 若在 winit 线程同步执行，会卡住整个事件循环（所有窗口的输入/事件
+                // 都被延迟）。改由渲染线程首次 `draw_frame`（`needs_initial_configure`
+                // 标志）在 acquire 前建立合法 swapchain。
                 // `SurfaceTexture` 从不跨线程：acquire→present 全在渲染线程 draw() 内，
                 // 满足 wgpu-hal 同线程约束（第三十三/三十四轮的 handoff 失败不重演）。
                 let scale = desc.dpi_override.unwrap_or(window.scale_factor()) as f32;
@@ -2391,7 +2478,7 @@ impl App {
                     desired_maximum_frame_latency: desc.frame_latency,
                     color_space: wgpu::SurfaceColorSpace::Auto,
                 };
-                surface.configure(&self.gpu.device, &surface_config);
+                // 初始 configure 推迟到渲染线程首次 draw（见上方注释）。
 
                 self.id_to_handle.insert(window_id, handle);
                 self.alive_handles += 1;
@@ -2409,6 +2496,7 @@ impl App {
                     dpi_override: desc.dpi_override,
                     init_duration,
                     frame_style: desc.frame_style,
+                    pending_show: desc.visible && desc.preparable,
                 });
             }
         }
@@ -2502,6 +2590,11 @@ impl App {
                         req.on_close,
                     );
                 }
+                // 程序化关窗：`VireoWindow::close` 发来的 handle，走与用户点关闭
+                // 按钮相同的完整关窗路径（close_hooks / NC 清理 / 退出判定）。
+                while let Ok(handle) = self.close_rx.try_recv() {
+                    self.request_close(handle);
+                }
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
             }
 
@@ -2515,22 +2608,7 @@ impl App {
 
                 match event {
                     WindowEvent::CloseRequested => {
-                        if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
-                            if let Some(h) = hook_opt.take() { h(); }
-                        }
-                        // 清理 NC 状态表，避免 hwnd 被系统复用后串扰到新窗口。
-                        #[cfg(target_os = "windows")]
-                        if let Some(&hwnd) = self.hwnds.get(handle) {
-                            if hwnd != 0 {
-                                crate::platform::windows::nc_remove(hwnd);
-                            }
-                        }
-                        // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present。
-                        // owner 只发送关闭请求；最后一个 VireoWindow 由渲染线程 drop 后，
-                        // 渲染线程会通过 exit_tx 确认退出。此处不能先退出 event loop 再
-                        // join，否则 owner 可能无期限等待仍在同步 wgpu 调用中的渲染线程。
-                        self.send(WinitEvent::CloseRequested { handle });
-                        self.alive_handles -= 1;
+                        self.request_close(handle);
                     }
                     WindowEvent::Resized(size) => {
                         // 事件驱动路径：仅同步逻辑尺寸。真正的 surface.configure /
@@ -2674,6 +2752,7 @@ impl App {
             #[cfg(target_os = "windows")]
             nc_rx,
             create_rx,
+            close_rx,
             #[cfg(target_os = "windows")]
             hwnds: Vec::new(),
             window_descs,
@@ -2905,6 +2984,8 @@ fn render_on_frame<F>(
     // NC 状态变更通道（§7.6，render thread → winit thread）。
     #[cfg(target_os = "windows")]
     nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    // 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
+    close_tx: mpsc::Sender<usize>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
 )
@@ -2940,7 +3021,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                 Ok(WinitEvent::WindowCreated {
                     handle, window, surface, surface_config, renderer,
                     logical_width, logical_height, scale, dpi_scale, dpi_override, init_duration,
-                    frame_style,
+                    frame_style, pending_show,
                 }) => {
                     let vw = VireoWindow::new(
                         window,
@@ -2956,10 +3037,12 @@ where F: FnMut(&App) -> bool + Send + 'static
                         dpi_override,
                         init_duration,
                     frame_style,
+                    pending_show,
                     event_tx.clone(),
                     cb_tx.clone(),
                     #[cfg(target_os = "windows")]
                     nc_tx.clone(),
+                    close_tx.clone(),
                     handle,
                 );
                     while app.windows.len() <= handle {
@@ -4498,6 +4581,17 @@ impl VireoWindow {
         self.handle
     }
 
+    /// 请求关闭窗口（走与用户点关闭按钮相同的完整关窗路径）。
+    ///
+    /// 内部经 `close_tx` 通道转发到 winit 线程，在 winit 线程依次执行
+    /// close_hooks / Windows NC 状态清理 / `alive_handles` 递减，并发送
+    /// `WinitEvent::CloseRequested` 给渲染线程——渲染线程随后置 `closing`、
+    /// 从 `App.windows` 移除本窗口，最后一个窗口关闭时请求退出 event loop。
+    /// 返回前不阻塞；实际关窗在下一次 winit 事件循环迭代生效。
+    pub fn close(&self) {
+        let _ = self.close_tx.send(self.handle);
+    }
+
     /// 返回 `WindowIndex`（与 `app.on_key_down` 等注册方法共用）
     pub fn index(&self) -> WindowIndex {
         WindowIndex(self.handle as u64)
@@ -5309,6 +5403,14 @@ mod metrics_tests {
             super::WindowDesc::new("t", 640, 360).frame_latency(1).frame_latency,
             1
         );
+    }
+
+    #[test]
+    fn window_desc_preparable_defaults_on_and_builder_switches() {
+        // `preparable` 默认开：创建隐藏、首帧渲染后显示，消除 winit 建窗 4 阶段闪烁。
+        assert!(super::WindowDesc::new("t", 640, 360).preparable);
+        assert!(!super::WindowDesc::new("t", 640, 360).preparable(false).preparable);
+        assert!(super::WindowDesc::new("t", 640, 360).preparable(true).preparable);
     }
 
     #[test]
