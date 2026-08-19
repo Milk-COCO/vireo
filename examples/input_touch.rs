@@ -39,7 +39,8 @@ fn main() {
 
         // 鼠标左键模拟 Started/Moved/Ended（桌面调试）
         let left = win.mouse_left();
-        let (mx, my) = win.mouse_pos();
+        let (mx, my) = win.mouse_pos().logical();
+        let (mx, my) = (mx as f32, my as f32);
         {
             let mut touches = win.input.touches.borrow_mut();
             if left && !mouse_touch_active {

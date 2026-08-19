@@ -770,7 +770,8 @@ pub struct VireoWindow {
     renderer: std::cell::RefCell<crate::render::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
-    pub mouse_pos: (f32, f32),
+    /// 最近一次 CursorMoved 的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
+    pub(crate) mouse_pos: (f32, f32),
     logical_width: std::cell::Cell<u32>,
     logical_height: std::cell::Cell<u32>,
     /// vireo 层自定义 dpi 覆盖：`Some(v)` = **vireo 全自持像素**（物理 = vireo 逻辑 × v，
@@ -1665,9 +1666,16 @@ impl VireoWindow {
         self.skipped_frames.get()
     }
 
-    /// 获取当前鼠标位置（窗口用户坐标系，即 WindowDesc 传入的宽高范围）
-    pub fn mouse_pos(&self) -> (f32, f32) {
-        self.mouse_pos
+    /// 获取当前鼠标位置（客户端坐标，物理 + 逻辑双表示）。
+    ///
+    /// 与 [`Self::inner_position`] 一致：`.physical()` 返回物理像素，`.logical()`
+    /// 返回 vireo 逻辑像素（= 物理 ÷ 当前有效 scale）。
+    pub fn mouse_pos(&self) -> PixelPos {
+        let sf = self
+            .applied_dpi_override
+            .get()
+            .unwrap_or(self.inner.scale_factor());
+        to_pixel_pos(self.mouse_pos.0 as f64, self.mouse_pos.1 as f64, sf)
     }
 
     /// 获取当前投影矩阵（逻辑像素）
@@ -3071,8 +3079,7 @@ where F: FnMut(&App) -> bool + Send + 'static
 
                 Ok(WinitEvent::CursorMoved { handle, x, y }) => {
                     if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        let sf = win.applied_dpi_override.get().unwrap_or(win.inner.scale_factor());
-                        win.mouse_pos = ((x / sf) as f32, (y / sf) as f32);
+                        win.mouse_pos = (x as f32, y as f32);
                     }
                 }
 
@@ -4235,6 +4242,15 @@ impl VireoWindow {
         self.inner
             .outer_position()
             .map(|p| to_pixel_pos(p.x as f64, p.y as f64, self.scale.get() as f64))
+    }
+
+    /// 窗口客户区物理尺寸（不含边框，物理 + 逻辑双表示）。
+    /// 直接查询 winit `Window::inner_size()`，与内部布局缓存（`logical_width`/
+    /// `logical_height`）无关——该缓存可能因 layout-follow 平滑或未 snap 的 resize
+    /// 滞后于窗口当前值；本方法总是返回此刻窗口的真实客户区尺寸。
+    pub fn inner_size(&self) -> PixelSize {
+        let s = self.inner.inner_size();
+        to_pixel_size(s.width as f64, s.height as f64, self.scale.get() as f64)
     }
 
     /// 窗口外沿物理尺寸（含边框，物理 + 逻辑双表示）。iOS / Web 与 `inner_size` 相同。

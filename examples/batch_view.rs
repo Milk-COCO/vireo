@@ -36,7 +36,8 @@ fn main() {
         t += 0.03;
 
         // 输入：左键拖动平移，滚轮缩放
-        let (mox, moy) = win.mouse_pos();
+        let (mox, moy) = win.mouse_pos().logical();
+        let (mox, moy) = (mox as f32, moy as f32);
         let mouse_left = win.mouse_left();
         if mouse_left {
             if !mouse_was_down {

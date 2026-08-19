@@ -104,7 +104,8 @@ fn main() {
         // 点击放置文本光标 → 候选窗跟随（仅按下瞬间更新）
         let mouse_down = win.mouse_left();
         if mouse_down && !last_mouse_down {
-            let (mx, my) = win.mouse_pos();
+            let (mx, my) = win.mouse_pos().logical();
+            let (mx, my) = (mx as f32, my as f32);
             text_cursor = (mx, my);
             win.set_ime_cursor_area(
                 winit::dpi::LogicalPosition::new(text_cursor.0 as f64, text_cursor.1 as f64),

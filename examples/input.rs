@@ -50,7 +50,8 @@ fn main() {
         // 鼠标点击（边缘检测，每帧只算一次）
         let mouse_left = win.mouse_left();
         if mouse_left && !mouse_was_down {
-            let (mx, my) = win.mouse_pos();
+            let (mx, my) = win.mouse_pos().logical();
+            let (mx, my) = (mx as f32, my as f32);
             if mx >= x && mx <= x + size && my >= y && my <= y + size {
                 click_count += 1;
                 // 随机换色

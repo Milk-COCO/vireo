@@ -594,7 +594,8 @@ fn main() {
         // 只能在「左键按下沿」且按下点在区域内时调用一次 drag_window()；
         // 若每帧 while 按住就调用，winit 会以当时光标位置重发 WM_NCLBUTTONDOWN，
         // 从窗口别处按住再移入区域内会瞬间把窗口吸附到鼠标。
-        let (_, my) = win.mouse_pos();
+        let (_, my) = win.mouse_pos().logical();
+        let my = my as f32;
         let lb_down = win.mouse_left();
         let lb_pressed = lb_down && !lb_was_down;
         if lb_pressed && my < 36.0 {

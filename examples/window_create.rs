@@ -151,7 +151,8 @@ fn main() {
         // 屏幕坐标 = W1 窗口外沿物理位置 + 鼠标（客户端逻辑）× scale_factor。
         let b_down = win1.key_down(KeyCode::KeyB);
         if b_down && !b_was_down {
-            let (mx, my) = win1.mouse_pos();
+            let (mx, my) = win1.mouse_pos().logical();
+            let (mx, my) = (mx as f32, my as f32);
             let sf = win1.metrics().scale_factor as f64;
             let (ox, oy) = win1
                 .outer_position()
@@ -240,7 +241,8 @@ fn draw_window(
         let max_x = w - 2.0 * BTN_W;
         let min_x = w - 3.0 * BTN_W;
         // 鼠标位置（客户端逻辑像素）驱动 hover 背景
-        let (mx, my) = win.mouse_pos();
+        let (mx, my) = win.mouse_pos().logical();
+        let (mx, my) = (mx as f32, my as f32);
         let maxed = win.is_maximized();
         let hover = |bx: f32| my >= 0.0 && my < TITLE_H && mx >= bx && mx < bx + BTN_W;
         // hover 背景（Win11 风格：普通按钮淡灰、关闭按钮红）
