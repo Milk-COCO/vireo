@@ -136,7 +136,6 @@ pub mod prelude {
     pub use crate::window::WindowId;
     pub use crate::window::WindowIndex;
     pub use crate::window::WindowLevel;
-    pub use crate::window::WindowMetrics;
     // 非客户区管理（§7.6）
     pub use crate::nc::HitTestInput;
     pub use crate::nc::NonClientHit;

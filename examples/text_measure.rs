@@ -23,9 +23,9 @@ fn main() {
         let (tw, th) = gpu.measure_text(text, &opts);
 
         // 屏幕中心（使用实际窗口逻辑尺寸）
-        let m = win.metrics();
-        let cx = m.width as f32 * 0.5;
-        let cy = m.height as f32 * 0.5;
+        let (lw, lh) = win.layout_size().logical();
+        let cx = lw as f32 * 0.5;
+        let cy = lh as f32 * 0.5;
 
         // 文本左上角（居中放置）
         let tx = cx - tw * 0.5;

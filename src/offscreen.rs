@@ -32,7 +32,7 @@ impl OffscreenCanvas {
         );
         let texture = Texture::new(&gpu.device, width, height, gpu.surface_format(),
             &gpu.texture_bind_group_layout, &gpu.default_sampler);
-        let renderer = Renderer::new(gpu.clone(), width, height, width, height, 1.0, aa, 1.0);
+        let renderer = Renderer::new(gpu.clone(), width as f32, height as f32, width, height, 1.0, aa, 1.0);
         Self { texture, renderer, init_duration, index: OffscreenIndex(0) }
     }
 

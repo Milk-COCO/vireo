@@ -311,23 +311,3 @@ pub(crate) fn to_pixel_pos(x: f64, y: f64, scale: f64) -> PixelPos {
 pub(crate) fn to_pixel_size(w: f64, h: f64, scale: f64) -> PixelSize {
     PixelSize { width: pixel_of(w, scale), height: pixel_of(h, scale) }
 }
-
-/// 物理尺寸 → 逻辑尺寸。有效缩放 = `dpi_override.unwrap_or(os_scale)`：
-/// `Some(v)` 覆盖下 vireo 逻辑为源真相（物理 = 逻辑 × v → 逻辑 = 物理 / v）；
-/// `None` 用 OS 系统 DPI（逻辑 = 物理 / OS 缩放）。
-pub(crate) fn logical_size(
-    width: u32,
-    height: u32,
-    dpi_override: Option<f64>,
-    os_scale: f64,
-) -> (u32, u32) {
-    let scale = dpi_override.unwrap_or(os_scale);
-    if scale <= 0.0 {
-        (width, height)
-    } else {
-        (
-            (width as f64 / scale) as u32,
-            (height as f64 / scale) as u32,
-        )
-    }
-}

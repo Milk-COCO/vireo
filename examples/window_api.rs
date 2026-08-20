@@ -302,10 +302,10 @@ fn main() {
             win.set_size(900, 600);
         }
         if edge(KeyCode::KeyI) {
-            let m = win.metrics();
+            let (lw, lh) = win.layout_size().logical();
             reqsize = win.request_resize(
-                (m.width as f64 * 0.66).max(1.0),
-                (m.height as f64 * 0.66).max(1.0),
+                (lw * 0.66).max(1.0),
+                (lh * 0.66).max(1.0),
             ).map(|s| (s.width, s.height));
         }
         if edge(KeyCode::BracketLeft) || edge(KeyCode::BracketRight) {
@@ -623,9 +623,10 @@ fn main() {
         drop(st_guard);
 
         // ---- 绘制：分类分组 + 自适应布局 ----
-        let m = win.metrics();
-        let win_w = m.width as f32;
-        let win_h = m.height as f32;
+        let (lw, lh) = win.layout_size().logical();
+        let (pw, ph) = win.layout_size().physical();
+        let win_w = lw as f32;
+        let win_h = lh as f32;
         let title_h = 36.0;
         let hint_h = 5.0 * 18.0 + 8.0;
         let area_bottom = (win_h - hint_h - 10.0).max(title_h + 12.0);
@@ -671,7 +672,7 @@ fn main() {
         ly += group(&mut b, left_x, ly, in_view(ly), "尺寸 · 位置") + GROUP_GAP;
         ly += row(&mut b, left_x, ly, in_view(ly), "inner_pos", &format!("px={:.0},{:.0} dp={:.0},{:.0}", inner_pos_px.0, inner_pos_px.1, inner_pos.0, inner_pos.1));
         ly += row(&mut b, left_x, ly, in_view(ly), "outer", &format!("pos={:?} size px={:.0}x{:.0}", outer_pos, outer_size.physical().0, outer_size.physical().1));
-        ly += row(&mut b, left_x, ly, in_view(ly), "metrics", &format!("logical={}x{} physical={}x{} sf={:.2}", m.width, m.height, m.physical_width, m.physical_height, m.scale_factor));
+        ly += row(&mut b, left_x, ly, in_view(ly), "layout", &format!("logical={}x{} physical={}x{} sf={:.2}", lw as u32, lh as u32, pw as u32, ph as u32, win.layout_scale()));
         ly += row(&mut b, left_x, ly, in_view(ly), "dpi_override", &format!("{:?}", dpi_override));
         ly += row(&mut b, left_x, ly, in_view(ly), "min/max_size", &format!("{}/{}", match min_mode { 1 => "400x300", 2 => "800x600", _ => "None" }, match max_mode { 1 => "1280x800", 2 => "1920x1080", _ => "None" }));
         ly += row(&mut b, left_x, ly, in_view(ly), "reqsize", &format!("{:?}", reqsize));

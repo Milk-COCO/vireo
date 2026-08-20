@@ -28,7 +28,7 @@ fn main() {
 
     app.run(move |app| {
         let win = app.window_ref(&idx).unwrap();
-        let w = win.metrics().width as f32;
+        let w = win.layout_size().logical().0 as f32;
 
         let mut batch = DrawBatch::new();
 

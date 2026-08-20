@@ -119,10 +119,10 @@ fn main() {
         // Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击）。
         #[cfg(target_os = "windows")]
         {
-            let m2 = win2.metrics();
-            if m2.width != w2_last_width {
-                w2_last_width = m2.width;
-                let w = m2.width as f32;
+            let m2w = win2.layout_size().logical().0 as u32;
+            if m2w != w2_last_width {
+                w2_last_width = m2w;
+                let w = m2w as f32;
                 let close_x = w - BTN_W;
                 let max_x = w - 2.0 * BTN_W;
                 let min_x = w - 3.0 * BTN_W;
@@ -153,7 +153,7 @@ fn main() {
         if b_down && !b_was_down {
             let (mx, my) = win1.mouse_pos().logical();
             let (mx, my) = (mx as f32, my as f32);
-            let sf = win1.metrics().scale_factor as f64;
+            let sf = win1.layout_scale();
             let (ox, oy) = win1
                 .outer_position()
                 .map(|p| p.physical())
@@ -224,9 +224,10 @@ fn draw_window(
     cfg: &str,
     content_top: f32,
 ) {
-    let m = win.metrics();
-    let w = m.width as f32;
-    let h = m.height as f32;
+    let (lw, lh) = win.layout_size().logical();
+    let (pw, ph) = win.layout_size().physical();
+    let w = lw as f32;
+    let h = lh as f32;
 
     let mut b = DrawBatch::new();
 
@@ -307,8 +308,8 @@ fn draw_window(
     draw_text(
         &mut b.texts,
         &format!(
-            "metrics: logical {}x{}  physical {}x{}  sf {:.2}",
-            m.width, m.height, m.physical_width, m.physical_height, m.scale_factor
+            "layout: logical {}x{}  physical {}x{}  sf {:.2}",
+            lw as u32, lh as u32, pw as u32, ph as u32, win.layout_scale()
         ),
         Pos::new(16.0, ty),
         TextDef::default().font_size(13.0),

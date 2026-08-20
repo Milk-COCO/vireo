@@ -305,9 +305,9 @@ pub struct Renderer {
     polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
     transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
     engine_storage_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
-    /// 逻辑视口尺寸（逻辑像素）
-    logical_width: u32,
-    logical_height: u32,
+    /// 逻辑视口尺寸（逻辑像素，浮点用户坐标系）
+    logical_width: f32,
+    logical_height: f32,
     /// 帧间复用的 CPU 暂存，避免每帧大块分配
     scratch_vdata: RefCell<Vec<u8>>,
     scratch_idata: RefCell<Vec<u8>>,
@@ -343,15 +343,15 @@ impl Renderer {
     }
     pub fn new(
         gpu: std::sync::Arc<GpuContext>,
-        logical_width: u32,
-        logical_height: u32,
+        logical_width: f32,
+        logical_height: f32,
         physical_width: u32,
         physical_height: u32,
         scale: f32,
         aa: crate::window::AntiAliasing,
         dpi_scale: f32,
     ) -> Self {
-        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
+        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
@@ -504,12 +504,12 @@ impl Renderer {
     /// （SDF feather 用）。
     pub(crate) fn update_layout(
         &mut self,
-        logical_width: u32,
-        logical_height: u32,
+        logical_width: f32,
+        logical_height: f32,
         scale: f32,
         dpi_scale: f32,
     ) {
-        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width as f32, logical_height as f32, 0.0, -1.0, 1.0);
+        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
@@ -533,8 +533,8 @@ impl Renderer {
     /// surface 已重配时调用（重建 msaa/ds 纹理以匹配新物理尺寸）。
     pub fn resize(
         &mut self,
-        logical_width: u32,
-        logical_height: u32,
+        logical_width: f32,
+        logical_height: f32,
         physical_width: u32,
         physical_height: u32,
         scale: f32,
@@ -572,7 +572,7 @@ impl Renderer {
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
         // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
         // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
-        let viewport = Rect::new(0.0, 0.0, self.logical_width as f32, self.logical_height as f32);
+        let viewport = Rect::new(0.0, 0.0, self.logical_width, self.logical_height);
 
         // Pass 1: bottom-up 计算子树 AABB（供 culling 用）
         {
@@ -633,8 +633,8 @@ impl Renderer {
 
         let target_view = &target.view;
         // 相机为逻辑像素正交；Pop 全屏四边形也用逻辑尺寸
-        let lw = self.logical_width as f32;
-        let lh = self.logical_height as f32;
+        let lw = self.logical_width;
+        let lh = self.logical_height;
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
         let mut event_infos = self.scratch_event_infos.borrow_mut();
@@ -1643,8 +1643,8 @@ impl Renderer {
             for info in event_infos.iter() {
                 // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
                 if let Some(scissor_rect) = info.scissor_push {
-                    let sx = self.physical_width as f32 / self.logical_width.max(1) as f32;
-                    let sy = self.physical_height as f32 / self.logical_height.max(1) as f32;
+                    let sx = self.physical_width as f32 / self.logical_width.max(1.0);
+                    let sy = self.physical_height as f32 / self.logical_height.max(1.0);
                     let fw = self.physical_width as f32;
                     let fh = self.physical_height as f32;
                     // 负坐标 / 越界：先 float 裁到视口再转 u32，避免 as u32 回绕

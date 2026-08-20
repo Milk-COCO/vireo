@@ -29,12 +29,12 @@ fn main() {
 
         // A
         let mut batch = DrawBatch::new();
-        let ma = win_a.metrics();
-        let mb = win_b.metrics();
-        let w = ma.width as f32;
-        let h = ma.height as f32;
-        let cx = mx * w / mb.width as f32;
-        let cy = my * h / mb.height as f32;
+        let (wa, ha) = win_a.layout_size().logical();
+        let (wb, hb) = win_b.layout_size().logical();
+        let w = wa as f32;
+        let h = ha as f32;
+        let cx = mx * w / wb as f32;
+        let cy = my * h / hb as f32;
         if has_mouse {
             draw_circle(&mut batch, Pos::new(cx, cy), 20.0, Some(RED));
             draw_line(&mut batch, cx, 0.0, cx, h, 1.0, Some(Color::new(0.25, 0.25, 0.35, 0.4)));

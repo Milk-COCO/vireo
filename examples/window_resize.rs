@@ -84,9 +84,9 @@
 //! - `None`：vireo 逻辑即 winit 逻辑，OS 系统 DPI 缩放正常参与；
 //! - `Some(d)`：vireo 全自持像素，物理 = 逻辑 × d，忽略 OS 缩放。
 //!
-//! 运行时查询见 `win.metrics()`：`width/height` 是 vireo 逻辑，`physical_width/physical_height`
-//! 是物理像素（= 逻辑 × scale_factor；`Some(dpi_override)` 窗口下 scale_factor = d，
-//! 逻辑 ≠ 物理，除非 d = 1.0）。HUD 下方同时显示两种。
+//! 运行时查询见 `win.layout_size()`（返回物理 + 逻辑双表示的 `PixelSize`：`.logical()`
+//! 是 vireo 逻辑宽高，`.physical()` 是物理像素 = 逻辑 × `win.layout_scale()`）。
+//! HUD 下方同时显示两种。
 
 use vireo::prelude::*;
 
@@ -165,13 +165,14 @@ fn main() {
             key_was[i] = keys[i];
         }
 
-        let metrics = win.metrics();
+        let (lw, lh) = win.layout_size().logical();
+        let (pw, ph) = win.layout_size().physical();
         let mut batch = DrawBatch::new();
 
         // 动画方块（验证拖动期间帧流是否持续）
         let t = app.frame_count as f32 * 0.05;
-        let w = metrics.width.max(1) as f32;
-        let h = metrics.height.max(1) as f32;
+        let w = (lw as f32).max(1.0);
+        let h = (lh as f32).max(1.0);
         let bx = (w - 80.0) * (t.sin() * 0.5 + 0.5);
         let by = (h - 80.0) * (t.cos() * 0.5 + 0.5);
         draw_rounded_rect(&mut batch, Pos::new(bx, by), 80.0, 80.0, 12.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
@@ -197,7 +198,7 @@ fn main() {
             format!("Layout follow: {}  (L)", follow_label),
             format!(
                 "window: {}x{} (logical)  {}x{} (physical)  Update FPS: {:.1}  update dt: {:.2} ms",
-                metrics.width, metrics.height, metrics.physical_width, metrics.physical_height, app.fps, app.frame_time * 1000.0
+                lw as u32, lh as u32, pw as u32, ph as u32, app.fps, app.frame_time * 1000.0
             ),
             format!(
                 "last configure: {:.2} ms  acquire: {:.2} ms  encode: {:.2} ms",

@@ -100,13 +100,13 @@ fn main() {
         // 与当前 smoothing 一致（预设被 `[` `]` 应用）。
         let current = win.layout_follow_smoothing();
 
-        let metrics = win.metrics();
+        let (lw, lh) = win.layout_size().logical();
         let mut batch = DrawBatch::new();
 
         // 动画方块（验证重排节奏；正方形在拉伸中变成分率）
         let t = app.frame_count as f32 * 0.05;
-        let w = metrics.width.max(1) as f32;
-        let h = metrics.height.max(1) as f32;
+        let w = (lw as f32).max(1.0);
+        let h = (lh as f32).max(1.0);
         let bx = (w - 120.0) * (t.sin() * 0.5 + 0.5);
         let by = (h - 120.0) * (t.cos() * 0.5 + 0.5);
         draw_rounded_rect(
@@ -136,7 +136,7 @@ fn main() {
             format!("current(): {:?}", current),
             format!(
                 "window: {}x{} (logical)   Update FPS: {:.1}",
-                metrics.width, metrics.height, app.fps
+                lw as u32, lh as u32, app.fps
             ),
             "[ ]=切预设  L=开/关跟随  V=present mode  — 拖动窗口边缘/标题栏观察".into(),
         ];

@@ -192,14 +192,14 @@ fn size_drifted_beyond(configured: (u32, u32), observed: (u32, u32), eps: u32) -
 /// `false`，使去抖计时能老化并触发一次性 snap。
 #[allow(clippy::type_complexity)]
 fn observed_moved(
-    anchor: (u32, u32, u32, u32, f32),
-    observed: (u32, u32, u32, u32, f32),
-    eps: u32,
+    anchor: (u32, u32, f32, f32, f32),
+    observed: (u32, u32, f32, f32, f32),
+    eps: f32,
 ) -> bool {
-    anchor.0.abs_diff(observed.0) > eps
-        || anchor.1.abs_diff(observed.1) > eps
-        || anchor.2.abs_diff(observed.2) > eps
-        || anchor.3.abs_diff(observed.3) > eps
+    anchor.0.abs_diff(observed.0) as f32 > eps
+        || anchor.1.abs_diff(observed.1) as f32 > eps
+        || (anchor.2 - observed.2).abs() > eps
+        || (anchor.3 - observed.3).abs() > eps
         || anchor.4 != observed.4
 }
 
@@ -613,22 +613,7 @@ pub struct DrawTimings {
 }
 
 pub use crate::dpi::{Dp, Pixel, PixelPos, PixelSize, Pp, Px, dp, px};
-use crate::dpi::{dim_to_winit_position, dim_to_winit_size, logical_size, to_pixel_pos, to_pixel_size};
-
-/// 窗口尺寸/缩放只读快照（逻辑坐标 = 用户坐标系）。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WindowMetrics {
-    /// 逻辑宽（用户坐标系宽度）
-    pub width: u32,
-    /// 逻辑高（用户坐标系高度）
-    pub height: u32,
-    /// 物理宽（像素）；`Some(dpi_override)` 窗口下 = 逻辑 × dpi（≠ 逻辑，除非 dpi = 1.0）
-    pub physical_width: u32,
-    /// 物理高（像素）；`Some(dpi_override)` 窗口下 = 逻辑 × dpi（≠ 逻辑，除非 dpi = 1.0）
-    pub physical_height: u32,
-    /// 逻辑像素 → 物理像素 缩放因子（`Some(dpi_override)` 窗口 = dpi；`None` = OS 系统 DPI）
-    pub scale_factor: f64,
-}
+use crate::dpi::{dim_to_winit_position, dim_to_winit_size, to_pixel_pos, to_pixel_size};
 
 /// 一次 [`VireoWindow::draw`] 的结果。
 #[derive(Clone, Copy, Debug)]
@@ -683,9 +668,8 @@ enum WinitEvent {
         surface: wgpu::Surface<'static>,
         surface_config: wgpu::SurfaceConfiguration,
         renderer: crate::render::Renderer,
-        logical_width: u32,
-        logical_height: u32,
-        scale: f32,
+        logical_width: f32,
+        logical_height: f32,
         dpi_scale: f32,
         dpi_override: Option<f64>,
         init_duration: f64,
@@ -772,8 +756,8 @@ pub struct VireoWindow {
     pub gpu: Arc<GpuContext>,
     /// 最近一次 CursorMoved 的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
     pub(crate) mouse_pos: (f32, f32),
-    logical_width: std::cell::Cell<u32>,
-    logical_height: std::cell::Cell<u32>,
+    logical_width: std::cell::Cell<f32>,
+    logical_height: std::cell::Cell<f32>,
     /// vireo 层自定义 dpi 覆盖：`Some(v)` = **vireo 全自持像素**（物理 = vireo 逻辑 × v，
     /// 忽略 OS 缩放）；`None` = vireo 逻辑即 winit 逻辑（OS 系统 DPI 参与）。
     /// **不**设置 winit 的 `scale_factor_override`。运行时经 [`VireoWindow::set_dpi_override`] 切换。
@@ -787,11 +771,10 @@ pub struct VireoWindow {
     pending_override_target: std::cell::Cell<Option<(u32, u32)>>,
     /// `pending_override_target` 设置时刻（超时兜底：resize 被 OS 钳制时也应用 override）。
     pending_override_since: std::cell::Cell<Option<std::time::Instant>>,
-    scale: std::cell::Cell<f32>,
     dpi_scale: std::cell::Cell<f32>,
     /// Last layout committed by `surface.configure`. FollowLayout may temporarily
     /// move the live camera away from this snapshot while the surface keeps its size.
-    configured_layout: std::cell::Cell<(u32, u32, f32, f32)>,
+    configured_layout: std::cell::Cell<(f32, f32, f32, f32)>,
     pub input: InputState,
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
     pub init_duration: f64,
@@ -819,7 +802,7 @@ pub struct VireoWindow {
     pending_resize_at: std::cell::Cell<Option<std::time::Instant>>,
     /// 上一帧观测到的窗口状态 (phys_w, phys_h, log_w, log_h, scale)——
     /// 用于判断尺寸是否仍在**移动**（相对上一帧变化才算移动，松手即停）。
-    last_observed: std::cell::Cell<(u32, u32, u32, u32, f32)>,
+    last_observed: std::cell::Cell<(u32, u32, f32, f32, f32)>,
     /// 拖动开始时缓存的显示器刷新率（Hz）。acquire 在拖动期失去 vsync 节流时，
     /// 渲染循环用它把 `max_fps` 临时压到刷新率（防空转）；松手 snap（configure）
     /// 后清空。只查询一次，避免拖动中每帧 `current_monitor()`。
@@ -887,9 +870,8 @@ impl VireoWindow {
         instance: wgpu::Instance,
         surface_config: wgpu::SurfaceConfiguration,
         renderer: crate::render::Renderer,
-        logical_width: u32,
-        logical_height: u32,
-        scale: f32,
+        logical_width: f32,
+        logical_height: f32,
         dpi_scale: f32,
         dpi_override: Option<f64>,
         init_duration: f64,
@@ -904,6 +886,7 @@ impl VireoWindow {
         let initial_present_mode = surface_config.present_mode;
         let initial_frame_latency = surface_config.desired_maximum_frame_latency;
         let initial_phys = (surface_config.width, surface_config.height);
+        let scale = dpi_override.unwrap_or(dpi_scale as f64) as f32;
         Self {
             surface: std::cell::RefCell::new(surface),
             instance,
@@ -920,7 +903,6 @@ impl VireoWindow {
             applied_dpi_override: std::cell::Cell::new(dpi_override),
             pending_override_target: std::cell::Cell::new(None),
             pending_override_since: std::cell::Cell::new(None),
-            scale: std::cell::Cell::new(scale),
             dpi_scale: std::cell::Cell::new(dpi_scale),
             configured_layout: std::cell::Cell::new((
                 logical_width,
@@ -985,7 +967,8 @@ impl VireoWindow {
         let dpi_override = self.applied_dpi_override.get();
         let scale = dpi_override.unwrap_or(sf) as f32;
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
+        let s = to_pixel_size(size.width as f64, size.height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
 
         let mut config = self.surface_config.borrow().clone();
         config.width = size.width;
@@ -997,7 +980,6 @@ impl VireoWindow {
         *self.surface_config.borrow_mut() = config;
         self.logical_width.set(logical_w);
         self.logical_height.set(logical_h);
-        self.scale.set(scale);
         self.dpi_scale.set(dpi_scale);
         self.configured_layout.set((logical_w, logical_h, scale, dpi_scale));
         self.needs_initial_configure.set(false);
@@ -1144,11 +1126,12 @@ impl VireoWindow {
                 self.pending_override_target.set(None);
                 self.pending_override_since.set(None);
             }
-        }
-        let dpi_override = self.applied_dpi_override.get();
+}
+let dpi_override = self.applied_dpi_override.get();
         let new_scale = dpi_override.unwrap_or(sf) as f32;
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
+        let s = to_pixel_size(size.width as f64, size.height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
         let mut configured_this_frame = false;
         let mut follow_pending = false;
         {
@@ -1157,9 +1140,9 @@ impl VireoWindow {
                 (sc.width, sc.height),
                 (size.width, size.height),
                 RESIZE_DRIFT_EPSILON,
-            ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
-                || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
-                || new_scale != self.scale.get();
+            ) || (self.logical_width.get() - logical_w).abs() > RESIZE_DRIFT_EPSILON as f32
+                || (self.logical_height.get() - logical_h).abs() > RESIZE_DRIFT_EPSILON as f32
+                || new_scale != self.layout_scale() as f32;
             let mode_drifted = sc.present_mode != self.applied_present_mode.get();
             let latency_drifted =
                 sc.desired_maximum_frame_latency != self.applied_frame_latency.get();
@@ -1175,7 +1158,7 @@ impl VireoWindow {
                 && observed_moved(
                     self.last_observed.get(),
                     (size.width, size.height, logical_w, logical_h, new_scale),
-                    RESIZE_DRIFT_EPSILON,
+                    RESIZE_DRIFT_EPSILON as f32,
                 );
             if moved {
                 self.last_observed.set((size.width, size.height, logical_w, logical_h, new_scale));
@@ -1239,7 +1222,6 @@ impl VireoWindow {
                 }
                 self.logical_width.set(logical_w);
                 self.logical_height.set(logical_h);
-                self.scale.set(new_scale);
                 self.dpi_scale.set(dpi_scale);
                 follow_pending = true;
             } else {
@@ -1346,31 +1328,32 @@ impl VireoWindow {
         if follow_pending {
             let size = self.inner.inner_size();
             let sf = self.inner.scale_factor();
-            let dpi_override = self.applied_dpi_override.get();
-            let new_scale = dpi_override.unwrap_or(sf) as f32;
-            let dpi_scale = sf as f32;
-            let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
+let dpi_override = self.applied_dpi_override.get();
+        let new_scale = dpi_override.unwrap_or(sf) as f32;
+        let dpi_scale = sf as f32;
+        let s = to_pixel_size(size.width as f64, size.height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
             let still_drifted = {
                 let sc = self.surface_config.borrow();
                 size_drifted_beyond(
                     (sc.width, sc.height),
                     (size.width, size.height),
                     RESIZE_DRIFT_EPSILON,
-                ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
-                    || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
-                    || new_scale != self.scale.get()
+                ) || (self.logical_width.get() - logical_w).abs() > RESIZE_DRIFT_EPSILON as f32
+                    || (self.logical_height.get() - logical_h).abs() > RESIZE_DRIFT_EPSILON as f32
+                    || new_scale != self.layout_scale() as f32
             };
             if still_drifted && size.width != 0 && size.height != 0 {
                 // 平滑模式分派：PerFrame 每帧追；Average 用滑动窗均值。
                 let frame = self.follow_frame.get() + 1;
                 self.follow_frame.set(frame);
                 let now = std::time::Instant::now();
-                let target: Option<(u32, u32)> = match self.follow_smoothing.get() {
+                let target: Option<(f32, f32)> = match self.follow_smoothing.get() {
                     FollowAmount::PerFrame => Some((logical_w, logical_h)),
                     FollowAmount::Average(amt) => {
                         // 采样并入滑动窗，淘汰过期样本，取均值（连续渐变，不跳格）。
                         let mut q = self.follow_samples.borrow_mut();
-                        q.push_back((frame, now, logical_w as f32, logical_h as f32));
+                        q.push_back((frame, now, logical_w, logical_h));
                         loop {
                             let stale = match amt {
                                 FollowFramesOrTime::Time(d) => q
@@ -1389,27 +1372,23 @@ impl VireoWindow {
                             }
                         }
                         let (tw, th) = q.iter().fold(
-                            (0.0f64, 0.0f64),
-                            |(a, b), &(_, _, w, h)| (a + w as f64, b + h as f64),
+                            (0.0f32, 0.0f32),
+                            |(a, b), &(_, _, w, h)| (a + w, b + h),
                         );
-                        let n = q.len().max(1) as f64;
+                        let n = q.len().max(1) as f32;
                         drop(q);
-                        Some((
-                            (tw / n).round().max(1.0) as u32,
-                            (th / n).round().max(1.0) as u32,
-                        ))
+                        Some(((tw / n).max(1.0), (th / n).max(1.0)))
                     }
                 };
                 if let Some((lw, lh)) = target {
                     if trace {
                         eprintln!("[draw] follow-layout(acq) {}x{}", lw, lh);
                     }
-                    self.logical_width.set(lw);
-                    self.logical_height.set(lh);
-                    self.scale.set(new_scale);
-                    self.dpi_scale.set(dpi_scale);
-                    let vw = (lw as f32 * new_scale).round().max(1.0) as u32;
-                    let vh = (lh as f32 * new_scale).round().max(1.0) as u32;
+self.logical_width.set(lw);
+                        self.logical_height.set(lh);
+                        self.dpi_scale.set(dpi_scale);
+                    let vw = (lw * new_scale).round().max(1.0) as u32;
+                    let vh = (lh * new_scale).round().max(1.0) as u32;
                     self.renderer.borrow_mut().update_layout(
                         lw, lh, new_scale, dpi_scale,
                     );
@@ -1565,41 +1544,16 @@ impl VireoWindow {
         if width == 0 || height == 0 { return; }
         let sf = self.inner.scale_factor();
         let dpi_override = self.applied_dpi_override.get();
-        let scale = dpi_override.unwrap_or(sf);
-        let mut logical_w = width;
-        let mut logical_h = height;
-        if scale > 0.0 {
-            logical_w = (width as f64 / scale) as u32;
-            logical_h = (height as f64 / scale) as u32;
-        }
+        let s = to_pixel_size(width as f64, height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
         self.logical_width.set(logical_w);
         self.logical_height.set(logical_h);
-        self.scale.set(scale as f32);
         self.dpi_scale.set(sf as f32);
     }
 
-    /// 当前逻辑/物理尺寸与缩放只读快照。
-    /// `width`/`height` 为 vireo 逻辑（用户坐标系）；`physical_width`/`physical_height`
-    /// 为物理像素（= 逻辑 × scale_factor；`Some(dpi_override)` 窗口下 scale_factor = dpi，
-    /// 逻辑 ≠ 物理，除非 dpi = 1.0）。
-    pub fn metrics(&self) -> WindowMetrics {
-        let width = self.logical_width.get();
-        let height = self.logical_height.get();
-        let scale_factor = self.scale.get() as f64;
-        let physical_width = (width as f64 * scale_factor).round() as u32;
-        let physical_height = (height as f64 * scale_factor).round() as u32;
-        WindowMetrics {
-            width,
-            height,
-            physical_width,
-            physical_height,
-            scale_factor,
-        }
-    }
-
     /// 每轮 `on_frame` 前的轻量尺寸同步（P2 最小改造，2026-08-06）：
-    /// 只把逻辑尺寸/缩放字段刷到当前窗口值，让用户构建 batch 时 `metrics()` 至少
-    /// 反映本轮开始的实际大小。**策略与 `draw` 的 follow 分支一致**——仅当
+    /// 只把逻辑尺寸/缩放字段刷到当前窗口值，让用户构建 batch 时 [`Self::layout_size`]
+    /// 至少反映本轮开始的实际大小。**策略与 `draw` 的 follow 分支一致**——仅当
     /// `layout_follow` 开启且尺寸相对已配置值漂移时才更新；否则 Cells 保持已配置值
     ///（几何 camera 也停在已配置布局，两者一致）。0×0 跳过。
     /// 注意：这仍是本轮开始的快照，`draw()` acquire 后可能 late-poll 更新 camera，
@@ -1613,21 +1567,21 @@ impl VireoWindow {
         let dpi_override = self.applied_dpi_override.get();
         let scale = dpi_override.unwrap_or(sf) as f32;
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
+        let s = to_pixel_size(size.width as f64, size.height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
         let drift = {
             let sc = self.surface_config.borrow();
             size_drifted_beyond(
                 (sc.width, sc.height),
                 (size.width, size.height),
                 RESIZE_DRIFT_EPSILON,
-            ) || self.logical_width.get().abs_diff(logical_w) > RESIZE_DRIFT_EPSILON
-                || self.logical_height.get().abs_diff(logical_h) > RESIZE_DRIFT_EPSILON
-                || scale != self.scale.get()
+            ) || (self.logical_width.get() - logical_w).abs() > RESIZE_DRIFT_EPSILON as f32
+                || (self.logical_height.get() - logical_h).abs() > RESIZE_DRIFT_EPSILON as f32
+                || scale != self.layout_scale() as f32
         };
         if self.layout_follow.get() && drift {
             self.logical_width.set(logical_w);
             self.logical_height.set(logical_h);
-            self.scale.set(scale);
             self.dpi_scale.set(dpi_scale);
         }
     }
@@ -1638,7 +1592,8 @@ impl VireoWindow {
         let sf = self.inner.scale_factor();
         let dpi_override = self.applied_dpi_override.get();
         let scale = dpi_override.unwrap_or(sf) as f32;
-        let (logical_w, logical_h) = logical_size(size.width, size.height, dpi_override, sf);
+        let s = to_pixel_size(size.width as f64, size.height as f64, dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
         let config = self.surface_config.borrow();
         size_drifted_beyond(
             (config.width, config.height),
@@ -1670,20 +1625,19 @@ impl VireoWindow {
     ///
     /// 与 [`Self::inner_position`] 一致：`.physical()` 返回物理像素，`.logical()`
     /// 返回 vireo 逻辑像素（= 物理 ÷ 当前有效 scale）。
+    ///
+    /// **不阻塞**：读 vireo 内部缓存（由事件 / 渲染线程轮询锚点更新），任何线程可调，
+    /// 无 winit 跨线程 hop（macOS 亦如此）。
     pub fn mouse_pos(&self) -> PixelPos {
-        let sf = self
-            .applied_dpi_override
-            .get()
-            .unwrap_or(self.inner.scale_factor());
-        to_pixel_pos(self.mouse_pos.0 as f64, self.mouse_pos.1 as f64, sf)
+        to_pixel_pos(self.mouse_pos.0 as f64, self.mouse_pos.1 as f64, self.layout_scale())
     }
 
     /// 获取当前投影矩阵（逻辑像素）
     pub fn projection(&self) -> glam::Mat4 {
         glam::camera::rh::proj::opengl::orthographic(
             0.0,
-            self.logical_width.get() as f32,
-            self.logical_height.get() as f32,
+            self.logical_width.get(),
+            self.logical_height.get(),
             0.0,
             -1.0,
             1.0,
@@ -1747,6 +1701,9 @@ impl VireoWindow {
         result
     }
 
+    /// 窗口当前是否聚焦（基于最近 `Focused` 事件）。
+    ///
+    /// **不阻塞**：读 vireo 内部缓存，任何线程可调，无 winit 跨线程 hop。
     pub fn focused(&self) -> bool {
         *self.input.focused.borrow()
     }
@@ -1763,6 +1720,9 @@ impl VireoWindow {
         !self.focused()
     }
 
+    /// 光标是否在窗口客户区内（基于最近 `CursorEntered` / `CursorLeft` 事件）。
+    ///
+    /// **不阻塞**：读 vireo 内部缓存，任何线程可调，无 winit 跨线程 hop。
     pub fn cursor_inside(&self) -> bool {
         *self.input.cursor_inside.borrow()
     }
@@ -2424,12 +2384,12 @@ impl App {
                 // 满足 wgpu-hal 同线程约束（第三十三/三十四轮的 handoff 失败不重演）。
                 let scale = desc.dpi_override.unwrap_or(window.scale_factor()) as f32;
                 let dpi = window.scale_factor() as f32;
-                let (logical_w, logical_h) = logical_size(
-                    window.inner_size().width,
-                    window.inner_size().height,
-                    desc.dpi_override,
-                    dpi as f64,
+                let s = to_pixel_size(
+                    window.inner_size().width as f64,
+                    window.inner_size().height as f64,
+                    desc.dpi_override.unwrap_or(dpi as f64),
                 );
+                let (logical_w, logical_h) = (s.width.dp.0 as f32, s.height.dp.0 as f32);
                 let renderer = Renderer::new(
                     self.gpu.clone(),
                     logical_w,
@@ -2499,7 +2459,6 @@ impl App {
                     renderer,
                     logical_width: logical_w,
                     logical_height: logical_h,
-                    scale,
                     dpi_scale: dpi,
                     dpi_override: desc.dpi_override,
                     init_duration,
@@ -3028,7 +2987,7 @@ where F: FnMut(&App) -> bool + Send + 'static
             match rx.try_recv() {
                 Ok(WinitEvent::WindowCreated {
                     handle, window, surface, surface_config, renderer,
-                    logical_width, logical_height, scale, dpi_scale, dpi_override, init_duration,
+                    logical_width, logical_height, dpi_scale, dpi_override, init_duration,
                     frame_style, pending_show,
                 }) => {
                     let vw = VireoWindow::new(
@@ -3040,7 +2999,6 @@ where F: FnMut(&App) -> bool + Send + 'static
                         renderer,
                         logical_width,
                         logical_height,
-                        scale,
                         dpi_scale,
                         dpi_override,
                         init_duration,
@@ -3675,8 +3633,8 @@ impl VireoWindow {
             return;
         }
         // 保持 vireo 逻辑尺寸不变，按新 dpi 计算目标物理尺寸并 resize 窗口。
-        let lw = self.logical_width.get().max(1);
-        let lh = self.logical_height.get().max(1);
+        let lw = self.logical_width.get().max(1.0);
+        let lh = self.logical_height.get().max(1.0);
         let os = self.inner.scale_factor();
         let new_scale = dpi.unwrap_or(os);
         let (pw, ph) = if new_scale > 0.0 {
@@ -3685,7 +3643,7 @@ impl VireoWindow {
                 ((lh as f64 * new_scale).round() as u32).max(1),
             )
         } else {
-            (lw, lh)
+            (lw.round() as u32, lh.round() as u32)
         };
         self.dpi_override.set(dpi);
         self.pending_override_target.set(Some((pw, ph)));
@@ -4067,6 +4025,10 @@ impl VireoWindow {
     }
 
     /// 当前窗口是否可调大小。X11 未实现。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn is_resizable(&self) -> bool {
         self.inner.is_resizable()
     }
@@ -4229,34 +4191,51 @@ impl VireoWindow {
     /// 客户端区（不含边框）左上角物理像素位置（物理 + 逻辑双表示）。
     /// ## Platform-specific
     /// - Android / Wayland 恒 `NotSupported`。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn inner_position(&self) -> Result<PixelPos, NotSupportedError> {
         self.inner
             .inner_position()
-            .map(|p| to_pixel_pos(p.x as f64, p.y as f64, self.scale.get() as f64))
+            .map(|p| to_pixel_pos(p.x as f64, p.y as f64, self.layout_scale()))
     }
 
     /// 窗口外沿（含边框）物理像素位置（物理 + 逻辑双表示）。
     /// ## Platform-specific
     /// - Android / Wayland 恒 `NotSupported`。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn outer_position(&self) -> Result<PixelPos, NotSupportedError> {
         self.inner
             .outer_position()
-            .map(|p| to_pixel_pos(p.x as f64, p.y as f64, self.scale.get() as f64))
+            .map(|p| to_pixel_pos(p.x as f64, p.y as f64, self.layout_scale()))
     }
 
     /// 窗口客户区物理尺寸（不含边框，物理 + 逻辑双表示）。
     /// 直接查询 winit `Window::inner_size()`，与内部布局缓存（`logical_width`/
     /// `logical_height`）无关——该缓存可能因 layout-follow 平滑或未 snap 的 resize
     /// 滞后于窗口当前值；本方法总是返回此刻窗口的真实客户区尺寸。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值
+    /// （如 [`Self::layout_size`]）。
     pub fn inner_size(&self) -> PixelSize {
         let s = self.inner.inner_size();
-        to_pixel_size(s.width as f64, s.height as f64, self.scale.get() as f64)
+        to_pixel_size(s.width as f64, s.height as f64, self.layout_scale())
     }
 
     /// 窗口外沿物理尺寸（含边框，物理 + 逻辑双表示）。iOS / Web 与 `inner_size` 相同。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn outer_size(&self) -> PixelSize {
         let s = self.inner.outer_size();
-        to_pixel_size(s.width as f64, s.height as f64, self.scale.get() as f64)
+        to_pixel_size(s.width as f64, s.height as f64, self.layout_scale())
     }
 
     /// 把窗口在**当前所在显示器**上居中。vireo 自实现（Electron / Tauri `center`
@@ -4280,16 +4259,28 @@ impl VireoWindow {
     }
 
     /// 当前是否最小化。`None` 表示平台无法查询。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn is_minimized(&self) -> Option<bool> {
         self.inner.is_minimized()
     }
 
     /// 当前是否最大化。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn is_maximized(&self) -> bool {
         self.inner.is_maximized()
     }
 
     /// 当前是否可见。`None` 表示平台无法查询。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn is_visible(&self) -> Option<bool> {
         self.inner.is_visible()
     }
@@ -4301,6 +4292,10 @@ impl VireoWindow {
     }
 
     /// 当前全屏状态（`None` = 非全屏）。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn fullscreen(&self) -> Option<Fullscreen> {
         self.inner.fullscreen()
     }
@@ -4313,6 +4308,10 @@ impl VireoWindow {
     }
 
     /// 当前窗口主题。iOS / Android / X11 / Orbital 不支持；Wayland 仅在显式设置后返回。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn theme(&self) -> Option<Theme> {
         self.inner.theme()
     }
@@ -4413,10 +4412,14 @@ impl VireoWindow {
     /// 当前窗口尺寸调整步进（网格对齐窗口，物理 + 逻辑双表示）。无步进时返回 `None`。
     /// ## Platform-specific
     /// - iOS / Android / Web / Orbital 恒 `None`。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn resize_increments(&self) -> Option<PixelSize> {
         self.inner
             .resize_increments()
-            .map(|s| to_pixel_size(s.width as f64, s.height as f64, self.scale.get() as f64))
+            .map(|s| to_pixel_size(s.width as f64, s.height as f64, self.layout_scale()))
     }
 
     /// 设置窗口尺寸调整步进（网格对齐窗口）。参数意图同 [`VireoWindow::set_size`]。
@@ -4437,6 +4440,10 @@ impl VireoWindow {
     }
 
     /// 窗口当前所在显示器。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn current_monitor(&self) -> Option<MonitorHandle> {
         self.inner.current_monitor()
     }
@@ -4444,23 +4451,74 @@ impl VireoWindow {
     /// 主显示器。
     /// ## Platform-specific
     /// - Wayland / Web 恒 `None`。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn primary_monitor(&self) -> Option<MonitorHandle> {
         self.inner.primary_monitor()
     }
 
     /// 全部可用显示器。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn available_monitors(&self) -> impl Iterator<Item = MonitorHandle> {
         self.inner.available_monitors()
     }
 
     /// winit 窗口唯一标识（跨窗口 / 事件对比用）。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn id(&self) -> WindowId {
         self.inner.id()
     }
 
     /// 当前 DPI 缩放因子（物理像素 / 逻辑像素）。
+    ///
+    /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
+    /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
+    /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值
+    /// （[`Self::layout_scale`] 在 macOS 上不阻塞）。
     pub fn scale_factor(&self) -> f64 {
         self.inner.scale_factor()
+    }
+
+    /// 当前**布局层**的逻辑→物理缩放（物理 / 逻辑），即
+    /// `applied_dpi_override.unwrap_or(dpi_scale)`：
+    ///
+    /// - `Some(dpi_override)` 已落地 → = 该 dpi 覆盖；
+    /// - 否则 = OS 系统 DPI（[`Self::scale_factor`]）。
+    ///
+    /// 与 [`Self::scale_factor`] 的区别：`scale_factor` 始终返回 OS 真实 DPI（winit
+    /// 直通）；`layout_scale` 反映布局层实际采用的缩放（dpi 覆盖落地前仍是旧值，
+    /// 见 [`Self::set_dpi_override`]）。`inner_size`/`outer_size`/`inner_position`/
+    /// `outer_position`/`resize_increments`/`mouse_pos` 的逻辑换算统一用它。
+    ///
+    /// **不阻塞**：读 vireo 内部缓存（渲染线程每帧轮询锚点更新），任何线程可调，
+    /// 无 winit 跨线程 hop（macOS 亦如此）。
+    pub fn layout_scale(&self) -> f64 {
+        self.applied_dpi_override
+            .get()
+            .unwrap_or(self.dpi_scale.get() as f64)
+    }
+
+    /// 当前**布局层**生效的窗口逻辑尺寸（物理 + 逻辑双表示）。
+    ///
+    /// 逻辑值读内部布局缓存（`logical_width`/`logical_height`），物理值 = 逻辑 ×
+    /// [`Self::layout_scale`]。**与 [`Self::inner_size`] 的区别**：`inner_size` 直接
+    /// 查询 winit 当前窗口客户区；布局缓存可能因 layout-follow 平滑或未 snap 的
+    /// resize 滞后于窗口（见 [`Self::inner_size`] 说明）。布局缓存是 `metrics()` 与
+    /// `projection()` 等「按布局构图」API 的同一尺寸来源。
+    ///
+    /// **不阻塞**：读 vireo 内部布局缓存（见 [`Self::layout_scale`]），任何线程可调。
+    pub fn layout_size(&self) -> PixelSize {
+        let w = self.logical_width.get() as f64;
+        let h = self.logical_height.get() as f64;
+        to_pixel_size(w * self.layout_scale(), h * self.layout_scale(), self.layout_scale())
     }
 
     /// 运行时切换 present mode（会 reconfigure surface）。
@@ -4536,7 +4594,6 @@ impl VireoWindow {
             let (logical_w, logical_h, scale, dpi_scale) = self.configured_layout.get();
             self.logical_width.set(logical_w);
             self.logical_height.set(logical_h);
-            self.scale.set(scale);
             self.dpi_scale.set(dpi_scale);
             let mut renderer = self.renderer.borrow_mut();
             renderer.update_layout(logical_w, logical_h, scale, dpi_scale);
@@ -5064,7 +5121,8 @@ mod aspect_ratio_and_focus_tests {
 mod metrics_tests {
     //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
-    use super::{logical_size, skip_report, sliding_rate, DrawOutcome, DrawSkipReason};
+    use super::{skip_report, sliding_rate, DrawOutcome, DrawSkipReason};
+    use crate::dpi::to_pixel_size;
 
     #[test]
     fn pace_none_when_no_cap() {
@@ -5133,30 +5191,42 @@ mod metrics_tests {
 
     #[test]
     fn logical_size_scales_physical_by_scale_factor() {
-        // 无 dpi 覆盖：逻辑 = 物理 / OS scale_factor
-        assert_eq!(logical_size(1920, 1080, None, 1.5), (1280, 720));
-        assert_eq!(logical_size(1000, 500, None, 2.0), (500, 250));
+        // 无 dpi 覆盖：逻辑 = 物理 / OS scale_factor（f32 不截断，可含小数）
+        let s = to_pixel_size(1920.0, 1080.0, 1.5);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1280.0, 720.0));
+        let s = to_pixel_size(1000.0, 500.0, 2.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (500.0, 250.0));
+        let s = to_pixel_size(1280.0, 720.0, 1.5);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (853.3333, 480.0));
     }
 
     #[test]
     fn logical_size_override_one_is_physical() {
-        // dpi_override(Some(1.0))：逻辑 = 物理（用户坐标即物理像素）
-        assert_eq!(logical_size(1920, 1080, Some(1.0), 1.5), (1920, 1080));
-        assert_eq!(logical_size(1000, 500, Some(1.0), 2.0), (1000, 500));
+        // scale=1.0：逻辑 = 物理（用户坐标即物理像素）
+        let s = to_pixel_size(1920.0, 1080.0, 1.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1920.0, 1080.0));
+        let s = to_pixel_size(1000.0, 500.0, 1.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1000.0, 500.0));
     }
 
     #[test]
     fn logical_size_custom_override_overrides_os_scale() {
         // Some(v)：logic = physical / v，与 OS 无关
-        assert_eq!(logical_size(1920, 1080, Some(1.5), 2.0), (1280, 720));
-        assert_eq!(logical_size(1000, 500, Some(4.0), 2.0), (250, 125));
-        assert_eq!(logical_size(1000, 500, Some(0.5), 2.0), (2000, 1000));
+        let s = to_pixel_size(1920.0, 1080.0, 1.5);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1280.0, 720.0));
+        let s = to_pixel_size(1000.0, 500.0, 4.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (250.0, 125.0));
+        let s = to_pixel_size(1000.0, 500.0, 0.5);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (2000.0, 1000.0));
     }
 
     #[test]
     fn logical_size_invalid_scale_factor_falls_back_to_physical() {
-        assert_eq!(logical_size(800, 600, None, 0.0), (800, 600));
-        assert_eq!(logical_size(800, 600, Some(0.0), 2.0), (800, 600));
+        // scale<=0：逻辑 = 物理（pixel_of 回退）
+        let s = to_pixel_size(800.0, 600.0, 0.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (800.0, 600.0));
+        let s = to_pixel_size(800.0, 600.0, -1.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (800.0, 600.0));
     }
 
     #[test]
@@ -5172,20 +5242,6 @@ mod metrics_tests {
         let t = r.timings;
         assert_eq!((t.acquire_secs, t.encode_secs, t.present_secs), (0.0, 0.0, 0.0));
         assert!(t.gpu_secs.is_none());
-    }
-
-    #[test]
-    fn window_metrics_matches_constructor_values() {
-        let m = super::WindowMetrics {
-            width: 800,
-            height: 600,
-            physical_width: 1200,
-            physical_height: 900,
-            scale_factor: 1.5,
-        };
-        assert_eq!((m.width, m.height), (800, 600));
-        assert_eq!((m.physical_width, m.physical_height), (1200, 900));
-        assert_eq!(m.scale_factor, 1.5);
     }
 
     #[test]
@@ -5351,11 +5407,11 @@ mod metrics_tests {
     #[test]
     fn observed_moved_ignores_oscillation_within_epsilon() {
         // 松手后 800↔802 抖动（eps=2）相对锚点不算移动 → 去抖计时老化 → snap
-        let eps = 2u32;
-        let anchor = (800, 600, 800, 600, 1.0);
+        let eps = 2.0f32;
+        let anchor = (800, 600, 800.0, 600.0, 1.0);
         for w in [800u32, 802, 800, 801, 799, 800] {
             assert!(
-                !super::observed_moved(anchor, (w, 600, w, 600, 1.0), eps),
+                !super::observed_moved(anchor, (w, 600, w as f32, 600.0, 1.0), eps),
                 "w={w} 应在容差内视为未移动"
             );
         }
@@ -5364,13 +5420,13 @@ mod metrics_tests {
     #[test]
     fn observed_moved_tracks_accumulated_drift() {
         // 锚点=上次显著位置：物理/逻辑累计超出容差才算移动（单调慢拖也能及时刷新去抖计时）
-        let eps = 2u32;
-        let anchor = (800, 600, 800, 600, 1.0);
-        assert!(super::observed_moved(anchor, (800 + eps + 1, 600, 801, 600, 1.0), eps));
+        let eps = 2.0f32;
+        let anchor = (800, 600, 800.0, 600.0, 1.0);
+        assert!(super::observed_moved(anchor, (800 + eps as u32 + 1, 600, 801.0, 600.0, 1.0), eps));
         // 逻辑宽高变化超容差（scale ≥ 1 时物理未变、逻辑却变了）也算移动
-        assert!(super::observed_moved(anchor, (800, 600, 800 - eps - 1, 600, 1.0), eps));
+        assert!(super::observed_moved(anchor, (800, 600, 800.0 - eps - 1.0, 600.0, 1.0), eps));
         // scale 变化即便物理/逻辑都在容差内也算移动（需要重配）
-        assert!(super::observed_moved(anchor, (800, 600, 800, 600, 2.0), eps));
+        assert!(super::observed_moved(anchor, (800, 600, 800.0, 600.0, 2.0), eps));
     }
 
     #[test]
