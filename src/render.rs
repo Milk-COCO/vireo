@@ -276,22 +276,15 @@ pub struct Renderer {
     pub(crate) gpu: std::sync::Arc<GpuContext>,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    vertex_buf: RefCell<Option<wgpu::Buffer>>,
-    vertex_cap: RefCell<u64>,
-    index_buf: RefCell<Option<wgpu::Buffer>>,
-    index_cap: RefCell<u64>,
-    instance_buf: RefCell<Option<wgpu::Buffer>>,
-    instance_cap: RefCell<u64>,
-    geo_instance_buf: RefCell<Option<wgpu::Buffer>>,
-    geo_instance_cap: RefCell<u64>,
-    geo_template_vertex_buf: RefCell<Option<wgpu::Buffer>>,
-    geo_template_vertex_cap: RefCell<u64>,
-    geo_template_index_buf: RefCell<Option<wgpu::Buffer>>,
-    geo_template_index_cap: RefCell<u64>,
+    vertex_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    index_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    instance_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    geo_instance_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    geo_template_vertex_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    geo_template_index_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
     physical_width: u32,
     physical_height: u32,
     scale: f32,
-    dpi_scale: f32,
     /// 文字 shader `screen_resolution` 覆盖（`layout_follow` 拖动中用）。
     /// `Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi）：glyph 不重新光栅化
     /// （scale/dpi 不变 → 图集 cache key 稳定），仅 shader NDC 映射补偿 DXGI 拉伸。
@@ -374,21 +367,14 @@ impl Renderer {
             camera_buf,
             camera_bind_group,
             vertex_buf: RefCell::new(None),
-            vertex_cap: RefCell::new(0),
             index_buf: RefCell::new(None),
-            index_cap: RefCell::new(0),
             instance_buf: RefCell::new(None),
-            instance_cap: RefCell::new(0),
             geo_instance_buf: RefCell::new(None),
-            geo_instance_cap: RefCell::new(0),
             geo_template_vertex_buf: RefCell::new(None),
-            geo_template_vertex_cap: RefCell::new(0),
             geo_template_index_buf: RefCell::new(None),
-            geo_template_index_cap: RefCell::new(0),
             physical_width,
             physical_height,
             scale,
-            dpi_scale,
             text_viewport_override: std::cell::Cell::new(None),
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
@@ -518,7 +504,6 @@ impl Renderer {
         self.logical_width = logical_width;
         self.logical_height = logical_height;
         self.scale = scale;
-        self.dpi_scale = dpi_scale;
     }
 
     /// 设置文字 shader `screen_resolution` 覆盖（`layout_follow` 拖动中）。
@@ -1416,18 +1401,18 @@ impl Renderer {
         // ---- 合并上传 ----
         if !combined_vdata.is_empty() {
             let vbuf = self.vertex_buf.borrow();
-            self.gpu.queue.write_buffer(vbuf.as_ref().unwrap(), 0, &combined_vdata);
+            self.gpu.queue.write_buffer(&vbuf.as_ref().unwrap().0, 0, &combined_vdata);
         }
         if !combined_idata.is_empty() {
             let ibuf = self.index_buf.borrow();
-            self.gpu.queue.write_buffer(ibuf.as_ref().unwrap(), 0, &combined_idata);
+            self.gpu.queue.write_buffer(&ibuf.as_ref().unwrap().0, 0, &combined_idata);
         }
         if !combined_instances.is_empty() {
             let size = (combined_instances.len() * size_of::<ShapeInstance>()) as u64;
             self.ensure_instance_buffer(size);
             let instance_buf = self.instance_buf.borrow();
             self.gpu.queue.write_buffer(
-                instance_buf.as_ref().unwrap(),
+                &instance_buf.as_ref().unwrap().0,
                 0,
                 bytemuck::cast_slice(&combined_instances),
             );
@@ -1438,13 +1423,13 @@ impl Renderer {
             let size = (combined_geo_vertices.len() * size_of::<GeoVertex>()) as u64;
             self.ensure_geo_template_vertex_buffer(size);
             let buf = self.geo_template_vertex_buf.borrow();
-            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_vertices));
+            self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_vertices));
         }
         if !combined_geo_indices.is_empty() {
             let size = (combined_geo_indices.len() * 4) as u64;
             self.ensure_geo_template_index_buffer(size);
             let buf = self.geo_template_index_buf.borrow();
-            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_indices));
+            self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_indices));
         }
 
         // ---- 上传几何实例 ----
@@ -1452,7 +1437,7 @@ impl Renderer {
             let size = (combined_geo_instances.len() * size_of::<GeoInstance>()) as u64;
             self.ensure_geo_instance_buffer(size);
             let buf = self.geo_instance_buf.borrow();
-            self.gpu.queue.write_buffer(buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&combined_geo_instances));
+            self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_instances));
         }
 
         // ---- 上传多边形边数据 ----
@@ -1764,9 +1749,9 @@ impl Renderer {
                                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                             }
                                         }
-                                        pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().slice(..));
+                                        pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().0.slice(..));
                                         pass.set_index_buffer(
-                                            ibuf.as_ref().unwrap().slice(..),
+ibuf.as_ref().unwrap().0.slice(..),
                                             wgpu::IndexFormat::Uint32,
                                         );
                                         shapes_bound = true;
@@ -1812,7 +1797,7 @@ impl Renderer {
                                         );
                                         pass.set_vertex_buffer(
                                             1,
-                                            instance_buf.as_ref().unwrap().slice(..),
+                                            instance_buf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_index_buffer(
                                             self.gpu.instance_quad_index_buf.slice(..),
@@ -1846,7 +1831,7 @@ impl Renderer {
                                         );
                                         pass.set_vertex_buffer(
                                             1,
-                                            instance_buf.as_ref().unwrap().slice(..),
+                                            instance_buf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_index_buffer(
                                             self.gpu.instance_quad_index_buf.slice(..),
@@ -1888,14 +1873,14 @@ impl Renderer {
                                         }
                                         pass.set_vertex_buffer(
                                             0,
-                                            geo_template_vbuf.as_ref().unwrap().slice(..),
+                                            geo_template_vbuf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_vertex_buffer(
                                             1,
-                                            geo_instance_buf.as_ref().unwrap().slice(..),
+                                            geo_instance_buf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_index_buffer(
-                                            geo_template_ibuf.as_ref().unwrap().slice(..),
+                                            geo_template_ibuf.as_ref().unwrap().0.slice(..),
                                             wgpu::IndexFormat::Uint32,
                                         );
                                         if uses_stencil {
@@ -1923,14 +1908,14 @@ impl Renderer {
                                         pass.set_bind_group(2, engine_bg, &[]);
                                         pass.set_vertex_buffer(
                                             0,
-                                            geo_template_vbuf.as_ref().unwrap().slice(..),
+                                            geo_template_vbuf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_vertex_buffer(
                                             1,
-                                            geo_instance_buf.as_ref().unwrap().slice(..),
+                                            geo_instance_buf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_index_buffer(
-                                            geo_template_ibuf.as_ref().unwrap().slice(..),
+                                            geo_template_ibuf.as_ref().unwrap().0.slice(..),
                                             wgpu::IndexFormat::Uint32,
                                         );
                                         if uses_stencil {
@@ -2012,10 +1997,10 @@ impl Renderer {
                             }
                         }
                         if let Some(vb) = vbuf.as_ref() {
-                            pass.set_vertex_buffer(0, vb.slice(..));
+                            pass.set_vertex_buffer(0, vb.0.slice(..));
                         }
                         if let Some(ib) = ibuf.as_ref() {
-                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_index_buffer(ib.0.slice(..), wgpu::IndexFormat::Uint32);
                         }
                         shapes_bound = true;
                         last_custom_ptr = custom_ptr;
@@ -2055,7 +2040,7 @@ impl Renderer {
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                             pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
-                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().0.slice(..));
                             pass.set_index_buffer(
                                 self.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -2085,7 +2070,7 @@ impl Renderer {
                             pass.set_bind_group(0, &self.camera_bind_group, &[]);
                             pass.set_bind_group(2, engine_bg, &[]);
                             pass.set_vertex_buffer(0, self.gpu.instance_quad_vertex_buf.slice(..));
-                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(1, instance_buf.as_ref().unwrap().0.slice(..));
                             pass.set_index_buffer(
                                 self.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -2126,10 +2111,10 @@ impl Renderer {
                             if let Some(bg) = custom_bg.as_ref() {
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
-                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
-                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().0.slice(..));
+                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().0.slice(..));
                             pass.set_index_buffer(
-                                geo_template_ibuf.as_ref().unwrap().slice(..),
+                                geo_template_ibuf.as_ref().unwrap().0.slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
                             if uses_stencil {
@@ -2157,10 +2142,10 @@ impl Renderer {
                             pass.set_pipeline(&geo_pipeline);
                             pass.set_bind_group(0, &self.camera_bind_group, &[]);
                             pass.set_bind_group(2, engine_bg, &[]);
-                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().slice(..));
-                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().slice(..));
+                            pass.set_vertex_buffer(0, geo_template_vbuf.as_ref().unwrap().0.slice(..));
+                            pass.set_vertex_buffer(1, geo_instance_buf.as_ref().unwrap().0.slice(..));
                             pass.set_index_buffer(
-                                geo_template_ibuf.as_ref().unwrap().slice(..),
+                                geo_template_ibuf.as_ref().unwrap().0.slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
                             if uses_stencil {
@@ -2275,92 +2260,92 @@ impl Renderer {
 
     fn ensure_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.vertex_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.vertex_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertex buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.vertex_buf.borrow_mut() = Some(buf);
-        *cap = new_cap;
+        *slot = Some((buf, new_cap));
     }
 
     fn ensure_instance_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.instance_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.instance_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo shape instance buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.instance_buf.borrow_mut() = Some(buffer);
-        *cap = new_cap;
+        *slot = Some((buffer, new_cap));
     }
 
     fn ensure_geo_instance_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.geo_instance_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.geo_instance_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo instance buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.geo_instance_buf.borrow_mut() = Some(buffer);
-        *cap = new_cap;
+        *slot = Some((buffer, new_cap));
     }
 
     fn ensure_geo_template_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.geo_template_vertex_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.geo_template_vertex_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo template vertex buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.geo_template_vertex_buf.borrow_mut() = Some(buffer);
-        *cap = new_cap;
+        *slot = Some((buffer, new_cap));
     }
 
     fn ensure_geo_template_index_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.geo_template_index_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.geo_template_index_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo template index buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.geo_template_index_buf.borrow_mut() = Some(buffer);
-        *cap = new_cap;
+        *slot = Some((buffer, new_cap));
     }
 
     fn ensure_index_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut cap = self.index_cap.borrow_mut();
-        if *cap >= size { return; }
-        let new_cap = if *cap == 0 { size.next_power_of_two() } else { (*cap * 2).max(size) };
+        let mut slot = self.index_buf.borrow_mut();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size { return; }
+        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("index buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        *self.index_buf.borrow_mut() = Some(buf);
-        *cap = new_cap;
+        *slot = Some((buf, new_cap));
     }
 
     fn ensure_polygon_edge_buffer(&self, size: u64) {
