@@ -44,6 +44,89 @@ pub struct ShapeStats {
     pub geo_template_vertices: usize,
 }
 
+/// 形状与文字共享状态机的并集覆盖（去重）。
+///
+/// `uv` / `bind_group` / `color` / `transform` 在 `DrawBatch` 形状与文字间本就共享
+///（`uv`→`TextTextureState`, `bind_group`→`TextTextureState.view`, `color`→`batch_color`,
+/// `transform`→`transform_table`），故并集仅保留一份；独有位为
+/// `sdf_feather`（形状）与 `text_clip`（文字）。
+///
+/// 构造按集合覆盖：`shape(ShapeOverride)` / `text(TextOverride)` 用对应覆盖的所有 `Some` 字段
+/// 覆盖并集；`sdf_feather` / `text_clip` 只动独有位。
+#[derive(Clone, Debug, Default)]
+pub struct BatchOverride {
+    pub color: Option<crate::color::Color>,
+    pub sdf_feather: Option<Option<f32>>,
+    pub uv: Option<UvRect>,
+    pub transform: Option<Transform>,
+    pub bind_group: Option<Option<wgpu::BindGroup>>,
+    pub text_clip: Option<Option<crate::glyphon::TextBounds>>,
+}
+
+impl BatchOverride {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// 用 `ShapeOverride` 的所有 `Some` 字段覆盖（`sdf_feather` 含独有位）。
+    pub fn shape(mut self, s: crate::shapes::ShapeOverride) -> Self {
+        if s.color.is_some() {
+            self.color = s.color;
+        }
+        if s.sdf_feather.is_some() {
+            self.sdf_feather = s.sdf_feather;
+        }
+        if s.uv.is_some() {
+            self.uv = s.uv;
+        }
+        if s.transform.is_some() {
+            self.transform = s.transform;
+        }
+        if s.bind_group.is_some() {
+            self.bind_group = s.bind_group;
+        }
+        self
+    }
+    /// 用 `TextOverride` 的 `Some` 字段覆盖（`color/transform` 为共享位，`clip` 为独有位）。
+    pub fn text(mut self, t: crate::text::TextOverride) -> Self {
+        if t.color.is_some() {
+            self.color = t.color;
+        }
+        if t.clip.is_some() {
+            self.text_clip = t.clip;
+        }
+        if t.transform.is_some() {
+            self.transform = t.transform;
+        }
+        self
+    }
+    /// 仅覆盖独有：文字裁切
+    pub fn text_clip(mut self, clip: Option<crate::glyphon::TextBounds>) -> Self {
+        self.text_clip = Some(clip);
+        self
+    }
+    /// 仅覆盖独有：形状 SDF 柔边
+    pub fn sdf_feather(mut self, f: Option<f32>) -> Self {
+        self.sdf_feather = Some(f);
+        self
+    }
+    pub fn color(mut self, c: crate::color::Color) -> Self {
+        self.color = Some(c);
+        self
+    }
+    pub fn transform(mut self, t: Transform) -> Self {
+        self.transform = Some(t);
+        self
+    }
+    pub fn uv(mut self, uv: UvRect) -> Self {
+        self.uv = Some(uv);
+        self
+    }
+    pub fn bind_group(mut self, bg: Option<wgpu::BindGroup>) -> Self {
+        self.bind_group = Some(bg);
+        self
+    }
+}
+
 /// 一次 `Renderer::draw` 的扁平事件序列（模块级，扁平方法可引用）。
 ///
 /// - `Batch`：常规 batch（自身 shapes + texts）。有效视图（累计祖先 view）在
@@ -3524,21 +3607,24 @@ impl DrawBatch {
         self.cached_transform_index = None;
     }
 
-    /// 在临时应用 [`crate::shapes::ShapeOverride`] 后执行 `f`，结束时自动恢复 batch 画笔状态（不写回）。
+    /// 在临时应用共享覆盖后执行 `f`，结束时自动恢复 batch 画笔状态（不写回）。
     ///
-    /// 用途：对「一个区域 / 一批绘制」临时套用颜色 / SDF 柔边 / UV / 变换 / 贴图覆盖；
-    /// 闭包内绘制的形状使用覆盖后的状态，闭包返回后 batch 的画笔状态原样还原。
-    /// 若 `opts` 全部为 `None`（空覆盖），直接执行 `f`，省去保存/恢复开销。
+    /// `BatchOverride` 为 `ShapeOverride` 去重并集 + `text_clip`：
+    /// `uv`/`bind_group`/`color`/`transform` 在形状与文字间共享（同一 `DrawBatch`
+    /// 状态机），`sdf_feather` 仅形状，`text_clip` 仅文字。
+    /// 构造按集合覆盖：`BatchOverride::default().shape(s).text(t)` 用对应 `Some` 字段
+    /// 覆盖并集，`sdf_feather`/`text_clip` 只动独有位。
     pub fn with_override<R>(
         &mut self,
-        opts: crate::shapes::ShapeOverride,
+        ov: BatchOverride,
         f: impl FnOnce(&mut Self, crate::color::Color) -> R,
     ) -> R {
-        if opts.color.is_none()
-            && opts.sdf_feather.is_none()
-            && opts.uv.is_none()
-            && opts.transform.is_none()
-            && opts.bind_group.is_none()
+        if ov.color.is_none()
+            && ov.sdf_feather.is_none()
+            && ov.uv.is_none()
+            && ov.transform.is_none()
+            && ov.bind_group.is_none()
+            && ov.text_clip.is_none()
         {
             return f(self, self.color);
         }
@@ -3548,25 +3634,29 @@ impl DrawBatch {
         let saved_transform = self.transform;
         let saved_xform_cache = self.cached_transform_index;
         let saved_bind_group = self.bind_group.clone();
-        let tex_overridden = opts.bind_group.is_some();
+        let tex_overridden = ov.bind_group.is_some();
+        let saved_text_clip = self.text_clip;
 
-        if let Some(c) = opts.color {
+        if let Some(c) = ov.color {
             self.color = c;
         }
         // Some(None)=几何, Some(Some(f))=SDF；外层 None=保持
-        if let Some(feather) = opts.sdf_feather {
+        if let Some(feather) = ov.sdf_feather {
             self.sdf_feather = feather;
         }
-        if let Some(uv) = opts.uv {
+        if let Some(uv) = ov.uv {
             self.uv = uv;
         }
-        if let Some(t) = opts.transform {
+        if let Some(t) = ov.transform {
             self.set_transform(t);
         }
         // Some(None)=白纹理, Some(Some(bg))=绑定；外层 None=保持
-        if let Some(bg) = opts.bind_group {
+        if let Some(bg) = ov.bind_group {
             self.add_texture_segment(self.bind_group.clone());
-            self.bind_group = bg;
+            self.bind_group = bg.clone();
+        }
+        if let Some(clip) = ov.text_clip {
+            self.text_clip = clip;
         }
 
         let color = self.color;
@@ -3582,6 +3672,7 @@ impl DrawBatch {
         self.uv = saved_uv;
         self.transform = saved_transform;
         self.cached_transform_index = saved_xform_cache;
+        self.text_clip = saved_text_clip;
         result
     }
 
@@ -5095,13 +5186,7 @@ mod tests {
         let before = b.color();
         let mut seen: Option<crate::color::Color> = None;
         b.with_override(
-            crate::shapes::ShapeOverride {
-                color: Some(crate::color::Color::new(0.0, 1.0, 0.0, 1.0)),
-                sdf_feather: None,
-                uv: None,
-                transform: None,
-                bind_group: None,
-            },
+            BatchOverride::default().color(crate::color::Color::new(0.0, 1.0, 0.0, 1.0)),
             |_b, c| {
                 seen = Some(c);
             },
@@ -5120,13 +5205,7 @@ mod tests {
         let before = b.color();
         let mut ran = false;
         b.with_override(
-            crate::shapes::ShapeOverride {
-                color: None,
-                sdf_feather: None,
-                uv: None,
-                transform: None,
-                bind_group: None,
-            },
+            BatchOverride::default(),
             |_b, c| {
                 ran = true;
                 assert_eq!(c, before);
@@ -5134,6 +5213,28 @@ mod tests {
         );
         assert!(ran);
         assert_eq!(b.color(), before);
+    }
+
+    #[test]
+    fn with_override_text_clip_and_shared_color() {
+        let mut b = DrawBatch::new();
+        let clip = crate::glyphon::TextBounds { left: 0, top: 0, right: 10, bottom: 10 };
+        let green = crate::color::Color::new(0.0, 1.0, 0.0, 1.0);
+        b.with_override(
+            BatchOverride::default().color(green).text_clip(Some(clip)),
+            |b, c| {
+                assert_eq!(c, green);
+                assert_eq!(b.color(), green);
+                assert_eq!(b.text_clip, Some(clip));
+                // 形状与文字共享 batch.color：闭包内形状与文字 fallback 同色
+                b.text("hi", Pos::new(0.0, 0.0), TextDef::default(), TextOverride::default());
+                // 文字未显式 color，prepare 将用 batch_color (=green) 兜底，此处 entry 仍为 None
+                assert_eq!(b.texts.entries[0].override_().color, None);
+            },
+        );
+        // 退出后恢复
+        assert_eq!(b.text_clip, None);
+        assert_eq!(b.color(), crate::color::Color::new(1.0, 1.0, 1.0, 1.0));
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub mod prelude {
     pub use crate::color::Color;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
+    pub use crate::render::BatchOverride;
     pub use crate::render::DrawBatch;
     pub use crate::render::InheritFromParent;
     pub use crate::render::Pos;
