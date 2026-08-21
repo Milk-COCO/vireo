@@ -100,6 +100,7 @@ pub struct TextContext {
     pub text_atlas: TextAtlas,
     pub text_renderer: TextRenderer,
     pub viewport: Viewport,
+    last_viewport: Option<(u32, u32)>,
     sample_count: u32,
     /// 已 shape 的 Buffer 槽位
     pub(crate) shape_slots: Vec<ShapeCacheSlot>,
@@ -755,6 +756,16 @@ impl TextContext {
         resolved
     }
 
+    pub(crate) fn ensure_viewport(&mut self, queue: &Queue, width: u32, height: u32) {
+        let next = (width, height);
+        if self.last_viewport == Some(next) {
+            return;
+        }
+        self.viewport
+            .update(queue, crate::glyphon::Resolution { width, height });
+        self.last_viewport = Some(next);
+    }
+
 }
 
 impl TextContext {
@@ -796,6 +807,7 @@ impl TextContext {
             text_atlas,
             text_renderer,
             viewport,
+            last_viewport: None,
             sample_count: 1,
             shape_slots: Vec::with_capacity(64),
             shape_map: FxHashMap::default(),
@@ -1652,13 +1664,7 @@ impl TextEntryList {
         let mut text_ctx = gpu.text_ctx.lock().unwrap();
         text_ctx.begin_prepare_pins();
 
-        text_ctx.viewport.update(
-            &gpu.queue,
-            crate::glyphon::Resolution {
-                width: physical_width,
-                height: physical_height,
-            },
-        );
+        text_ctx.ensure_viewport(&gpu.queue, physical_width, physical_height);
 
         /// 文本区域元数据（entry 遍历阶段收集，第二次循环消费）。
         /// `buf` 用 enum 携带 buffer 来源：
