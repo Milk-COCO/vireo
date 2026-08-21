@@ -3524,13 +3524,24 @@ impl DrawBatch {
         self.cached_transform_index = None;
     }
 
-    /// 在临时应用 [`crate::shapes::ShapeOverride`] 后执行 `f`，结束时恢复状态（不写回）。
-    #[allow(dead_code)]
-    pub(crate) fn with_override<R>(
+    /// 在临时应用 [`crate::shapes::ShapeOverride`] 后执行 `f`，结束时自动恢复 batch 画笔状态（不写回）。
+    ///
+    /// 用途：对「一个区域 / 一批绘制」临时套用颜色 / SDF 柔边 / UV / 变换 / 贴图覆盖；
+    /// 闭包内绘制的形状使用覆盖后的状态，闭包返回后 batch 的画笔状态原样还原。
+    /// 若 `opts` 全部为 `None`（空覆盖），直接执行 `f`，省去保存/恢复开销。
+    pub fn with_override<R>(
         &mut self,
         opts: crate::shapes::ShapeOverride,
         f: impl FnOnce(&mut Self, crate::color::Color) -> R,
     ) -> R {
+        if opts.color.is_none()
+            && opts.sdf_feather.is_none()
+            && opts.uv.is_none()
+            && opts.transform.is_none()
+            && opts.bind_group.is_none()
+        {
+            return f(self, self.color);
+        }
         let saved_color = self.color;
         let saved_feather = self.sdf_feather;
         let saved_uv = self.uv;
@@ -5075,6 +5086,54 @@ mod tests {
         b.sdf_feather = None;
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
         assert!(!b.has_sdf);
+    }
+
+    #[test]
+    fn with_override_applies_then_restores() {
+        let mut b = DrawBatch::new();
+        b.set_color(crate::color::Color::new(1.0, 0.0, 0.0, 1.0));
+        let before = b.color();
+        let mut seen: Option<crate::color::Color> = None;
+        b.with_override(
+            crate::shapes::ShapeOverride {
+                color: Some(crate::color::Color::new(0.0, 1.0, 0.0, 1.0)),
+                sdf_feather: None,
+                uv: None,
+                transform: None,
+                bind_group: None,
+            },
+            |_b, c| {
+                seen = Some(c);
+            },
+        );
+        assert_eq!(b.color(), before);
+        assert_eq!(
+            seen,
+            Some(crate::color::Color::new(0.0, 1.0, 0.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn with_override_noop_passthrough() {
+        let mut b = DrawBatch::new();
+        b.set_color(crate::color::Color::new(1.0, 0.0, 0.0, 1.0));
+        let before = b.color();
+        let mut ran = false;
+        b.with_override(
+            crate::shapes::ShapeOverride {
+                color: None,
+                sdf_feather: None,
+                uv: None,
+                transform: None,
+                bind_group: None,
+            },
+            |_b, c| {
+                ran = true;
+                assert_eq!(c, before);
+            },
+        );
+        assert!(ran);
+        assert_eq!(b.color(), before);
     }
 
     #[test]
