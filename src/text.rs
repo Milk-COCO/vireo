@@ -69,6 +69,30 @@ impl ShapeKey {
 
 }
 
+/// 单字符缓存键：栈上分配，命中 0 分配 / 1 哈希，未命中 2 分配 / 2 哈希。
+/// 与整段 [`ShapeKey`] 分离，避免单字符 `to_string()` + 克隆开销。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GlyphKey {
+    ch: char,
+    font_size_bits: u32,
+    max_width_bits: u32,
+    align: u8,
+    attrs: Option<AttrsOwned>,
+}
+
+impl GlyphKey {
+    fn from_char(ch: char, options: &TextDef) -> Self {
+        // resolve_glyph 恒以 max_width=None + Left 落盘，保持与旧 ShapeKey 行为一致
+        Self {
+            ch,
+            font_size_bits: options.font_size.to_bits(),
+            max_width_bits: u32::MAX,
+            align: TextAlign::Left as u8,
+            attrs: options.attrs.clone(),
+        }
+    }
+}
+
 pub(crate) struct ShapeCacheSlot {
     key: ShapeKey,
     buffer: Arc<Buffer>,
@@ -116,7 +140,7 @@ pub struct TextContext {
     shape_max_entries: Option<usize>,
     /// 按字符和完整 shape 样式缓存 resolved glyph 元数据。
     /// 不缓存位图；光栅结果仍由 glyph atlas 管理。默认无 cap/TTL/LRU。
-    glyph_cache: FxHashMap<ShapeKey, Arc<ResolvedGlyphCluster>>,
+    glyph_cache: FxHashMap<GlyphKey, Arc<ResolvedGlyphCluster>>,
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
     stats: ShapeCacheStats,
@@ -728,14 +752,14 @@ impl TextContext {
 
     /// 按需 shape 单个字符并缓存完整 resolved glyph cluster。
     fn resolve_glyph(&mut self, ch: char, options: &TextDef) -> Arc<ResolvedGlyphCluster> {
+        let key = GlyphKey::from_char(ch, options);
+        if let Some(glyph) = self.glyph_cache.get(&key) {
+            return glyph.clone();
+        }
         let mut opts = options.clone();
         opts.max_width = None;
         opts.align = TextAlign::Left;
         let text = ch.to_string();
-        let key = ShapeKey::from_text(&text, &opts);
-        if let Some(glyph) = self.glyph_cache.get(&key) {
-            return glyph.clone();
-        }
         let idx = self.get_or_shape_text(&text, &opts);
         let advance = self.slot_line_width(idx);
         let buffer = &self.shape_slots[idx as usize].buffer;
