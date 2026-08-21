@@ -758,7 +758,7 @@ pub struct VireoWindow {
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
     /// 最近一次 CursorMoved 的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
-    pub(crate) mouse_pos: (f32, f32),
+    pub(crate) mouse_pos: std::cell::Cell<(f32, f32)>,
     /// 最近一次观测到的**物理像素**窗口尺寸（真实来源）。逻辑尺寸 = 物理 ÷
     /// [`Self::layout_scale`] 现算（f64 除法，无截断；`PixelSize` 快照会因 scale
     /// 变化而过期，故不缓存逻辑值）。
@@ -783,6 +783,14 @@ pub struct VireoWindow {
     /// scale 现算，不在快照里缓存（避免 scale 时效问题）。
     configured_layout: std::cell::Cell<(u32, u32, f32, f32)>,
     pub input: InputState,
+    /// 待应用输入事件队列：`render_on_frame` 的 `WinitEvent` 通道 drain 时把输入类事件
+    /// 入队（按 window handle 路由），由 `refresh_input` 批量应用到 `InputState`。
+    /// 这样输入更新权交给用户（可在 `on_frame` 构批次前调 `refresh_input` 拿当帧新鲜输入），
+    /// `draw` 在 `auto_refresh_input` 开启时也自动调一次，用户不必手动重复。
+    pending_input: std::cell::RefCell<Vec<WinitEvent>>,
+    /// 输入自动刷新开关（默认开）：`draw` 在 `auto_refresh_input` 为 true 时自动调
+    /// `refresh_input`；设为 false 后由用户自行在 `on_frame` 内调用以获得当帧零滞后。
+    auto_refresh_input: std::cell::Cell<bool>,
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
     pub init_duration: f64,
     /// 用于向 winit 线程发送窗口操作事件
@@ -903,7 +911,7 @@ impl VireoWindow {
             renderer: std::cell::RefCell::new(renderer),
             inner,
             gpu,
-            mouse_pos: (-1.0, -1.0),
+            mouse_pos: std::cell::Cell::new((-1.0, -1.0)),
             physical_size: std::cell::Cell::new(initial_phys),
             dpi_override: std::cell::Cell::new(dpi_override),
             applied_dpi_override: std::cell::Cell::new(dpi_override),
@@ -917,6 +925,8 @@ impl VireoWindow {
                 dpi_scale,
             )),
             input: InputState::default(),
+            pending_input: std::cell::RefCell::new(Vec::new()),
+            auto_refresh_input: std::cell::Cell::new(true),
             init_duration,
             event_tx,
             cb_tx,
@@ -1071,6 +1081,10 @@ impl VireoWindow {
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
             };
         }
+        // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_frame 内手动调）
+        if self.auto_refresh_input.get() {
+            self.refresh_input();
+        }
         let trace = std::env::var_os("VIREO_DRAW_TRACE").is_some();
         let t_trace = std::time::Instant::now();
         let mut configure_secs = 0.0;
@@ -1129,9 +1143,13 @@ impl VireoWindow {
                 self.pending_override_since.set(None);
             }
 }
-let dpi_override = self.applied_dpi_override.get();
+        // 构图缓存由 `refresh_metrics` 显式提供：此处复用它做 layout_follow 相机推进
+        // （drift 判定与下方 resize 路径一致），避免 draw 内再复制一份尺寸轮询逻辑。
+        // 用户也可在 on_frame 内手动调 `refresh_metrics` 以拿当帧构图新鲜度；漏调则由
+        // 本帧 draw 补一次。
+        self.refresh_metrics();
+        let dpi_override = self.applied_dpi_override.get();
         let new_scale = dpi_override.unwrap_or(sf) as f32;
-        let dpi_scale = sf as f32;
         let mut configured_this_frame = false;
         let mut follow_pending = false;
         {
@@ -1220,8 +1238,8 @@ let dpi_override = self.applied_dpi_override.get();
                 if trace {
                     eprintln!("[draw] follow-layout(drift) {}x{}", size.width, size.height);
                 }
-                self.physical_size.set((size.width, size.height));
-                self.dpi_scale.set(dpi_scale);
+                // 相机（physical_size/dpi_scale）已由上方 `refresh_metrics()` 推进；
+                // 这里只置 follow_pending 标记供下方 acquire 后平滑段使用。
                 follow_pending = true;
             } else {
                 // 不跟随 / 尺寸未漂移：清掉可能残留的虚拟 viewport（配置/稳定路径已由
@@ -1542,17 +1560,17 @@ let dpi_override = self.applied_dpi_override.get();
         self.dpi_scale.set(sf as f32);
     }
 
-    /// 每轮 `on_frame` 前的轻量尺寸同步（P2 最小改造，2026-08-06）：
-    /// 只把逻辑尺寸/缩放字段刷到当前窗口值，让用户构建 batch 时 [`Self::layout_size`]
-    /// 至少反映本轮开始的实际大小。**策略与 `draw` 的 follow 分支一致**——仅当
-    /// `layout_follow` 开启且尺寸相对已配置值漂移时才更新；否则 Cells 保持已配置值
-    ///（几何 camera 也停在已配置布局，两者一致）。0×0 跳过。
-    /// 注意：这仍是本轮开始的快照，`draw()` acquire 后可能 late-poll 更新 camera，
-    /// 两者可以不同（camera 更接近 present 时刻）。
-    fn refresh_metrics(&self) {
+    /// 显式刷新本窗构图缓存（尺寸/`scale`/`metrics`）。
+    ///
+    /// 采 `Window::inner_size()`/`scale_factor()`，`0×0`（最小化）返回 `false`
+    ///（调用方应跳过本窗本帧构图）；否则按 `layout_follow` 与 `RESIZE_DRIFT_EPSILON`
+    /// 推 `physical_size`/`dpi_scale`（与 `draw` 的 follow 策略一致），返回 `true`。
+    /// 不触发 `surface.configure`（`present_mode`/`AA`/`latency` 等重配仍由 `draw` 兑现）。
+    /// `draw` 未调本方法时静默用旧快照；`draw` 内部复用本方法判据，外部显式调用可获同帧新鲜度。
+    pub fn refresh_metrics(&self) -> bool {
         let size = self.inner.inner_size();
         if size.width == 0 || size.height == 0 {
-            return;
+            return false;
         }
         let sf = self.inner.scale_factor();
         let dpi_override = self.applied_dpi_override.get();
@@ -1569,6 +1587,105 @@ let dpi_override = self.applied_dpi_override.get();
         if self.layout_follow.get() && drift {
             self.physical_size.set((size.width, size.height));
             self.dpi_scale.set(dpi_scale);
+        }
+        true
+    }
+
+    /// 显式拉取本窗待处理输入（drain 通道中排队的 `WinitEvent` 输入事件，应用到 `InputState`）。
+    ///
+    /// 覆盖上次 `refresh_input` 到本次调用之间 winit 线程攒下的全部输入：按键/鼠标按下释放
+    /// 的净结果、滚轮增量（`take_scroll` 仍返回区间累加）、`mouse_pos`/`focus`/`cursor_inside`
+    /// 最新值。`0×0` 等窗口状态不影响输入，恒返回是否有事件被应用。
+    ///
+    /// `draw` 在 `auto_refresh_input` 开启（默认）时自动调一次，用户不必手动重复；
+    /// 设为 `false` 后由用户在 `on_frame` 内构批次前调用，可获得当帧零滞后输入。
+    /// 漏调则这段事件在下次 `refresh_input` 才结算（与 `refresh_metrics` 同策略）。
+    pub fn refresh_input(&self) -> bool {
+        let mut q = self.pending_input.borrow_mut();
+        if q.is_empty() {
+            return false;
+        }
+        for ev in q.drain(..) {
+            self.apply_input_event(ev);
+        }
+        true
+    }
+
+    /// `draw` 内自动输入刷新的开关（默认开）。见 [`Self::refresh_input`]。
+    pub fn set_auto_refresh_input(&self, enabled: bool) {
+        self.auto_refresh_input.set(enabled);
+    }
+
+    /// 当前是否启用 `draw` 内自动输入刷新。见 [`Self::refresh_input`]。
+    pub fn auto_refresh_input(&self) -> bool {
+        self.auto_refresh_input.get()
+    }
+
+    /// 把单个输入事件应用到 `InputState`（与 `pending_input` 队列的语义一致）。
+    fn apply_input_event(&self, ev: WinitEvent) {
+        match ev {
+            WinitEvent::CursorMoved { x, y, .. } => {
+                self.mouse_pos.set((x as f32, y as f32));
+            }
+            WinitEvent::KeyboardInput { event, .. } => {
+                let is_pressed = event.state.is_pressed();
+                let repeat = event.repeat;
+                if is_pressed && !repeat {
+                    self.input.keys_down.borrow_mut().insert(event.key);
+                } else if !is_pressed {
+                    self.input.keys_down.borrow_mut().remove(&event.key);
+                }
+            }
+            WinitEvent::MouseInput { button, pressed, .. } => {
+                if pressed {
+                    self.input.mouse_buttons_down.borrow_mut().insert(button);
+                } else {
+                    self.input.mouse_buttons_down.borrow_mut().remove(&button);
+                }
+            }
+            WinitEvent::MouseWheel { delta, .. } => {
+                let mut acc = self.input.scroll_delta.borrow_mut();
+                match &delta {
+                    crate::input::ScrollDelta::Line { x, y } => {
+                        acc.line.0 += x;
+                        acc.line.1 += y;
+                    }
+                    crate::input::ScrollDelta::Pixel { x, y } => {
+                        acc.pixel.0 += x;
+                        acc.pixel.1 += y;
+                    }
+                }
+            }
+            WinitEvent::ModifiersChanged { modifiers, .. } => {
+                *self.input.modifiers.borrow_mut() = modifiers;
+            }
+            WinitEvent::Focused { focused, .. } => {
+                let was_focused = std::mem::replace(&mut *self.input.focused.borrow_mut(), focused);
+                if !focused && was_focused {
+                    self.input.keys_down.borrow_mut().clear();
+                    self.input.mouse_buttons_down.borrow_mut().clear();
+                }
+            }
+            WinitEvent::CursorEntered { .. } => {
+                *self.input.cursor_inside.borrow_mut() = true;
+            }
+            WinitEvent::CursorLeft { .. } => {
+                *self.input.cursor_inside.borrow_mut() = false;
+            }
+            WinitEvent::Touch { event, .. } => {
+                let sf = self.applied_dpi_override.get().unwrap_or(self.inner.scale_factor());
+                let tx = (event.x as f64 / sf) as f32;
+                let ty = (event.y as f64 / sf) as f32;
+                match event.phase {
+                    crate::input::TouchPhase::Started | crate::input::TouchPhase::Moved => {
+                        self.input.touches.borrow_mut().insert(event.id, (tx, ty, event.force));
+                    }
+                    _ => {
+                        self.input.touches.borrow_mut().remove(&event.id);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1613,7 +1730,8 @@ let dpi_override = self.applied_dpi_override.get();
     /// **不阻塞**：读 vireo 内部缓存（由事件 / 渲染线程轮询锚点更新），任何线程可调，
     /// 无 winit 跨线程 hop（macOS 亦如此）。
     pub fn mouse_pos(&self) -> PixelPos {
-        to_pixel_pos(self.mouse_pos.0 as f64, self.mouse_pos.1 as f64, self.layout_scale())
+        let mp = self.mouse_pos.get();
+        to_pixel_pos(mp.0 as f64, mp.1 as f64, self.layout_scale())
     }
 
     /// 获取当前投影矩阵（逻辑像素）
@@ -3017,88 +3135,56 @@ where F: FnMut(&App) -> bool + Send + 'static
                 }
 
                 Ok(WinitEvent::CursorMoved { handle, x, y }) => {
-                    if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        win.mouse_pos = (x as f32, y as f32);
+                    if let Some(Some(win)) = app.windows.get(handle) {
+                        win.pending_input.borrow_mut().push(WinitEvent::CursorMoved { handle, x, y });
                     }
                 }
 
                 Ok(WinitEvent::KeyboardInput { handle, event }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        let is_pressed = event.state.is_pressed();
-                        let repeat = event.repeat;
-                        if is_pressed && !repeat {
-                            win.input.keys_down.borrow_mut().insert(event.key);
-                        } else if !is_pressed {
-                            win.input.keys_down.borrow_mut().remove(&event.key);
-                        }
+                        win.pending_input.borrow_mut().push(WinitEvent::KeyboardInput { handle, event });
                     }
                 }
 
                 Ok(WinitEvent::MouseInput { handle, button, pressed }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        if pressed {
-                            win.input.mouse_buttons_down.borrow_mut().insert(button);
-                        } else {
-                            win.input.mouse_buttons_down.borrow_mut().remove(&button);
-                        }
+                        win.pending_input.borrow_mut().push(WinitEvent::MouseInput { handle, button, pressed });
                     }
                 }
 
                 Ok(WinitEvent::MouseWheel { handle, delta }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        let mut acc = win.input.scroll_delta.borrow_mut();
-                        match &delta {
-                            crate::input::ScrollDelta::Line { x, y } => {
-                                acc.line.0 += x; acc.line.1 += y;
-                            }
-                            crate::input::ScrollDelta::Pixel { x, y } => {
-                                acc.pixel.0 += x; acc.pixel.1 += y;
-                            }
-                        }
+                        win.pending_input.borrow_mut().push(WinitEvent::MouseWheel { handle, delta });
                     }
                 }
 
                 Ok(WinitEvent::ModifiersChanged { handle, modifiers }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        *win.input.modifiers.borrow_mut() = modifiers;
+                        win.pending_input.borrow_mut().push(WinitEvent::ModifiersChanged { handle, modifiers });
                     }
                 }
 
                 Ok(WinitEvent::Focused { handle, focused }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        let was_focused = std::mem::replace(&mut *win.input.focused.borrow_mut(), focused);
-                        if !focused && was_focused {
-                            win.input.keys_down.borrow_mut().clear();
-                            win.input.mouse_buttons_down.borrow_mut().clear();
-                        }
+                        win.pending_input.borrow_mut().push(WinitEvent::Focused { handle, focused });
                     }
                 }
 
                 Ok(WinitEvent::CursorEntered { handle }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        *win.input.cursor_inside.borrow_mut() = true;
+                        win.pending_input.borrow_mut().push(WinitEvent::CursorEntered { handle });
                     }
                 }
 
                 Ok(WinitEvent::CursorLeft { handle }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        *win.input.cursor_inside.borrow_mut() = false;
+                        win.pending_input.borrow_mut().push(WinitEvent::CursorLeft { handle });
                     }
                 }
 
                 Ok(WinitEvent::Touch { handle, event }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
-                        let sf = win.applied_dpi_override.get().unwrap_or(win.inner.scale_factor());
-                        let tx = (event.x as f64 / sf) as f32;
-                        let ty = (event.y as f64 / sf) as f32;
-                        match event.phase {
-                            crate::input::TouchPhase::Started | crate::input::TouchPhase::Moved => {
-                                win.input.touches.borrow_mut().insert(event.id, (tx, ty, event.force));
-                            }
-                            _ => {
-                                win.input.touches.borrow_mut().remove(&event.id);
-                            }
-                        }
+                        win.pending_input.borrow_mut().push(WinitEvent::Touch { handle, event });
                     }
                 }
 
@@ -3267,7 +3353,6 @@ where F: FnMut(&App) -> bool + Send + 'static
         if created_windows >= expected_windows {
             for win in app.windows.iter().flatten() {
                 win.last_draw_outcome.set(None);
-                win.refresh_metrics();
             }
             if !(on_frame)(&app) {
                 // 用户请求退出：通知 winit 线程 exit，本线程返回。
