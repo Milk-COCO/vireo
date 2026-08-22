@@ -879,6 +879,11 @@ pub struct TextOverride {
     /// `Some` = 在 batch 局部空间上叠加变换（右乘 batch 变换），不污染 batch 状态。
     /// `None` = 保持 batch 当前变换。
     pub transform: Option<crate::render::Transform>,
+    /// `Some` = 覆盖 batch.uv（文字 base_uv）；`None` = 保持
+    pub uv: Option<crate::render::UvRect>,
+    /// `Some(None)` = 白贴图；`Some(Some(bg))` = 指定文字 base 纹理；`None` = 保持
+    /// 与 `ShapeOverride::bind_group` 共享语义（`BatchOverride` 去重后同一字段）。
+    pub bind_group: Option<Option<wgpu::BindGroup>>,
 }
 
 impl TextOverride {
@@ -888,7 +893,7 @@ impl TextOverride {
 
     /// 仅覆盖 color 的快捷构造。
     pub fn from_color(c: Color) -> Self {
-        Self { color: Some(c), clip: None, transform: None }
+        Self { color: Some(c), clip: None, transform: None, uv: None, bind_group: None }
     }
 
     pub fn color(mut self, c: Color) -> Self {
@@ -910,6 +915,31 @@ impl TextOverride {
     /// 在 batch 局部空间上叠加变换（不覆盖整个 batch transform，仅对本次绘制生效）。
     pub fn transform(mut self, t: crate::render::Transform) -> Self {
         self.transform = Some(t);
+        self
+    }
+
+    pub fn uv(mut self, uv: crate::render::UvRect) -> Self {
+        self.uv = Some(uv);
+        self
+    }
+
+    pub fn uv_rect(mut self, u0: f32, v0: f32, u1: f32, v1: f32) -> Self {
+        self.uv = Some(crate::render::UvRect { u0, v0, u1, v1 });
+        self
+    }
+
+    pub fn texture(mut self, tex: &crate::texture::Texture) -> Self {
+        self.bind_group = Some(Some(tex.bind_group.clone()));
+        self
+    }
+
+    pub fn clear_texture(mut self) -> Self {
+        self.bind_group = Some(None);
+        self
+    }
+
+    pub fn bind_group(mut self, bg: Option<wgpu::BindGroup>) -> Self {
+        self.bind_group = Some(bg);
         self
     }
 }
@@ -1326,6 +1356,7 @@ pub struct TextTextureState {
     pub(crate) generation: u64,
     pub(crate) view: Option<wgpu::TextureView>,
     pub(crate) uv: crate::render::UvRect,
+    pub(crate) bind_group: Option<wgpu::BindGroup>,
 }
 
 /// 一次 `prepare_texts` 产出的连续文字渲染段（内部用）。
@@ -1336,6 +1367,7 @@ pub(crate) struct PreparedTextSegment {
     pub vertex_start: u32,
     pub vertex_count: u32,
     pub texture_view: Option<wgpu::TextureView>,
+    pub bind_group: Option<wgpu::BindGroup>,
 }
 
 impl Default for TextTextureState {
@@ -1344,6 +1376,7 @@ impl Default for TextTextureState {
             generation: 0,
             view: None,
             uv: crate::render::UvRect::default(),
+            bind_group: None,
         }
     }
 }
@@ -1356,7 +1389,7 @@ impl TextTextureState {
 
     /// 是否绑定了 batch 基础贴图（`None` = 白贴图路径）。
     pub fn has_texture(&self) -> bool {
-        self.view.is_some()
+        self.view.is_some() || self.bind_group.is_some()
     }
 
     /// 捕获时的 batch UV 子区域。
@@ -1516,7 +1549,7 @@ impl TextEntry {
 #[derive(Clone)]
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
-    texture_state: TextTextureState,
+    pub(crate) texture_state: TextTextureState,
 }
 
 impl TextEntryList {
@@ -1545,6 +1578,15 @@ impl TextEntryList {
     pub(crate) fn set_texture_state(&mut self, view: Option<wgpu::TextureView>) {
         self.texture_state.generation = self.texture_state.generation.wrapping_add(1);
         self.texture_state.view = view;
+        self.texture_state.bind_group = None;
+    }
+
+    /// 更新当前文字画笔的 bind group（`TextOverride` 的 `bind_group` 共享位）。
+    /// 递增 `generation`；之后 `push*` 的条目会冻结新状态。
+    pub(crate) fn set_bind_group_state(&mut self, bg: Option<wgpu::BindGroup>) {
+        self.texture_state.generation = self.texture_state.generation.wrapping_add(1);
+        self.texture_state.bind_group = bg;
+        self.texture_state.view = None;
     }
 
     /// 更新当前文字画笔的 UV 子区域（由 [`DrawBatch::set_uv`] / [`DrawBatch::clear_uv`] 调用）。
@@ -1812,9 +1854,26 @@ impl TextEntryList {
         // 不再需要平行 stable_bufs vec + hi 计数器。
 
         for entry in &self.entries {
-            let texture_state = entry.texture_state().clone();
-            let uv = texture_state.uv;
-            let batch_base_uv = [uv.u0, uv.v0, uv.u1, uv.v1];
+            let ov = entry.override_();
+            let mut texture_state = entry.texture_state().clone();
+            // uv / bind_group 覆盖：与 ShapeOverride 共享 semantics
+            let effective_uv = ov.uv.unwrap_or(texture_state.uv);
+            let batch_base_uv = [effective_uv.u0, effective_uv.v0, effective_uv.u1, effective_uv.v1];
+            // bind_group 覆盖：按覆盖后的状态分段
+            if let Some(bg_opt) = &ov.bind_group {
+                texture_state.bind_group = bg_opt.clone();
+                texture_state.view = None;
+                let bg_hash = bg_opt.as_ref().map(|bg| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = rustc_hash::FxHasher::default();
+                    bg.hash(&mut h);
+                    h.finish()
+                }).unwrap_or(0x9E3779B97F4A7C15);
+                texture_state.generation = texture_state.generation.wrapping_add(1).wrapping_add(bg_hash);
+                texture_state.uv = effective_uv;
+            } else if ov.uv.is_some() {
+                texture_state.uv = effective_uv;
+            }
             // color: override > batch_color
             let color_rgb = entry.override_().color.unwrap_or(batch_color);
             let color = crate::glyphon::Color::rgba(
@@ -2103,6 +2162,7 @@ impl TextEntryList {
                         vertex_start,
                         vertex_count,
                         texture_view: metas[first].texture_state.view.clone(),
+                        bind_group: metas[first].texture_state.bind_group.clone(),
                     });
                 }
                 first = end;

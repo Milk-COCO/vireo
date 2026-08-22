@@ -86,7 +86,7 @@ impl BatchOverride {
         }
         self
     }
-    /// 用 `TextOverride` 的 `Some` 字段覆盖（`color/transform` 为共享位，`clip` 为独有位）。
+    /// 用 `TextOverride` 的 `Some` 字段覆盖（`color/transform/uv/bind_group` 为共享位，`clip` 为独有位）。
     pub fn text(mut self, t: crate::text::TextOverride) -> Self {
         if t.color.is_some() {
             self.color = t.color;
@@ -96,6 +96,12 @@ impl BatchOverride {
         }
         if t.transform.is_some() {
             self.transform = t.transform;
+        }
+        if t.uv.is_some() {
+            self.uv = t.uv;
+        }
+        if t.bind_group.is_some() {
+            self.bind_group = t.bind_group;
         }
         self
     }
@@ -1573,14 +1579,21 @@ impl Renderer {
                     let text_ctx = self.gpu.text_ctx.lock().unwrap();
                     event_infos[ei].text = prepared
                         .into_iter()
-                        .map(|segment| TextRenderSegment {
-                            vertex_start: segment.vertex_start,
-                            vertex_count: segment.vertex_count,
-                            bind_group: segment.texture_view.as_ref().map(|view| {
-                                text_ctx
-                                    .text_atlas
-                                    .bind_group_for_base_texture(&self.gpu.device, view)
-                            }),
+                        .map(|segment| {
+                            let bind_group = if let Some(bg) = segment.bind_group.clone() {
+                                Some(bg)
+                            } else {
+                                segment.texture_view.as_ref().map(|view| {
+                                    text_ctx
+                                        .text_atlas
+                                        .bind_group_for_base_texture(&self.gpu.device, view)
+                                })
+                            };
+                            TextRenderSegment {
+                                vertex_start: segment.vertex_start,
+                                vertex_count: segment.vertex_count,
+                                bind_group,
+                            }
                         })
                         .collect();
                     drop(text_ctx);
@@ -3635,7 +3648,9 @@ impl DrawBatch {
         let saved_xform_cache = self.cached_transform_index;
         let saved_bind_group = self.bind_group.clone();
         let tex_overridden = ov.bind_group.is_some();
+        let uv_overridden = ov.uv.is_some();
         let saved_text_clip = self.text_clip;
+        let saved_text_state = self.texts.texture_state.clone();
 
         if let Some(c) = ov.color {
             self.color = c;
@@ -3646,6 +3661,7 @@ impl DrawBatch {
         }
         if let Some(uv) = ov.uv {
             self.uv = uv;
+            self.texts.set_uv_state(uv);
         }
         if let Some(t) = ov.transform {
             self.set_transform(t);
@@ -3653,7 +3669,13 @@ impl DrawBatch {
         // Some(None)=白纹理, Some(Some(bg))=绑定；外层 None=保持
         if let Some(bg) = ov.bind_group {
             self.add_texture_segment(self.bind_group.clone());
+            self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_geo_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
             self.bind_group = bg.clone();
+            // 同步文字 batch 贴图：共享 uv/bind_group
+            self.texts.set_bind_group_state(bg.clone());
+            self.text_texture_view = None;
         }
         if let Some(clip) = ov.text_clip {
             self.text_clip = clip;
@@ -3665,7 +3687,16 @@ impl DrawBatch {
         if tex_overridden {
             // 含 clear（None）：必须封段，否则后续/本段顶点会落到 trailing 用恢复后的贴图
             self.add_texture_segment(self.bind_group.clone());
+            self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_geo_instance_texture_segment(self.bind_group.clone());
+            self.advance_shape_texture_generation();
             self.bind_group = saved_bind_group;
+            self.texts.texture_state = saved_text_state.clone();
+            // 恢复后需 bump generation 以分离后续文字段
+            self.texts.texture_state.generation = self.texts.texture_state.generation.wrapping_add(1);
+        } else if uv_overridden {
+            self.texts.texture_state = saved_text_state.clone();
+            self.texts.texture_state.generation = self.texts.texture_state.generation.wrapping_add(1);
         }
         self.color = saved_color;
         self.sdf_feather = saved_feather;
@@ -4339,9 +4370,9 @@ impl DrawBatch {
         self.add_instance_texture_segment(self.bind_group.clone());
         self.add_geo_instance_texture_segment(self.bind_group.clone());
         self.advance_shape_texture_generation();
-        self.bind_group = bg;
+        self.bind_group = bg.clone();
         self.text_texture_view = None;
-        self.texts.set_texture_state(None);
+        self.texts.set_bind_group_state(bg);
     }
 
     /// 设置 UV 子区域：后续 **shape** 顶点 UV 与之后 **text** 入队时冻结的
@@ -5235,6 +5266,32 @@ mod tests {
         // 退出后恢复
         assert_eq!(b.text_clip, None);
         assert_eq!(b.color(), crate::color::Color::new(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn text_override_has_uv_and_bind_group_shared() {
+        let uv = UvRect { u0: 0.1, v0: 0.2, u1: 0.8, v1: 0.9 };
+        let ov = TextOverride::default().uv(uv).clear_texture().color(RED);
+        assert_eq!(ov.uv, Some(uv));
+        assert_eq!(ov.bind_group, Some(None));
+        assert_eq!(ov.color, Some(RED));
+        let bo = BatchOverride::default().text(ov);
+        assert_eq!(bo.uv, Some(uv));
+        assert_eq!(bo.bind_group, Some(None));
+        assert_eq!(bo.color, Some(RED));
+    }
+
+    #[test]
+    fn with_override_uv_and_text_texture_restores() {
+        let mut b = DrawBatch::new();
+        let uv0 = b.uv();
+        let uv1 = UvRect { u0: 0.1, v0: 0.2, u1: 0.3, v1: 0.4 };
+        b.with_override(BatchOverride::default().uv(uv1), |b, _| {
+            assert_eq!(b.uv(), uv1);
+            assert_eq!(b.texts.texture_state.uv, uv1);
+        });
+        assert_eq!(b.uv(), uv0);
+        assert_eq!(b.texts.texture_state.uv, uv0);
     }
 
     #[test]

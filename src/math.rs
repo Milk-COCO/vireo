@@ -265,7 +265,7 @@ pub(crate) fn seed_identity_transform_table(table: &mut Vec<f32>, map: &mut FxHa
 }
 
 /// 纹理坐标子区域，控制形状内部 UV 映射范围。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UvRect {
     pub u0: f32, pub v0: f32,
     pub u1: f32, pub v1: f32,
