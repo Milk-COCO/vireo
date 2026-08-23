@@ -322,7 +322,7 @@ fn set_overlay_icons(hwnd: isize, icons: Vec<isize>) {
 }
 
 /// 销毁窗口此前的缩略图按钮 HICON。
-fn drop_thumbar_icons(hwnd: isize) {
+pub(crate) fn drop_thumbar_icons(hwnd: isize) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     if let Some(icons) = w.get_mut(&hwnd) {
         for icon in icons.thumb_bar.drain(..) {
@@ -332,13 +332,17 @@ fn drop_thumbar_icons(hwnd: isize) {
 }
 
 /// 销毁窗口此前的 overlay HICON。
-fn drop_overlay_icons(hwnd: isize) {
+pub(crate) fn drop_overlay_icons(hwnd: isize) {
     let mut w = WINDOW_ICONS.lock().unwrap();
     if let Some(icons) = w.get_mut(&hwnd) {
         for icon in icons.overlay.drain(..) {
             unsafe { DestroyIcon(icon as HICON) };
         }
     }
+}
+
+pub(crate) fn remove_window_icons_entry(hwnd: isize) {
+    WINDOW_ICONS.lock().unwrap().remove(&hwnd);
 }
 
 // WVR_HREDRAW(0x0100) | WVR_VREDRAW(0x0200)，windows-sys 0.52.0 未定义。
@@ -389,7 +393,7 @@ pub(crate) fn set_thumbar_callback(hwnd: isize, cb: Box<dyn FnMut(u32)>) {
 }
 
 /// 卸载窗口的全部缩略图点击回调（`set_thumbar_buttons(None)` 时调用）。
-fn clear_thumbar_callback(hwnd: isize) {
+pub(crate) fn clear_thumbar_callback(hwnd: isize) {
     let mut map = THUMB_CALLBACKS.lock().unwrap();
     if map.remove(&hwnd).is_some() {
         unsafe {
@@ -758,6 +762,10 @@ static NC_STATES: LazyLock<Mutex<HashMap<isize, NcState>>> =
 /// 扰动 → 逻辑宽度又变 → 再重发」的自激环，松手后残留约 1 秒抽搐（死区
 /// `RESIZE_DRIFT_EPSILON` 无法吸收，因为扰动每步都在重置计时器）。
 pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
+    // 避免已销毁或被复用的 HWND 僵尸更新
+    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) } == 0 {
+        return;
+    }
     let mut states = NC_STATES.lock().unwrap();
     let state = states.entry(hwnd as isize).or_insert_with(|| NcState {
         regions: Vec::new(),

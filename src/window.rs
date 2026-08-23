@@ -2346,11 +2346,16 @@ impl App {
                 if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
                     if let Some(h) = hook_opt.take() { h(); }
                 }
-                // 清理 NC 状态表，避免 hwnd 被系统复用后串扰到新窗口。
+                // 清理 NC / 任务栏状态表，避免 hwnd 被系统复用后串扰到新窗口。
                 #[cfg(target_os = "windows")]
                 if let Some(&hwnd) = self.hwnds.get(handle) {
                     if hwnd != 0 {
                         crate::platform::windows::nc_remove(hwnd);
+                        crate::platform::windows::drop_thumbar_icons(hwnd);
+                        crate::platform::windows::drop_overlay_icons(hwnd);
+                        crate::platform::windows::clear_thumbar_callback(hwnd);
+                        // 清理 WINDOW_ICONS 空壳，避免 GDI 句柄泄漏
+                        crate::platform::windows::remove_window_icons_entry(hwnd);
                     }
                 }
                 // SurfaceTexture 全部由渲染线程在 draw() 内 acquire→present。
