@@ -1737,6 +1737,17 @@ mod tests {
     }
 
     #[test]
+    fn negative_radius_and_size_skipped() {
+        let mut batch = test_batch();
+        draw_circle(&mut batch, Pos::new(0.0, 0.0), -5.0, Some(RED));
+        draw_ellipse(&mut batch, Pos::new(0.0, 0.0), -3.0, 5.0, Some(RED));
+        draw_rectangle(&mut batch, Pos::new(0.0, 0.0), -10.0, 10.0, Some(RED));
+        draw_arc(&mut batch, Pos::new(0.0, 0.0), -5.0, 0.0, 1.0, Some(RED));
+        assert!(batch.instances.is_empty());
+        assert!(batch.geo_instances.is_empty());
+    }
+
+    #[test]
     fn multiple_shapes_in_one_batch() {
         let mut batch = test_batch();
         batch.sdf_feather = Some(0.0);

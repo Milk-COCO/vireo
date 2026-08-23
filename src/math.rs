@@ -289,3 +289,23 @@ impl UvRect {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn affine_rect_bounds_rot45() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let c = std::f32::consts::FRAC_PI_4.cos();
+        let s = std::f32::consts::FRAC_PI_4.sin();
+        let b = affine_rect_bounds(&r, [c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]);
+        assert!((b.w - 141.42).abs() < 0.5);
+        assert!((b.h - 141.42).abs() < 0.5);
+    }
+    #[test]
+    fn transform_key_symmetric_distinct() {
+        let k1 = transform_key([1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [10.0, 20.0, 1.0]);
+        let k2 = transform_key([2.0, 1.0, 0.0], [1.0, 2.0, 0.0], [20.0, 10.0, 1.0]);
+        assert_ne!(k1, k2);
+    }
+}

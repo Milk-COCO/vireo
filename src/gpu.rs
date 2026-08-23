@@ -2039,6 +2039,17 @@ mod custom_material_tests {
     }
 
     #[test]
+    fn material_pipeline_key_no_overlap_sample_and_layout() {
+        // 旧 bug: layout<<6 与 sample<<4 重叠，sample=4/Mesh 键 == sample=1/Sdf
+        let mesh4 = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let sdf1 = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_ne!(mesh4, sdf1);
+        let geo8 = material_pipeline_key(MaterialTarget::Shape, 8, false, false, false, 0, ShapeVertexLayout::GeoInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mesh1 = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_ne!(geo8, mesh1);
+    }
+
+    #[test]
     fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
         assert!(default_shape_vertex_wgsl(true).contains("@interpolate(linear, sample)"));
         assert!(!default_shape_vertex_wgsl(false).contains("@interpolate(linear, sample)"));
