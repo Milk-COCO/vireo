@@ -41,81 +41,9 @@ const SHAPE_GC_INTERVAL: Duration = Duration::from_millis(250);
 /// 空闲 Buffer 池上限。
 const BUFFER_POOL_CAP: usize = 128;
 
-/// 影响 layout/shape 的键（不含 x/y/color/clip/transform）。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ShapeKey {
-    text: String,
-    font_size_bits: u32,
-    max_width_bits: u32,
-    align: u8,
-    /// None = 默认 Attrs
-    attrs: Option<AttrsOwned>,
-}
-
-impl ShapeKey {
-    fn from_text(text: &str, options: &TextDef) -> Self {
-        let max_width_bits = options
-            .max_width
-            .map(|w| w.to_bits())
-            .unwrap_or(u32::MAX);
-        Self {
-            text: text.to_string(),
-            font_size_bits: options.font_size.to_bits(),
-            max_width_bits,
-            align: options.align as u8,
-            attrs: options.attrs.clone(),
-        }
-    }
-
-}
-
-/// 单字符缓存键：栈上分配，命中 0 分配 / 1 哈希，未命中 2 分配 / 2 哈希。
-/// 与整段 [`ShapeKey`] 分离，避免单字符 `to_string()` + 克隆开销。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct GlyphKey {
-    ch: char,
-    font_size_bits: u32,
-    max_width_bits: u32,
-    align: u8,
-    attrs: Option<AttrsOwned>,
-}
-
-impl GlyphKey {
-    fn from_char(ch: char, options: &TextDef) -> Self {
-        // resolve_glyph 恒以 max_width=None + Left 落盘，保持与旧 ShapeKey 行为一致
-        Self {
-            ch,
-            font_size_bits: options.font_size.to_bits(),
-            max_width_bits: u32::MAX,
-            align: TextAlign::Left as u8,
-            attrs: options.attrs.clone(),
-        }
-    }
-}
-
-pub(crate) struct ShapeCacheSlot {
-    key: ShapeKey,
-    buffer: Arc<Buffer>,
-    line_width: f32,
-    /// [`StableText`] 活跃标记。
-    /// - `None`：未被 StableText 使用，可正常淘汰。
-    /// - `Some(arc)`：曾/正被 StableText 使用。`Arc::strong_count > 1` 表示还有活的 StableText；
-    ///   等于 1 表示所有 StableText 均已 drop（死标记），下次扫描会清掉。
-    liveness: Option<Arc<()>>,
-    last_used: Instant,
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-pub struct ShapeCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    /// 自动 GC 调用次数（TTL 扫描）
-    pub gc_runs: u64,
-    /// 最近一次 GC 耗时（微秒）
-    pub last_gc_us: u64,
-    /// 累计 GC 耗时（微秒）
-    pub total_gc_us: u64,
-}
+mod cache;
+pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
+pub use cache::ShapeCacheStats;
 
 pub struct TextContext {
     pub font_system: FontSystem,
