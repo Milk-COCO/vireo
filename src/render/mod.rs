@@ -8,21 +8,19 @@ use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
 pub use crate::math::{Pos, Rect, Transform, UvRect};
-use crate::math::{
-    affine_rect_bounds, left_mul_view_table, mul_affine_cols, seed_identity_transform_table,
-    transform_key, IDENTITY_TRANSFORM_ROW,
-};
+use crate::math::{left_mul_view_table, IDENTITY_TRANSFORM_ROW};
 use crate::gpu::{GpuContext, GeoInstance, GeoVertex, ShapeInstance};
 use crate::gpu::MaterialTarget;
 use crate::material::Material;
-use crate::area::{effective_area, Area, AreaGeom, AreaStencilOp};
+use crate::area::{Area, AreaGeom, AreaStencilOp, effective_area};
 
 mod batch;
+mod cull;
 pub use batch::{DrawBatch, InheritFromParent};
 pub(crate) use batch::{
     BatchShapeCommand, EdgeTemplate, EdgeTemplateKind, InstanceTextureSegment, TextureSegment,
-    compute_subtree_aabb,
 };
+pub(crate) use cull::{compute_subtree_aabb, prepare_culling, viewport_for_culling, AabbMap, ViewMap};
 
 /// CPU 真实数据分布（诊断用）。
 ///
@@ -403,8 +401,8 @@ pub struct Renderer {
     scratch_transforms: RefCell<Vec<f32>>,
     scratch_poly_edges: RefCell<Vec<f32>>,
     scratch_event_infos: RefCell<Vec<EventInfo>>,
-    scratch_aabb_map: RefCell<FxHashMap<usize, Option<Rect>>>,
-    scratch_view_map: RefCell<FxHashMap<usize, Transform>>,
+    scratch_aabb_map: RefCell<AabbMap>,
+    scratch_view_map: RefCell<ViewMap>,
     scratch_view_table: RefCell<Vec<f32>>,
     scratch_ref_stack: RefCell<Vec<u32>>,
     scratch_batch_transform_bases: RefCell<Vec<u32>>,
@@ -653,39 +651,15 @@ impl Renderer {
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
         // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
         // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
-        let viewport = Rect::new(0.0, 0.0, self.logical_width, self.logical_height);
-
-        // Pass 1: bottom-up 计算子树 AABB（供 culling 用）
-        {
-            let mut aabb_map = self.scratch_aabb_map.borrow_mut();
-            aabb_map.clear();
-            for b in batches {
-                compute_subtree_aabb(b, &mut aabb_map, &Transform::IDENTITY);
-            }
-        }
-
-        // Pass 2: flatten with culling
         let mut events: Vec<DrawEvent> = Vec::new();
-        let mut uses_stencil = false;
-        {
-            let aabb_map = self.scratch_aabb_map.borrow();
-            let mut view_map = self.scratch_view_map.borrow_mut();
-            view_map.clear();
-            for b in batches {
-                let event_start = events.len();
-                b.flatten_events(
-                    &mut events,
-                    0,
-                    Some(viewport),
-                    &aabb_map,
-                    &Transform::IDENTITY,
-                    &mut view_map,
-                );
-                uses_stencil |= events[event_start..]
-                    .iter()
-                    .any(|ev| matches!(ev, DrawEvent::StencilPop | DrawEvent::AreaOp { .. }));
-            }
-        }
+        let (_viewport, uses_stencil) = prepare_culling(
+            batches,
+            self.logical_width,
+            self.logical_height,
+            &self.scratch_aabb_map,
+            &self.scratch_view_map,
+            &mut events,
+        );
 
         let has_content = clear_color.is_some()
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.texts.entries.is_empty()));

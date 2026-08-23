@@ -4,8 +4,8 @@ use rustc_hash::FxHashMap;
 use crate::area::{effective_area, Area, AreaGeom};
 use crate::gpu::{GeoInstance, GeoVertex, ShapeInstance, Vertex};
 use crate::math::{
-    affine_rect_bounds, left_mul_view_table, mul_affine_cols, seed_identity_transform_table,
-    transform_key, Pos, Rect, Transform, UvRect, IDENTITY_TRANSFORM_ROW,
+    affine_rect_bounds, mul_affine_cols, seed_identity_transform_table, transform_key, Pos,
+    Rect, Transform, UvRect,
 };
 use crate::material::Material;
 use crate::text::{TextDef, TextEntryList};
@@ -244,36 +244,6 @@ impl InheritFromParent {
     pub fn any(self) -> bool {
         self.transform || self.color || self.sdf_feather || self.uv
     }
-}
-
-/// Bottom-up 计算 batch 整棵子树的 AABB（含子顶点），存入 map 供 culling 使用。
-///
-/// `view` 是祖先累计视图：本 batch 自身顶点先按其世界 AABB 计算，再按有效视图
-/// （`view × self.view`）仿射到**视图空间**后并入。子树递归传 `eff_view`，因此
-/// 存储的 AABB 已统一在视图空间，flatten 时 map 命中项**不再**重复左乘视图。
-pub(crate) fn compute_subtree_aabb(
-    batch: &DrawBatch,
-    map: &mut FxHashMap<usize, Option<Rect>>,
-    view: &Transform,
-) -> Option<Rect> {
-    let key = batch as *const DrawBatch as *const () as usize;
-    let eff_view = view.then(&batch.view);
-    let own = batch.compute_own_world_aabb().map(|b| {
-        let (v0, v1, v2) = eff_view.to_cols();
-        affine_rect_bounds(&b, v0, v1, v2)
-    });
-    let mut combined = own;
-    for child in &batch.children {
-        let ca = compute_subtree_aabb(child, map, &eff_view);
-        if let Some(c) = ca {
-            combined = match combined {
-                Some(a) => Some(a.union(&c)),
-                None => Some(c),
-            };
-        }
-    }
-    map.insert(key, combined);
-    combined
 }
 
 #[derive(Clone)]
