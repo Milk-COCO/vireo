@@ -434,6 +434,7 @@ impl WindowDesc {
     /// `metrics().scale_factor`，以及本 desc 尺寸族字段的物理化。运行时可用
     /// [`VireoWindow::set_dpi_override`] 切换（保持 vireo 逻辑尺寸、resize 物理窗口）。
     pub fn dpi_override(mut self, dpi: Option<f64>) -> Self {
+        debug_assert!(dpi.map_or(true, |d| d.is_finite() && d > 0.0), "dpi_override must be None or finite >0");
         self.dpi_override = dpi;
         self
     }
@@ -3695,6 +3696,7 @@ impl VireoWindow {
     ///
     /// 示例：`examples/window_api.rs` 按 `O` 键循环切换。
     pub fn set_dpi_override(&self, dpi: Option<f64>) {
+        debug_assert!(dpi.map_or(true, |d| d.is_finite() && d > 0.0), "dpi_override must be None or finite >0");
         if self.dpi_override.get() == dpi {
             return;
         }

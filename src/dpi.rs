@@ -253,6 +253,7 @@ pub(crate) fn dim_to_winit_size(
     os_scale: f64,
 ) -> Size {
     let phys = |w: f64, h: f64| {
+        debug_assert!(w.is_finite() && h.is_finite(), "dim_to_winit_size: size must be finite");
         Size::Physical(PhysicalSize::new(
             (w).round().max(1.0) as u32,
             (h).round().max(1.0) as u32,

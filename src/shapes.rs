@@ -459,9 +459,9 @@ fn join_arc(prev: (f32, f32), at: (f32, f32), next: (f32, f32)) -> (f32, f32) {
 }
 
 fn emit_rectangle(batch: &mut DrawBatch, w: f32, h: f32, color: Color) {
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 || color.a == 0.0 { return; }
     match batch.sdf_feather {
         None => {
-            if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
             let idx = batch.current_transform_index();
             let base = batch.vertices.len() as u32;
             let uv = batch.uv;
@@ -475,7 +475,7 @@ fn emit_rectangle(batch: &mut DrawBatch, w: f32, h: f32, color: Color) {
 }
 
 fn emit_circle(batch: &mut DrawBatch, r: f32, color: Color) {
-    if r == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || r <= 0.0 || color.a == 0.0 { return; }
     match batch.sdf_feather {
         None => {
             let n = ((r * std::f32::consts::TAU) as u32).clamp(32, 256);
@@ -521,7 +521,7 @@ fn emit_line(
     batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32,
     thickness: f32, color: Color,
 ) {
-    if thickness == 0.0 || color.a == 0.0 { return; }
+    if !thickness.is_finite() || thickness <= 0.0 || color.a == 0.0 { return; }
     if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 {
         // 零长线：没有线段部分，只有端点圆弧帽。
         // 当前线实现是“线 + 圆弧端点”，端点半径 = thickness/2。
@@ -576,7 +576,7 @@ fn emit_line(
 fn emit_ellipse(
     batch: &mut DrawBatch, rx: f32, ry: f32, color: Color,
 ) {
-    if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
+    if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 || color.a == 0.0 { return; }
     match batch.sdf_feather {
         None => {
             let n = ((rx.max(ry) * std::f32::consts::TAU) as u32).clamp(32, 256);
@@ -622,8 +622,8 @@ fn emit_rounded_rect(
     batch: &mut DrawBatch, w: f32, h: f32,
     radius: f32, color: Color,
 ) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
-    let r = radius.min(w * 0.5).min(h * 0.5);
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 || color.a == 0.0 { return; }
+    let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
     match batch.sdf_feather {
         None if r == 0.0 => {
             emit_rectangle(batch, w, h, color);
@@ -774,7 +774,7 @@ fn emit_triangle(
 }
 
 fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
-    if points.len() < 3 || color.a == 0.0 { return; }
+    if points.len() < 3 || color.a == 0.0 || points.iter().any(|(x,y)| !x.is_finite() || !y.is_finite()) { return; }
 
     let n = points.len();
     match batch.sdf_feather {
@@ -853,9 +853,9 @@ fn emit_arc(
     batch: &mut DrawBatch, r: f32,
     start_angle: f32, end_angle: f32, color: Color,
 ) {
-    if r == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || r <= 0.0 || !start_angle.is_finite() || !end_angle.is_finite() || color.a == 0.0 { return; }
     let span = (end_angle - start_angle).abs();
-    if span < 0.001 { return; }
+    if !span.is_finite() || span < 0.001 { return; }
     match batch.sdf_feather {
         None => {
             let n = ((r * span) as u32).clamp(16, 256);
@@ -898,7 +898,7 @@ fn emit_arc(
 }
 
 fn emit_rect_outline(batch: &mut DrawBatch, w: f32, h: f32, thickness: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !w.is_finite() || !h.is_finite() || !thickness.is_finite() || w <= 0.0 || h <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let half = thickness * 0.5;
     let x2 = w;
     let y2 = h;
@@ -912,7 +912,7 @@ fn emit_rect_outline(batch: &mut DrawBatch, w: f32, h: f32, thickness: f32, colo
 }
 
 fn emit_circle_outline(batch: &mut DrawBatch, r: f32, thickness: f32, color: Color, segments: u32) {
-    if r == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || !thickness.is_finite() || r <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let n = segments.max(8) as usize;
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
@@ -924,7 +924,7 @@ fn emit_circle_outline(batch: &mut DrawBatch, r: f32, thickness: f32, color: Col
 }
 
 fn emit_ellipse_outline(batch: &mut DrawBatch, rx: f32, ry: f32, thickness: f32, color: Color, segments: u32) {
-    if rx == 0.0 || ry == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !rx.is_finite() || !ry.is_finite() || !thickness.is_finite() || rx <= 0.0 || ry <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let n = (segments as usize).max(16);
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
@@ -942,7 +942,7 @@ fn emit_rounded_rect_outline(
     color: Color,
     corner_segments: u32,
 ) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !w.is_finite() || !h.is_finite() || !thickness.is_finite() || w <= 0.0 || h <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     if r == 0.0 {
         emit_rect_outline(batch, w, h, thickness, color);
@@ -977,7 +977,7 @@ fn emit_rounded_rect_outline(
 }
 
 fn emit_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Color) {
-    if points.len() < 2 || thickness == 0.0 || color.a == 0.0 { return; }
+    if points.len() < 2 || !thickness.is_finite() || thickness <= 0.0 || color.a == 0.0 || points.iter().any(|(x,y)| !x.is_finite() || !y.is_finite()) { return; }
 
     let n = points.len();
     let closed = n > 2
@@ -1150,7 +1150,7 @@ fn emit_arc_outline(
     color: Color,
     segments: u32,
 ) {
-    if r == 0.0 || thickness == 0.0 || color.a == 0.0 {
+    if !r.is_finite() || !thickness.is_finite() || r <= 0.0 || thickness <= 0.0 || color.a == 0.0 {
         return;
     }
     let segments = segments.max(2);
@@ -1200,7 +1200,7 @@ fn uv_key(uv: &UvRect) -> u64 {
 }
 
 pub(crate) fn geo_emit_rectangle(batch: &mut DrawBatch, w: f32, h: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 || color.a == 0.0 { return; }
     let mut k = 0x51E774B9u64;
     k = mix_key(k, w);
     k = mix_key(k, h);
@@ -1209,9 +1209,9 @@ pub(crate) fn geo_emit_rectangle(batch: &mut DrawBatch, w: f32, h: f32, color: C
 }
 
 pub(crate) fn geo_emit_rounded_rect(batch: &mut DrawBatch, w: f32, h: f32, radius: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || color.a == 0.0 { return; }
-    let r = radius.min(w * 0.5).min(h * 0.5);
-    if r == 0.0 {
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 || color.a == 0.0 { return; }
+    let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+    if r <= 0.0 {
         return geo_emit_rectangle(batch, w, h, color);
     }
     let mut k = 0x52E884BAu64;
@@ -1223,7 +1223,7 @@ pub(crate) fn geo_emit_rounded_rect(batch: &mut DrawBatch, w: f32, h: f32, radiu
 }
 
 pub(crate) fn geo_emit_circle(batch: &mut DrawBatch, r: f32, color: Color) {
-    if r == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || r <= 0.0 || color.a == 0.0 { return; }
     let mut k = 0x53E994BBu64;
     k = mix_key(k, r);
     k ^= uv_key(&batch.uv);
@@ -1231,7 +1231,7 @@ pub(crate) fn geo_emit_circle(batch: &mut DrawBatch, r: f32, color: Color) {
 }
 
 pub(crate) fn geo_emit_ellipse(batch: &mut DrawBatch, rx: f32, ry: f32, color: Color) {
-    if rx == 0.0 || ry == 0.0 || color.a == 0.0 { return; }
+    if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 || color.a == 0.0 { return; }
     let mut k = 0x54EA94BCu64;
     k = mix_key(k, rx);
     k = mix_key(k, ry);
@@ -1245,7 +1245,7 @@ pub(crate) fn geo_emit_line(
     thickness: f32,
     color: Color,
 ) {
-    if thickness == 0.0 || color.a == 0.0 { return; }
+    if !thickness.is_finite() || thickness <= 0.0 || color.a == 0.0 { return; }
     if (x2 - x1).abs() + (y2 - y1).abs() < 0.001 {
         // 零长线 = 端点圆弧帽 → 画圆（点）。与 mesh 路径一致：位置走内部平移。
         let r = thickness * 0.5;
@@ -1267,7 +1267,7 @@ pub(crate) fn geo_emit_line(
 }
 
 pub(crate) fn geo_emit_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Color) {
-    if points.len() < 2 || thickness == 0.0 || color.a == 0.0 { return; }
+    if points.len() < 2 || !thickness.is_finite() || thickness <= 0.0 || color.a == 0.0 { return; }
     let mut k = 0x55EB95BDu64;
     k = mix_key(k, thickness);
     for (px, py) in points {
@@ -1302,7 +1302,7 @@ pub(crate) fn geo_emit_triangle(
 }
 
 pub(crate) fn geo_emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Color) {
-    if points.len() < 3 || color.a == 0.0 { return; }
+    if points.len() < 3 || color.a == 0.0 || points.iter().any(|(x,y)| !x.is_finite() || !y.is_finite()) { return; }
     let mut k = 0x57ED97BFu64;
     for (px, py) in points {
         k = mix_key(k, *px);
@@ -1318,8 +1318,8 @@ pub(crate) fn geo_emit_arc(
     r: f32, start_angle: f32, end_angle: f32,
     color: Color,
 ) {
-    if r == 0.0 || color.a == 0.0 { return; }
-    if (end_angle - start_angle).abs() < 0.001 { return; }
+    if !r.is_finite() || r <= 0.0 || color.a == 0.0 { return; }
+    if !end_angle.is_finite() || !start_angle.is_finite() || (end_angle - start_angle).abs() < 0.001 { return; }
     let mut k = 0x58EE98C0u64;
     k = mix_key(k, r);
     k = mix_key(k, start_angle);
@@ -1329,7 +1329,7 @@ pub(crate) fn geo_emit_arc(
 }
 
 pub(crate) fn geo_emit_rect_outline(batch: &mut DrawBatch, w: f32, h: f32, thickness: f32, color: Color) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !w.is_finite() || !h.is_finite() || !thickness.is_finite() || w <= 0.0 || h <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let half = thickness * 0.5;
     let x2 = w;
     let y2 = h;
@@ -1343,7 +1343,7 @@ pub(crate) fn geo_emit_rect_outline(batch: &mut DrawBatch, w: f32, h: f32, thick
 }
 
 pub(crate) fn geo_emit_circle_outline(batch: &mut DrawBatch, r: f32, thickness: f32, color: Color, segments: u32) {
-    if r == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || !thickness.is_finite() || r <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let n = segments.max(8) as usize;
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
@@ -1355,7 +1355,7 @@ pub(crate) fn geo_emit_circle_outline(batch: &mut DrawBatch, r: f32, thickness: 
 }
 
 pub(crate) fn geo_emit_ellipse_outline(batch: &mut DrawBatch, rx: f32, ry: f32, thickness: f32, color: Color, segments: u32) {
-    if rx == 0.0 || ry == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !rx.is_finite() || !ry.is_finite() || !thickness.is_finite() || rx <= 0.0 || ry <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let n = (segments as usize).max(16);
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
     for i in 0..n {
@@ -1372,7 +1372,7 @@ pub(crate) fn geo_emit_rounded_rect_outline(
     color: Color,
     corner_segments: u32,
 ) {
-    if w == 0.0 || h == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !w.is_finite() || !h.is_finite() || !thickness.is_finite() || w <= 0.0 || h <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     if r == 0.0 {
         return geo_emit_rect_outline(batch, w, h, thickness, color);
@@ -1426,7 +1426,7 @@ pub(crate) fn geo_emit_arc_outline(
     color: Color,
     segments: u32,
 ) {
-    if r == 0.0 || thickness == 0.0 || color.a == 0.0 { return; }
+    if !r.is_finite() || !thickness.is_finite() || r <= 0.0 || thickness <= 0.0 || color.a == 0.0 { return; }
     let segments = segments.max(2);
     let sx = r * start_angle.cos();
     let sy = r * start_angle.sin();

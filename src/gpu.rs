@@ -443,11 +443,11 @@ fn material_pipeline_key(
     };
     target as u64
         | ((sample_count as u64) << 4)
+        | ((layout_bits) << 8)
         | ((alpha_to_coverage as u64) << 12)
         | ((stencil_mode as u64) << 13)
         | ((ssaa as u64) << 14)
         | ((stencil_op.min(4) as u64) << 16)
-        | (layout_bits << 6)
         | ((surface_format_bits(format) as u64) << 20)
 }
 
@@ -1046,7 +1046,7 @@ impl GpuContext {
             | ((alpha_to_coverage as u32) << 16)
             | ((ssaa as u32) << 17)
             | ((geometry as u32) << 18)
-            | surface_format_bits(self.surface_format());
+            | (surface_format_bits(self.surface_format()) << 4);
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1123,7 +1123,7 @@ impl GpuContext {
             | ((geometry as u32) << 18)
             | (1u32 << 19)
             | (op << 20)
-            | surface_format_bits(self.surface_format());
+            | (surface_format_bits(self.surface_format()) << 4);
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1255,7 +1255,7 @@ impl GpuContext {
             | ((use_stencil as u32) << 19)
             | (op << 20)
             | (1u32 << 23)
-            | surface_format_bits(self.surface_format());
+            | (surface_format_bits(self.surface_format()) << 4);
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1358,7 +1358,7 @@ impl GpuContext {
             | ((use_stencil as u32) << 19)
             | (op << 20)
             | (2u32 << 23)
-            | surface_format_bits(self.surface_format());
+            | (surface_format_bits(self.surface_format()) << 4);
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();

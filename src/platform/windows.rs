@@ -147,8 +147,8 @@ mod taskbar {
 /// IPropertyStore vtable 槽位（从 IUnknown 起 0 基）。
 #[allow(dead_code)]
 mod propstore {
-    pub const GET_AT: usize = 3;
-    pub const GET_COUNT: usize = 4;
+    pub const GET_COUNT: usize = 3;
+    pub const GET_AT: usize = 4;
     pub const GET_VALUE: usize = 5;
     pub const SET_VALUE: usize = 6;
     pub const COMMIT: usize = 7;
@@ -857,14 +857,20 @@ fn nc_handle_button_down(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT 
 
     // 进入按下状态：记 HT + 捕获鼠标，等 WM_LBUTTONUP 决定是否触发动作。
     // 不调 DefSubclassProc/DefWindowProc → 经典按下按钮不渲染。
+    // 若已处于按下状态则先清理，避免重复 SetCapture 泄漏。
+    let already_pressed = NC_STATES.lock().map(|m| m.get(&(hwnd as isize)).and_then(|s| s.pressed_ht).is_some()).unwrap_or(false);
+    if already_pressed {
+        unsafe { ReleaseCapture(); }
+        if let Ok(mut map) = NC_STATES.lock() {
+            if let Some(s) = map.get_mut(&(hwnd as isize)) { s.pressed_ht = None; }
+        }
+    }
     if let Ok(mut map) = NC_STATES.lock() {
         if let Some(s) = map.get_mut(&(hwnd as isize)) {
             s.pressed_ht = Some(ht);
         }
     }
-    unsafe {
-        SetCapture(hwnd);
-    }
+    unsafe { SetCapture(hwnd); }
     0
 }
 
@@ -1485,19 +1491,20 @@ if buttons.is_empty() {
     }
 
     fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
-        let hwnd = win_hwnd(&self.inner).unwrap_or(0);
+        let Some(hwnd) = win_hwnd(&self.inner) else { return; };
         let _ = self.nc_tx.send((hwnd, NcUpdate::SetRegions(regions.to_vec())));
     }
 
     fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
-        nc_get_regions(win_hwnd(&self.inner).unwrap_or(0)).unwrap_or_default()
+        let Some(hwnd) = win_hwnd(&self.inner) else { return Vec::new(); };
+        nc_get_regions(hwnd).unwrap_or_default()
     }
 
     fn set_hit_test_callback(
         &self,
         callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
     ) {
-        let hwnd = win_hwnd(&self.inner).unwrap_or(0);
+        let Some(hwnd) = win_hwnd(&self.inner) else { return; };
         let upd = match callback {
             Some(f) => NcUpdate::SetHitTestCb(HitTestCallback(Box::new(f))),
             None => NcUpdate::ClearHitTestCb,

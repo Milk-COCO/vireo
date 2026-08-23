@@ -179,6 +179,8 @@ pub(crate) fn mul_affine_cols(
 
 /// 对矩形的 4 个角应用 2D 仿射列矩阵，返回外接 AABB（保守，含旋转/缩放）。
 pub(crate) fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> Rect {
+    debug_assert!(r.w >= 0.0 && r.h >= 0.0 && r.w.is_finite() && r.h.is_finite() && r.x.is_finite() && r.y.is_finite(), "affine_rect_bounds: rect must be finite non-negative");
+    debug_assert!(c0[0].is_finite() && c0[1].is_finite() && c1[0].is_finite() && c1[1].is_finite() && c2[0].is_finite() && c2[1].is_finite(), "affine_rect_bounds: cols must be finite");
     let tx = |x: f32, y: f32| c0[0] * x + c1[0] * y + c2[0];
     let ty = |x: f32, y: f32| c0[1] * x + c1[1] * y + c2[1];
     let (xs, ys) = ([r.x, r.x + r.w], [r.y, r.y + r.h]);
@@ -201,6 +203,7 @@ pub(crate) fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32;
 /// 把 `view` 左乘到 `table` 每一行（12 f32 的列主序矩阵），写入 `out`。
 /// `view` 为单位阵时直接整表拷贝；否则逐行 `view.to_cols() * row`。
 pub(crate) fn left_mul_view_table(view: &Transform, table: &[f32], out: &mut Vec<f32>) {
+    debug_assert!(table.len() % 12 == 0, "transform_table must be 12-aligned");
     out.clear();
     if view.a == 1.0
         && view.b == 0.0

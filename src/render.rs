@@ -4018,7 +4018,21 @@ impl DrawBatch {
                         .all(|&index| index < self.vertices.len() as u32)
             }
             BatchShapeCommand::Instances { instance_start, instance_count, .. } => {
-                instance_start.saturating_add(*instance_count) <= self.instances.len() as u32
+                if instance_start.saturating_add(*instance_count) > self.instances.len() as u32 {
+                    return false;
+                }
+                let edge_count = self.polygon_edges.len() / 4;
+                self.instances[*instance_start as usize..(*instance_start + *instance_count) as usize]
+                    .iter()
+                    .all(|inst| {
+                        if inst.sdf_type == 6 || inst.sdf_type == 7 {
+                            let s = inst.sdf_params[0] as usize;
+                            let c = inst.sdf_params[1] as usize;
+                            s.saturating_add(c) <= edge_count
+                        } else {
+                            true
+                        }
+                    })
             }
             BatchShapeCommand::GeoInstances { geo_instance_start, geo_instance_count, .. } => {
                 if geo_instance_start.saturating_add(*geo_instance_count) > self.geo_instances.len() as u32 {
