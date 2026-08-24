@@ -35,6 +35,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use vireo::prelude::*;
+#[cfg(target_os = "windows")]
+use vireo::platform::windows::WindowExtWindows;
 
 struct WinState {
     moved: Option<(i32, i32)>,

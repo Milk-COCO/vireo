@@ -1466,6 +1466,7 @@ impl App {
         /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
         /// 运行在 winit 线程。
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
+        #[cfg(target_os = "windows")]
         /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
         ///
         /// 运行在 winit 线程。窗口创建后（`resumed`）由 Runner 注册到进程级拦截子类，
@@ -3056,20 +3057,6 @@ impl VireoWindow {
         /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
         /// 运行在 winit 线程。
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
-    }
-
-    /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
-    ///
-    /// 依赖 `set_thumbar_buttons` 安装的 `WM_COMMAND`/`THBN_CLICKED` 拦截子类；
-    /// 点击发生在窗口所属线程（winit 事件线程），回调在该线程执行（无需 `+Send`）。
-    /// 回调注册到进程级表，`set_thumbar_buttons(None)` 清除按钮时一并卸载。
-    ///
-    /// 跨线程可用：内部经 `window_handle_any_thread` 取 HWND 后写入 Mutex 保护的表。
-    pub fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self {
-        if let Some(hwnd) = win_hwnd(&self.inner) {
-            crate::platform::windows::set_thumbar_callback(hwnd, Box::new(callback));
-        }
-        self
     }
 
     /// 设置窗口是否接收 IME 事件（默认关闭）。

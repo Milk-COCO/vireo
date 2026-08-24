@@ -1152,6 +1152,9 @@ pub trait WindowExtWindows {
         &self,
         callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
     );
+
+    /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
+    fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self;
 }
 
 /// 任务栏进度状态（`set_progress_bar`）。
@@ -1519,6 +1522,13 @@ if buttons.is_empty() {
             None => NcUpdate::ClearHitTestCb,
         };
         let _ = self.nc_tx.send((hwnd, upd));
+    }
+
+    fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self {
+        if let Some(hwnd) = win_hwnd(&self.inner) {
+            set_thumbar_callback(hwnd, Box::new(callback));
+        }
+        self
     }
 }
 
