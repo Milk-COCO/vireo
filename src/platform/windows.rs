@@ -761,13 +761,14 @@ static NC_STATES: LazyLock<Mutex<HashMap<isize, NcState>>> =
 /// 变化时重发 regions，每次重发都触发一次 `SetWindowPos`，形成「重发 → 尺寸
 /// 扰动 → 逻辑宽度又变 → 再重发」的自激环，松手后残留约 1 秒抽搐（死区
 /// `RESIZE_DRIFT_EPSILON` 无法吸收，因为扰动每步都在重置计时器）。
-pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
+pub(crate) fn nc_apply(hwnd: isize, update: NcUpdate) {
+    let hwnd_raw = hwnd as HWND;
     // 避免已销毁或被复用的 HWND 僵尸更新
-    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) } == 0 {
+    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd_raw) } == 0 {
         return;
     }
     let mut states = NC_STATES.lock().unwrap();
-    let state = states.entry(hwnd as isize).or_insert_with(|| NcState {
+    let state = states.entry(hwnd).or_insert_with(|| NcState {
         regions: Vec::new(),
         hit_test_cb: None,
         pressed_ht: None,
@@ -792,11 +793,11 @@ pub(crate) fn nc_apply(hwnd: HWND, update: NcUpdate) {
 
     if has_regions || has_cb {
         unsafe {
-            SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0);
+            SetWindowSubclass(hwnd_raw, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0);
         }
     } else {
         unsafe {
-            RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID);
+            RemoveWindowSubclass(hwnd_raw, Some(nc_subclass_proc), NC_SUBCLASS_ID);
         }
     }
 }
@@ -1576,6 +1577,83 @@ fn move_zorder(window: &winit::window::Window, topmost: bool) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+}
+
+pub(crate) fn apply_window_opacity(hwnd: isize, opacity: f64) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+    unsafe {
+        let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, ex_style | WS_EX_LAYERED as isize);
+        let alpha = (opacity * 255.0).round() as u8;
+        SetLayeredWindowAttributes(hwnd as HWND, 0, alpha, LWA_ALPHA);
+    }
+}
+
+pub(crate) fn apply_window_focusable(hwnd: isize, focusable: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    unsafe {
+        let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
+        let new_style = if focusable {
+            ex_style & !(WS_EX_NOACTIVATE as isize)
+        } else {
+            ex_style | (WS_EX_NOACTIVATE as isize)
+        };
+        if new_style != ex_style {
+            SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, new_style);
+        }
+    }
+}
+
+pub(crate) fn cleanup_window_state(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    nc_remove(hwnd);
+    drop_thumbar_icons(hwnd);
+    drop_overlay_icons(hwnd);
+    clear_thumbar_callback(hwnd);
+    remove_window_icons_entry(hwnd);
+}
+
+pub fn dwm_timing() -> Option<(u64, u64)> {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    unsafe {
+        let mut ti: DWM_TIMING_INFO = std::mem::zeroed();
+        ti.cbSize = std::mem::size_of::<DWM_TIMING_INFO>() as u32;
+        if DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut ti) == 0 {
+            if ti.qpcRefreshPeriod > 0 {
+                return Some((ti.qpcVBlank, ti.qpcRefreshPeriod));
+            }
+        }
+    }
+    None
+}
+
+pub fn qpc_now() -> u64 {
+    use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
+    let mut v: i64 = 0;
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut v);
+    }
+    v as u64
+}
+
+pub fn qpc_ticks_per_sec() -> u64 {
+    use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
+    static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FREQ.get_or_init(|| {
+        let mut v: i64 = 0;
+        unsafe {
+            let _ = QueryPerformanceFrequency(&mut v);
+        }
+        v.max(1) as u64
+    })
 }
 
 #[cfg(test)]

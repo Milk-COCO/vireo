@@ -23,7 +23,6 @@ use crate::input::InputState;
 /// 而 vireo 的部分调用点（如 `set_opacity`）跑在渲染线程，故走
 /// `window_handle_any_thread()` 逃生通道。调用方负责只把 handle 传给线程安全的
 /// Win32 API（本模块的调用点均为线程安全操作）。
-#[cfg(target_os = "windows")]
 use crate::platform::windows::win_hwnd;
 
 pub use winit::dpi::LogicalPosition;
@@ -115,7 +114,6 @@ enum WinitEvent {
     /// macOS 等后续 `NSWindow setContentAspectRatio` 实施时挂接。
     /// 必须经 winit 线程执行 `SetWindowSubclass`（同 `set_frame_style`），
     /// 渲染线程收到本事件后转发 `aspect_ratio_tx` → winit 线程。
-    #[cfg(target_os = "windows")]
     SetAspectRatio { handle: usize, ratio: Option<f64> },
 }
 
@@ -181,7 +179,6 @@ pub struct VireoWindow {
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     /// NC 状态变更通道（§7.6）。`pub(crate)` 供 `platform::windows::WindowExtWindows`
     /// 的 NC 方法使用。
-    #[cfg(target_os = "windows")]
     pub(crate) nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     /// 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
     close_tx: mpsc::Sender<usize>,
@@ -238,7 +235,6 @@ pub struct VireoWindow {
     focusable: std::cell::Cell<bool>,
     /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
     /// Frameless 无边框时 DWM 无法圆角，`set_frame_style` 离幀前钳 / 恢复用。
-    #[cfg(target_os = "windows")]
     pub(crate) user_corner_pref: std::cell::Cell<crate::platform::windows::CornerPreference>,
     /// 关窗事件已到达（关闭中，draw 跳过）
     closing: std::cell::Cell<bool>,
@@ -276,7 +272,7 @@ impl VireoWindow {
         pending_show: bool,
         event_tx: mpsc::Sender<WinitEvent>,
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
-        #[cfg(target_os = "windows")] nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+        nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
         close_tx: mpsc::Sender<usize>,
         handle: usize,
     ) -> Self {
@@ -335,9 +331,7 @@ impl VireoWindow {
             handle,
             frame_style: std::cell::Cell::new(frame_style),
             focusable: std::cell::Cell::new(true),
-            #[cfg(target_os = "windows")]
             nc_tx,
-            #[cfg(target_os = "windows")]
             user_corner_pref: std::cell::Cell::new(
                 crate::platform::windows::CornerPreference::Default,
             ),
@@ -1476,7 +1470,6 @@ impl App {
         ///
         /// 运行在 winit 线程。窗口创建后（`resumed`）由 Runner 注册到进程级拦截子类，
         /// 与运行期 [`VireoWindow::on_thumb_button`] 等价。
-        #[cfg(target_os = "windows")]
         on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
 
@@ -1537,12 +1530,10 @@ impl App {
         let (frame_style_tx, frame_style_rx) = mpsc::channel::<(isize, FrameStyle)>();
         // 渲染线程 → winit 线程：运行期 set_aspect_ratio。同 set_frame_style，
         // 子类化必须在 winit 事件线程调用；ratio 值存到 platform::windows 进程级表。
-        #[cfg(target_os = "windows")]
         let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel::<(isize, Option<f64>)>();
         // 渲染线程 → winit 线程：非客户区管理（§7.6 4 套消息）。
         // SetWindowSubclass 不可跨线程；state 经本 channel 转发到 winit 线程
         // 安装/卸载 nc_subclass。
-        #[cfg(target_os = "windows")]
         let (nc_tx, nc_rx) = mpsc::channel::<(isize, crate::platform::windows::NcUpdate)>();
         // 运行期窗口创建：渲染线程 `App::window`（on_frame 里）→ winit 线程
         // `about_to_wait` drain 后执行窗口创建。render 端 sender 存进 self，
@@ -1571,9 +1562,7 @@ impl App {
                     cb_tx,
                     exit_tx,
                     frame_style_tx,
-                    #[cfg(target_os = "windows")]
                     aspect_ratio_tx,
-                    #[cfg(target_os = "windows")]
                     nc_tx,
                     close_tx,
                     device_lost,
@@ -1592,17 +1581,14 @@ impl App {
     /// 接收渲染线程发来的运行期边框样式切换（在 winit 线程执行 Win32 子类操作）
     frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
     /// 接收渲染线程发来的运行期宽高比设置（在 winit 线程挂接/卸载子类）
-    #[cfg(target_os = "windows")]
     aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
 /// 接收渲染线程发来的运行期非客户区管理（§7.6；在 winit 线程装/卸 nc_subclass）
-            #[cfg(target_os = "windows")]
             nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
             /// 接收渲染线程发来的运行期窗口创建请求（on_frame 里 `App::window`）
             create_rx: mpsc::Receiver<CreateWindowRequest>,
             /// 接收渲染线程发来的程序化关窗请求（`VireoWindow::close`；载荷 = handle）。
             close_rx: mpsc::Receiver<usize>,
             /// 已创建窗口的 hwnd（按 handle 索引），窗口关闭时用于清理 NC 状态。
-            #[cfg(target_os = "windows")]
             hwnds: Vec<isize>,
             window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
@@ -1635,7 +1621,6 @@ impl App {
                     if let Some(h) = hook_opt.take() { h(); }
                 }
                 // 清理 NC / 任务栏状态表，避免 hwnd 被系统复用后串扰到新窗口。
-                #[cfg(target_os = "windows")]
                 if let Some(&hwnd) = self.hwnds.get(handle) {
                     if hwnd != 0 {
                         crate::platform::windows::nc_remove(hwnd);
@@ -1745,7 +1730,6 @@ impl App {
                 // `Normal`/`Frameless` 不装子类，完全放行 winit 原生：
                 // Frameless 由 winit 处理客户区（客户区 = 窗口矩形）。
                 // 必须在 winit 事件线程、窗口创建后安装。
-                #[cfg(target_os = "windows")]
                 if let Some(hwnd) = win_hwnd(&window) {
                     let fs = desc.frame_style;
                     if !fs.has_titlebar() && fs.has_border() {
@@ -1914,7 +1898,6 @@ impl App {
                 // 运行期边框样式切换：SetWindowSubclass / RemoveWindowSubclass
                 // 必须在窗口 owner（winit 事件）线程执行，这里 drain 渲染线程
                 // 发来的请求（见 platform::windows::install 注释）。
-                #[cfg(target_os = "windows")]
                 while let Ok((hwnd, style)) = self.frame_style_rx.try_recv() {
                     // 只有 HiddenTitlebar 需要子类；切到 Normal/Frameless
                     // 时卸载，让 winit 原生接管（Frameless 客户区/阴影）。
@@ -1924,22 +1907,15 @@ impl App {
                         crate::platform::windows::remove(hwnd);
                     }
                 }
-                #[cfg(not(target_os = "windows"))]
-                while self.frame_style_rx.try_recv().is_ok() {}
-                // 运行期宽高比切换：drain 渲染线程发来的 (hwnd, ratio)，
+                                // 运行期宽高比切换：drain 渲染线程发来的 (hwnd, ratio)，
                 // 在本线程（winit 事件线程）挂/卸 aspect 子类。
-                #[cfg(target_os = "windows")]
                 while let Ok((hwnd, ratio)) = self.aspect_ratio_rx.try_recv() {
                     crate::platform::windows::set_aspect_ratio(hwnd, ratio);
                 }
                 // 非客户区 hit-test（§7.6）：drain 渲染线程发来的 (hwnd, NcUpdate)，
                 // 在本线程应用 state（有 regions 或 callback 时装 nc_subclass）。
-                #[cfg(target_os = "windows")]
                 while let Ok((hwnd, upd)) = self.nc_rx.try_recv() {
-                    crate::platform::windows::nc_apply(
-                        hwnd as windows_sys::Win32::Foundation::HWND,
-                        upd,
-                    );
+                    crate::platform::windows::nc_apply(hwnd, upd);
                 }
                 // 运行期窗口创建：drain 渲染线程（on_frame 里 `App::window`）
                 // 发来的请求，在本线程（winit 事件线程）创建窗口。
@@ -2109,13 +2085,10 @@ impl App {
             cb_rx,
             exit_rx,
             frame_style_rx,
-            #[cfg(target_os = "windows")]
             aspect_ratio_rx,
-            #[cfg(target_os = "windows")]
             nc_rx,
             create_rx,
             close_rx,
-            #[cfg(target_os = "windows")]
             hwnds: Vec::new(),
             window_descs,
             id_to_handle: FxHashMap::default(),
@@ -2276,61 +2249,17 @@ fn phase_summary(samples: &[PhaseSample]) {
 /// `qpcVBlank` = 最近一次 vblank 的 QPC 时间；`qpcRefreshPeriod` = 刷新周期。
 /// 失败返回 `None`（非 Windows / DWM 不可用 / 远程会话）。
 fn dwm_timing() -> Option<(u64, u64)> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
-        unsafe {
-            let mut ti: DWM_TIMING_INFO = std::mem::zeroed();
-            ti.cbSize = std::mem::size_of::<DWM_TIMING_INFO>() as u32;
-            if DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut ti) == 0 {
-                if ti.qpcRefreshPeriod > 0 {
-                    return Some((ti.qpcVBlank, ti.qpcRefreshPeriod));
-                }
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        None
-    }
+    crate::platform::windows::dwm_timing()
 }
 
 /// 当前 QPC 计数（`QueryPerformanceCounter`）。
 fn qpc_now() -> u64 {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
-        let mut v: i64 = 0;
-        unsafe {
-            let _ = QueryPerformanceCounter(&mut v);
-        }
-        v as u64
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        0
-    }
+    crate::platform::windows::qpc_now()
 }
 
 /// QPC 频率（每类 QPC tick 的纳秒数），用于把 ticks 转成 ms。
 fn qpc_ticks_per_sec() -> u64 {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
-        static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        *FREQ.get_or_init(|| {
-            let mut v: i64 = 0;
-            unsafe {
-                let _ = QueryPerformanceFrequency(&mut v);
-            }
-            v.max(1) as u64
-        })
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        1
-    }
+    crate::platform::windows::qpc_ticks_per_sec()
 }
 
 
@@ -2342,9 +2271,8 @@ fn render_on_frame<F>(
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     exit_tx: mpsc::Sender<()>,
     frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
-    #[cfg(target_os = "windows")] aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
+    aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
     // NC 状态变更通道（§7.6，render thread → winit thread）。
-    #[cfg(target_os = "windows")]
     nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     // 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
     close_tx: mpsc::Sender<usize>,
@@ -2357,10 +2285,6 @@ where F: FnMut(&App) -> bool + Send + 'static
     // 用户 on_frame 至少跑过一次后，才允许「零窗口退出」判定生效。
     // 否则 expected_windows==0（纯 run 内创建窗口）会在首帧 on_frame 前就退出。
     let mut on_frame_called = false;
-    #[cfg(not(target_os = "windows"))]
-    let _ = &frame_style_tx;
-    #[cfg(target_os = "windows")]
-    let _ = &aspect_ratio_tx;
     let request_exit = || {
         let _ = exit_tx.send(());
     };
@@ -2399,7 +2323,6 @@ where F: FnMut(&App) -> bool + Send + 'static
                     pending_show,
                     event_tx.clone(),
                     cb_tx.clone(),
-                    #[cfg(target_os = "windows")]
                     nc_tx.clone(),
                     close_tx.clone(),
                     handle,
@@ -2555,13 +2478,11 @@ where F: FnMut(&App) -> bool + Send + 'static
                         // SetWindowSubclass / RemoveWindowSubclass 必须在 winit
                         // 事件线程调用（见 platform::windows::install 注释），
                         // 这里仅转发到 winit 线程，由 Runner::about_to_wait 执行。
-                        #[cfg(target_os = "windows")]
                         if let Some(hwnd) = win_hwnd(&win.inner) {
                             let _ = frame_style_tx.send((hwnd, style));
                         }
                     }
                 }
-                #[cfg(target_os = "windows")]
                 Ok(WinitEvent::SetAspectRatio { handle, ratio }) => {
                     if let Some(Some(win)) = app.windows.get(handle) {
                         if let Some(hwnd) = win_hwnd(&win.inner) {
@@ -3076,25 +2997,33 @@ impl VireoWindow {
     /// DWM 无法圆角，圆角偏好被钳为 `Default`；切回 `Normal`/`HiddenTitlebar`
     /// 时自动恢复用户上次经 `set_corner_preference` 设置的偏好。
     pub fn set_frame_style(&self, style: FrameStyle) {
-        #[cfg(target_os = "windows")]
         let prev = self.frame_style.get();
         self.frame_style.set(style);
-        #[cfg(target_os = "windows")]
         {
-            use crate::platform::windows::CornerPreference;
             let prev_frameless = prev == FrameStyle::Frameless;
             let new_frameless = style == FrameStyle::Frameless;
             if prev_frameless != new_frameless {
-                // 进入/离开 Frameless 时与偏好对齐（钳 Default / 恢复偏好）。
-                let target = if new_frameless {
-                    CornerPreference::Default
+                if let Some(hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
+                    let target = if new_frameless {
+                        crate::platform::windows::CornerPreference::Default
+                    } else {
+                        self.user_corner_pref.get()
+                    };
+                    #[cfg(target_os = "windows")]
+                    {
+                        winit::platform::windows::WindowExtWindows::set_corner_preference(
+                            &*self.inner,
+                            target.into_winit(),
+                        );
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = target;
+                        let _ = hwnd;
+                    }
                 } else {
-                    self.user_corner_pref.get()
-                };
-                winit::platform::windows::WindowExtWindows::set_corner_preference(
-                    &*self.inner,
-                    target.into_winit(),
-                );
+                    let _ = new_frameless;
+                }
             }
         }
         let _ = self.event_tx.send(WinitEvent::SetFrameStyle {
@@ -3136,7 +3065,6 @@ impl VireoWindow {
     /// 回调注册到进程级表，`set_thumbar_buttons(None)` 清除按钮时一并卸载。
     ///
     /// 跨线程可用：内部经 `window_handle_any_thread` 取 HWND 后写入 Mutex 保护的表。
-    #[cfg(target_os = "windows")]
     pub fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self {
         if let Some(hwnd) = win_hwnd(&self.inner) {
             crate::platform::windows::set_thumbar_callback(hwnd, Box::new(callback));
@@ -3241,22 +3169,9 @@ impl VireoWindow {
     /// - 其他平台：无操作。
     pub fn set_opacity(&self, opacity: f64) {
         let opacity = opacity.clamp(0.0, 1.0);
-        #[cfg(target_os = "windows")]
-        {
-            let Some(hwnd) = win_hwnd(&self.inner) else {
-                return;
-            };
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
-                LWA_ALPHA, WS_EX_LAYERED,
-            };
-            use windows_sys::Win32::Foundation::HWND;
-            unsafe {
-                let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
-                SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, ex_style | WS_EX_LAYERED as isize);
-                let alpha = (opacity * 255.0).round() as u8;
-                SetLayeredWindowAttributes(hwnd as HWND, 0, alpha, LWA_ALPHA);
-            }
+        if let Some(hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
+            crate::platform::windows::apply_window_opacity(hwnd, opacity);
+            return;
         }
         #[cfg(target_os = "macos")]
         {
@@ -3272,11 +3187,9 @@ impl VireoWindow {
                     }
                 }
             }
+            return;
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let _ = opacity;
-        }
+        let _ = opacity;
     }
 
     /// 运行时切换窗口是否可被点击激活获得焦点。对应 Electron/Tauri `setFocusable`。
@@ -3295,30 +3208,8 @@ impl VireoWindow {
     /// **其他平台**：无操作。
     pub fn set_focusable(&self, focusable: bool) {
         self.focusable.set(focusable);
-        #[cfg(target_os = "windows")]
-        {
-            let Some(hwnd) = win_hwnd(&self.inner) else {
-                return;
-            };
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
-            };
-            use windows_sys::Win32::Foundation::HWND;
-            unsafe {
-                let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
-                let new_style = if focusable {
-                    ex_style & !(WS_EX_NOACTIVATE as isize)
-                } else {
-                    ex_style | (WS_EX_NOACTIVATE as isize)
-                };
-                if new_style != ex_style {
-                    SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, new_style);
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = focusable;
+        if let Some(hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
+            crate::platform::windows::apply_window_focusable(hwnd, focusable);
         }
     }
 
@@ -3339,14 +3230,12 @@ impl VireoWindow {
     /// 后续 macOS 平台窗口能力整批实施时挂接。
     pub fn set_aspect_ratio(&self, ratio: Option<f64>) {
         let ratio = validate_aspect_ratio(ratio);
-        #[cfg(target_os = "windows")]
         {
             let _ = self.event_tx.send(WinitEvent::SetAspectRatio {
                 handle: self.handle,
                 ratio,
             });
         }
-        #[cfg(not(target_os = "windows"))]
         {
             // 暂存意图以备未来 macOS 实现时即可生效（与 `set_focusable` 同约定）。
             let _ = ratio;

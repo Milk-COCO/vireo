@@ -84,14 +84,12 @@ impl FrameStyle {
         }
     }
 
-    /// Windows 内部布尔：是否绘制系统标题栏。
-    #[cfg(target_os = "windows")]
+    /// 是否绘制系统标题栏（仅 `Normal`）。
     pub(crate) fn has_titlebar(self) -> bool {
         matches!(self, FrameStyle::Normal)
     }
 
-    /// Windows 内部布尔：是否保留系统 resize 边框。
-    #[cfg(target_os = "windows")]
+    /// 是否保留系统 resize 边框（除 `Frameless` 外均保留）。
     pub(crate) fn has_border(self) -> bool {
         !matches!(self, FrameStyle::Frameless)
     }
