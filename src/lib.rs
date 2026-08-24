@@ -31,6 +31,11 @@ pub mod text;
 pub mod texture;
 pub mod window;
 
+/// 初始化日志（透传 `env_logger`，`RUST_LOG` 生效）。应用 `main` 首行调用一次。
+pub fn init_logger() {
+    let _ = env_logger::try_init();
+}
+
 /// 一次导入所有常用类型。
 pub mod prelude {
     pub use crate::area::Area;

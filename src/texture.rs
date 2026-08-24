@@ -60,7 +60,7 @@ impl Texture {
         match std::fs::read(path.as_ref()) {
             Ok(data) => Self::from_bytes(&data, gpu),
             Err(e) => {
-                eprintln!("Texture::from_file: failed to read file: {}", e);
+                log::error!("Texture::from_file: failed to read file: {}", e);
                 create_missing_checker(gpu)
             }
         }
@@ -76,7 +76,7 @@ impl Texture {
                 Self::from_rgba(width, height, &rgba, gpu)
             }
             Err(e) => {
-                eprintln!("Texture::from_bytes: failed to decode image: {}", e);
+                log::error!("Texture::from_bytes: failed to decode image: {}", e);
                 create_missing_checker(gpu)
             }
         }
@@ -86,12 +86,12 @@ impl Texture {
     /// 非法输入（宽高为0或数据长度不足）时打印错误并返回 ffcc00/6699ff 棋盘 missing 纹理。
     pub fn from_rgba(width: u32, height: u32, pixels: &[u8], gpu: &GpuContext) -> Self {
         if width == 0 || height == 0 {
-            eprintln!("Texture::from_rgba: width/height must be > 0 (got {}x{})", width, height);
+            log::error!("Texture::from_rgba: width/height must be > 0 (got {}x{})", width, height);
             return create_missing_checker(gpu);
         }
         let needed = (width as usize) * (height as usize) * 4;
         if pixels.len() < needed {
-            eprintln!(
+            log::error!(
                 "Texture::from_rgba: pixel buffer too short (need {} bytes for {}x{} RGBA, got {})",
                 needed, width, height, pixels.len()
             );

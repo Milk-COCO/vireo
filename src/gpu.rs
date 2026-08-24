@@ -572,7 +572,10 @@ impl GpuContext {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .unwrap();
+        .unwrap_or_else(|e| {
+            log::error!("vireo gpu: request_adapter failed: {e:?}");
+            panic!("vireo gpu: no adapter found");
+        });
 
         // 无此 feature 时，pipeline 校验只认 WebGPU 保底 sample count（通常 [1, 4]），
         // 即便 adapter 列表含 8 也会在 create_render_pipeline 时 Validation panic。
@@ -594,7 +597,10 @@ impl GpuContext {
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::default(),
             }))
-            .unwrap();
+            .unwrap_or_else(|e| {
+                log::error!("vireo gpu: request_device failed: {e:?}");
+                panic!("vireo gpu: request_device failed");
+            });
 
         // 设备丢失检测：回调置位共享标志。渲染循环每帧轮询并在丢失时终止；
         // `draw` 也据此返回 `DrawOutcome::Failed(DeviceLost)`。
@@ -602,7 +608,7 @@ impl GpuContext {
         {
             let flag = device_lost.clone();
             device.set_device_lost_callback(move |reason: wgpu::DeviceLostReason, msg: String| {
-                eprintln!("vireo: GPU device lost ({reason:?}): {msg}");
+                log::error!("vireo gpu: device lost ({reason:?}): {msg}");
                 flag.store(true, std::sync::atomic::Ordering::Release);
             });
         }

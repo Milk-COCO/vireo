@@ -192,7 +192,7 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
     let h = height as usize;
     let expected = w.saturating_mul(h).saturating_mul(4);
     if rgba.len() < expected || w == 0 || h == 0 {
-        eprintln!(
+        log::warn!(
             "vireo taskbar: hicone_from_rgba 尺寸非法 ({}x{}, rgba len={}, expected={})",
             width, height, rgba.len(), expected
         );
@@ -235,7 +235,7 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
             LR_DEFAULTCOLOR as IMAGE_FLAGS,
         );
         if icon.is_null() {
-            eprintln!("vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})", width, height);
+            log::warn!("vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})", width, height);
         }
         icon as isize
     }
@@ -246,7 +246,7 @@ fn create_taskbar_list3() -> *mut c_void {
     let hr_co = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
     if hr_co != KW_HRESULT_OK && hr_co != 1 {
         // 1 = S_FALSE（本线程已初始化，合法）；RPC_E_CHANGED_MODE 等才是问题。
-        eprintln!(
+        log::warn!(
             "vireo taskbar: CoInitializeEx(MTA) hr=0x{:08X}",
             hr_co as u32
         );
@@ -262,7 +262,7 @@ fn create_taskbar_list3() -> *mut c_void {
         )
     };
     if hr != KW_HRESULT_OK {
-        eprintln!("vireo taskbar: CoCreateInstance ITaskbarList3 hr=0x{:08X}", hr as u32);
+        log::warn!("vireo taskbar: CoCreateInstance ITaskbarList3 hr=0x{:08X}", hr as u32);
         return std::ptr::null_mut();
     }
     // HrInit 失败也保留对象（SetProgressValue 等仍可用）。
@@ -270,10 +270,10 @@ fn create_taskbar_list3() -> *mut c_void {
         let f: HrFn0 = slot_fn(obj, taskbar::HR_INIT);
         let hr_init = f(obj);
         if hr_init != KW_HRESULT_OK {
-            eprintln!("vireo taskbar: HrInit hr=0x{:08X}", hr_init as u32);
+            log::warn!("vireo taskbar: HrInit hr=0x{:08X}", hr_init as u32);
         }
     }
-    eprintln!("vireo taskbar: ITaskbarList3 ready, obj={:p}", obj);
+    log::warn!("vireo taskbar: ITaskbarList3 ready, obj={:p}", obj);
     obj
 }
 
@@ -1303,13 +1303,13 @@ impl WindowExtWindows for crate::window::VireoWindow {
             let f: HrFnState = slot_fn(taskbar, taskbar::SET_PROGRESS_STATE);
             let hr = f(taskbar, hwnd as HWND, flag);
             if hr != KW_HRESULT_OK {
-                eprintln!("vireo taskbar: SetProgressState hr=0x{:08X}", hr as u32);
+                log::warn!("vireo taskbar: SetProgressState hr=0x{:08X}", hr as u32);
             }
             if let Some((n, d)) = value {
                 let f: HrFnProgress = slot_fn(taskbar, taskbar::SET_PROGRESS_VALUE);
                 let hr = f(taskbar, hwnd as HWND, n, d);
                 if hr != KW_HRESULT_OK {
-                    eprintln!("vireo taskbar: SetProgressValue hr=0x{:08X}", hr as u32);
+                    log::warn!("vireo taskbar: SetProgressValue hr=0x{:08X}", hr as u32);
                 }
             }
         }
@@ -1344,7 +1344,7 @@ if buttons.is_empty() {
         let count = buttons.len().min(u32::MAX as usize) as u32;
         if count > 7 {
             // Windows 限制：缩略图最多 7 个按钮。
-            eprintln!("vireo: set_thumbar_buttons 超过 7 个按钮，截断到 7");
+            log::warn!("vireo: set_thumbar_buttons 超过 7 个按钮，截断到 7");
         }
         let count = count.min(7);
         let mut icons: Vec<isize> = Vec::with_capacity(count as usize);
@@ -1399,7 +1399,7 @@ if buttons.is_empty() {
             let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
             let hr = f(taskbar, hwnd as HWND, count, tb.as_ptr());
             if hr != KW_HRESULT_OK {
-                eprintln!("vireo taskbar: ThumbBarAddButtons hr=0x{:08X}", hr as u32);
+                log::warn!("vireo taskbar: ThumbBarAddButtons hr=0x{:08X}", hr as u32);
             }
         }
     }
@@ -1442,7 +1442,7 @@ if buttons.is_empty() {
             let f: HrFnOverlay = slot_fn(taskbar, taskbar::SET_OVERLAY_ICON);
             let hr = f(taskbar, hwnd as HWND, hicon as HICON, desc_ptr);
             if hr != KW_HRESULT_OK {
-                eprintln!("vireo taskbar: SetOverlayIcon hr=0x{:08X}", hr as u32);
+                log::warn!("vireo taskbar: SetOverlayIcon hr=0x{:08X}", hr as u32);
             }
         }
     }
@@ -1486,12 +1486,12 @@ if buttons.is_empty() {
                 let f_state: HrFnSetValue = slot_fn(pstore, propstore::SET_VALUE);
                 let hr_set = f_state(pstore, &PKEY_APP_USER_MODEL_ID, &pv);
                 if hr_set != KW_HRESULT_OK {
-                    eprintln!("vireo taskbar: propstore SetValue hr=0x{:08X}", hr_set as u32);
+                    log::warn!("vireo taskbar: propstore SetValue hr=0x{:08X}", hr_set as u32);
                 }
                 let f_commit: HrFnCommit = slot_fn(pstore, propstore::COMMIT);
                 let hr_commit = f_commit(pstore);
                 if hr_commit != KW_HRESULT_OK {
-                    eprintln!("vireo taskbar: propstore Commit hr=0x{:08X}", hr_commit as u32);
+                    log::warn!("vireo taskbar: propstore Commit hr=0x{:08X}", hr_commit as u32);
                 }
                 // PropVariantClear 释放 VT_LPWSTR 的 CoTaskMemAlloc。
                 let _ = PropVariantClear(&mut pv);
@@ -1546,7 +1546,7 @@ fn window_hwnd(window: &winit::window::Window) -> Option<isize> {
     use winit::raw_window_handle::RawWindowHandle;
     let wh = unsafe { window.window_handle_any_thread() }.ok()?;
     let RawWindowHandle::Win32(h) = wh.as_raw() else {
-        eprintln!("vireo window_hwnd: 非 Win32 handle");
+        log::warn!("vireo window_hwnd: 非 Win32 handle");
         return None;
     };
     Some(h.hwnd.get())

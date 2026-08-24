@@ -420,11 +420,8 @@ impl Material {
                     if has_unset {
                         drop(slots_guard);
                         if !notified_unset.swap(true, Ordering::AcqRel) {
-                            eprintln!(
-                                "vireo: material_with_resources: one or more texture resources \
-                                 were never set via set_texture(); batches using this material \
-                                 will be skipped. Call set_texture() for every declared Texture \
-                                 resource before drawing."
+                            log::warn!(
+                                "vireo material: one or more Texture resources never set via set_texture(); batches using this material will be skipped"
                             );
                         }
                         // 未填槽：不缓存，返回 None；填齐后（dirty=true）会自动重建。

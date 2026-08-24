@@ -687,7 +687,7 @@ impl VireoWindow {
                 // get_current_texture 内部校验失败：surface 配置可能已失效。
                 // 按当前尺寸重配后本帧跳过（与 Outdated 一致），并记录告警——
                 // 不再伪装成「已重配」（旧实现只打 SurfaceReconfigured 不实际重配）。
-                eprintln!("vireo: surface get_current_texture validation error — reconfiguring");
+                log::warn!("vireo surface get_current_texture validation error — reconfiguring");
                 let size = self.inner.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return DrawReport {
@@ -895,7 +895,7 @@ let dpi_override = self.applied_dpi_override.get();
         {
             requested
         } else {
-            eprintln!("vireo: PresentMode {requested:?} not supported, falling back to AutoVsync");
+            log::warn!("vireo PresentMode {requested:?} not supported, falling back to AutoVsync");
             wgpu::PresentMode::AutoVsync
         }
     }
@@ -2613,7 +2613,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                 std::thread::sleep(std::time::Duration::from_millis(16));
             }
             if device_lost.load(std::sync::atomic::Ordering::Acquire) {
-                eprintln!("vireo: GPU device lost — terminating");
+                log::error!("vireo GPU device lost — terminating");
                 request_exit();
                 break;
             }
