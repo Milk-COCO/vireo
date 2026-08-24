@@ -50,6 +50,7 @@ pub use winit::window::WindowLevel;
 
 mod desc;
 mod metrics;
+mod on;
 pub use desc::{AntiAliasing, FrameStyle, SendRawWindowHandle, WindowDesc};
 pub use metrics::{
     DrawFailure, DrawOutcome, DrawReport, DrawSkipReason, DrawTimings, FollowAmount,
@@ -1450,126 +1451,33 @@ impl App {
     }
 
     // ------ 输入事件回调注册（winit 线程 invoke，无需 +Send）------
-
-    pub fn on_key_down(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::KeyEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_key_down.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_key_up(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::KeyEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_key_up.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_mouse_down(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::MouseButtonEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_mouse_down.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_mouse_up(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::MouseButtonEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_mouse_up.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_scroll(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::MouseScrollEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_scroll.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_cursor_entered(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_cursor_entered.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_cursor_left(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_cursor_left.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_touch(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::TouchEvent) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_touch.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_focus_gained(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_focus_gained.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_focus_lost(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_focus_lost.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_modifiers_changed(&mut self, handle: WindowIndex, callback: impl FnMut(crate::input::Modifiers) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_modifiers_changed.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_ime(&mut self, handle: WindowIndex, callback: impl FnMut(&crate::input::Ime) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_ime.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_file_dropped(&mut self, handle: WindowIndex, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_file_dropped.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_file_hovered(&mut self, handle: WindowIndex, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_file_hovered.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_file_hover_cancelled(&mut self, handle: WindowIndex, callback: impl FnOnce() + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_file_hover_cancelled.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_moved(&mut self, handle: WindowIndex, callback: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_moved.push(Box::new(callback));
-        self
-    }
-
-    pub fn on_theme_changed(&mut self, handle: WindowIndex, callback: impl FnMut(winit::window::Theme) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_theme_changed.push(Box::new(callback));
-        self
-    }
-
-    /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
-    /// 运行在 winit 线程。
-    pub fn on_resized(&mut self, handle: WindowIndex, callback: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_resized.push(Box::new(callback));
-        self
-    }
-
-    /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
-    ///
-    /// 运行在 winit 线程。窗口创建后（`resumed`）由 Runner 注册到进程级拦截子类，
-    /// 与运行期 [`VireoWindow::on_thumb_button`] 等价。
-    #[cfg(target_os = "windows")]
-    pub fn on_thumb_button(&mut self, handle: WindowIndex, callback: impl FnMut(u32) + 'static) -> &mut Self {
-        let h = handle.0;
-        self.callbacks.entry(h).or_default().on_thumb_button.push(Box::new(callback));
-        self
+    crate::def_app_ons! {
+        on_key_down: impl FnMut(&crate::input::KeyEvent) + 'static => on_key_down,
+        on_key_up: impl FnMut(&crate::input::KeyEvent) + 'static => on_key_up,
+        on_mouse_down: impl FnMut(&crate::input::MouseButtonEvent) + 'static => on_mouse_down,
+        on_mouse_up: impl FnMut(&crate::input::MouseButtonEvent) + 'static => on_mouse_up,
+        on_scroll: impl FnMut(&crate::input::MouseScrollEvent) + 'static => on_scroll,
+        on_cursor_entered: impl FnOnce() + 'static => on_cursor_entered,
+        on_cursor_left: impl FnOnce() + 'static => on_cursor_left,
+        on_touch: impl FnMut(&crate::input::TouchEvent) + 'static => on_touch,
+        on_focus_gained: impl FnOnce() + 'static => on_focus_gained,
+        on_focus_lost: impl FnOnce() + 'static => on_focus_lost,
+        on_modifiers_changed: impl FnMut(crate::input::Modifiers) + 'static => on_modifiers_changed,
+        on_ime: impl FnMut(&crate::input::Ime) + 'static => on_ime,
+        on_file_dropped: impl FnMut(&std::path::PathBuf) + 'static => on_file_dropped,
+        on_file_hovered: impl FnMut(&std::path::PathBuf) + 'static => on_file_hovered,
+        on_file_hover_cancelled: impl FnOnce() + 'static => on_file_hover_cancelled,
+        on_moved: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static => on_moved,
+        on_theme_changed: impl FnMut(winit::window::Theme) + 'static => on_theme_changed,
+        /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
+        /// 运行在 winit 线程。
+        on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
+        /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
+        ///
+        /// 运行在 winit 线程。窗口创建后（`resumed`）由 Runner 注册到进程级拦截子类，
+        /// 与运行期 [`VireoWindow::on_thumb_button`] 等价。
+        #[cfg(target_os = "windows")]
+        on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
 
     /// 注册一个延迟 `frames` 帧后执行的闭包。
@@ -3196,135 +3104,29 @@ impl VireoWindow {
     }
 
     // ------ 事件订阅 API（通过 cb_tx 异步发送到 winit 线程，无需 +Send）------
-
-    pub fn on_key_down(&self, callback: impl FnMut(&crate::input::KeyEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_key_down.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_key_up(&self, callback: impl FnMut(&crate::input::KeyEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_key_up.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_mouse_down(&self, callback: impl FnMut(&crate::input::MouseButtonEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_mouse_down.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_mouse_up(&self, callback: impl FnMut(&crate::input::MouseButtonEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_mouse_up.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_scroll(&self, callback: impl FnMut(&crate::input::MouseScrollEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_scroll.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_cursor_entered(&self, callback: impl FnOnce() + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_cursor_entered.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_cursor_left(&self, callback: impl FnOnce() + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_cursor_left.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_touch(&self, callback: impl FnMut(&crate::input::TouchEvent) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_touch.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_focus_gained(&self, callback: impl FnOnce() + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_focus_gained.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_focus_lost(&self, callback: impl FnOnce() + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_focus_lost.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_modifiers_changed(&self, callback: impl FnMut(crate::input::Modifiers) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_modifiers_changed.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_ime(&self, callback: impl FnMut(&crate::input::Ime) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_ime.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_file_dropped(&self, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_file_dropped.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_file_hovered(&self, callback: impl FnMut(&std::path::PathBuf) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_file_hovered.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    pub fn on_file_hover_cancelled(&self, callback: impl FnOnce() + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_file_hover_cancelled.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    /// 窗口位置（物理像素，含边框外沿）变化时回调。运行在 winit 线程。
-    pub fn on_moved(&self, callback: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_moved.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    /// 系统主题变化时回调（仅 Windows/macOS 上报）。运行在 winit 线程。
-    pub fn on_theme_changed(&self, callback: impl FnMut(winit::window::Theme) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_theme_changed.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
-    }
-
-    /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
-    /// 运行在 winit 线程。
-    pub fn on_resized(&self, callback: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static) -> &Self {
-        let mut cbs = crate::input::InputCallbacks::default();
-        cbs.on_resized.push(Box::new(callback));
-        let _ = self.cb_tx.send((self.handle, cbs));
-        self
+    crate::def_window_ons! {
+        on_key_down: impl FnMut(&crate::input::KeyEvent) + 'static => on_key_down,
+        on_key_up: impl FnMut(&crate::input::KeyEvent) + 'static => on_key_up,
+        on_mouse_down: impl FnMut(&crate::input::MouseButtonEvent) + 'static => on_mouse_down,
+        on_mouse_up: impl FnMut(&crate::input::MouseButtonEvent) + 'static => on_mouse_up,
+        on_scroll: impl FnMut(&crate::input::MouseScrollEvent) + 'static => on_scroll,
+        on_cursor_entered: impl FnOnce() + 'static => on_cursor_entered,
+        on_cursor_left: impl FnOnce() + 'static => on_cursor_left,
+        on_touch: impl FnMut(&crate::input::TouchEvent) + 'static => on_touch,
+        on_focus_gained: impl FnOnce() + 'static => on_focus_gained,
+        on_focus_lost: impl FnOnce() + 'static => on_focus_lost,
+        on_modifiers_changed: impl FnMut(crate::input::Modifiers) + 'static => on_modifiers_changed,
+        on_ime: impl FnMut(&crate::input::Ime) + 'static => on_ime,
+        on_file_dropped: impl FnMut(&std::path::PathBuf) + 'static => on_file_dropped,
+        on_file_hovered: impl FnMut(&std::path::PathBuf) + 'static => on_file_hovered,
+        on_file_hover_cancelled: impl FnOnce() + 'static => on_file_hover_cancelled,
+        /// 窗口位置（物理像素，含边框外沿）变化时回调。运行在 winit 线程。
+        on_moved: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static => on_moved,
+        /// 系统主题变化时回调（仅 Windows/macOS 上报）。运行在 winit 线程。
+        on_theme_changed: impl FnMut(winit::window::Theme) + 'static => on_theme_changed,
+        /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
+        /// 运行在 winit 线程。
+        on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
     }
 
     /// 任务栏缩略图按钮点击回调（参数 = 按钮 `id`）。仅 Windows 生效。
