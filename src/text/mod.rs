@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 use rustc_hash::FxHashMap;
 
 use crate::glyphon::{
-    Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextArea, TextAtlas,
+    Buffer, Cache, FontSystem, Metrics, PrepareError, Shaping, SwashCache, TextArea, TextAtlas,
     TextBounds, TextRenderer, Viewport,
 };
 pub use crate::glyphon::Attrs;
 pub use crate::glyphon::ColorMode;
 pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight};
-use wgpu::{Device, MultisampleState, Queue, TextureFormat};
+use wgpu::{Device, MultisampleState, Queue, Sampler, TextureFormat, TextureView};
 
 use crate::color::Color;
 use crate::render::Pos;
@@ -51,6 +51,9 @@ pub struct TextContext {
     pub cache: Cache,
     pub text_atlas: TextAtlas,
     pub text_renderer: TextRenderer,
+    /// 创建 atlas 时用的默认基底纹理/采样器，AtlasFull 重建 atlas 时需要。
+    pub(crate) base_texture: TextureView,
+    pub(crate) base_sampler: Sampler,
     pub viewport: Viewport,
     last_viewport: Option<(u32, u32)>,
     sample_count: u32,
@@ -758,6 +761,8 @@ impl TextContext {
             cache,
             text_atlas,
             text_renderer,
+            base_texture: default_base_texture.clone(),
+            base_sampler: default_base_sampler.clone(),
             viewport,
             last_viewport: None,
             sample_count: 1,
@@ -1998,6 +2003,9 @@ impl TextEntryList {
                 ref mut text_renderer,
                 ref viewport,
                 ref shape_slots,
+                ref cache,
+                ref base_texture,
+                ref base_sampler,
                 ..
             } = *text_ctx;
 
@@ -2021,24 +2029,25 @@ impl TextEntryList {
                     }
 
                     if resolved {
-                        let glyphs = metas[run_start..run_end].iter().filter_map(|meta| {
-                            let MetaBuf::Resolved(resolved) = &meta.buf else { return None };
-                            Some(crate::glyphon::ResolvedGlyphArea {
-                                glyph: &resolved.glyph,
-                                line_y: resolved.line_y,
-                                line_top: resolved.line_top,
-                                line_height: resolved.line_height,
-                                left: meta.left,
-                                top: meta.top,
-                                scale,
-                                bounds: meta.bounds,
-                                default_color: meta.color,
-                                transform_index: meta.transform_index,
-                                base_uv_rect: meta.base_uv_rect,
-                            })
-                        });
-                        text_renderer
-                            .prepare_resolved_glyphs(
+                        let mut attempt = 0;
+                        loop {
+                            let glyphs = metas[run_start..run_end].iter().filter_map(|meta| {
+                                let MetaBuf::Resolved(resolved) = &meta.buf else { return None };
+                                Some(crate::glyphon::ResolvedGlyphArea {
+                                    glyph: &resolved.glyph,
+                                    line_y: resolved.line_y,
+                                    line_top: resolved.line_top,
+                                    line_height: resolved.line_height,
+                                    left: meta.left,
+                                    top: meta.top,
+                                    scale,
+                                    bounds: meta.bounds,
+                                    default_color: meta.color,
+                                    transform_index: meta.transform_index,
+                                    base_uv_rect: meta.base_uv_rect,
+                                })
+                            });
+                            match text_renderer.prepare_resolved_glyphs(
                                 &gpu.device,
                                 &gpu.queue,
                                 font_system,
@@ -2046,32 +2055,51 @@ impl TextEntryList {
                                 viewport,
                                 glyphs,
                                 swash_cache,
-                            )
-                            .expect("resolved glyph prepare failed");
-                    } else {
-                        let areas = metas[run_start..run_end].iter().filter_map(|meta| {
-                            let buf: &Buffer = match &meta.buf {
-                                MetaBuf::Stable(arc) => arc,
-                                MetaBuf::Slot(si) => {
-                                    debug_assert!((*si as usize) < shape_slots.len());
-                                    &*shape_slots[*si as usize].buffer
+                            ) {
+                                Ok(()) => break,
+                                Err(PrepareError::AtlasFull) if attempt == 0 => {
+                                    *text_atlas = TextAtlas::with_color_mode(
+                                        &gpu.device,
+                                        &gpu.queue,
+                                        cache,
+                                        text_atlas.format,
+                                        text_atlas.color_mode,
+                                        base_texture,
+                                        base_sampler,
+                                    );
+                                    attempt += 1;
                                 }
-                                MetaBuf::Resolved(_) => return None,
-                            };
-                            Some(TextArea {
-                                buffer: buf,
-                                left: meta.left,
-                                top: meta.top,
-                                scale,
-                                bounds: meta.bounds,
-                                default_color: meta.color,
-                                custom_glyphs: &[],
-                                transform_index: meta.transform_index,
-                                base_uv_rect: meta.base_uv_rect,
-                            })
-                        });
-                        text_renderer
-                            .prepare(
+                                Err(PrepareError::AtlasFull) => {
+                                    log::warn!("text atlas full after rebuild, skipping segment");
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut attempt = 0;
+                        loop {
+                            let areas = metas[run_start..run_end].iter().filter_map(|meta| {
+                                let buf: &Buffer = match &meta.buf {
+                                    MetaBuf::Stable(arc) => arc,
+                                    MetaBuf::Slot(si) => {
+                                        debug_assert!((*si as usize) < shape_slots.len());
+                                        &*shape_slots[*si as usize].buffer
+                                    }
+                                    MetaBuf::Resolved(_) => return None,
+                                };
+                                Some(TextArea {
+                                    buffer: buf,
+                                    left: meta.left,
+                                    top: meta.top,
+                                    scale,
+                                    bounds: meta.bounds,
+                                    default_color: meta.color,
+                                    custom_glyphs: &[],
+                                    transform_index: meta.transform_index,
+                                    base_uv_rect: meta.base_uv_rect,
+                                })
+                            });
+                            match text_renderer.prepare(
                                 &gpu.device,
                                 &gpu.queue,
                                 font_system,
@@ -2079,8 +2107,26 @@ impl TextEntryList {
                                 viewport,
                                 areas,
                                 swash_cache,
-                            )
-                            .expect("glyphon prepare failed");
+                            ) {
+                                Ok(()) => break,
+                                Err(PrepareError::AtlasFull) if attempt == 0 => {
+                                    *text_atlas = TextAtlas::with_color_mode(
+                                        &gpu.device,
+                                        &gpu.queue,
+                                        cache,
+                                        text_atlas.format,
+                                        text_atlas.color_mode,
+                                        base_texture,
+                                        base_sampler,
+                                    );
+                                    attempt += 1;
+                                }
+                                Err(PrepareError::AtlasFull) => {
+                                    log::warn!("text atlas full after rebuild, skipping segment");
+                                    break;
+                                }
+                            }
+                        }
                     }
                     run_start = run_end;
                 }
@@ -2102,6 +2148,11 @@ impl TextEntryList {
 
     /// prepare + render 所有文本条目到 render pass（单 batch 便利方法）。
     /// 不使用 transform（所有文字用恒等矩阵）。
+    ///
+    /// 不变量：本方法内的 prepare 与 render 之间，以及调用方 `Renderer::draw` 的整个执行期间，
+    /// 不得改动 `text_ctx.viewport` 或 `text_ctx.text_atlas`（也不要响应窗口 resize）。
+    /// 否则 glyphon 会返回 `RenderError::ScreenResolutionChanged` / `RemovedFromAtlas`，
+    /// 该文字段的渲染将失败（此处按跳过 + 日志处理，不会 panic）。
     pub fn draw(
         &self,
         gpu: &GpuContext,
@@ -2125,7 +2176,7 @@ impl TextEntryList {
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
         let text_ctx = gpu.text_ctx.lock().unwrap();
-        text_ctx
+        if let Err(e) = text_ctx
             .text_renderer
             .render(
                 &text_ctx.text_atlas,
@@ -2133,7 +2184,9 @@ impl TextEntryList {
                 render_pass,
                 &gpu.engine_storage_dummy_bind_group,
             )
-            .expect("glyphon render failed");
+        {
+            log::warn!("glyphon text render failed (skipped this frame): {:?}", e);
+        }
     }
 }
 

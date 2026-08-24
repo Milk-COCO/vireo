@@ -1655,7 +1655,7 @@ ibuf.as_ref().unwrap().0.slice(..),
                     // 复用循环顶部已计算的整批材质 bind group（ZeroResource 无 group 3 → None）。
                     let material_bg = custom_bg.as_ref();
                     for segment in &info.text {
-                        let _ = text_ctx.text_renderer.render_range_with_material(
+                        if let Err(e) = text_ctx.text_renderer.render_range_with_material(
                             &text_ctx.text_atlas,
                             &text_ctx.viewport,
                             &mut pass,
@@ -1667,7 +1667,9 @@ ibuf.as_ref().unwrap().0.slice(..),
                             info.custom_text_pipeline.as_deref(),
                             material_bg,
                             &info.dynamic_offsets,
-                        );
+                        ) {
+                            log::warn!("glyphon text render failed (skipped segment): {:?}", e);
+                        }
                     }
                     shapes_bound = false;
                     last_geometry = None;
