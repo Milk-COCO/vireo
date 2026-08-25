@@ -1290,10 +1290,21 @@ pub struct DeferredTask {
 pub struct DeferredTaskGuard;
 
 impl DeferredTask {
-    fn is_ready(&self, frame_count: u64) -> bool {
+    pub(crate) fn is_ready(&self, frame_count: u64) -> bool {
         match self.kind {
             DeferredTaskKind::AfterFrames(target) => frame_count >= target,
             DeferredTaskKind::AfterSecs(wakeup) => std::time::Instant::now() >= wakeup,
+        }
+    }
+}
+
+#[cfg(test)]
+impl DeferredTask {
+    /// 仅测试用：构造一个 `after_frames(target)` 等价任务（空闭包）。
+    pub(crate) fn for_frames(target: u64) -> Self {
+        DeferredTask {
+            kind: DeferredTaskKind::AfterFrames(target),
+            f: Box::new(|| {}),
         }
     }
 }
@@ -1475,7 +1486,10 @@ impl App {
     }
 
     /// 注册一个延迟 `frames` 帧后执行的闭包。
-    /// frame 计数以 `render_on_frame` 循环的帧为单位，首次调用 `on_frame` 时 `frame_count` 为 1。
+    /// 帧计数以 `render_on_frame` 循环的帧为单位。任务在**帧末**（`on_frame` / `draw` 之后）
+    /// 执行：若在 `on_frame` 内注册，则 `after_frames(0)` 于本帧末尾执行、`after_frames(1)`
+    /// 于下一帧末尾执行；若在 `run()` 之前注册（`frame_count == 0`），`after_frames(0)` 于
+    /// 第一个 `on_frame` 之前执行、`after_frames(1)` 于第 1 帧末尾执行。
     pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
         let target = self.frame_count + frames;
         self.deferred_tasks.borrow_mut().push(DeferredTask {
@@ -1484,7 +1498,8 @@ impl App {
         });
     }
 
-    /// 注册一个延迟 `secs` 秒后执行的闭包（墙钟时间）。
+    /// 注册一个延迟 `secs` 秒后执行的闭包（墙钟时间）。与 `after_frames` 一样在帧末检查到期，
+    /// 因此实际执行点落在某帧末尾（而非 sleep 精确的墙钟时刻）。
     pub fn after_secs<F: FnOnce() + Send + 'static>(&self, secs: f64, f: F) {
         self.deferred_tasks.borrow_mut().push(DeferredTask {
             kind: DeferredTaskKind::AfterSecs(
@@ -1492,6 +1507,29 @@ impl App {
             ),
             f: Box::new(f),
         });
+    }
+
+    /// 执行所有已到期的延迟任务（`after_frames` / `after_secs` 注册）。
+    /// 在每帧末尾（on_frame / draw 之后）调用；循环开始前也会调用一次（此时
+    /// `frame_count == 0`），让 `run()` 之前排的 `after_frames(0)` 在第一个 `on_frame`
+    /// 之前执行。语义：`after_frames(k)` 于「编号为注册时 `frame_count + k` 的帧末」执行。
+    fn run_due_deferred_tasks(&self) {
+        let ready = {
+            let mut tasks = self.deferred_tasks.borrow_mut();
+            let mut ready = Vec::new();
+            let mut i = 0;
+            while i < tasks.len() {
+                if tasks[i].is_ready(self.frame_count) {
+                    ready.push(tasks.swap_remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            ready
+        };
+        for task in ready {
+            (task.f)();
+        }
     }
 
     /// 启动事件循环 + 渲染线程。
@@ -2312,6 +2350,9 @@ where F: FnMut(&App) -> bool + Send + 'static
     // `VIREO_PHASE_STATS=1`：present 相对 vblank 相位诊断（需 Windows + DWM）。
     let phase_diag = std::env::var_os("VIREO_PHASE_STATS").is_some();
     let mut phase_samples: Vec<PhaseSample> = Vec::new();
+    // 循环前先跑一次到期延迟任务（frame_count 仍为 0）：
+    // run 之前排的 after_frames(0) 会在第一个 on_frame 之前执行。
+    app.run_due_deferred_tasks();
     loop {
         let frame_start = std::time::Instant::now();
         let interval_ms = pacing_prev
@@ -2561,26 +2602,6 @@ where F: FnMut(&App) -> bool + Send + 'static
             }
         }
 
-        // 执行所有到期的延迟任务
-        {
-            let ready = {
-                let mut tasks = app.deferred_tasks.borrow_mut();
-                let mut ready = Vec::new();
-                let mut i = 0;
-                while i < tasks.len() {
-                    if tasks[i].is_ready(app.frame_count) {
-                        ready.push(tasks.swap_remove(i));
-                    } else {
-                        i += 1;
-                    }
-                }
-                ready
-            };
-            for task in ready {
-                (task.f)();
-            }
-        }
-
 // 等所有窗口创建完才开始调用用户代码
         if created_windows >= expected_windows {
             for win in app.windows.iter().flatten() {
@@ -2636,6 +2657,9 @@ where F: FnMut(&App) -> bool + Send + 'static
         } else {
             std::thread::yield_now();
         }
+
+        // 执行所有到期的延迟任务（帧末，on_frame / draw 之后）
+        app.run_due_deferred_tasks();
 
         // 空转抑制：相位锁——本帧滞后于 stride 时（无 vsync / acquire 不阻塞），
         // 下一帧 sleep 到「绝对 deadline」，且落后不追赶（跳 slot），避免双帧。
@@ -4682,5 +4706,29 @@ mod metrics_tests {
         // App::new 与 with_descriptor 共用同一构造路径（编译/逻辑层验证：
         // 不实际创建 GPU，避免开窗口）。
         let _ = super::App::with_descriptor; // 存在且可调用
+    }
+
+    #[test]
+    fn deferred_after_frames_timing_table() {
+        // 验证「after_frames(k) 于 frame_count + k 帧末执行」的 4 种情况：
+        // run 前注册（fc=0）与帧内注册（第 N 帧），k=0/1 都能区分。
+        // 初始 drain 在 fc=0（第一个 on_frame 之前）；每帧末 drain 在对应 fc。
+
+        // —— run 之前注册（fc=0）——
+        let run0 = super::DeferredTask::for_frames(0); // after_frames(0) → target 0
+        let run1 = super::DeferredTask::for_frames(1); // after_frames(1) → target 1
+        // 初始 drain（fc=0）：
+        assert!(run0.is_ready(0), "run 前 after_frames(0) 应在第一个 on_frame 之前执行");
+        assert!(!run1.is_ready(0), "run 前 after_frames(1) 初始 drain 时未到期");
+        // 第 1 帧末 drain（fc=1）：
+        assert!(run1.is_ready(1), "run 前 after_frames(1) 应在第 1 帧末尾执行");
+
+        // —— 帧内注册（第 N 帧，N 任意）——
+        let n = 7u64;
+        let inner0 = super::DeferredTask::for_frames(n);     // after_frames(0) at frame N → target N
+        let inner1 = super::DeferredTask::for_frames(n + 1); // after_frames(1) at frame N → target N+1
+        assert!(inner0.is_ready(n), "帧内 after_frames(0) 于本帧末尾执行");
+        assert!(!inner1.is_ready(n), "帧内 after_frames(1) 本帧末尾未到期");
+        assert!(inner1.is_ready(n + 1), "帧内 after_frames(1) 于下一帧末尾执行");
     }
 }
