@@ -58,5 +58,5 @@ fn main() {
 
         win.draw(BLACK, &[&present]);
         true
-    });
+    }).unwrap();;
 }

@@ -126,5 +126,5 @@ fn main() {
             &[&b, &title],
         );
         true
-    });
+    }).unwrap();;
 }

@@ -178,5 +178,5 @@ fn main() {
         win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
-    });
+    }).unwrap();;
 }

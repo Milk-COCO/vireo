@@ -229,5 +229,5 @@ fn main() {
         last_enc_ms = report.timings.encode_secs * 1000.0;
         last_conf_ms = report.timings.configure_secs * 1000.0;
         true
-    });
+    }).unwrap();;
 }

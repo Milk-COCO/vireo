@@ -64,5 +64,5 @@ fn main() {
         win.draw(Color::new(0.04, 0.06, 0.1, 1.0), &[&ring, &logo_batch, &text]);
 
         true
-    });
+    }).unwrap();;
 }

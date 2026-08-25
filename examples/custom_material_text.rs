@@ -66,5 +66,5 @@ fn main() {
 
         win.draw(Color::new(0.035, 0.045, 0.075, 1.0), &[&batch]);
         true
-    });
+    }).unwrap();;
 }

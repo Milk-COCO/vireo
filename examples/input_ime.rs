@@ -221,5 +221,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&ui, &b]);
         true
-    });
+    }).unwrap();;
 }

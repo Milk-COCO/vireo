@@ -70,5 +70,5 @@ fn main() {
         }
 
         true
-    });
+    }).unwrap();;
 }

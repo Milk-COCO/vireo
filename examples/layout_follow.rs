@@ -153,5 +153,5 @@ fn main() {
         let report = win.draw(Color::new(0.06, 0.07, 0.10, 1.0), &[&batch]);
         let _ = report;
         true
-    });
+    }).unwrap();;
 }

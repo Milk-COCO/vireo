@@ -125,5 +125,5 @@ fn main() {
 
         win.draw(BLACK, &[&batch]);
         true
-    });
+    }).unwrap();;
 }

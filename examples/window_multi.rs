@@ -85,5 +85,5 @@ fn main() {
         win_b.draw(Color::new(0.12, 0.12, 0.18, 1.0), &[&batch]);
 
         true
-    });
+    }).unwrap();;
 }

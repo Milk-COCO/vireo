@@ -136,7 +136,7 @@ fn main() {
             &[&ui, &p1, &p2, &p3, &p4],
         );
         true
-    });
+    }).unwrap();;
 }
 
 fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {

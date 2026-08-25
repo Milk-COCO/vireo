@@ -54,7 +54,7 @@ fn main() {
             &[&ui, &left, &right],
         );
         true
-    });
+    }).unwrap();;
 }
 
 fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatch {

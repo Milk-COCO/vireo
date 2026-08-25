@@ -28,5 +28,5 @@ fn main() {
         win.draw(BLACK, &[&win_batch]);
 
         true
-    });
+    }).unwrap();;
 }

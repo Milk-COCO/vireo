@@ -240,5 +240,5 @@ fn main() {
         }
 
         true
-    });
+    }).unwrap();;
 }

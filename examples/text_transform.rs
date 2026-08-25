@@ -54,5 +54,5 @@ fn main() {
 
         win.draw(bg, &[&title, &b0, &b1, &b2, &b3]);
         true
-    });
+    }).unwrap();;
 }

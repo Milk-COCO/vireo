@@ -1497,7 +1497,10 @@ impl App {
     /// 启动事件循环 + 渲染线程。
     /// winit 线程只负责任何操作，渲染线程持有 `App` + `on_frame` 独立运行。
     /// 闭包签名: FnMut(&App) -> bool，返回 true 继续循环，false 退出。
-    pub fn run<F: FnMut(&App) -> bool + Send + 'static>(mut self, on_frame: F) {
+    pub fn run<F: FnMut(&App) -> bool + Send + 'static>(
+        mut self,
+        on_frame: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event_loop = EventLoop::new().unwrap();
 
         let window_init_durations = std::mem::take(&mut *self.window_init_durations.borrow_mut());
@@ -1568,7 +1571,7 @@ impl App {
                     close_tx,
                     device_lost,
                     expected_windows,
-                );
+                )
             })
             .expect("failed to spawn render thread");
 
@@ -2104,7 +2107,10 @@ impl App {
         }).unwrap();
 
         // Winit loop 结束后等待渲染线程退出。
-        let _ = render_thread.join();
+        match render_thread.join() {
+            Ok(inner) => inner,
+            Err(payload) => Err(panic_payload_to_string(payload).into()),
+        }
     }
 }
 
@@ -2263,6 +2269,16 @@ fn qpc_ticks_per_sec() -> u64 {
     crate::platform::windows::qpc_ticks_per_sec()
 }
 
+/// 将 `catch_unwind` 捕获的 panic payload 转成可读字符串。
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
 
 fn render_on_frame<F>(
     mut app: App,
@@ -2279,7 +2295,7 @@ fn render_on_frame<F>(
     close_tx: mpsc::Sender<usize>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     expected_windows: usize,
-)
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where F: FnMut(&App) -> bool + Send + 'static
 {
     let mut created_windows = 0usize;
@@ -2417,7 +2433,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                     }
                     if app.window_count() == 0 {
                         request_exit();
-                        return;
+                        return Ok(());
                     }
                 }
 
@@ -2502,7 +2518,7 @@ where F: FnMut(&App) -> bool + Send + 'static
                     }
                 }
 
-                Err(mpsc::TryRecvError::Disconnected) => return,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
@@ -2521,7 +2537,7 @@ where F: FnMut(&App) -> bool + Send + 'static
             // 外部丢弃），也要通知 winit 线程退出，否则 winit 线程会在 run_app 里
             // 永久空转（Poll 无窗口）。send 失败（winit 线程已退出）无副作用。
             request_exit();
-            return;
+            return Ok(());
         }
 
         // FPS 统计
@@ -2573,7 +2589,7 @@ where F: FnMut(&App) -> bool + Send + 'static
             if !(on_frame)(&app) {
                 // 用户请求退出：通知 winit 线程 exit，本线程返回。
                 request_exit();
-                break;
+                break Ok(());
             }
             on_frame_called = true;
             if pacing {
@@ -2615,7 +2631,7 @@ where F: FnMut(&App) -> bool + Send + 'static
             if device_lost.load(std::sync::atomic::Ordering::Acquire) {
                 log::error!("vireo GPU device lost — terminating");
                 request_exit();
-                break;
+                break Ok(());
             }
         } else {
             std::thread::yield_now();

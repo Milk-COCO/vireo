@@ -123,5 +123,5 @@ fn main() {
             &[&parent, &free, &title],
         );
         true
-    });
+    }).unwrap();;
 }

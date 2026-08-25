@@ -724,5 +724,5 @@ fn main() {
 
         win.draw(Color::new(0.07, 0.08, 0.12, if transparent { 0.55 } else { 1.0 }), &[&b]);
         true
-    });
+    }).unwrap();;
 }

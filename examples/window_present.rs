@@ -89,5 +89,5 @@ fn main() {
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
         true
-    });
+    }).unwrap();;
 }

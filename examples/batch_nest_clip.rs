@@ -56,7 +56,7 @@ fn main() {
             &[&ui, &left, &right],
         );
         true
-    });
+    }).unwrap();;
 }
 
 /// root → mid → leaf（与 `nested_clips_*` 单测同构）

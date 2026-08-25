@@ -94,5 +94,5 @@ fn main() {
         } else {
             true
         }
-    });
+    }).unwrap();;
 }

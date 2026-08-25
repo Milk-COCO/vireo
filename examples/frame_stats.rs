@@ -385,5 +385,5 @@ fn main() {
         }
         last_gpu_ms = gpu_ms;
         true
-    });
+    }).unwrap();;
 }

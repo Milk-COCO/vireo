@@ -214,7 +214,7 @@ fn main() {
         );
         draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
-    });
+    }).unwrap();;
 }
 
 fn draw_window(

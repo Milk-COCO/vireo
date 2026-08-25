@@ -48,5 +48,5 @@ fn main() {
             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         true
-    });
+    }).unwrap();;
 }

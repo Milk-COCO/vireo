@@ -152,5 +152,5 @@ fn main() {
 
         win.draw(bg, &[&batch]);
         true
-    });
+    }).unwrap();;
 }

@@ -298,5 +298,5 @@ fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().collect();
         win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &refs);
         true
-    });
+    }).unwrap();;
 }

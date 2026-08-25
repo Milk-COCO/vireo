@@ -141,5 +141,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    });
+    }).unwrap();;
 }

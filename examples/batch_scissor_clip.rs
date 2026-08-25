@@ -129,5 +129,5 @@ fn main() {
             &[&ui, &scissor_batch, &no_clip],
         );
         true
-    });
+    }).unwrap();;
 }
