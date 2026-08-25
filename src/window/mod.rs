@@ -2352,8 +2352,12 @@ where F: FnMut(&App) -> bool + Send + 'static
     let mut phase_samples: Vec<PhaseSample> = Vec::new();
     // 循环前先跑一次到期延迟任务（frame_count 仍为 0）：
     // run 之前排的 after_frames(0) 会在第一个 on_frame 之前执行。
-    app.run_due_deferred_tasks();
-    loop {
+    // 将整个渲染线程运行段包进 catch_unwind：任何渲染线程 panic（用户代码或 vireo 内部）
+    // 都转为「整 app 干净退出」而非僵尸——否则渲染线程 unwind 死掉、主线程卡在
+    // run_app 无法观察，进程既不退出也不渲染。
+    let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        app.run_due_deferred_tasks();
+        loop {
         let frame_start = std::time::Instant::now();
         let interval_ms = pacing_prev
             .map(|p| frame_start.duration_since(p).as_secs_f64() * 1e3)
@@ -2472,10 +2476,6 @@ where F: FnMut(&App) -> bool + Send + 'static
                     if let Some(w) = app.windows.get_mut(handle) {
                         *w = None;
                     }
-                    if app.window_count() == 0 {
-                        request_exit();
-                        return Ok(());
-                    }
                 }
 
                 // Winit 窗口操作：转发到正确的窗口
@@ -2564,22 +2564,8 @@ where F: FnMut(&App) -> bool + Send + 'static
             }
         }
 
-        // The winit thread may have already exited after the final close
-        // event. Do not enter user code or block in another frame wait.
-        // 需 on_frame 至少跑过一次 + 无运行期在途创建请求，才退出：
-        // 否则零窗口 App（纯 run 内创建）首帧就退出；或运行期请求已发
-        // 但 WindowCreated 未到，提前退出会漏掉刚创建的窗口。
-        if on_frame_called
-            && created_windows >= expected_windows
-            && app.pending_creates.get() == 0
-            && app.window_count() == 0
-        {
-            // 防御：即使不是经 CloseRequested 路径（例如零窗口 App::run、窗口被
-            // 外部丢弃），也要通知 winit 线程退出，否则 winit 线程会在 run_app 里
-            // 永久空转（Poll 无窗口）。send 失败（winit 线程已退出）无副作用。
-            request_exit();
-            return Ok(());
-        }
+        // 零窗口不再自动退出：仅 on_frame 返回 false（或 device lost）才结束。
+        // 这样关闭所有窗口后仍可在 on_frame 内 app.window() 重新创建窗口。
 
         // FPS 统计
         let now = std::time::Instant::now();
@@ -2671,6 +2657,19 @@ where F: FnMut(&App) -> bool + Send + 'static
         app.pacing_deadline.set(next_deadline);
         if let Some(s) = sleep {
             std::thread::sleep(s);
+        }
+    }
+    }));
+    match render_result {
+        Ok(inner) => inner,
+        Err(payload) => {
+            let msg = panic_payload_to_string(payload);
+            log::error!(
+                "vireo: render thread panicked, terminating app: {:?}",
+                msg
+            );
+            request_exit();
+            Err(msg.into())
         }
     }
 }
