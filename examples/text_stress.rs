@@ -10,7 +10,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let (lw, lh) = win.layout_size().logical();
         let w = lw as f32;
         let h = lh as f32;
@@ -178,5 +181,5 @@ fn main() {
         win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

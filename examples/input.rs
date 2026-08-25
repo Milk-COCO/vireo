@@ -24,7 +24,10 @@ fn main() {
     let mut mouse_was_down = false;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // ------ 状态轮询 ------
 
@@ -125,5 +128,5 @@ fn main() {
 
         win.draw(BLACK, &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

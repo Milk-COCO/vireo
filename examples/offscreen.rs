@@ -8,8 +8,14 @@ fn main() {
     let idx = app.window(WindowDesc::new("Offscreen Render", 800, 600), None::<fn()>);
 
     app.run(move |app| {
-        let canvas = app.offscreen_ref(&off_idx).unwrap();
-        let win = app.window_ref(&idx).unwrap();
+        let canvas = match app.offscreen_ref(&off_idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // 离屏渲染
         let mut off_batch = DrawBatch::new();
@@ -28,5 +34,5 @@ fn main() {
         win.draw(BLACK, &[&win_batch]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

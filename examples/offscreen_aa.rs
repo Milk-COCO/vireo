@@ -26,10 +26,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        if let Some(c) = app.offscreen_ref(&off_ssaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Some(c) = app.offscreen_ref(&off_msaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 0.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Some(c) = app.offscreen_ref(&off_sdf)  { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let (Some(w), Some(c1), Some(c2), Some(c3)) = (
+        if let Ok(c) = app.offscreen_ref(&off_ssaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Ok(c) = app.offscreen_ref(&off_msaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 0.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Ok(c) = app.offscreen_ref(&off_sdf) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let (Ok(w), Ok(c1), Ok(c2), Ok(c3)) = (
             app.window_ref(&win),
             app.offscreen_ref(&off_ssaa),
             app.offscreen_ref(&off_msaa),
@@ -48,5 +48,5 @@ fn main() {
             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         true
-    }).unwrap();;
+    }).unwrap();
 }

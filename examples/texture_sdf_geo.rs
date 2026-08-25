@@ -36,11 +36,17 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         match tex {
             Some(i) => {
-                let t = app.texture(i).unwrap();
+                let t = match app.texture(i) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
                 let label = Color::new(0.5, 0.5, 0.7, 1.0);
 
                 // ---- 上半：几何模式 ----
@@ -70,5 +76,5 @@ fn main() {
         }
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

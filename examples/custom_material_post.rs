@@ -24,8 +24,14 @@ fn main() {
     let material = app.material(WGSL).expect("material WGSL");
 
     app.run(move |app| {
-        let win = app.window_ref(&window).unwrap();
-        let scene_canvas = app.offscreen_ref(&scene).unwrap();
+        let win = match app.window_ref(&window) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let scene_canvas = match app.offscreen_ref(&scene) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let mut scene_batch = DrawBatch::new();
         draw_circle(
@@ -58,5 +64,5 @@ fn main() {
 
         win.draw(BLACK, &[&present]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

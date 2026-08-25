@@ -34,7 +34,10 @@ fn main() {
     let mut last_enc_ms = 0.0f64;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let keys = [
             win.key_down(KeyCode::Digit1),
@@ -89,5 +92,5 @@ fn main() {
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
         true
-    }).unwrap();;
+    }).unwrap();
 }

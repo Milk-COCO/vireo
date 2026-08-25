@@ -11,7 +11,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let bg = Color::new(0.08, 0.08, 0.14, 1.0);
         let gray = Color::new(0.4, 0.4, 0.5, 1.0);
         let yl = Color::new(1.0, 0.85, 0.3, 1.0);
@@ -54,5 +57,5 @@ fn main() {
 
         win.draw(bg, &[&title, &b0, &b1, &b2, &b3]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

@@ -32,7 +32,10 @@ fn main() {
 
     let mut t: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.02;
 
         let mut batch = DrawBatch::new();
@@ -128,7 +131,7 @@ fn main() {
         );
 
         if let Some(i) = logo {
-            if let Some(tex) = app.texture(i) {
+            if let Ok(tex) = app.texture(i) {
                 let s = 0.08;
                 let w = tex.width as f32 * s;
                 let h = tex.height as f32 * s;
@@ -206,5 +209,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

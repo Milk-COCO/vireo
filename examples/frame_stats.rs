@@ -161,7 +161,10 @@ fn main() {
     });
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         win.set_gpu_timing(true);
         let max_sc = win.gpu().max_sample_count();
         let win_init_ms = win.init_duration() * 1000.0;
@@ -385,5 +388,5 @@ fn main() {
         }
         last_gpu_ms = gpu_ms;
         true
-    }).unwrap();;
+    }).unwrap();
 }

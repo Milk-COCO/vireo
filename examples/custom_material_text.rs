@@ -42,7 +42,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&window).unwrap();
+        let win = match app.window_ref(&window) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let mut batch = DrawBatch::new();
         batch.custom_material = Some(material.clone());
@@ -66,5 +69,5 @@ fn main() {
 
         win.draw(Color::new(0.035, 0.045, 0.075, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

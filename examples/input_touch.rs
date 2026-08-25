@@ -25,7 +25,10 @@ fn main() {
     let sim_id: u64 = 9999;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         if !registered {
             registered = true;
@@ -140,5 +143,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

@@ -111,7 +111,7 @@ fn main() {
             app.window_ref(&w2),
             app.window_ref(&w3),
         ) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
             _ => return false,
         };
 
@@ -170,7 +170,7 @@ fn main() {
 
         // popup：每帧画内容；满 1 秒后 close()（程序化关窗，走完整路径）。
         if let Some((idx, born)) = popup {
-            if let Some(win) = app.window_ref(&idx) {
+            if let Ok(win) = app.window_ref(&idx) {
                 let mut pb = DrawBatch::new();
                 draw_rectangle(
                     &mut pb,
@@ -214,7 +214,7 @@ fn main() {
         );
         draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
-    }).unwrap();;
+    }).unwrap();
 }
 
 fn draw_window(

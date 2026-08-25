@@ -139,8 +139,8 @@ fn main() {
 
         for i in 0..2 {
             let win = match app.window_ref(&idxs[i]) {
-                Some(w) => w,
-                None => continue,
+                Ok(w) => w,
+                Err(_) => continue,
             };
             win.set_gpu_timing(true);
 
@@ -240,5 +240,5 @@ fn main() {
         }
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

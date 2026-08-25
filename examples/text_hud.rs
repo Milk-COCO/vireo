@@ -31,7 +31,10 @@ fn main() {
     let mut fps_s = String::new();
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         if win.key_down(KeyCode::Space) {
             show_auto = !show_auto;
@@ -152,5 +155,5 @@ fn main() {
 
         win.draw(bg, &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

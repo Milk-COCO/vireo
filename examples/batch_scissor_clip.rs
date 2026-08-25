@@ -30,7 +30,10 @@ fn main() {
 
     let mut t: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.02;
 
         let mut ui = DrawBatch::new();
@@ -129,5 +132,5 @@ fn main() {
             &[&ui, &scissor_batch, &no_clip],
         );
         true
-    }).unwrap();;
+    }).unwrap();
 }

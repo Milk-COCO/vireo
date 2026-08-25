@@ -21,7 +21,10 @@ fn main() {
 
     let mut t: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.025;
 
         let mut ui = DrawBatch::new();
@@ -136,7 +139,7 @@ fn main() {
             &[&ui, &p1, &p2, &p3, &p4],
         );
         true
-    }).unwrap();;
+    }).unwrap();
 }
 
 fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {

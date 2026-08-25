@@ -169,7 +169,10 @@ fn main() {
     let mut mac_alt: u8 = 0; // 0=Both 1=OnlyLeft 2=OnlyRight
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         if !registered {
             registered = true;
@@ -724,5 +727,5 @@ fn main() {
 
         win.draw(Color::new(0.07, 0.08, 0.12, if transparent { 0.55 } else { 1.0 }), &[&b]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

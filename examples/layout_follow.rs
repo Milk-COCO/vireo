@@ -61,7 +61,10 @@ fn main() {
     let mut key_was = [false; 4]; // [ ] L V
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let keys = [
             win.key_down(KeyCode::BracketLeft),
@@ -153,5 +156,5 @@ fn main() {
         let report = win.draw(Color::new(0.06, 0.07, 0.10, 1.0), &[&batch]);
         let _ = report;
         true
-    }).unwrap();;
+    }).unwrap();
 }

@@ -16,7 +16,10 @@ fn main() {
     let opts = TextDef::default().font_size(font_size);
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let gpu = win.gpu();
         let mut batch = DrawBatch::new();
 
@@ -77,5 +80,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

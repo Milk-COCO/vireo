@@ -9,13 +9,18 @@
 //!     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
 //!     draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
 //!         TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
-//!     app.window_ref(&win).unwrap().draw(BLACK, &[&batch]);
+//!     let win = match app.window_ref(&win) {
+//!         Ok(w) => w,
+//!         Err(_) => return false,
+//!     };
+//!     win.draw(BLACK, &[&batch]);
 //!     true
 //! });
 //! ```
 
 pub mod area;
 pub mod color;
+pub mod error;
 pub mod render;
 pub mod material;
 pub mod glyphon;
@@ -156,6 +161,7 @@ pub mod prelude {
     pub use crate::dpi::Pixel;
     pub use crate::dpi::PixelPos;
     pub use crate::dpi::PixelSize;
+    pub use crate::error::VireoError;
     pub use crate::offscreen::OffscreenCanvas;
     pub use crate::window::OffscreenIndex;
     pub use wgpu::PresentMode;

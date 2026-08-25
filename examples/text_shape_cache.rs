@@ -80,7 +80,10 @@ fn main() {
     eprintln!("[text_shape_cache] logging stats to terminal every 1s");
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let t = t0.elapsed().as_secs_f32();
 
         if win.key_down(KeyCode::Digit1) {
@@ -298,5 +301,5 @@ fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().collect();
         win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &refs);
         true
-    }).unwrap();;
+    }).unwrap();
 }

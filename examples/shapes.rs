@@ -14,7 +14,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let mut batch = DrawBatch::new();
         batch.set_sdf_feather(Some(1.0));
 
@@ -52,5 +55,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

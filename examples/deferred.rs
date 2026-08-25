@@ -48,7 +48,10 @@ fn main() {
     });
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // 取走本帧的触发标记
         let arm = {

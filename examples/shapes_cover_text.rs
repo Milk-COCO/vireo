@@ -11,7 +11,10 @@ fn main() {
     let idx = app.window(WindowDesc::new("图形覆盖文本", 520, 180), None::<fn()>);
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // 所有文字和矩形在同一 y 行(80)，x 逐渐右移
         // Layer 1: 红色矩形 + 白色文字（右半被 Layer 2 矩形遮盖）
@@ -35,5 +38,5 @@ fn main() {
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b1, &b2, &b3]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

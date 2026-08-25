@@ -44,7 +44,10 @@ fn main() {
     let mut text_cursor = (400.0f32, 260.0f32);
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         if !registered {
             registered = true;
@@ -221,5 +224,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&ui, &b]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

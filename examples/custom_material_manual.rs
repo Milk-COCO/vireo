@@ -103,7 +103,10 @@ fn main() {
     let start = std::time::Instant::now();
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // 手动写数据到 buffer（描述符材质走 mat.set_uniform，手动 BGL 直接写）
         let t = start.elapsed().as_secs_f32();
@@ -141,5 +144,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

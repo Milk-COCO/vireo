@@ -32,7 +32,10 @@ fn main() {
 
     let mut t: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.03;
 
         // 输入：左键拖动平移，滚轮缩放
@@ -141,5 +144,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&ui, &root, &ref_batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

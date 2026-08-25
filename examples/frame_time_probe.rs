@@ -35,7 +35,10 @@ fn main() {
 
     let mut focused = false;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         if !focused {
             win.focus();
             focused = true;
@@ -94,5 +97,5 @@ fn main() {
         } else {
             true
         }
-    }).unwrap();;
+    }).unwrap();
 }

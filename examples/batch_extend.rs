@@ -17,7 +17,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // 同一次 draw：先 Clear（底色），再按序叠加 b1、b2
         let mut b1 = DrawBatch::new();
@@ -33,5 +36,5 @@ fn main() {
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b1, &b2]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

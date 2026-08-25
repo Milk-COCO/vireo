@@ -16,6 +16,7 @@ use crate::offscreen::OffscreenCanvas;
 use crate::texture::Texture;
 use crate::gpu::GpuContext;
 use crate::input::InputState;
+use crate::error::VireoError;
 
 /// 取 winit 窗口的原生 HWND（Windows）。失败返回 `None`。
 ///
@@ -1394,9 +1395,15 @@ impl App {
         OffscreenIndex(idx)
     }
 
-    /// 根据索引获取离屏画布引用
-    pub fn offscreen_ref(&self, idx: &OffscreenIndex) -> Option<&OffscreenCanvas> {
-        self.offscreens.get(idx.0)
+    /// 根据索引获取离屏画布引用。
+    ///
+    /// 返回 `Err` 表示索引无效或离屏画布已释放（例如窗口关闭时关联的离屏资源被清理）。
+    /// 调用方应处理 `Err`（例如在 `on_frame` 中 `return false`），而不是 `.unwrap()`。
+    pub fn offscreen_ref(&self, idx: &OffscreenIndex) -> Result<&OffscreenCanvas, VireoError> {
+        match self.offscreens.get(idx.0) {
+            Some(c) => Ok(c),
+            None => Err(VireoError::OffscreenNotFound(idx.0)),
+        }
     }
 
     /// 从文件加载纹理（存储在 App 中管理生命周期），返回纹理索引。
@@ -1408,9 +1415,14 @@ impl App {
         idx
     }
 
-    /// 根据索引获取已加载的纹理
-    pub fn texture(&self, index: usize) -> Option<&Texture> {
-        self.textures.get(index)
+    /// 根据索引获取已加载的纹理。
+    ///
+    /// 返回 `Err` 表示索引越界或贴图尚未加载完成。调用方应处理 `Err`，而不是 `.unwrap()`。
+    pub fn texture(&self, index: usize) -> Result<&Texture, VireoError> {
+        match self.textures.get(index) {
+            Some(t) => Ok(t),
+            None => Err(VireoError::TextureNotFound(index)),
+        }
     }
 
     /// 配置一个待创建的窗口。可选 on_close 钩子在窗口被关闭时调用。
@@ -2741,9 +2753,15 @@ impl App {
         self.gpu.create_material_manual_with_vertex_shader(source, vertex_source, bgl)
     }
 
-    /// 根据索引获取窗口引用。返回 None 表示窗口已关闭或索引无效。
-    pub fn window_ref(&self, idx: &WindowIndex) -> Option<&VireoWindow> {
-        self.windows.get(idx.0 as usize).and_then(|w| w.as_ref())
+    /// 根据索引获取窗口引用。
+    ///
+    /// 返回 `Err` 表示窗口已关闭或索引无效。调用方应处理 `Err`（例如在 `on_frame` 中
+    /// `return false`），而不是 `.unwrap()`——否则窗口关闭会让整个渲染线程 panic。
+    pub fn window_ref(&self, idx: &WindowIndex) -> Result<&VireoWindow, VireoError> {
+        match self.windows.get(idx.0 as usize).and_then(|w| w.as_ref()) {
+            Some(w) => Ok(w),
+            None => Err(VireoError::WindowNotFound(idx.0)),
+        }
     }
 
     /// 存活窗口数量

@@ -42,7 +42,10 @@ fn main() {
 
     let mut tried_runtime = false;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         if !tried_runtime {
             tried_runtime = true;
@@ -81,5 +84,5 @@ fn main() {
         } else {
             true
         }
-    }).unwrap();;
+    }).unwrap();
 }

@@ -10,12 +10,18 @@ fn main() {
     let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).dpi_override(Some(1.0)), None::<fn()>);
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let mut batch = DrawBatch::new();
 
         match tex {
             Some(i) => {
-                let t = app.texture(i).unwrap();
+                let t = match app.texture(i) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
                 let s = 0.2; // logo 是 1000x1000，缩小到可看
                 batch.set_texture(Some(t));
                 draw_rectangle(&mut batch, Pos::new(20.0, 80.0), t.width as f32 * s, t.height as f32 * s, Some(WHITE));
@@ -43,5 +49,5 @@ fn main() {
 
         win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

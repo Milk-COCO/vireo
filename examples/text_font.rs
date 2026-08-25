@@ -36,7 +36,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let mut batch = DrawBatch::new();
 
         draw_text(
@@ -92,5 +95,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }

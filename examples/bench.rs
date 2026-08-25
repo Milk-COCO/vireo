@@ -28,7 +28,10 @@ fn main() {
     let mut preserve_order = true;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let mut batch = DrawBatch::new();
 
         // ---- 场景切换 ----
@@ -117,7 +120,7 @@ fn main() {
 
         win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }
 
 // ─── 场景定义 ─────────────────────────────────────────────

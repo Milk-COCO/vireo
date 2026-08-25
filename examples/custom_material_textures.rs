@@ -91,7 +91,10 @@ fn main() {
     let start = std::time::Instant::now();
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         let _keep_textures_alive = (&tex0, &tex1);
 
         let t = start.elapsed().as_secs_f32();
@@ -126,5 +129,5 @@ fn main() {
             &[&b, &title],
         );
         true
-    }).unwrap();;
+    }).unwrap();
 }

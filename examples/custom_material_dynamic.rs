@@ -63,7 +63,10 @@ fn main() {
     );
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let stride = std::mem::size_of::<RectParams>() as u32;
         let mut batches: Vec<DrawBatch> = Vec::new();
@@ -88,5 +91,5 @@ fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().chain(std::iter::once(&title)).collect();
         win.draw(Color::new(0.05, 0.07, 0.11, 1.0), &refs);
         true
-    }).unwrap();;
+    }).unwrap();
 }

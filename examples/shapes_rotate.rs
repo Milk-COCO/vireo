@@ -8,7 +8,10 @@ fn main() {
 
     let mut t: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.02;
 
         // 三个转子绕 (180,200) 公转 + 各自自转
@@ -34,5 +37,5 @@ fn main() {
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&rotors, &spinning]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

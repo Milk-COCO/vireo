@@ -124,7 +124,10 @@ fn main() {
     let mut last_suboptimal = false;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         let keys = [
             win.key_down(KeyCode::KeyO),
@@ -229,5 +232,5 @@ fn main() {
         last_enc_ms = report.timings.encode_secs * 1000.0;
         last_conf_ms = report.timings.configure_secs * 1000.0;
         true
-    }).unwrap();;
+    }).unwrap();
 }

@@ -13,9 +13,18 @@ fn main() {
 
     let mut angle: f32 = 0.0;
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
-        let logo = app.texture(logo_idx).unwrap();
-        let logo_bg = app.texture(logo_bg_idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let logo = match app.texture(logo_idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let logo_bg = match app.texture(logo_bg_idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         angle += 0.012;
 
         let cx = 300.0;
@@ -59,5 +68,5 @@ fn main() {
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&glow, &batch]);
 
         true
-    }).unwrap();;
+    }).unwrap();
 }

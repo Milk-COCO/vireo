@@ -14,7 +14,10 @@ fn main() {
     let mut s_was = false;
 
     app.run(move |app| {
-        let win = app.window_ref(&idx).unwrap();
+        let win = match app.window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         t += 0.016;
 
         let s_down = win.key_down(KeyCode::KeyS);
@@ -107,5 +110,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).unwrap();;
+    }).unwrap();
 }
