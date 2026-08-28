@@ -7,9 +7,7 @@
 //!     · `after_secs(1.0)`  → 1 秒墙钟后把方块变回白
 //!   HUD 打印每个回调触发时记录的 frame 编号，可见 `0` 比 `1` 早一帧。
 //!
-//! 语义（`src/window/mod.rs`）：`after_ticks(k)` 在「注册帧 + k」的帧末执行；
-//! 若在 `run()` 之前注册（`frame_count == 0`），`after_ticks(0)` 在第一个 `on_tick`
-//! 之前执行、`after_ticks(1)` 在第 1 帧末尾执行。
+//! 语义（`src/thread.rs`）：`after_ticks(k)` 在「注册帧 + k」的帧末执行，即调用 `after_ticks` 的那一帧 `on_tick` 末尾再过 k 帧；`after_secs` 按墙钟时间触发。
 
 use std::sync::{Arc, Mutex};
 

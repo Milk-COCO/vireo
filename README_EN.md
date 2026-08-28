@@ -33,7 +33,7 @@ cargo run --example ez
 
 ```rust
 // Later batches overlay earlier ones
-win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
+win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 ```
 
 ### Text API (What / Where / Override)

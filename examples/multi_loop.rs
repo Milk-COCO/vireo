@@ -4,7 +4,7 @@
 //! - 循环 A 持续绘制窗口 1（用 `ctx.tick_count()` 让方块左右移动）。
 //! - 循环 B 绘制窗口 2，约 3 秒后返回 `false` 自行结束；当所有循环结束，应用自动退出。
 //!
-//! 与 [`App::run`] 的区别：`spawn` 不阻塞当前线程，返回可 `await` 的 [`ThreadHandle`]。
+//! 与 [`App::run`] 一样，`spawn` 也返回可 `await` 的 [`ThreadHandle`]；区别在于 [`App::run`] 通常作为末语句直接丢弃句柄（析构时 join 渲染线程，阻塞到窗口关闭），而 `spawn` 把句柄交给你显式 `.await` 或与其他 future 组合。
 //!
 //! 线程昵称：本例通过 [`Thread::with_name`] 把这条 OS 线程命名为 `loop-demo`；若不设置，
 //! `spawn` 会用默认名 `vireo-thread-{n}`（n 为进程内 spawn 创建顺序，从 0 开始）。

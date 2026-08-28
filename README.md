@@ -33,7 +33,7 @@ cargo run --example ez
 
 ```rust
 // 多 batch：后面的盖住前面的
-win.draw(Some(bg_color), &[&batch1, &batch2, &batch3]);
+win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 ```
 
 ### 文本 API
