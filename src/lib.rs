@@ -2,23 +2,32 @@
 //!
 //! ```rust
 //! use vireo::prelude::*;
-//! let mut app = App::new();
-//! let win = app.window(WindowDesc::new("Hello", 400, 300), None::<fn()>);
-//! app.run(move |app| {
-//!     let mut batch = DrawBatch::new();
-//!     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
-//!     draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
-//!         TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
-//!     let win = match app.window_ref(&win) {
-//!         Ok(w) => w,
-//!         Err(_) => return false,
-//!     };
-//!     win.draw(BLACK, &[&batch]);
-//!     true
+//! App::new(|app| async move {
+//!     let win = app.window(WindowDesc::new("Hello", 400, 300), None);
+//!     app.run(move |cx: &mut LoopContext| {
+//!         let mut batch = DrawBatch::new();
+//!         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
+//!         draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
+//!             TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
+//!         if let Ok(w) = app.window_ref(&win) {
+//!             w.draw(BLACK, &[&batch]);
+//!         }
+//!         true
+//!     });
 //! });
 //! ```
-
 pub mod area;
+
+#[doc(hidden)]
+pub use vireo_macro::main;
+
+#[doc(hidden)]
+pub use crate::window::App;
+#[doc(hidden)]
+
+
+pub mod thread;
+
 pub mod color;
 pub mod error;
 pub mod render;
@@ -26,6 +35,7 @@ pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
+pub mod lock;
 pub mod nc;
 pub mod dpi;
 pub mod math;
@@ -162,8 +172,14 @@ pub mod prelude {
     pub use crate::dpi::PixelPos;
     pub use crate::dpi::PixelSize;
     pub use crate::error::VireoError;
+    pub use crate::thread::Loop;
+    pub use crate::thread::LoopContext;
+    pub use crate::thread::Thread;
+    pub use crate::thread::ThreadHandle;
     pub use crate::offscreen::OffscreenCanvas;
     pub use crate::window::OffscreenIndex;
     pub use wgpu::PresentMode;
+    // `#[vireo::main]` 过程宏：把 `async fn main` 改写为在主线程跑 winit 的入口。
+    pub use vireo_macro::main;
 }
 

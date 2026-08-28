@@ -27,8 +27,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Custom Material Dynamic Offset", 600, 400),
         None::<fn()>,
@@ -62,8 +62,8 @@ fn main() {
         bytemuck::cast_slice(&params),
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -91,5 +91,5 @@ fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().chain(std::iter::once(&title)).collect();
         win.draw(Color::new(0.05, 0.07, 0.11, 1.0), &refs);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

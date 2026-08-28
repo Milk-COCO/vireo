@@ -16,8 +16,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("text/hud — Normal · Dynamic · Glyphs", 720, 360), None::<fn()>);
 
     // 跨帧 HUD 行（Bevy span 思路）：标签 Normal，分数 Glyphs
@@ -30,8 +30,8 @@ fn main() {
     let mut score_s = String::new();
     let mut fps_s = String::new();
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -50,7 +50,7 @@ fn main() {
 
         fps_s.clear();
         // 一位小数：拆成 Glyphs 友好串（可选；也可用 format 后 draw_text_hud!）
-        let fps = app.fps;
+        let fps = ctx.fps();
         let w = fps.floor() as i64;
         let f = ((fps - w as f64) * 10.0).round() as i64;
         let (w, f) = if f >= 10 { (w + 1, 0) } else { (w, f) };
@@ -133,7 +133,7 @@ fn main() {
             ov(Color::new(0.7, 0.4, 0.4, 1.0)),
         );
 
-        let st = app.gpu.shape_cache_stats();
+        let st = ctx.app().gpu.shape_cache_stats();
         let tot = st.hits + st.misses;
         let hit = if tot > 0 {
             100.0 * st.hits as f64 / tot as f64
@@ -146,7 +146,7 @@ fn main() {
                 TextPart::normal("shape hit~"),
                 TextPart::glyphs(format!("{hit:.0}")),
                 TextPart::normal("%  entries "),
-                TextPart::glyphs(app.gpu.shape_cache_len().to_string()),
+                TextPart::glyphs(ctx.app().gpu.shape_cache_len().to_string()),
             ],
             Pos::new(16.0, 312.0),
             def(13.0),
@@ -155,5 +155,5 @@ fn main() {
 
         win.draw(bg, &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

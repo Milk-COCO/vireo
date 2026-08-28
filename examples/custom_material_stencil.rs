@@ -40,8 +40,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Custom Material + Stencil", 640, 480),
         None::<fn()>,
@@ -59,15 +59,15 @@ fn main() {
     ])).expect("WGSL compile");
     let start = std::time::Instant::now();
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
 
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
-            &app.gpu.queue,
+            &ctx.app().gpu.queue,
             "u_pulse",
             &PulseParams {
                 time: t,
@@ -126,5 +126,5 @@ fn main() {
             &[&parent, &free, &title],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }

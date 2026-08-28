@@ -5,8 +5,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("Vireo Measure - Bounding Box", 800, 600), None::<fn()>);
 
     let text = "Measure Me!";
@@ -15,8 +15,8 @@ fn main() {
     // 预先测量一次（文本不变，尺寸不变）
     let opts = TextDef::default().font_size(font_size);
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -80,5 +80,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

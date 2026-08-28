@@ -27,8 +27,8 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
     v
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let window = app.window(
         WindowDesc::new("One Material: Shape + Text", 640, 400),
         None::<fn()>,
@@ -41,8 +41,8 @@ fn main() {
         &app.gpu,
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&window) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&window) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -69,5 +69,5 @@ fn main() {
 
         win.draw(Color::new(0.035, 0.045, 0.075, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

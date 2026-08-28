@@ -22,8 +22,8 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
     );
 }
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let logo = Some(app.load_texture("logo_quad.png"));
     let idx = app.window(
         WindowDesc::new("ShapeOverride", 900, 520).dpi_override(Some(1.0)),
@@ -31,8 +31,8 @@ fn main() {
     );
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -131,13 +131,13 @@ fn main() {
         );
 
         if let Some(i) = logo {
-            if let Ok(tex) = app.texture(i) {
+            if let Ok(tex) = ctx.app().texture(i) {
                 let s = 0.08;
                 let w = tex.width as f32 * s;
                 let h = tex.height as f32 * s;
 
                 // 笔刷贴图：后续白色矩形会采样 logo
-                batch.set_texture(Some(tex));
+                batch.set_texture(Some(&*tex));
                 draw_rectangle(&mut batch, Pos::new(30.0, 360.0), w, h, Some(WHITE));
                 label(&mut batch, "set_texture(Some)", 30.0, 360.0 + h + 4.0);
 
@@ -151,7 +151,7 @@ fn main() {
                     },
                     ShapeOverride::new()
                         .color(WHITE)
-                        .texture(tex)
+                        .texture(&*tex)
                         .uv_rect(0.0, 0.0, 0.5, 0.5),
                 );
                 label(&mut batch, "opts.uv 半区", 160.0, 360.0 + h + 4.0);
@@ -209,5 +209,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

@@ -1,15 +1,15 @@
-//! 延迟任务示例：`after_frames(0)` vs `after_frames(1)` 与 `after_secs`
+//! 延迟任务示例：`after_ticks(0)` vs `after_ticks(1)` 与 `after_secs`
 //!
 //! 交互：
 //! - 空格：触发一组延迟任务
-//!     · `after_frames(0)` → 本帧（注册帧）末尾把方块变红
-//!     · `after_frames(1)` → 下一帧末尾把方块变绿
+//!     · `after_ticks(0)` → 本帧（注册帧）末尾把方块变红
+//!     · `after_ticks(1)` → 下一帧末尾把方块变绿
 //!     · `after_secs(1.0)`  → 1 秒墙钟后把方块变回白
 //!   HUD 打印每个回调触发时记录的 frame 编号，可见 `0` 比 `1` 早一帧。
 //!
-//! 语义（`src/window/mod.rs`）：`after_frames(k)` 在「注册帧 + k」的帧末执行；
-//! 若在 `run()` 之前注册（`frame_count == 0`），`after_frames(0)` 在第一个 `on_frame`
-//! 之前执行、`after_frames(1)` 在第 1 帧末尾执行。
+//! 语义（`src/window/mod.rs`）：`after_ticks(k)` 在「注册帧 + k」的帧末执行；
+//! 若在 `run()` 之前注册（`frame_count == 0`），`after_ticks(0)` 在第一个 `on_tick`
+//! 之前执行、`after_ticks(1)` 在第 1 帧末尾执行。
 
 use std::sync::{Arc, Mutex};
 
@@ -27,8 +27,8 @@ fn prune(log: &mut Vec<(u64, String)>) {
     }
 }
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("Deferred Tasks", 640, 420), None::<fn()>);
 
     let demo: Arc<Mutex<Demo>> = Arc::new(Mutex::new(Demo {
@@ -47,8 +47,8 @@ fn main() {
         }
     });
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -62,29 +62,29 @@ fn main() {
         };
 
         if arm {
-            let fc = app.frame_count;
-            // after_frames(0)：注册帧（fc）末尾执行
-            app.after_frames(0, {
+            let fc = ctx.tick_count();
+            // after_ticks(0)：注册帧（fc）末尾执行
+            ctx.after_ticks(0, {
                 let d = Arc::clone(&demo);
                 move || {
                     let mut d = d.lock().unwrap();
                     d.color = Color::new(1.0, 0.25, 0.25, 1.0);
-                    d.log.push((fc, "after_frames(0) -> red".into()));
+                    d.log.push((fc, "after_ticks(0) -> red".into()));
                     prune(&mut d.log);
                 }
             });
-            // after_frames(1)：注册帧 + 1（fc+1）末尾执行
-            app.after_frames(1, {
+            // after_ticks(1)：注册帧 + 1（fc+1）末尾执行
+            ctx.after_ticks(1, {
                 let d = Arc::clone(&demo);
                 move || {
                     let mut d = d.lock().unwrap();
                     d.color = Color::new(0.25, 1.0, 0.35, 1.0);
-                    d.log.push((fc + 1, "after_frames(1) -> green".into()));
+                    d.log.push((fc + 1, "after_ticks(1) -> green".into()));
                     prune(&mut d.log);
                 }
             });
             // after_secs：墙钟 1 秒后执行（落在某帧末尾）
-            app.after_secs(1.0, {
+            ctx.after_secs(1.0, {
                 let d = Arc::clone(&demo);
                 move || {
                     let mut d = d.lock().unwrap();
@@ -99,7 +99,7 @@ fn main() {
             let d = demo.lock().unwrap();
             (d.color, d.log.clone())
         };
-        let fc = app.frame_count;
+        let fc = ctx.tick_count();
 
         // 背景
         let mut bg = DrawBatch::new();
@@ -131,7 +131,7 @@ fn main() {
         };
         line(&mut hud, &format!("frame: {fc}"), y);
         y += 24.0;
-        line(&mut hud, "SPACE: after_frames(0) red / (1) green / after_secs(1.0) white", y);
+        line(&mut hud, "SPACE: after_ticks(0) red / (1) green / after_secs(1.0) white", y);
         y += 28.0;
         for (f, msg) in log.iter().rev() {
             line(&mut hud, &format!("  f{f}  {msg}"), y);
@@ -141,6 +141,5 @@ fn main() {
         win.draw(Color::new(0.05, 0.06, 0.1, 1.0), &[&bg, &shape, &hud]);
 
         true
-    })
-    .unwrap();
+    }).await.unwrap();
 }

@@ -4,23 +4,23 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let tex_id = app.load_texture("logo_bg.png");
     let idx = app.window(WindowDesc::new("Texture Sub-Region", 450, 220), None::<fn()>);
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let tex = match app.texture(tex_id) {
+        let tex = match ctx.app().texture(tex_id) {
             Ok(v) => v,
             Err(_) => return false,
         };
 
         let mut batch = DrawBatch::new();
-        batch.set_texture(Some(tex));
+        batch.set_texture(Some(&*tex));
         let s = 0.1; // logo 1000x1000，缩小到 100x100
 
         // 画整张纹理
@@ -49,5 +49,5 @@ fn main() {
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

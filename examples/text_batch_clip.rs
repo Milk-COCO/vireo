@@ -9,8 +9,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Text + Batch Clip", 920, 480).dpi_override(Some(1.0)),
         None::<fn()>,
@@ -19,8 +19,8 @@ fn main() {
     let mut t: f32 = 0.0;
     let long = "Text clipped by parent circle.";
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -57,7 +57,7 @@ fn main() {
             &[&ui, &left, &right],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }
 
 fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatch {

@@ -45,8 +45,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let aa = match std::env::var("VIREO_AA").as_deref() {
         Ok("msaa4") => AntiAliasing::Msaa { samples: 4, alpha_to_coverage: false },
         Ok("ssaa4") => AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },
@@ -73,8 +73,8 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -86,7 +86,7 @@ fn main() {
             hue: t * 0.1,
             _pad: 0.0,
         };
-        mat.set_uniform(&app.gpu.queue, "u_pulse", &params);
+        mat.set_uniform(&ctx.app().gpu.queue, "u_pulse", &params);
 
         let mut b = DrawBatch::new();
         b.custom_material = Some(mat.clone());
@@ -108,5 +108,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

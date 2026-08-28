@@ -14,8 +14,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let window = app.window(
         WindowDesc::new("Material on Offscreen Texture", 640, 400),
         None::<fn()>,
@@ -23,12 +23,12 @@ fn main() {
     let scene = app.offscreen(640, 400, AntiAliasing::None);
     let material = app.material(WGSL).expect("material WGSL");
 
-    app.run(move |app| {
-        let win = match app.window_ref(&window) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&window) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let scene_canvas = match app.offscreen_ref(&scene) {
+        let scene_canvas = match ctx.app().offscreen_ref(&scene) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -64,5 +64,5 @@ fn main() {
 
         win.draw(BLACK, &[&present]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

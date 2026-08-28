@@ -7,13 +7,13 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("Transform Stack", 900, 420), None::<fn()>);
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -93,5 +93,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

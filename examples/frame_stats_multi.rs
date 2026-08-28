@@ -2,7 +2,7 @@
 //!
 //! W0 / W1 的 PresentMode 与 frame_latency 可独立设置，每帧都调用两者的
 //! `win.draw`个窗口 HUD 显示自己的 Present / Latency、上一帧
-//! acquire/encode/gpu/present 耗时、presented_fps 与全局 app.fps。
+//! acquire/encode/gpu/present 耗时、presented_fps 与全局 app.fps.get()。
 //! 初始差异化：W0 = AutoVsync + latency 2，W1 = Immediate + latency 1。
 //!
 //! 按键（任意窗口聚焦均可）：
@@ -35,10 +35,10 @@ const CONFIGS: [WinCfg; 2] = [
     WinCfg { name: "W1", bg: Color::new(0.05, 0.13, 0.09, 1.0) },
 ];
 
-fn main() {
+#[vireo::main]
+async fn main() {
     let quiet = std::env::var("VIREO_QUIET").is_ok();
 
-    let mut app = App::new();
     let mut idxs = Vec::new();
     for cfg in &CONFIGS {
         idxs.push(app.window(
@@ -83,7 +83,7 @@ fn main() {
     modes[1] = true;
     latencies[1] = 1;
 
-    app.run(move |app| {
+    app.run(move |ctx| {
         {
             let mut c = ctrl.lock().unwrap();
             for i in 0..2 {
@@ -122,11 +122,11 @@ fn main() {
             return true;
         }
 
-        let ft_ms = app.frame_time * 1000.0;
-        if !quiet && app.frame_count % 60 == 0 {
+        let ft_ms = ctx.frame_time() * 1000.0;
+        if !quiet && ctx.tick_count() % 60 == 0 {
             eprintln!(
                 "[fps] global fps={:.1} ft={:.2}ms | W0={} lat{} | W1={} lat{} | half={} disabled={:?}",
-                app.fps,
+                ctx.fps(),
                 ft_ms,
                 if modes[0] { "IMM" } else { "VSYNC" },
                 latencies[0],
@@ -138,14 +138,14 @@ fn main() {
         }
 
         for i in 0..2 {
-            let win = match app.window_ref(&idxs[i]) {
+            let win = match ctx.app().window_ref(&idxs[i]) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
             win.set_gpu_timing(true);
 
             // 应用该窗口自己的 present mode / latency —— 只在变化时设置一次
-            //（每帧设会触发每帧 surface.configure，DX12 上每次 50-80ms 卡顿）
+            //（每帧设会触发每帧 surface.configure，Vulkan 默认后端上每次 50-80ms 卡顿；DX12 阻塞显著更低）
             if modes[i] != applied_mode[i] {
                 win.set_present_mode(if modes[i] { PresentMode::Immediate } else { PresentMode::AutoVsync });
                 applied_mode[i] = modes[i];
@@ -156,7 +156,7 @@ fn main() {
             }
 
             // 该窗口本帧是否被跳过
-            let skip = disabled[i] || (half_mode && i == 1 && app.frame_count % 2 == 0);
+            let skip = disabled[i] || (half_mode && i == 1 && ctx.tick_count() % 2 == 0);
             if skip {
                 // 不调用 draw → 该窗口画面保持上一帧，且不参与本帧 acquire
                 continue;
@@ -191,7 +191,7 @@ fn main() {
             ], 10.0, 15.0);
             row(&mut batch, vec![
                 TextPart::normal("Global FPS: "),
-                TextPart::glyphs(format!("{:5.1}", app.fps)),
+                TextPart::glyphs(format!("{:5.1}", ctx.fps())),
                 TextPart::normal("  frame: "),
                 TextPart::glyphs(format!("{:6.2}", ft_ms)),
                 TextPart::normal("ms"),
@@ -240,5 +240,5 @@ fn main() {
         }
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

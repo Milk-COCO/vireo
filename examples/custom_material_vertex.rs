@@ -58,8 +58,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Custom Vertex Shader", 640, 420),
         None::<fn()>,
@@ -68,8 +68,8 @@ fn main() {
         .material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
         .expect("custom vertex WGSL compile");
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -91,5 +91,5 @@ fn main() {
 
         win.draw(Color::new(0.04, 0.05, 0.09, 1.0), &[&batch, &title]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

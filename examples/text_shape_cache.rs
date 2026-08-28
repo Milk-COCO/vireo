@@ -57,8 +57,8 @@ const STATIC_POOL: &[&str] = &[
 
 const FONT_SIZES: &[f32] = &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0];
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Text Shape Cache Stress", 960, 640),
         None::<fn()>,
@@ -79,42 +79,42 @@ fn main() {
 
     eprintln!("[text_shape_cache] logging stats to terminal every 1s");
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
         let t = t0.elapsed().as_secs_f32();
 
         if win.key_down(KeyCode::Digit1) {
-            app.gpu.set_shape_cache_ttl(Some(Duration::from_secs(2)));
+            ctx.app().gpu.set_shape_cache_ttl(Some(Duration::from_secs(2)));
             ttl_label = "TTL=2s";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit2) {
-            app.gpu.set_shape_cache_ttl(None);
+            ctx.app().gpu.set_shape_cache_ttl(None);
             ttl_label = "TTL=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit3) {
-            app.gpu.set_shape_cache_max_entries(Some(64));
+            ctx.app().gpu.set_shape_cache_max_entries(Some(64));
             max_label = "max=64";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit4) {
-            app.gpu.set_shape_cache_max_entries(None);
+            ctx.app().gpu.set_shape_cache_max_entries(None);
             max_label = "max=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::KeyC) {
-            app.gpu.clear_shape_cache();
-            app.gpu.reset_shape_cache_stats();
+            ctx.app().gpu.clear_shape_cache();
+            ctx.app().gpu.reset_shape_cache_stats();
             eprintln!("[text_shape_cache] cache cleared");
         }
         if win.key_down(KeyCode::Space) {
             dynamic = !dynamic;
-            app.gpu.clear_shape_cache();
-            app.gpu.reset_shape_cache_stats();
+            ctx.app().gpu.clear_shape_cache();
+            ctx.app().gpu.reset_shape_cache_stats();
             cfg_dirty = true;
             eprintln!(
                 "[text_shape_cache] mode => {}",
@@ -130,8 +130,8 @@ fn main() {
 
         // 每秒终端输出（不画动态数字 HUD）
         if last_log.elapsed() >= Duration::from_secs(1) {
-            let n = app.gpu.shape_cache_len();
-            let stats = app.gpu.shape_cache_stats();
+            let n = ctx.app().gpu.shape_cache_len();
+            let stats = ctx.app().gpu.shape_cache_stats();
             let total = stats.hits + stats.misses;
             let hit_pct = if total > 0 {
                 100.0 * stats.hits as f64 / total as f64
@@ -145,8 +145,8 @@ fn main() {
             };
             eprintln!(
                 "[text_shape_cache] FPS={:.1} frame={:.2}ms | entries={n} hit={hit_pct:.1}% (h={} m={}) | gc_runs={} last_gc={}us avg_gc={}us | {}",
-                app.fps,
-                app.frame_time * 1000.0,
+                ctx.fps(),
+                ctx.frame_time() * 1000.0,
                 stats.hits,
                 stats.misses,
                 stats.gc_runs,
@@ -301,5 +301,5 @@ fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().collect();
         win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &refs);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

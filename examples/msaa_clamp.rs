@@ -11,8 +11,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     let supported = app.gpu.supported_sample_counts().to_vec();
     let max_sc = app.gpu.max_sample_count();
@@ -41,8 +41,8 @@ fn main() {
     eprintln!("[1] window() returned (pipeline preheat OK if we got here)");
 
     let mut tried_runtime = false;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -78,11 +78,11 @@ fn main() {
             );
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
 
-        if app.frame_count >= 3 {
+        if ctx.tick_count() >= 3 {
             eprintln!("[3] draw OK — no panic. exit.");
             false
         } else {
             true
         }
-    }).unwrap();
+    }).await.unwrap();
 }

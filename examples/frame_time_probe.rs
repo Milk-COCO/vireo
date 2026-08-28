@@ -7,7 +7,8 @@
 use std::time::Instant;
 use vireo::prelude::*;
 
-fn main() {
+#[vireo::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let no_text = args.iter().any(|a| a == "--no-text");
     let immediate = args.iter().any(|a| a == "--immediate");
@@ -19,7 +20,6 @@ fn main() {
     );
 
     let t0 = Instant::now();
-    let app = App::new();
     let mut desc = WindowDesc::new("frame_time_probe", 600, 400)
         .anti_aliasing(AntiAliasing::None)
         .active(true);
@@ -34,8 +34,8 @@ fn main() {
     );
 
     let mut focused = false;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -53,9 +53,9 @@ fn main() {
         if !no_text {
             let info = format!(
                 "FPS: {:.1}\nFrame time: {:.3}ms\nFrames: {}",
-                app.fps,
-                app.frame_time * 1000.0,
-                app.frame_count
+                ctx.fps(),
+                ctx.frame_time() * 1000.0,
+                ctx.tick_count()
             );
             draw_text(
                 &mut batch.texts,
@@ -83,19 +83,19 @@ fn main() {
 
         eprintln!(
             "  F{:<2}  frame_time={:7.2}ms  acq={:6.2} enc={:6.2}  fps={:5.1}  focused={}",
-            app.frame_count,
-            app.frame_time * 1000.0,
+            ctx.tick_count(),
+            ctx.frame_time() * 1000.0,
             acq_ms,
             enc_ms,
-            app.fps,
+            ctx.fps(),
             win.focused(),
         );
 
-        if app.frame_count >= 12 {
+        if ctx.tick_count() >= 12 {
             eprintln!("done.");
             false
         } else {
             true
         }
-    }).unwrap();
+    }).await.unwrap();
 }

@@ -12,16 +12,16 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Area — include/exclude/∪/∩", 920, 500).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -139,7 +139,7 @@ fn main() {
             &[&ui, &p1, &p2, &p3, &p4],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }
 
 fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {

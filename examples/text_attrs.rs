@@ -18,16 +18,16 @@
 /// 所有属性全用 TextOptions 的 with_xxx builder 设置，无需手动构建 AttrsOwned。
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     let idx = app.window(
         WindowDesc::new("Text Attributes", 700, 600).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -207,5 +207,5 @@ fn main() {
         win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

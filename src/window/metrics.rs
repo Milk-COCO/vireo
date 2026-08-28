@@ -1,12 +1,10 @@
-/// 滑动窗口帧数：约 0.5s@60Hz，平滑 FPS，避免「满 1 秒整段重置」导致 55↔60 乱跳。
-pub(crate) const FPS_SAMPLE_CAP: usize = 30;
 /// presented rate 的滑动窗口大小（成功 `queue.present` 的间隔采样数）。
 pub(crate) const PRESENT_SAMPLE_CAP: usize = 30;
 /// resize 去抖默认值：尺寸**稳定**满此时间才 `surface.configure`。
 /// 连续拖动时每帧尺寸都变、去抖永不触发 → 全程不 configure，按旧尺寸持续
 /// present（DXGI SCALING_STRETCH 实时拉伸），帧流保持满速、无 27-68ms 卡顿
-/// （wgpu-hal DX12 configure 每次都会 `wait_for_present_queue_idle` 等 present
-/// queue 排空，DWM 停消费时无限等 → 旧实现拖动即冻屏）。
+/// （Vulkan 后端（wgpu 默认）上每次 `surface.configure` 阻塞较重——wgpu-hal Vulkan 会等
+/// present queue 排空，DWM 停消费时无限等 → 旧实现拖动即冻屏；DX12 同操作阻塞显著更低）。
 /// 用户可经 `VireoWindow::set_resize_debounce` 覆盖。
 pub(crate) const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -26,9 +24,10 @@ pub(crate) const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration = std::time::Durat
 pub(crate) const RESIZE_DRIFT_EPSILON: u32 = 2;
 
 /// 拖动窗口时的 resize 尺寸刷新策略（`VireoWindow::set_resize_refresh_policy`）。
-/// 目标是把「拖动中是否实时跟踪尺寸」的选择权交给用户：每帧/周期刷新在 wgpu-hal
-/// DX12 上每次 `surface.configure` 都要阻塞等 present queue 排空（实测 ~50-80ms），
-/// 会明显掉帧，但能实时看到新布局；`OnRelease` 全程不卡但内容拉伸到松手。
+/// 目标是把「拖动中是否实时跟踪尺寸」的选择权交给用户：每帧/周期刷新在
+/// Vulkan 后端（wgpu 默认）上每次 `surface.configure` 都要阻塞等 present queue 排空
+/// （实测 ~50-80ms），会明显掉帧，但能实时看到新布局；DX12 同操作阻塞显著更低。
+/// `OnRelease` 全程不卡但内容拉伸到松手。
 /// 「松手 snap」的去抖时长由 `VireoWindow::set_resize_debounce` 配置（默认 100ms）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeRefreshPolicy {

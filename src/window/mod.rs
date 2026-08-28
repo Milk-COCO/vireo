@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex, mpsc};
-use std::cell::RefCell;
+﻿use std::sync::{Arc, Mutex, mpsc};
 use rustc_hash::FxHashMap;
+
+use crate::lock::Lock;
 
 use crate::render::Renderer;
 
@@ -34,6 +35,8 @@ pub use winit::dpi::Position;
 pub use winit::dpi::Size;
 pub use winit::error::ExternalError;
 pub use winit::error::NotSupportedError;
+
+/// 诊断一次性标志：首帧 draw outcome（Presented/Skipped）打印一次，便于排查
 pub use winit::monitor::MonitorHandle;
 pub use winit::monitor::VideoModeHandle;
 pub use winit::window::Cursor;
@@ -48,6 +51,9 @@ pub use winit::window::WindowButtons;
 pub use winit::window::WindowId;
 pub use winit::window::WindowLevel;
 
+/// 进程级入口由 [`App::new`] / [`App::with_descriptor`] 提供：在 OS 主线程直接构造
+/// `App` 并把用户 future 放到独立的 `vireo-main` 线程，无需任何跨线程移交通道。
+
 mod desc;
 mod metrics;
 mod on;
@@ -59,7 +65,7 @@ pub use metrics::{
 pub(crate) use desc::clamp_aa;
 #[allow(unused_imports)]
 pub(crate) use metrics::{
-    DEFAULT_RESIZE_DEBOUNCE, FPS_SAMPLE_CAP, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON,
+    DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON,
     ResizeRefresh, drag_cap_effective, drag_effective_cap, mhz_to_hz, observed_moved,
     pac_advance, phys_to_logical, resize_refresh, should_backoff_after_draws,
     size_drifted_beyond, skip_report, sliding_rate, validate_aspect_ratio,
@@ -67,6 +73,30 @@ pub(crate) use metrics::{
 
 pub use crate::dpi::{Dp, Pixel, PixelPos, PixelSize, Pp, Px, dp, px};
 use crate::dpi::{dim_to_winit_position, dim_to_winit_size, to_pixel_pos, to_pixel_size};
+
+/// `pacing_deadline` 的进程启动基线：`Instant` 没有 epoch，存原子量时改成相对此基线的纳秒。
+static PACE_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// `Option<Instant>` → `AtomicI64` 纳秒（`None` = `i64::MIN` 哨兵）。
+fn deadline_nanos(d: Option<std::time::Instant>) -> i64 {
+    match d {
+        None => i64::MIN,
+        Some(t) => {
+            let epoch = *PACE_START.get_or_init(std::time::Instant::now);
+            t.duration_since(epoch).as_nanos().min(i64::MAX as u128) as i64
+        }
+    }
+}
+
+/// `AtomicI64` 纳秒 → `Option<Instant>`（`i64::MIN` 哨兵 = `None`）。
+fn nanos_to_deadline(n: i64) -> Option<std::time::Instant> {
+    if n == i64::MIN {
+        return None;
+    }
+    let epoch = *PACE_START.get_or_init(std::time::Instant::now);
+    Some(epoch + std::time::Duration::from_nanos(n.max(0) as u64))
+}
+use crate::thread::Loop;
 
 /// 从 winit 线程发往渲染线程的事件（全是 Send-safe 的自定义类型）。
 enum WinitEvent {
@@ -126,52 +156,52 @@ enum WinitEvent {
 ///
 /// 所有公开 API 坐标系为逻辑像素（用户友好），GPU 内部使用物理像素。
 pub struct VireoWindow {
-    pub(crate) surface: std::cell::RefCell<wgpu::Surface<'static>>,
+    pub(crate) surface: Lock<wgpu::Surface<'static>>,
     instance: wgpu::Instance,
-    surface_config: std::cell::RefCell<wgpu::SurfaceConfiguration>,
+    surface_config: Lock<wgpu::SurfaceConfiguration>,
     /// 首次 draw 前 surface 尚未 `surface.configure`（建窗时推迟到渲染线程）：
     /// 置 true 强制首帧走 configure 路径，建立合法 swapchain 后再 acquire。
-    needs_initial_configure: std::cell::Cell<bool>,
+    needs_initial_configure: Lock<bool>,
     /// 首帧渲染成功后是否自动显示窗口（`WindowDesc::preparable`）：建窗时隐藏，
     /// 首次 `Presented` 后 `set_visible(true)`，让窗口第一次出现即完整形态。
-    pending_show: std::cell::Cell<bool>,
-    renderer: std::cell::RefCell<crate::render::Renderer>,
+    pending_show: Lock<bool>,
+    renderer: Lock<crate::render::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
     /// 最近一次 CursorMoved 的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
-    pub(crate) mouse_pos: std::cell::Cell<(f32, f32)>,
+    pub(crate) mouse_pos: Lock<(f32, f32)>,
     /// 最近一次观测到的**物理像素**窗口尺寸（真实来源）。逻辑尺寸 = 物理 ÷
     /// [`Self::layout_scale`] 现算（f64 除法，无截断；`PixelSize` 快照会因 scale
     /// 变化而过期，故不缓存逻辑值）。
-    physical_size: std::cell::Cell<(u32, u32)>,
+    physical_size: Lock<(u32, u32)>,
     /// vireo 层自定义 dpi 覆盖：`Some(v)` = **vireo 全自持像素**（物理 = vireo 逻辑 × v，
     /// 忽略 OS 缩放）；`None` = vireo 逻辑即 winit 逻辑（OS 系统 DPI 参与）。
     /// **不**设置 winit 的 `scale_factor_override`。运行时经 [`VireoWindow::set_dpi_override`] 切换。
-    dpi_override: std::cell::Cell<Option<f64>>,
+    dpi_override: Lock<Option<f64>>,
     /// 真正应用（写进 renderer/布局）的 dpi 覆盖。`set_dpi_override` 只改
     /// `dpi_override` 并请求物理 resize；`draw` 在物理尺寸落到目标后把
     /// `applied_dpi_override` 推进到新值（此前仍用旧 override，避免物理旧尺寸 × 新
     /// scale 造成逻辑瞬时漂移）。
-    applied_dpi_override: std::cell::Cell<Option<f64>>,
+    applied_dpi_override: Lock<Option<f64>>,
     /// `set_dpi_override` 请求的目标物理尺寸（等待 resize 落地）；`None` = 无 pending。
-    pending_override_target: std::cell::Cell<Option<(u32, u32)>>,
+    pending_override_target: Lock<Option<(u32, u32)>>,
     /// `pending_override_target` 设置时刻（超时兜底：resize 被 OS 钳制时也应用 override）。
-    pending_override_since: std::cell::Cell<Option<std::time::Instant>>,
-    dpi_scale: std::cell::Cell<f32>,
+    pending_override_since: Lock<Option<std::time::Instant>>,
+    dpi_scale: Lock<f32>,
     /// Last layout committed by `surface.configure`. FollowLayout may temporarily
     /// move the live camera away from this snapshot while the surface keeps its size.
     /// 存 `(phys_w, phys_h, scale, dpi_scale)`——物理尺寸 + scale 族；逻辑由物理 ÷
     /// scale 现算，不在快照里缓存（避免 scale 时效问题）。
-    configured_layout: std::cell::Cell<(u32, u32, f32, f32)>,
+    configured_layout: Lock<(u32, u32, f32, f32)>,
     pub input: InputState,
-    /// 待应用输入事件队列：`render_on_frame` 的 `WinitEvent` 通道 drain 时把输入类事件
+    /// 待应用输入事件队列：supervisor 线程 drain `WinitEvent` 通道时把输入类事件
     /// 入队（按 window handle 路由），由 `refresh_input` 批量应用到 `InputState`。
-    /// 这样输入更新权交给用户（可在 `on_frame` 构批次前调 `refresh_input` 拿当帧新鲜输入），
+    /// 这样输入更新权交给用户（可在 `on_tick` 构批次前调 `refresh_input` 拿当帧新鲜输入），
     /// `draw` 在 `auto_refresh_input` 开启时也自动调一次，用户不必手动重复。
-    pending_input: std::cell::RefCell<Vec<WinitEvent>>,
+    pending_input: Lock<Vec<WinitEvent>>,
     /// 输入自动刷新开关（默认开）：`draw` 在 `auto_refresh_input` 为 true 时自动调
-    /// `refresh_input`；设为 false 后由用户自行在 `on_frame` 内调用以获得当帧零滞后。
-    auto_refresh_input: std::cell::Cell<bool>,
+    /// `refresh_input`；设为 false 后由用户自行在 `on_tick` 内调用以获得当帧零滞后。
+    auto_refresh_input: Lock<bool>,
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
     pub init_duration: f64,
     /// 用于向 winit 线程发送窗口操作事件
@@ -184,78 +214,91 @@ pub struct VireoWindow {
     /// 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
     close_tx: mpsc::Sender<usize>,
     /// 待应用的 present mode（在 draw 开头应用）
-    pending_mode: std::cell::Cell<Option<wgpu::PresentMode>>,
+    pending_mode: Lock<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
-    applied_present_mode: std::cell::Cell<wgpu::PresentMode>,
+    applied_present_mode: Lock<wgpu::PresentMode>,
     /// 待应用的最大在途帧（`desired_maximum_frame_latency`，在 draw 开头应用）
-    pending_frame_latency: std::cell::Cell<Option<u32>>,
+    pending_frame_latency: Lock<Option<u32>>,
     /// 真正 configure 到 surface 的在途帧（仅 configure 时更新）
-    applied_frame_latency: std::cell::Cell<u32>,
+    applied_frame_latency: Lock<u32>,
     /// 上次 `surface.configure` 的时刻（resize 实时刷新间隔用）
-    last_configure: std::cell::Cell<std::time::Instant>,
+    last_configure: Lock<std::time::Instant>,
     /// 最近一次「尺寸仍与已配置值不同」的帧时刻（resize 去抖用）
-    pending_resize_at: std::cell::Cell<Option<std::time::Instant>>,
+    pending_resize_at: Lock<Option<std::time::Instant>>,
     /// 上一帧观测到的窗口状态 (phys_w, phys_h, scale)——逻辑 = 物理 ÷ scale 派生，
     /// 不单存；用于判断尺寸是否仍在**移动**（相对上一帧变化才算移动，松手即停）。
-    last_observed: std::cell::Cell<(u32, u32, f32)>,
+    last_observed: Lock<(u32, u32, f32)>,
     /// 拖动开始时缓存的显示器刷新率（Hz）。acquire 在拖动期失去 vsync 节流时，
     /// 渲染循环用它把 `max_fps` 临时压到刷新率（防空转）；松手 snap（configure）
     /// 后清空。只查询一次，避免拖动中每帧 `current_monitor()`。
-    drag_refresh_mhz: std::cell::Cell<Option<u32>>,
+    drag_refresh_mhz: Lock<Option<u32>>,
     /// 拖动中的 resize 尺寸刷新策略。见 [`ResizeRefreshPolicy`]。
-    resize_policy: std::cell::Cell<ResizeRefreshPolicy>,
+    resize_policy: Lock<ResizeRefreshPolicy>,
     /// resize 去抖时长：尺寸稳定满此时间才一次性 configure（松手 snap）。默认
     /// [`DEFAULT_RESIZE_DEBOUNCE`]（100ms），可经 `set_resize_debounce` 覆盖。
-    resize_debounce: std::cell::Cell<std::time::Duration>,
+    resize_debounce: Lock<std::time::Duration>,
+    /// 本窗口帧率上限（`VireoWindow::set_max_fps`）。默认取 `App` 创建时的值；拖动期
+    /// 按 `drag_cap` 压到刷新率防空转。cap 归属窗口级（与渲染循环解耦）。
+    max_fps: Lock<Option<u32>>,
+    /// 拖动期帧率上限开关（`VireoWindow::set_drag_cap`），与 `max_fps` 解耦。
+    drag_cap: Lock<bool>,
+    /// 本窗口节流相位锁 deadline（`pac_advance` 维护）。
+    /// 帧率上限相位锁的下一个 deadline（`pac_advance` 维护）。`AtomicI64` 存纳秒
+    /// （`None` 哨兵 = `i64::MIN`，值 = 相对 `PACE_START` 的纳秒）。用原子量是为了同窗口被
+    /// 多个 loop 绘制时，`draw` 对 deadline 的读-算-写不是 16 字节 `Instant` 的撕裂读；
+    /// 注意：多 loop 间的 pacing 抖动（某 loop 基于稍旧 deadline 少睡一帧）仍可能发生，那是
+    /// 良性抖动，不是 bug。
+    pacing_deadline: std::sync::atomic::AtomicI64,
     /// 布局跟随开关（独立于 `ResizeRefreshPolicy`，默认开）：窗口尺寸已变但 surface
     /// 未重配时，每帧把 camera/逻辑尺寸更新到新窗口（`Renderer::update_layout`），
     /// 内容**实时重排**而非停在旧布局——DXGI 把旧 surface 拉伸到新窗口时正好抵消
     /// 缩放：几何和文字都按 x/y 两轴的新尺寸映射，不因宽高比变化产生额外近似。
     /// 可见误差来自窗口尺寸采样时序、整数舍入和 DPI 转换，而非单轴补偿。
     /// 关闭 = 旧行为：拖动中内容停旧逻辑布局（纯拉伸）。
-    layout_follow: std::cell::Cell<bool>,
+    layout_follow: Lock<bool>,
     /// 布局跟随的平滑模式（`FollowAmount`，默认 `Average(Time(16ms))`）。
     /// 参量化每个模式的平滑强度，详见 [`VireoWindow::set_layout_follow_smoothing`]。
-    follow_smoothing: std::cell::Cell<FollowAmount>,
+    follow_smoothing: Lock<FollowAmount>,
     /// 平均窗（`Average`）的尺寸采样队列：(帧号, 时刻, 逻辑宽, 逻辑高)。
     /// follow 平滑滑动窗：采样**物理像素**尺寸（逻辑 = 物理 ÷ scale 现算，避免在
     /// 逻辑空间均值引入额外精度损失）。
-    follow_samples: std::cell::RefCell<std::collections::VecDeque<(u64, std::time::Instant, u32, u32)>>,
+    follow_samples: Lock<std::collections::VecDeque<(u64, std::time::Instant, u32, u32)>>,
     /// 跟随执行计数器（`Frames` 单位节流依据），每次 4a 跟随段自增。
-    follow_frame: std::cell::Cell<u64>,
+    follow_frame: Lock<u64>,
     /// 待应用的 AA 模式（在 draw 开头应用）
-    pending_aa: std::cell::Cell<Option<AntiAliasing>>,
+    pending_aa: Lock<Option<AntiAliasing>>,
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
     /// 窗口边框样式（供 `frame_style()` 查询；运行时经 `set_frame_style` 切换）。
-    pub(crate) frame_style: std::cell::Cell<FrameStyle>,
+    pub(crate) frame_style: Lock<FrameStyle>,
     /// 窗口是否可被点击激活获得焦点（`VireoWindow::set_focusable`）。
     /// 跨平台字段：Windows 经 `WS_EX_NOACTIVATE` 扩展样式落地；macOS 暂存
     /// 意图（需 NSWindow 子类化 `acceptsFirstResponder` 覆盖，待 macOS 平台
     /// 窗口能力整批实施时一并实现）。
-    focusable: std::cell::Cell<bool>,
+    focusable: Lock<bool>,
     /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
     /// Frameless 无边框时 DWM 无法圆角，`set_frame_style` 离幀前钳 / 恢复用。
-    pub(crate) user_corner_pref: std::cell::Cell<crate::platform::windows::CornerPreference>,
+    pub(crate) user_corner_pref: Lock<crate::platform::windows::CornerPreference>,
     /// 关窗事件已到达（关闭中，draw 跳过）
-    closing: std::cell::Cell<bool>,
+    closing: Lock<bool>,
+    /// 当前帧是否 in-flight（已 acquire SurfaceTexture 尚未 present）。关窗路径据此等待
+    /// 当前帧结束后再释放 Surface，避免 in-flight draw 与 Surface drop 竞态导致 wgpu 校验 panic。
+    draw_idle: std::sync::atomic::AtomicBool,
     /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
     gpu_timing_enabled: std::sync::atomic::AtomicBool,
     /// 上一份已完成提交的 GPU queue latency（由 `on_submitted_work_done` 写回）
     last_gpu_secs: Arc<Mutex<Option<f64>>>,
     pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
     /// Outcome recorded by this window's draw call in the current update iteration.
-    last_draw_outcome: std::cell::Cell<Option<DrawOutcome>>,
-    /// 本窗口最近一次 draw 的完整报告（timings + outcome），供
-    /// `VIREO_PACING_STATS=1` 采集器读取。
-    last_draw_report: std::cell::Cell<Option<DrawReport>>,
-    /// 本窗口最近一次 present 的相位样本（`VIREO_PHASE_STATS=1` 采集器读取）。
-    last_phase_sample: std::cell::Cell<Option<PhaseSample>>,
-    presented_frames: std::cell::Cell<u64>,
-    skipped_frames: std::cell::Cell<u64>,
+    pub(crate) last_draw_outcome: Lock<Option<DrawOutcome>>,
+    /// 本窗口最近一次 draw 的完整报告（timings + outcome）。
+    last_draw_report: Lock<Option<DrawReport>>,
+    presented_frames: Lock<u64>,
+    skipped_frames: Lock<u64>,
     /// 最近成功 present 的间隔（秒），滑动窗口，用于 [`VireoWindow::presented_fps`]。
-    present_intervals: std::cell::RefCell<Vec<f64>>,
-    last_present: std::cell::Cell<Option<std::time::Instant>>,
+    present_intervals: Lock<Vec<f64>>,
+    last_present: Lock<Option<std::time::Instant>>,
+    occupancy: std::sync::Mutex<()>,
 }
 
 impl VireoWindow {
@@ -282,71 +325,75 @@ impl VireoWindow {
         let initial_phys = (surface_config.width, surface_config.height);
         let scale = dpi_override.unwrap_or(dpi_scale as f64) as f32;
         Self {
-            surface: std::cell::RefCell::new(surface),
+            surface: Lock::new(surface),
             instance,
-            surface_config: std::cell::RefCell::new(surface_config),
-            needs_initial_configure: std::cell::Cell::new(true),
-            pending_show: std::cell::Cell::new(pending_show),
-            renderer: std::cell::RefCell::new(renderer),
+            surface_config: Lock::new(surface_config),
+            needs_initial_configure: Lock::new(true),
+            pending_show: Lock::new(pending_show),
+            renderer: Lock::new(renderer),
             inner,
             gpu,
-            mouse_pos: std::cell::Cell::new((-1.0, -1.0)),
-            physical_size: std::cell::Cell::new(initial_phys),
-            dpi_override: std::cell::Cell::new(dpi_override),
-            applied_dpi_override: std::cell::Cell::new(dpi_override),
-            pending_override_target: std::cell::Cell::new(None),
-            pending_override_since: std::cell::Cell::new(None),
-            dpi_scale: std::cell::Cell::new(dpi_scale),
-            configured_layout: std::cell::Cell::new((
+            mouse_pos: Lock::new((-1.0, -1.0)),
+            physical_size: Lock::new(initial_phys),
+            dpi_override: Lock::new(dpi_override),
+            applied_dpi_override: Lock::new(dpi_override),
+            pending_override_target: Lock::new(None),
+            pending_override_since: Lock::new(None),
+            dpi_scale: Lock::new(dpi_scale),
+            max_fps: Lock::new(None),
+            drag_cap: Lock::new(true),
+            pacing_deadline: std::sync::atomic::AtomicI64::new(i64::MIN),
+            configured_layout: Lock::new((
                 initial_phys.0,
                 initial_phys.1,
                 scale,
                 dpi_scale,
             )),
             input: InputState::default(),
-            pending_input: std::cell::RefCell::new(Vec::new()),
-            auto_refresh_input: std::cell::Cell::new(true),
+            pending_input: Lock::new(Vec::new()),
+            auto_refresh_input: Lock::new(true),
             init_duration,
             event_tx,
             cb_tx,
             close_tx,
-            pending_mode: std::cell::Cell::new(None),
-            applied_present_mode: std::cell::Cell::new(initial_present_mode),
-            pending_frame_latency: std::cell::Cell::new(None),
-            applied_frame_latency: std::cell::Cell::new(initial_frame_latency),
-            last_configure: std::cell::Cell::new(std::time::Instant::now()),
-            pending_resize_at: std::cell::Cell::new(None),
-            last_observed: std::cell::Cell::new((
+            pending_mode: Lock::new(None),
+            applied_present_mode: Lock::new(initial_present_mode),
+            pending_frame_latency: Lock::new(None),
+            applied_frame_latency: Lock::new(initial_frame_latency),
+            last_configure: Lock::new(std::time::Instant::now()),
+            pending_resize_at: Lock::new(None),
+            last_observed: Lock::new((
                 initial_phys.0,
                 initial_phys.1,
                 scale,
             )),
-            drag_refresh_mhz: std::cell::Cell::new(None),
-            resize_policy: std::cell::Cell::new(ResizeRefreshPolicy::OnRelease),
-            resize_debounce: std::cell::Cell::new(DEFAULT_RESIZE_DEBOUNCE),
-            layout_follow: std::cell::Cell::new(true),
-            follow_smoothing: std::cell::Cell::new(FollowAmount::default()),
-            follow_samples: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(16)),
-            follow_frame: std::cell::Cell::new(0),
-            pending_aa: std::cell::Cell::new(None),
+            drag_refresh_mhz: Lock::new(None),
+            resize_policy: Lock::new(ResizeRefreshPolicy::OnRelease),
+            resize_debounce: Lock::new(DEFAULT_RESIZE_DEBOUNCE),
+            layout_follow: Lock::new(true),
+            follow_smoothing: Lock::new(FollowAmount::default()),
+            follow_samples: Lock::new(std::collections::VecDeque::with_capacity(16)),
+            follow_frame: Lock::new(0),
+            pending_aa: Lock::new(None),
             handle,
-            frame_style: std::cell::Cell::new(frame_style),
-            focusable: std::cell::Cell::new(true),
+            frame_style: Lock::new(frame_style),
+            focusable: Lock::new(true),
             nc_tx,
-            user_corner_pref: std::cell::Cell::new(
+            user_corner_pref: Lock::new(
                 crate::platform::windows::CornerPreference::Default,
             ),
-            closing: std::cell::Cell::new(false),
+            closing: Lock::new(false),
+            draw_idle: std::sync::atomic::AtomicBool::new(true),
             gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
             last_gpu_secs: Arc::new(Mutex::new(None)),
             pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            last_draw_outcome: std::cell::Cell::new(None),
-            last_draw_report: std::cell::Cell::new(None),
-            last_phase_sample: std::cell::Cell::new(None),
-            presented_frames: std::cell::Cell::new(0),
-            skipped_frames: std::cell::Cell::new(0),
-            present_intervals: std::cell::RefCell::new(Vec::with_capacity(PRESENT_SAMPLE_CAP)),
-            last_present: std::cell::Cell::new(None),
+            last_draw_outcome: Lock::new(None),
+            last_draw_report: Lock::new(None),
+            presented_frames: Lock::new(0),
+            skipped_frames: Lock::new(0),
+            present_intervals: Lock::new(Vec::with_capacity(PRESENT_SAMPLE_CAP)),
+            last_present: Lock::new(None),
+            occupancy: std::sync::Mutex::new(()),
         }
     }
 
@@ -371,6 +418,14 @@ impl VireoWindow {
         self.physical_size.set((size.width, size.height));
         self.dpi_scale.set(dpi_scale);
         self.configured_layout.set((size.width, size.height, scale, dpi_scale));
+        // 注意：`needs_initial_configure` 必须在「surface 实际 configure 成功之后」才清。
+        // 任何在 configure 之前返回的早退路径（`draw_frame` 的 Closing / DeviceLost /
+        // ZeroSized / Outdated / Timeout / Occluded / Lost / Validation）都**不得**清除此标志，
+        // 否则下一帧会对未配置的 surface 调 `get_current_texture` 报错。本标志只在此处清除。
+        // 设备丢失边界：`wgpu::Surface::configure` 返回 `()`（错误走全局 error handler、不返回
+        // `Result`），若配置的同一时刻发生异步设备丢失，surface 实际未配好但本标志已清。此时的
+        // 兜底在 `draw_frame` 帧首的 `device_lost` 检查（m1）：置位则干净退出，不会拿未配好的
+        // surface 去 `get_current_texture`。属极端边界，无需在此额外处理。
         self.needs_initial_configure.set(false);
         self.last_configure.set(now);
         self.pending_resize_at.set(None);
@@ -408,18 +463,38 @@ impl VireoWindow {
         clear_color: crate::color::Color,
         batches: &[&DrawBatch],
     ) -> DrawReport {
-        let report = self.draw_frame(clear_color, batches);
-        self.last_draw_outcome.set(Some(report.outcome));
-        self.last_draw_report.set(Some(report));
-        match report.outcome {
-            DrawOutcome::Presented { .. } => {
-                self.presented_frames.set(self.presented_frames.get().saturating_add(1));
-                self.record_present();
+        let report = {
+            let _occupancy_guard = self.occupancy.lock().unwrap_or_else(|e| e.into_inner());
+            let r = self.draw_frame(clear_color, batches);
+            self.last_draw_outcome.set(Some(r.outcome));
+            self.last_draw_report.set(Some(r));
+            match r.outcome {
+                DrawOutcome::Presented { .. } => {
+                    self.presented_frames
+                        .set(self.presented_frames.get().saturating_add(1));
+                    self.record_present();
+                }
+                DrawOutcome::Skipped(_) => {
+                    self.skipped_frames
+                        .set(self.skipped_frames.get().saturating_add(1));
+                }
+                DrawOutcome::Failed(_) => {}
             }
-            DrawOutcome::Skipped(_) => {
-                self.skipped_frames.set(self.skipped_frames.get().saturating_add(1));
-            }
-            DrawOutcome::Failed(_) => {}
+            r
+        };
+        // 帧率上限节流（cap 归属窗口级）：在 `occupancy` 锁**之外** sleep，避免同窗口被
+        // 多 loop 绘制时一个 loop 的 cap sleep 占用锁、把另一个 loop 的 `draw` 串行阻塞、
+        // 导致该窗口实际刷新率被腰斩（M1）。相位锁 `pac_advance`：绝对 deadline 滚动、
+        // 落后不追赶；拖动期按 `drag_cap` 压到刷新率防空转（见 `drag_cap_effective`）。
+        // 与渲染循环解耦：`draw` 是窗口唯一的帧循环入口，`App` 仅作默认值来源。
+        let cap = self.effective_max_fps();
+        let now = std::time::Instant::now();
+        let cur = nanos_to_deadline(self.pacing_deadline.load(std::sync::atomic::Ordering::Acquire));
+        let (next_deadline, sleep_dur) = pac_advance(now, cur, cap);
+        self.pacing_deadline
+            .store(deadline_nanos(next_deadline), std::sync::atomic::Ordering::Release);
+        if let Some(s) = sleep_dur {
+            std::thread::sleep(s);
         }
         report
     }
@@ -458,7 +533,7 @@ impl VireoWindow {
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
             };
         }
-        // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_frame 内手动调）
+        // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_tick 内手动调）
         if self.auto_refresh_input.get() {
             self.refresh_input();
         }
@@ -489,8 +564,8 @@ impl VireoWindow {
         //    resize 刷新策略（`ResizeRefreshPolicy`）：任何策略下，尺寸停止变化满
         //    去抖时长（`set_resize_debounce`，默认 100ms）都会一次性 configure
         //    （松手 snap）；`EveryFrame`/`Periodic` 在尺寸持续变化时额外实时
-        //    configure。configure 阻塞在 wgpu-hal DX12 present queue 排空（~50-80ms），
-        //    实时刷新会掉帧——这是用户显式选择。
+        //    configure。configure 阻塞在 Vulkan 后端（wgpu 默认）的 present queue 排空
+        //    （~50-80ms）；DX12 同操作阻塞显著更低。实时刷新会掉帧——这是用户显式选择。
         //    present mode 变化不进去抖，下一帧立即 configure。
         let size = self.inner.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -522,7 +597,7 @@ impl VireoWindow {
 }
         // 构图缓存由 `refresh_metrics` 显式提供：此处复用它做 layout_follow 相机推进
         // （drift 判定与下方 resize 路径一致），避免 draw 内再复制一份尺寸轮询逻辑。
-        // 用户也可在 on_frame 内手动调 `refresh_metrics` 以拿当帧构图新鲜度；漏调则由
+        // 用户也可在 on_tick 内手动调 `refresh_metrics` 以拿当帧构图新鲜度；漏调则由
         // 本帧 draw 补一次。
         self.refresh_metrics();
         let dpi_override = self.applied_dpi_override.get();
@@ -601,7 +676,7 @@ impl VireoWindow {
                 // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
                 // （见下方 `follow-layout` 段）：acquire 可能等待 swapchain 空位，因此返回后
                 // re-poll 通常能取得更接近本帧 present 时刻的尺寸，但不保证前帧已上屏。
-                // 配合 frame_latency=1 降低 camera 的采样时差，不能保证消除拖动跳动。
+                // 配合 frame_latency=1（默认 2，可经 set_frame_latency 调整）降低 camera 的采样时差，不能保证消除拖动跳动。
                 // 这里只登记尺寸漂移状态 + 置 follow_pending 标记。
                 // DXGI 把旧 surface（S）拉伸到新窗口（W）：camera 用新逻辑尺寸 →
                 // 复合映射 uniform dpi、几何零畸变。
@@ -626,14 +701,36 @@ impl VireoWindow {
         }
 
         // 3) acquire
+        // 进入 acquire 前再核一次关闭 / 设备丢失：`draw_frame` 帧首（上方）的检查无法覆盖
+        // 「本帧已过帧首检查、close 事件在 acquire 前到达」的竞态。渲染线程持有 `Arc<VireoWindow>`
+        // 保证 surface/inner 在整段 `draw` 期间不被释放，此处早退仅为避免对已销毁窗口做
+        // `get_current_texture`（DX12 上可能阻塞或报 validation）。属防御性不变式固化。
+        if self.closing.get() {
+            return DrawReport {
+                outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
+                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+            };
+        }
+        if self.gpu.is_device_lost() {
+            return DrawReport {
+                outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
+                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+            };
+        }
         let t1 = std::time::Instant::now();
         if trace {
             eprintln!("[draw] acq-start");
         }
         let acquired = self.surface.borrow().get_current_texture();
         let (st, suboptimal) = match acquired {
-            wgpu::CurrentSurfaceTexture::Success(st) => (st, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(st) => (st, true),
+            wgpu::CurrentSurfaceTexture::Success(st) => {
+                self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
+                (st, false)
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
+                self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
+                (st, true)
+            }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 // 重配后再试；本帧跳过
                 let size = self.inner.inner_size();
@@ -645,6 +742,9 @@ impl VireoWindow {
                 }
                 let t_conf = std::time::Instant::now();
                 self.configure_surface(size, t_conf);
+                // `preparable` 兜底：首帧若走重配跳过，窗口会永远隐藏——显示它
+                // （宁可无内容一帧，不可永不出现），与 Timeout/Occluded 兜底一致。
+                self.maybe_show_prepared_window();
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings {
@@ -679,6 +779,8 @@ impl VireoWindow {
                     self.configure_surface(size, t_conf);
                     configure_secs = t_conf.elapsed().as_secs_f64();
                 }
+                // `preparable` 兜底：窗口存活但本帧重配跳过，仍应现形（与 Timeout/Occluded 一致）。
+                self.maybe_show_prepared_window();
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings { configure_secs, gpu_secs, ..DrawTimings::default() },
@@ -698,6 +800,8 @@ impl VireoWindow {
                 }
                 let t_conf = std::time::Instant::now();
                 self.configure_surface(size, t_conf);
+                // `preparable` 兜底：窗口存活但本帧重配跳过，仍应现形（与 Timeout/Occluded 一致）。
+                self.maybe_show_prepared_window();
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings {
@@ -715,7 +819,7 @@ impl VireoWindow {
 
         // 4a) follow 布局跟随（实际执行）：acquire 可能等待 swapchain 空位；返回后
         //     re-poll inner_size 通常比 acquire 前的样本更接近本帧 present 时刻，但 acquire
-        //     不保证前帧已上屏。配合 frame_latency=1 降低 camera 时差与拖动跳动，仍可能
+        //     不保证前帧已上屏。配合 frame_latency=1（默认 2，可经 set_frame_latency 调整）降低 camera 时差与拖动跳动，仍可能
         //     留下约一个刷新周期内的采样差异。
         //     只在 follow_pending（step 2 登记的漂移）且确实仍漂移时更新；否则清残留
         //     的虚拟 viewport。
@@ -820,28 +924,8 @@ let dpi_override = self.applied_dpi_override.get();
         self.inner.pre_present_notify();
         let t3 = std::time::Instant::now();
         self.gpu.queue.present(st);
+        self.draw_idle.store(true, std::sync::atomic::Ordering::Release);
         let present_secs = t3.elapsed().as_secs_f64();
-
-        if std::env::var_os("VIREO_PHASE_STATS").is_some() {
-            if let Some((qpc_vblank, qpc_period)) = dwm_timing() {
-                let now = qpc_now();
-                let per_sec = qpc_ticks_per_sec() as f64;
-                let vblank_ms = qpc_period as f64 / per_sec * 1e3;
-                // phase = 距最近 vblank 的时间 / 周期（0~1，0=刚过 vblank）。
-                // 注意：qpcVBlank 是 vblank 网格上的**某个**采样点，可能在 now 之前/之后
-                // 甚至离 now 好几帧（Firefox 源码分析证实），直接相减没有意义。
-                // 用 rem_euclid 归一到 [0, period)，无论采样在过去/未来都得到正确的相位。
-                let period = qpc_period.max(1) as i128;
-                let phase_ticks = (now as i128 - qpc_vblank as i128).rem_euclid(period);
-                let phase = phase_ticks as f64 / period as f64;
-                self.last_phase_sample.set(Some(PhaseSample {
-                    phase,
-                    vblank_ms,
-                    stretch: suboptimal,
-                    dragging: self.pending_resize_at.get().is_some(),
-                }));
-            }
-        }
 
         if trace {
             eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us gpu={:?} suboptimal={}",
@@ -930,7 +1014,7 @@ let dpi_override = self.applied_dpi_override.get();
     /// 仅同步逻辑尺寸（用户代码当帧即可读到新 `metrics()`）。真正的
     /// `surface.configure` / renderer 视图更新由 `draw` 的逐帧尺寸同步完成——
     /// 拖动/模态循环期间 Resized 事件可能滞后，逐帧轮询 `inner_size` 才是可靠兜底。
-    pub(crate) fn resize(&mut self, width: u32, height: u32) {
+    pub(crate) fn resize(&self, width: u32, height: u32) {
         if width == 0 || height == 0 { return; }
         let sf = self.inner.scale_factor();
         self.physical_size.set((width, height));
@@ -975,7 +1059,7 @@ let dpi_override = self.applied_dpi_override.get();
     /// 最新值。`0×0` 等窗口状态不影响输入，恒返回是否有事件被应用。
     ///
     /// `draw` 在 `auto_refresh_input` 开启（默认）时自动调一次，用户不必手动重复；
-    /// 设为 `false` 后由用户在 `on_frame` 内构批次前调用，可获得当帧零滞后输入。
+    /// 设为 `false` 后由用户在 `on_tick` 内构批次前调用，可获得当帧零滞后输入。
     /// 漏调则这段事件在下次 `refresh_input` 才结算（与 `refresh_metrics` 同策略）。
     pub fn refresh_input(&self) -> bool {
         let mut q = self.pending_input.borrow_mut();
@@ -1211,7 +1295,7 @@ let dpi_override = self.applied_dpi_override.get();
 
 /// 应用管理器 —— 管理 GPU 上下文、窗口、纹理。
 /// 构造后在 `run()` 之前配置窗口/纹理/离屏画布，`run()` 将 `self` 移动到渲染线程。
-/// 渲染线程 → winit 线程的运行期窗口创建请求（`App::window` 在 on_frame 里调用时）。
+/// 渲染线程 → winit 线程的运行期窗口创建请求（`App::window` 在 on_tick 里调用时）。
 /// winit 线程在 `about_to_wait` drain 后执行窗口创建。
 struct CreateWindowRequest {
     handle: u64,
@@ -1220,117 +1304,262 @@ struct CreateWindowRequest {
     on_close: Option<Box<dyn FnOnce() + Send>>,
 }
 
-pub struct App {
-    /// run() 前由 `App::window` 入队的待建窗口描述；run() 取出给 winit 线程。
-    /// 运行期（run 中）的 `App::window` 改走 `create_tx` 通道，不再写本字段。
-    pub(crate) window_descs: RefCell<Vec<WindowDesc>>,
-    /// `Vec<Option<VireoWindow>>`，以 handle 为索引。关闭的窗口为 `None`。
-    pub windows: Vec<Option<VireoWindow>>,
+/// 入口期一次性创建的通道集合：`App::new`/`with_descriptor` 在 spawn 用户闭包**前**建好
+/// 并把两个 sender（`create_tx`/`cb_tx`）写到 `AppInner`，随后把本结构交给 `run_blocking`
+/// 去构造 `Runner`（持有 receiver）。这样 `App::window` 与 `App::on_*` 在闭包运行前即可经
+/// 通道投递，无需注册握手。
+struct RunChannels {
+    event_tx: mpsc::Sender<WinitEvent>,
+    event_rx: mpsc::Receiver<WinitEvent>,
+    cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
+    exit_rx: mpsc::Receiver<()>,
+    exit_tx: mpsc::Sender<()>,
+    frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
+    aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
+    nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
+    create_rx: mpsc::Receiver<CreateWindowRequest>,
+    close_rx: mpsc::Receiver<usize>,
+    supervisor_event_tx: mpsc::Sender<WinitEvent>,
+    frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
+    aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
+    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    close_tx: mpsc::Sender<usize>,
+}
+
+pub struct AppInner {
+    /// `Vec<Option<Arc<VireoWindow>>>`，以 handle 为索引。关闭的窗口为 `None`。
+    pub windows: Lock<Vec<Option<Arc<VireoWindow>>>>,
+    /// 存活窗口数（O(1) 读，避免 `window_count` 每帧遍历整个 `windows` 历史表——
+    /// handle 单调递增不回收，长会话高频开关窗口时 `windows` 只增不缩，`window_count`
+    /// 若用 filter 计数会是 O(历史总数)。建窗 +1、关窗 -1）。
+    alive_window_count: std::sync::atomic::AtomicUsize,
+    /// 累计已创建窗口数（只增不缩）。用于渲染线程判定「曾创建且现已全部关闭」——
+    /// 关窗后 `alive_window_count` 归零，但 `on_tick` 可能仍返回 `true`，渲染线程需据此
+    /// 独立于 `on_tick` 返回值退出（与 supervisor 的 `all_windows_closed` 判定对齐）。
+    created_window_count: std::sync::atomic::AtomicUsize,
     pub gpu: Arc<GpuContext>,
-    instance: Option<wgpu::Instance>,
+    instance: Lock<Option<wgpu::Instance>>,
     /// 设备丢失标志：由 `GpuContext` 的 `Device::set_device_lost_callback` 置位
     ///（`GpuContext::device_lost()` 同 Arc）。渲染循环每帧读它，置位则干净终止。
     device_lost: Arc<std::sync::atomic::AtomicBool>,
     /// 稳定 handle → winit WindowId。handle 由 `App::window()` 分配，
     /// 在 run() 中被取出给 winit 线程用。
-    handle_to_id: FxHashMap<u64, WindowId>,
+    handle_to_id: Lock<FxHashMap<u64, WindowId>>,
     /// 下一个待分配的 handle（单调递增；`App::window()` 自增）。
-    next_handle: std::cell::Cell<u64>,
-    close_hooks: RefCell<FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>>,
-    /// 输入事件回调集合（按 handle 索引，run() 后迁移到 winit 线程）
-    callbacks: FxHashMap<u64, crate::input::InputCallbacks>,
-    default_icon: Option<Icon>,
-    textures: Vec<Texture>,
-    offscreens: Vec<OffscreenCanvas>,
-    pub frame_count: u64,
-    /// 相邻两次 update/`on_frame` 调用的间隔（秒），瞬时值。第一帧为 0。
-    /// 它不是相邻 displayed frame 的呈现间隔。
-    pub frame_time: f64,
-    /// update/`on_frame` 调用频率的滑动窗口平均值（约 0.5s@60Hz）。它不是 displayed FPS；
-    /// surface acquire、present mode、跳帧或合成器可能使实际显示频率不同。第一帧为 0。
-    /// 需要每窗口成功提交节拍用 [`VireoWindow::presented_fps`]。
-    pub fps: f64,
+    next_handle: Lock<u64>,
+    default_icon: Lock<Option<Icon>>,
+    textures: Lock<Vec<Arc<Texture>>>,
+    offscreens: Lock<Vec<Arc<OffscreenCanvas>>>,
     /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
     pub init_duration: f64,
-    /// 各 `app.window()` 调用的 init_duration（秒），按调用顺序入队。
-    /// run() 中按序出队给 winit 线程用。
-    window_init_durations: RefCell<Vec<f64>>,
-    /// 最近若干帧的间隔，用于平滑 FPS。
-    fps_samples: Vec<f64>,
-    last_frame: std::time::Instant,
-    deferred_tasks: RefCell<Vec<DeferredTask>>,
     /// 可选帧率上限（`App::set_max_fps`）。仅在 acquire 不阻塞（拖动/无 vsync）时
     /// 用 sleep 把 CPU 循环拉回目标频率，避免空转。默认 `Some(240)`：给足余量，
     /// 正常 vsync 下 acquire 更早卡住、cap 不生效；仅在空转时兜底。
-    max_fps: std::cell::Cell<Option<u32>>,
+    max_fps: Lock<Option<u32>>,
     /// 拖动期帧率上限开关（`App::set_drag_cap`）。与 `set_max_fps` 解耦：开启时
     /// resize 拖动中即使 `max_fps(None)` 也压到显示器刷新率（省资源但画面内容
     /// 变化实测易卡）；关闭则拖动期不额外压制、渲染循环全速产帧，画面内容随
     /// 窗口尺寸变化更平滑。默认开启。
-    drag_cap: std::cell::Cell<bool>,
-    /// 下一次帧循环「开始」的目标时刻（相位锁）。每帧推进一个 stride；落后（中途
-    /// 耗时已超 stride）时不追赶、直接跳到 now+stride，避免攒出 33ms 双帧。
-    pacing_deadline: std::cell::Cell<Option<std::time::Instant>>,
-    /// 运行期窗口创建通道：run() 内设置（取 create_rx 给 winit 线程），
-    /// 之后 `App::window` 通过它把创建请求发给 winit 线程。
-    create_tx: Option<mpsc::Sender<CreateWindowRequest>>,
-    /// 运行期已发出、尚未收到 `WindowCreated` 的窗口数（渲染线程维护）。
-    /// 退出判定用它防止「请求在途但窗口尚未出现」时提前退出。
-    pending_creates: std::cell::Cell<usize>,
+    drag_cap: Lock<bool>,
+    /// 运行期窗口创建通道：`App::new`/`with_descriptor` 在 spawn 用户闭包前设置
+    /// （取 create_rx 给 winit 线程），之后 `App::window` 通过它把创建请求发给 winit 线程。
+    /// 现在 `App::window` 始终走通道（预注册与运行期统一），不再有 `window_descs` 登记路径。
+    create_tx: Lock<Option<mpsc::Sender<CreateWindowRequest>>>,
+    /// `App` 级输入回调通道：与 `VireoWindow` 级回调（[`def_window_ons`]）共用同一通道，
+    /// `App::on_*` 在 [`App::new`] 设置本 sender 后即可经它发给 winit 线程，无需 handshake。
+    cb_tx: Lock<Option<mpsc::Sender<(usize, crate::input::InputCallbacks)>>>,
+    /// 已 spawn 的循环线程共享状态（跨线程）：supervisor 据此判定全部结束。
+    pub(crate) loop_states: Lock<Vec<std::sync::Arc<crate::thread::LoopHandleState>>>,
+    /// 所有预期窗口创建完成前为 `false`；loop 线程据此等待（避免无窗口时驱动）。
+    /// 置位条件：已创建窗口数 `>=` 预期窗口数（含预期 0 的纯运行期/零窗口场景，置位即放行，
+    /// loop 照常运行；真正防止「窗口已注册但未建出来就误退」靠 `pending_window_creates`）。
+    pub(crate) windows_ready: std::sync::atomic::AtomicBool,
+    /// 已通过 `App::window` 注册、但 `WindowCreated` 尚未到达的窗口计数（运行期建窗路径）。
+    /// loop 线程在 `on_tick` 因窗口暂未建出而返回 false 时，若此计数 `>0` 则不退出、继续等待
+    /// `WindowCreated`；supervisor 退出判定也据此认定「窗口尚未就绪」。这样 ez 竞态（预注册窗口
+    /// 经运行期通道晚到）与「在 `on_tick` 内建窗」「零窗口 app」均为正常行为，无需时间兜底。
+    pub(crate) pending_window_creates: std::sync::atomic::AtomicUsize,
+    /// `App::run` / `App::spawn` 被调用后置位：标记「应用已请求至少一个渲染循环」。
+    /// supervisor 退出判定据此区分两类场景——
+    /// - 已请求循环：必须等 `loop_states` 非空且全部 `done` 才退出（防止 `spawn` 尚未把
+    ///   状态推入 `loop_states` 前的竞态早退）；
+    /// - 从未请求循环（纯建窗 app）：循环计数视为「已完成」，窗口全部关闭即可退出，
+    ///   否则 `loop_states` 为空会让 `all().is_empty()` 守卫误判为「尚未注册」而永不退出。
+    pub(crate) loops_ever_requested: std::sync::atomic::AtomicBool,
+    /// vireo-main 的 `main` future 已完成（整个进程生命周期的顶层权威信号）。
+    /// supervisor 退出判定前置条件之一：`main_done && all_loops_done && windows_settled` 时退出
+    /// ——即「用户代码已结束 且 所有 loop 已结束 且 所有窗口已关闭/无窗口」。
+    /// 取代旧的 `app_started`（后者只在首次 `app.window`/`app.run` 时置位，无法覆盖零窗口零 loop
+    /// 的 `main` 立即返回场景，导致 supervisor 永不退出而挂死）。
+    /// `main_done` 仅在 `block_on(main)` 真正返回后由 vireo-main 线程置位；此时 `main` 体内的同步
+    /// `app.window`/`app.run` 早已执行（`pending_window_creates` 已自增），故不存在「supervisor
+    /// 首轮迭代早于 `app.window` 调用而误退」的启动竞态。
+    pub(crate) main_done: std::sync::atomic::AtomicBool,
 }
 
-/// 延迟执行的任务，由 [`App::after_frames`] / [`App::after_secs`] 注册。
+pub struct App {
+    pub(crate) inner: Arc<AppInner>,
+}
+
+impl Clone for App {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner.clone() }
+    }
+}
+
+impl std::ops::Deref for App {
+    type Target = AppInner;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/// 延迟执行的任务，由 [`LoopContext::after_ticks`] / [`LoopContext::after_secs`] 注册。
 pub struct DeferredTask {
     kind: DeferredTaskKind,
     pub(crate) f: Box<dyn FnOnce() + Send>,
 }
 
-/// 在 `App::after_frames` / `App::after_secs` 内部使用。
+/// 在 `LoopContext::after_ticks` / `LoopContext::after_secs` 内部使用。
 /// 用户不直接构造。
 #[doc(hidden)]
 pub struct DeferredTaskGuard;
 
 impl DeferredTask {
-    pub(crate) fn is_ready(&self, frame_count: u64) -> bool {
-        match self.kind {
-            DeferredTaskKind::AfterFrames(target) => frame_count >= target,
-            DeferredTaskKind::AfterSecs(wakeup) => std::time::Instant::now() >= wakeup,
+    pub(crate) fn new(kind: DeferredTaskKind, f: Box<dyn FnOnce() + Send>) -> Self {
+        DeferredTask { kind, f }
+    }
+
+    pub(crate) fn is_ready(&self, tick_count: u64) -> bool {
+        match &self.kind {
+            DeferredTaskKind::AfterTicks(target) => tick_count >= *target,
+            DeferredTaskKind::AfterSecs(wakeup) => std::time::Instant::now() >= *wakeup,
         }
     }
 }
 
 #[cfg(test)]
 impl DeferredTask {
-    /// 仅测试用：构造一个 `after_frames(target)` 等价任务（空闭包）。
+    /// 仅测试用：构造一个 `after_ticks(target)` 等价任务（空闭包）。
     pub(crate) fn for_frames(target: u64) -> Self {
         DeferredTask {
-            kind: DeferredTaskKind::AfterFrames(target),
+            kind: DeferredTaskKind::AfterTicks(target),
             f: Box::new(|| {}),
         }
     }
 }
 
-enum DeferredTaskKind {
-    AfterFrames(u64),
+pub(crate) enum DeferredTaskKind {
+    AfterTicks(u64),
     AfterSecs(std::time::Instant),
 }
 
+/// spawn 创建 loop 线程的顺序计数器：默认线程名 `vireo-thread-{n}` 的 n 取此值
+/// （进程内单调递增，取决于 spawn 创建顺序，从 0 开始）。
+static NEXT_THREAD_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl App {
-    /// 创建 App（内部 `InstanceDescriptor::new_without_display_handle_from_env()`：
-    /// 允许 `WGPU_BACKEND` 等环境变量选择后端）。构造时即初始化 GPU 设备，
-    /// 可在 run() 之前加载纹理等资源。
-    pub fn new() -> Self {
+    /// 进程入口：在 **OS 主线程**构造 `App`（同时初始化 GPU），把用户 future `main`
+    /// 放到独立的 `vireo-main` 线程由 `pollster::block_on` 驱动，随后在本线程（OS 主线程）
+    /// 跑 winit `EventLoop`（满足 winit 线程要求，含 macOS）。`main` 接收 `App` 自身，
+    /// 典型写法是 `App::new(|app| async move { app.run(...); })`；`#[vireo::main]`
+    /// 宏即此写法的糖。
+    ///
+    /// `App` 在 OS 主线程直接构造并交由本调用方，无需任何跨线程移交通道。
+    pub fn new<F, Fut>(main: F)
+    where
+        F: FnOnce(App) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         App::from_instance_descriptor(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
+            .run_entry(main)
     }
 
-    /// 用 wgpu `InstanceDescriptor` 构造 App —— 代码指定后端/flags/内存预算/backend
-    /// options/display，压过 `WGPU_BACKEND` 等环境变量（不读 env）。
+    /// 用 wgpu `InstanceDescriptor` 构造 App 并作为进程入口（同 [`App::new`]，但显式指定
+    /// 后端/flags/内存预算/backend options/display，压过 `WGPU_BACKEND` 等环境变量）。
     ///
     /// `display` 原样透传：vireo 用窗口自身 handle 创建 surface（create_surface），
     /// 若 display 与窗口 handle 所属显示服务器不一致会触发 wgpu 校验错误
     /// `MismatchingDisplayHandle`；非 GLES（Wayland）后端通常传 `None` 即可。
-    pub fn with_descriptor(desc: wgpu::InstanceDescriptor) -> Self {
-        App::from_instance_descriptor(desc)
+    /// `#[vireo::main(descriptor = EXPR)]` 即调用本方法。
+    pub fn with_descriptor<F, Fut>(desc: wgpu::InstanceDescriptor, main: F)
+    where
+        F: FnOnce(App) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        App::from_instance_descriptor(desc).run_entry(main)
+    }
+
+    /// 进程入口宿主：OS 主线程建通道、把 sender 写到 `AppInner`、spawn 用户闭包到 `vireo-main`，
+    /// 随后在本线程跑 winit `EventLoop`（`run_blocking`）。把原来 `new`/`with_descriptor` 重复的
+    /// 闭包封装 + spawn 逻辑收敛到此一处。
+    fn run_entry<F, Fut>(self, main: F)
+    where
+        F: FnOnce(App) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let channels = self.init_run_channels();
+        let app_for_thread = self.clone();
+        let app_inner_for_flag = app_for_thread.inner.clone();
+        std::thread::Builder::new()
+            .name("vireo-main".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pollster::block_on(main(app_for_thread));
+                }));
+                if let Err(payload) = result {
+                    let msg = if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    eprintln!("[vireo] user main closure panicked: {}", msg);
+                }
+                // `main` future 已完成 → 置位顶层生命周期权威信号，允许 supervisor 在
+                // 所有 loop/窗口 settle 后退出（覆盖零窗口零 loop 场景，且不引入启动竞态）。
+                app_inner_for_flag
+                    .main_done
+                    .store(true, std::sync::atomic::Ordering::Release);
+            })
+            .expect("failed to spawn vireo-main thread");
+        if let Err(e) = self.run_blocking(channels) {
+            eprintln!("[vireo] app exited with error: {:?}", e);
+        }
+    }
+
+    /// 入口期创建所有通道，并在 spawn 用户闭包**前**把 `create_tx`/`cb_tx` 写到 `AppInner`。
+    /// 这样 `App::window` 与 `App::on_*` 在闭包运行前即可经通道投递（取代旧的注册握手）。
+    fn init_run_channels(&self) -> RunChannels {
+        let (event_tx, event_rx) = mpsc::channel();
+        let supervisor_event_tx = event_tx.clone();
+        let (cb_tx, cb_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let (frame_style_tx, frame_style_rx) = mpsc::channel();
+        let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel();
+        let (nc_tx, nc_rx) = mpsc::channel();
+        let (create_tx, create_rx) = mpsc::channel();
+        let (close_tx, close_rx) = mpsc::channel();
+        *self.create_tx.borrow_mut() = Some(create_tx);
+        *self.cb_tx.borrow_mut() = Some(cb_tx);
+        RunChannels {
+            event_tx,
+            event_rx,
+            cb_rx,
+            exit_rx,
+            exit_tx,
+            frame_style_rx,
+            aspect_ratio_rx,
+            nc_rx,
+            create_rx,
+            close_rx,
+            supervisor_event_tx,
+            frame_style_tx,
+            aspect_ratio_tx,
+            nc_tx,
+            close_tx,
+        }
     }
 
     fn from_instance_descriptor(desc: wgpu::InstanceDescriptor) -> Self {
@@ -1348,38 +1577,38 @@ impl App {
             })
             .flatten();
         let init_duration = init_start.elapsed().as_secs_f64();
-        Self {
-            window_descs: RefCell::new(Vec::new()),
-            windows: Vec::new(),
-            gpu,
-            instance: Some(instance),
-            device_lost,
-            handle_to_id: FxHashMap::default(),
-            next_handle: std::cell::Cell::new(0),
-            close_hooks: RefCell::new(FxHashMap::default()),
-            callbacks: FxHashMap::default(),
-            default_icon,
-            textures: Vec::new(),
-            offscreens: Vec::new(),
-            frame_count: 0,
-            frame_time: 0.0,
-            fps: 0.0,
-            init_duration,
-            window_init_durations: RefCell::new(Vec::new()),
-            fps_samples: Vec::with_capacity(FPS_SAMPLE_CAP),
-            last_frame: std::time::Instant::now(),
-            deferred_tasks: RefCell::new(Vec::new()),
-            max_fps: std::cell::Cell::new(Some(240)),
-            drag_cap: std::cell::Cell::new(true),
-            pacing_deadline: std::cell::Cell::new(None),
-            create_tx: None,
-            pending_creates: std::cell::Cell::new(0),
-        }
+        let app = Self {
+            inner: Arc::new(AppInner {
+                windows: Lock::new(Vec::new()),
+                alive_window_count: std::sync::atomic::AtomicUsize::new(0),
+                created_window_count: std::sync::atomic::AtomicUsize::new(0),
+                gpu,
+                instance: Lock::new(Some(instance)),
+                device_lost,
+                handle_to_id: Lock::new(FxHashMap::default()),
+                next_handle: Lock::new(0),
+                default_icon: Lock::new(default_icon),
+                textures: Lock::new(Vec::new()),
+                offscreens: Lock::new(Vec::new()),
+                init_duration,
+                max_fps: Lock::new(Some(240)),
+                drag_cap: Lock::new(true),
+                create_tx: Lock::new(None),
+                cb_tx: Lock::new(None),
+                loop_states: Lock::new(Vec::new()),
+                windows_ready: std::sync::atomic::AtomicBool::new(false),
+                pending_window_creates: std::sync::atomic::AtomicUsize::new(0),
+                loops_ever_requested: std::sync::atomic::AtomicBool::new(false),
+                main_done: std::sync::atomic::AtomicBool::new(false),
+            }),
+        };
+
+        app
     }
 
     /// 创建离屏画布。与 window() 对称，可在 run() 之前调用。
     /// 同步预热 AA 对应的 SDF + geo 管线，构造耗时由 `OffscreenCanvas::init_duration()` 暴露。
-    pub fn offscreen(&mut self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
+    pub fn offscreen(&self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(aa, self.gpu.supported_sample_counts());
         let sc = aa.sample_count();
@@ -1388,19 +1617,20 @@ impl App {
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
         let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
         let init_duration = start.elapsed().as_secs_f64();
-        let idx = self.offscreens.len();
+        let mut guard = self.offscreens.borrow_mut();
+        let idx = guard.len();
         let mut offscreen = OffscreenCanvas::with_aa(&self.gpu, width, height, aa, init_duration);
         offscreen.index = OffscreenIndex(idx);
-        self.offscreens.push(offscreen);
+        guard.push(Arc::new(offscreen));
         OffscreenIndex(idx)
     }
 
     /// 根据索引获取离屏画布引用。
     ///
     /// 返回 `Err` 表示索引无效或离屏画布已释放（例如窗口关闭时关联的离屏资源被清理）。
-    /// 调用方应处理 `Err`（例如在 `on_frame` 中 `return false`），而不是 `.unwrap()`。
-    pub fn offscreen_ref(&self, idx: &OffscreenIndex) -> Result<&OffscreenCanvas, VireoError> {
-        match self.offscreens.get(idx.0) {
+    /// 调用方应处理 `Err`（例如在 `on_tick` 中 `return false`），而不是 `.unwrap()`。
+    pub fn offscreen_ref(&self, idx: &OffscreenIndex) -> Result<Arc<OffscreenCanvas>, VireoError> {
+        match self.offscreens.borrow().get(idx.0).cloned() {
             Some(c) => Ok(c),
             None => Err(VireoError::OffscreenNotFound(idx.0)),
         }
@@ -1408,18 +1638,19 @@ impl App {
 
     /// 从文件加载纹理（存储在 App 中管理生命周期），返回纹理索引。
     /// 读取或解码失败时会打印错误并返回一个“missing”棋盘纹理（不返回 Err）。
-    pub fn load_texture(&mut self, path: impl AsRef<std::path::Path>) -> usize {
+    pub fn load_texture(&self, path: impl AsRef<std::path::Path>) -> usize {
         let tex = Texture::from_file(path, &self.gpu);
-        let idx = self.textures.len();
-        self.textures.push(tex);
+        let mut guard = self.textures.borrow_mut();
+        let idx = guard.len();
+        guard.push(Arc::new(tex));
         idx
     }
 
     /// 根据索引获取已加载的纹理。
     ///
     /// 返回 `Err` 表示索引越界或贴图尚未加载完成。调用方应处理 `Err`，而不是 `.unwrap()`。
-    pub fn texture(&self, index: usize) -> Result<&Texture, VireoError> {
-        match self.textures.get(index) {
+    pub fn texture(&self, index: usize) -> Result<Arc<Texture>, VireoError> {
+        match self.textures.borrow().get(index).cloned() {
             Some(t) => Ok(t),
             None => Err(VireoError::TextureNotFound(index)),
         }
@@ -1429,10 +1660,10 @@ impl App {
     /// 同步预热窗口 AA 对应的 SDF + geo 管线，并把 AA clamp 到硬件上限（避免 wgpu panic）。
     /// 构造耗时在 `App::run` 创建窗口后由 `VireoWindow::init_duration()` 暴露。
     ///
-    /// **run() 之前调用**（`&mut App`）→ 入队，由 `App::run` 的 winit 线程在
-    /// `resumed` 创建。
-    /// **run() 之后（on_frame 里）调用** → 经内部通道发给 winit 线程异步创建，
-    /// 下一轮 `about_to_wait` 生效；创建完成前 `App::window_ref` 返回 `None`。
+    /// 始终经 `create_tx` 内部通道发给 winit 线程异步创建；`run` 之前（`#[vireo::main]`
+    /// 注入的 `main` 闭包里）或 `run` 之后（on_tick 里）调用都走同一通道（通道在
+    /// `run_entry` 的 `init_run_channels` 中建立，`create_tx` 恒为 `Some`）。
+    /// 创建完成前 `App::window_ref` 返回 `None`。
     pub fn window(&self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + Send + 'static>) -> WindowIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(desc.anti_aliasing, self.gpu.supported_sample_counts());
@@ -1446,8 +1677,12 @@ impl App {
         let handle = self.next_handle.get();
         self.next_handle.set(handle + 1);
         let on_close = on_close.map(|f| Box::new(f) as Box<dyn FnOnce() + Send>);
-        match &self.create_tx {
-            // 运行期：发请求给 winit 线程异步创建。
+        // 始终经通道发给 winit 线程异步创建（预注册与运行期统一）。
+        // 计数 +1：窗口已注册但 `WindowCreated` 尚未到达，loop 不应因暂未建出而误退
+        // （`WindowCreated` 处理器统一 `fetch_sub`）。
+        // `create_tx` 在 `run_entry` 的 `init_run_channels` 中已建立，此处恒为 `Some`
+        // （旧「预注册」写法的 `None` 分支已不可达，见 `unreachable!`）。
+        match self.create_tx.borrow().as_ref().cloned() {
             Some(tx) => {
                 let _ = tx.send(CreateWindowRequest {
                     handle,
@@ -1455,14 +1690,13 @@ impl App {
                     init_duration,
                     on_close,
                 });
-                self.pending_creates.set(self.pending_creates.get() + 1);
+                self.pending_window_creates
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
-            // run() 前：入队，run() 取出交给 winit 线程在 resumed 创建。
-            None => {
-                self.window_init_durations.borrow_mut().push(init_duration);
-                self.window_descs.borrow_mut().push(desc);
-                self.close_hooks.borrow_mut().insert(handle, on_close);
-            }
+            None => unreachable!(
+                "vireo: create_tx is always Some after run_entry/init_run_channels; \
+                 App::window is only reachable with create_tx set"
+            ),
         }
         WindowIndex::new(handle)
     }
@@ -1497,133 +1731,112 @@ impl App {
         on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
 
-    /// 注册一个延迟 `frames` 帧后执行的闭包。
-    /// 帧计数以 `render_on_frame` 循环的帧为单位。任务在**帧末**（`on_frame` / `draw` 之后）
-    /// 执行：若在 `on_frame` 内注册，则 `after_frames(0)` 于本帧末尾执行、`after_frames(1)`
-    /// 于下一帧末尾执行；若在 `run()` 之前注册（`frame_count == 0`），`after_frames(0)` 于
-    /// 第一个 `on_frame` 之前执行、`after_frames(1)` 于第 1 帧末尾执行。
-    pub fn after_frames<F: FnOnce() + Send + 'static>(&self, frames: u64, f: F) {
-        let target = self.frame_count + frames;
-        self.deferred_tasks.borrow_mut().push(DeferredTask {
-            kind: DeferredTaskKind::AfterFrames(target),
-            f: Box::new(f),
+    /// 启动事件循环 + 渲染线程（经典单循环入口，向后兼容）。
+    ///
+    /// 非阻塞入口（薄包装）：内部 `spawn` 一条含单个 [`Loop`] 的 [`Thread`] 并立即返回
+    /// [`ThreadHandle`]。返回的句柄在析构时 join 渲染线程（见 [`ThreadHandle`]），因此
+    /// `app.run(on_tick)` 作为末语句仍会阻塞到窗口关闭。闭包签名 `FnMut(&mut LoopContext) -> bool`，
+    /// 返回 `true` 继续循环、`false` 退出；帧计数 / FPS 等 loop 环境状态在 [`LoopContext`] 上。
+    ///
+    /// 每条 `run`/`spawn`/`loops` 在独立 OS 线程上驱动（见 `spawn`）。
+    pub fn run<F: FnMut(&mut crate::thread::LoopContext) -> bool + Send + 'static>(
+        &self,
+        on_tick: F,
+    ) -> crate::thread::ThreadHandle {
+        self.spawn(crate::thread::Thread::new().with_loop(Loop::new(on_tick)))
+    }
+
+    /// 主入口：推一个显式 [`Thread`]（`&self` 可多次调用，真并行）。
+    ///
+    /// 在独立线程上启动 winit owner + 渲染线程，立即返回 [`ThreadHandle`]；句柄实现 `Future`，
+    /// 调用方 `.await` 即可等待本组所有循环结束并取回结果（错误同样经 `.await` 返回），析构时
+    /// 亦会 join 渲染线程（见 [`ThreadHandle`]）。与 [`App::run`] / [`App::loops`] 共用同一套渲染机件；
+    /// 每个 [`Loop`] 拥有独立的 [`LoopContext`]（帧计数 / 延迟任务 / 帧率上限）。
+    pub fn spawn(&self, thread: crate::thread::Thread) -> crate::thread::ThreadHandle {
+        let loops = thread.loops;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::thread::Loop>::new()));
+        let fps_stats = std::sync::Arc::new(crate::lock::Lock::new(crate::thread::FpsStats::new()));
+        let state = std::sync::Arc::new(crate::thread::LoopHandleState::new());
+        self.loops_ever_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.loop_states.borrow_mut().push(state.clone());
+        let app = self.clone();
+        let device_lost = self.device_lost.clone();
+        let state_for_thread = state.clone();
+        let shared_for_thread = shared.clone();
+        let fps_for_thread = fps_stats.clone();
+        let device_lost_for_thread = device_lost.clone();
+        let thread_name = thread.name.clone().unwrap_or_else(|| {
+            let n = NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("vireo-thread-{n}")
         });
+        let join = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                crate::thread::run_thread_loop(
+                    app,
+                    loops,
+                    state_for_thread,
+                    fps_for_thread,
+                    shared_for_thread,
+                    device_lost_for_thread,
+                );
+            })
+            .expect("failed to spawn vireo thread");
+        crate::thread::ThreadHandle { state, thread: Some(join), shared, fps_stats }
     }
 
-    /// 注册一个延迟 `secs` 秒后执行的闭包（墙钟时间）。与 `after_frames` 一样在帧末检查到期，
-    /// 因此实际执行点落在某帧末尾（而非 sleep 精确的墙钟时刻）。
-    pub fn after_secs<F: FnOnce() + Send + 'static>(&self, secs: f64, f: F) {
-        self.deferred_tasks.borrow_mut().push(DeferredTask {
-            kind: DeferredTaskKind::AfterSecs(
-                std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
-            ),
-            f: Box::new(f),
-        });
+    /// 糖：`spawn(Thread::new().with_loops(loops))`
+    pub fn loops(&self, loops: impl IntoIterator<Item = crate::thread::Loop>) -> crate::thread::ThreadHandle {
+        self.spawn(crate::thread::Thread::new().with_loops(loops))
     }
 
-    /// 执行所有已到期的延迟任务（`after_frames` / `after_secs` 注册）。
-    /// 在每帧末尾（on_frame / draw 之后）调用；循环开始前也会调用一次（此时
-    /// `frame_count == 0`），让 `run()` 之前排的 `after_frames(0)` 在第一个 `on_frame`
-    /// 之前执行。语义：`after_frames(k)` 于「编号为注册时 `frame_count + k` 的帧末」执行。
-    fn run_due_deferred_tasks(&self) {
-        let ready = {
-            let mut tasks = self.deferred_tasks.borrow_mut();
-            let mut ready = Vec::new();
-            let mut i = 0;
-            while i < tasks.len() {
-                if tasks[i].is_ready(self.frame_count) {
-                    ready.push(tasks.swap_remove(i));
-                } else {
-                    i += 1;
-                }
-            }
-            ready
-        };
-        for task in ready {
-            (task.f)();
-        }
-    }
-
-    /// 启动事件循环 + 渲染线程。
-    /// winit 线程只负责任何操作，渲染线程持有 `App` + `on_frame` 独立运行。
-    /// 闭包签名: FnMut(&App) -> bool，返回 true 继续循环，false 退出。
-    pub fn run<F: FnMut(&App) -> bool + Send + 'static>(
-        mut self,
-        on_frame: F,
+    /// 启动渲染循环（内部实现）。由 OS 主线程经 [`App::new`] / [`App::with_descriptor`]
+    /// 调用：winit `EventLoop` 在 **OS 主线程**构造并运行（满足 winit 线程要求，含 macOS）；
+    /// 另起 supervisor 线程集中应用事件并判定退出；每条 `spawn` 注册的循环在**独立 OS 线程**
+    /// 上驱动。事件应用与渲染解耦，多循环真并行。
+    ///
+    /// winit `EventLoop` 在 **OS 主线程**（即 `#[vireo::main]` 生成的 `fn main` 所在线程）
+    /// 构造，满足 winit 的线程要求（含 macOS），无需 `any_thread` 逃逸口。
+    fn run_blocking(
+        self,
+        channels: RunChannels,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // winit 事件循环由 OS 主线程运行的入口构造，满足线程要求（含 macOS）；无需 `any_thread`。
         let event_loop = EventLoop::new().unwrap();
 
-        let window_init_durations = std::mem::take(&mut *self.window_init_durations.borrow_mut());
-        let window_descs: Vec<_> = self.window_descs.borrow_mut().drain(..).collect();
-        let close_hooks = std::mem::take(&mut *self.close_hooks.borrow_mut());
         let default_icon = self.default_icon.take();
         // 保留 self.instance（渲染线程重建 surface 需要）；Runner 拿 clone。
-        let instance = self.instance.clone().expect("instance already taken");
-        self.handle_to_id.clear();
-        self.windows.clear();
+        let instance = self.instance.borrow().clone().expect("instance already taken");
+        self.handle_to_id.borrow_mut().clear();
+        self.windows.borrow_mut().clear();
 
-        // 提取回调集合：从 App 取出后移入 winit 线程 Runner。
-        let window_callbacks: Vec<crate::input::InputCallbacks> = {
-            let n = window_descs.len();
-            let mut cbs: Vec<crate::input::InputCallbacks> = Vec::with_capacity(n);
-            for i in 0..n {
-                cbs.push(self.callbacks.remove(&(i as u64)).unwrap_or_default());
-            }
-            cbs
-        };
-
-        let (event_tx, event_rx) = mpsc::channel::<WinitEvent>();
-        let render_event_tx = event_tx.clone();
-        let (cb_tx, cb_rx) = mpsc::channel::<(usize, crate::input::InputCallbacks)>();
-        // 渲染线程 → winit 线程的终止请求（on_frame 返回 false / 设备丢失）。
-        let (exit_tx, exit_rx) = mpsc::channel::<()>();
-        // 渲染线程 → winit 线程：运行期边框样式切换。SetWindowSubclass /
-        // RemoveWindowSubclass 必须在窗口 owner（winit 事件）线程调用（见
-        // platform::windows::install 注释），而 set_frame_style 从渲染线程发出，
-        // 故通过本 channel 转发到 Runner::about_to_wait 在 winit 线程执行。
-        let (frame_style_tx, frame_style_rx) = mpsc::channel::<(isize, FrameStyle)>();
-        // 渲染线程 → winit 线程：运行期 set_aspect_ratio。同 set_frame_style，
-        // 子类化必须在 winit 事件线程调用；ratio 值存到 platform::windows 进程级表。
-        let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel::<(isize, Option<f64>)>();
-        // 渲染线程 → winit 线程：非客户区管理（§7.6 4 套消息）。
-        // SetWindowSubclass 不可跨线程；state 经本 channel 转发到 winit 线程
-        // 安装/卸载 nc_subclass。
-        let (nc_tx, nc_rx) = mpsc::channel::<(isize, crate::platform::windows::NcUpdate)>();
-        // 运行期窗口创建：渲染线程 `App::window`（on_frame 里）→ winit 线程
-        // `about_to_wait` drain 后执行窗口创建。render 端 sender 存进 self，
-        // 随 self move 到渲染线程；winit 端 receiver 给 Runner。
-        let (create_tx, create_rx) = mpsc::channel::<CreateWindowRequest>();
-        self.create_tx = Some(create_tx);
-        // 渲染线程 → winit 线程：程序化关闭窗口（`VireoWindow::close`）。
-        // 与 `WindowEvent::CloseRequested` 同路径：close_hooks / NC 清理 /
-        // alive_handles 递减 / 发 `WinitEvent::CloseRequested` 都在 winit 线程
-        // 执行，故经本 channel 转发。载荷 = 窗口 handle。
-        let (close_tx, close_rx) = mpsc::channel::<usize>();
-
-        // 渲染线程：持有 App + on_frame，处理事件 + 用户代码 + 渲染。
-        let expected_windows = window_descs.len();
+        // 窗口创建现在统一经 `create_rx` 通道（预注册与运行期不再分两条路径），
+        // 故没有「预期窗口数」：置位即放行 loop 线程（真正防误退靠 `pending_window_creates`）。
+        let expected_windows = 0usize;
+        self.windows_ready.store(true, std::sync::atomic::Ordering::Release);
         // Clone GpuContext Arc for Runner（winit 线程只在创建窗口时用 device/queue 初始化 surface）
         let gpu_for_runner = self.gpu.clone();
         let device_lost = self.device_lost.clone();
-        let render_thread = std::thread::Builder::new()
-            .name("vireo-render".into())
+        let device_lost_super = device_lost.clone();
+        // supervisor 线程：集中应用事件 + 判定退出；持有 `self`（App）以访问 windows / loop_states。
+        let supervisor = std::thread::Builder::new()
+            .name("vireo-supervisor".into())
             .spawn(move || {
-                render_on_frame(
+                supervisor_loop(
                     self,
-                    on_frame,
-                    render_event_tx,
-                    event_rx,
-                    cb_tx,
-                    exit_tx,
-                    frame_style_tx,
-                    aspect_ratio_tx,
-                    nc_tx,
-                    close_tx,
-                    device_lost,
+                    channels.event_rx,
+                    channels.supervisor_event_tx,
+                    channels.frame_style_tx,
+                    channels.aspect_ratio_tx,
+                    channels.nc_tx,
+                    channels.close_tx,
+                    channels.exit_tx,
                     expected_windows,
+                    device_lost_super,
                 )
             })
-            .expect("failed to spawn render thread");
+            .expect("failed to spawn supervisor thread");
 
         // Winit 线程：仅创建窗口和转发事件。
         struct Runner {
@@ -1638,23 +1851,24 @@ impl App {
     aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
 /// 接收渲染线程发来的运行期非客户区管理（§7.6；在 winit 线程装/卸 nc_subclass）
             nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
-            /// 接收渲染线程发来的运行期窗口创建请求（on_frame 里 `App::window`）
+            /// 接收渲染线程发来的运行期窗口创建请求（on_tick 里 `App::window`）
             create_rx: mpsc::Receiver<CreateWindowRequest>,
             /// 接收渲染线程发来的程序化关窗请求（`VireoWindow::close`；载荷 = handle）。
             close_rx: mpsc::Receiver<usize>,
             /// 已创建窗口的 hwnd（按 handle 索引），窗口关闭时用于清理 NC 状态。
             hwnds: Vec<isize>,
-            window_descs: Vec<WindowDesc>,
             id_to_handle: FxHashMap<WindowId, usize>,
             close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
             window_callbacks: Vec<crate::input::InputCallbacks>,
             default_icon: Option<Icon>,
-            window_init_durations: Vec<f64>,
             instance: wgpu::Instance,
             /// 用于 winit 线程创建/初始化 surface（后续帧循环全在渲染线程）
             gpu: Arc<GpuContext>,
             created: bool,
-            alive_handles: usize,
+            /// macOS 等需 `Resumed` 后才能 `create_window`；在 `resumed` 后置位，
+            /// `about_to_wait` 仅在此为 true 后 drain `create_rx`（安全）。Windows/Linux 上为
+            /// 纯预防性门控（`resumed` 必然先于 `about_to_wait`）。
+            resumed_fired: bool,
         }
 
         // 辅助：从 Runner 获取 handle（panic-safe）
@@ -1667,9 +1881,10 @@ impl App {
                 let _ = self.event_tx.send(event);
             }
 
-            /// 完整关窗路径：close_hooks / NC 状态清理 / alive_handles 递减 /
-            /// 发 `WinitEvent::CloseRequested`。用户点关闭按钮与
-            /// `VireoWindow::close`（经 close_rx drain）共用。
+            /// 完整关窗路径：close_hooks / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
+            /// 用户点关闭按钮与 `VireoWindow::close`（经 close_rx drain）共用。关窗幂等由
+            /// `apply_winit_event_one` 的 `CloseRequested` 处理（置 `closing` + 置 None）保证，
+            /// 重复调用（点 X + 程序化 `close()`）不会 panic。
             fn request_close(&mut self, handle: usize) {
                 if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
                     if let Some(h) = hook_opt.take() { h(); }
@@ -1690,7 +1905,6 @@ impl App {
                 // 渲染线程会通过 exit_tx 确认退出。此处不能先退出 event loop 再
                 // join，否则 owner 可能无期限等待仍在同步 wgpu 调用中的渲染线程。
                 self.send(WinitEvent::CloseRequested { handle });
-                self.alive_handles -= 1;
             }
 
             fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>, os_scale: f64) -> WindowAttributes {
@@ -1810,9 +2024,9 @@ impl App {
 
                 // ---- 在 winit 线程上创建 surface；初始 configure 推迟到渲染线程 ----
                 // surface 的 create_surface 必须紧跟窗口创建；**初始 `surface.configure`
-                // 不再在此执行**——DX12 的 configure 会 `wait_for_present_queue_idle`
-                // 无限等 present queue 排空（主窗口每帧 present，阻塞可达几十 ms），
-                // 若在 winit 线程同步执行，会卡住整个事件循环（所有窗口的输入/事件
+                // 不再在此执行**——Vulkan 后端（wgpu 默认）的 configure 会等 present queue
+                // 排空（阻塞可达几十 ms；DX12 同操作阻塞显著更低），若在 winit 线程同步执行，
+                // 会卡住整个事件循环（所有窗口的输入/事件
                 // 都被延迟）。改由渲染线程首次 `draw_frame`（`needs_initial_configure`
                 // 标志）在 acquire 前建立合法 swapchain。
                 // `SurfaceTexture` 从不跨线程：acquire→present 全在渲染线程 draw() 内，
@@ -1884,7 +2098,6 @@ impl App {
                 // 初始 configure 推迟到渲染线程首次 draw（见上方注释）。
 
                 self.id_to_handle.insert(window_id, handle);
-                self.alive_handles += 1;
 
                 self.send(WinitEvent::WindowCreated {
                     handle,
@@ -1907,26 +2120,45 @@ impl App {
                     return;
                 }
                 self.created = true;
-
-                // 预建窗口：与运行期创建共用 create_window。取走 window_descs
-                // 避免循环内 &mut self 方法调用与字段借用冲突（resumed 只跑一次）。
-                let window_descs = std::mem::take(&mut self.window_descs);
-                for (handle, desc) in window_descs.iter().enumerate() {
-                    let init_duration = if handle < self.window_init_durations.len() {
-                        self.window_init_durations[handle]
-                    } else {
-                        0.0
-                    };
-                    self.create_window(event_loop, handle, desc, init_duration, None);
+                self.resumed_fired = true;
+                // 预注册窗口现在也经 `create_rx` 通道投递（`App::window` 在用户闭包内
+                // 已于 `resumed` 前把请求发到通道）；这里先 drain 一次让它们立即建出，
+                // 之后 `about_to_wait` 仍会在 `resumed_fired` 后继续 drain 运行期请求。
+                while let Ok(req) = self.create_rx.try_recv() {
+                    self.create_window(
+                        event_loop,
+                        req.handle as usize,
+                        &req.desc,
+                        req.init_duration,
+                        req.on_close,
+                    );
                 }
             }
 
             fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-                // 渲染线程请求终止（on_frame 返回 false / 设备丢失）
+                // 渲染线程请求终止（on_tick 返回 false / 设备丢失）
+                let mut exit_requested = false;
                 while self.exit_rx.try_recv().is_ok() {
-                    event_loop.exit();
+                    exit_requested = true;
                 }
-                // Drain callback registrations sent from render thread
+                // 运行期窗口创建：drain 渲染线程（on_tick 里 `App::window`）发来的请求，
+                // 在本线程（winit 事件线程）创建窗口。必须在 `cb_rx` **之前** drain——
+                // 这样同一迭代内 App 级 `on_*` 回调（经 `cb_tx` 通道）落到已扩容的
+                // `window_callbacks[handle]`，不会被丢弃。macOS 仅 `resumed` 之后允许
+                // `create_window`，故以 `resumed_fired` 门控（Windows/Linux 上恒 true）。
+                if self.resumed_fired {
+                    while let Ok(req) = self.create_rx.try_recv() {
+                        self.create_window(
+                            event_loop,
+                            req.handle as usize,
+                            &req.desc,
+                            req.init_duration,
+                            req.on_close,
+                        );
+                    }
+                }
+                // Drain callback registrations sent from render thread.
+                // 注意顺序：窗口创建（上方）先于回调合并，确保 window_callbacks[handle] 已 resize。
                 while let Ok((handle, mut reg)) = self.cb_rx.try_recv() {
                     if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                         cbs.on_key_down.extend(reg.on_key_down.drain(..));
@@ -1947,6 +2179,17 @@ impl App {
                         cbs.on_moved.extend(reg.on_moved.drain(..));
                         cbs.on_theme_changed.extend(reg.on_theme_changed.drain(..));
                         cbs.on_resized.extend(reg.on_resized.drain(..));
+                        // 窗口已存在（hwnd 已登记）时，合并后安装任务栏缩略图按钮回调
+                        // （Windows 专用；预注册窗口的 App 级回调经上方 create_rx 创建窗口时尚
+                        // 未合并，故此处补齐安装，避免丢失）。
+                        if (handle as usize) < self.hwnds.len() && self.hwnds[handle as usize] != 0 {
+                            for cb in std::mem::take(&mut reg.on_thumb_button) {
+                                crate::platform::windows::set_thumbar_callback(
+                                    self.hwnds[handle as usize],
+                                    cb,
+                                );
+                            }
+                        }
                     }
                 }
                 // 运行期边框样式切换：SetWindowSubclass / RemoveWindowSubclass
@@ -1961,7 +2204,7 @@ impl App {
                         crate::platform::windows::remove(hwnd);
                     }
                 }
-                                // 运行期宽高比切换：drain 渲染线程发来的 (hwnd, ratio)，
+                // 运行期宽高比切换：drain 渲染线程发来的 (hwnd, ratio)，
                 // 在本线程（winit 事件线程）挂/卸 aspect 子类。
                 while let Ok((hwnd, ratio)) = self.aspect_ratio_rx.try_recv() {
                     crate::platform::windows::set_aspect_ratio(hwnd, ratio);
@@ -1971,23 +2214,18 @@ impl App {
                 while let Ok((hwnd, upd)) = self.nc_rx.try_recv() {
                     crate::platform::windows::nc_apply(hwnd, upd);
                 }
-                // 运行期窗口创建：drain 渲染线程（on_frame 里 `App::window`）
-                // 发来的请求，在本线程（winit 事件线程）创建窗口。
-                while let Ok(req) = self.create_rx.try_recv() {
-                    self.create_window(
-                        event_loop,
-                        req.handle as usize,
-                        &req.desc,
-                        req.init_duration,
-                        req.on_close,
-                    );
-                }
                 // 程序化关窗：`VireoWindow::close` 发来的 handle，走与用户点关闭
                 // 按钮相同的完整关窗路径（close_hooks / NC 清理 / 退出判定）。
                 while let Ok(handle) = self.close_rx.try_recv() {
                     self.request_close(handle);
                 }
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                if exit_requested {
+                    // 必须在 `set_control_flow(Poll)` 之前短路：否则 Poll 会覆盖 `Exit`，
+                    // 导致 supervisor 已发出退出信号、事件循环却永不退出（进程残留）。
+                    event_loop.exit();
+                } else {
+                    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                }
             }
 
             fn window_event(
@@ -2135,192 +2373,35 @@ impl App {
         }
 
         event_loop.run_app(&mut Runner {
-            event_tx,
-            cb_rx,
-            exit_rx,
-            frame_style_rx,
-            aspect_ratio_rx,
-            nc_rx,
-            create_rx,
-            close_rx,
+            event_tx: channels.event_tx,
+            cb_rx: channels.cb_rx,
+            exit_rx: channels.exit_rx,
+            frame_style_rx: channels.frame_style_rx,
+            aspect_ratio_rx: channels.aspect_ratio_rx,
+            nc_rx: channels.nc_rx,
+            create_rx: channels.create_rx,
+            close_rx: channels.close_rx,
             hwnds: Vec::new(),
-            window_descs,
             id_to_handle: FxHashMap::default(),
-            close_hooks,
-            window_callbacks,
+            close_hooks: FxHashMap::default(),
+            window_callbacks: Vec::new(),
             default_icon,
-            window_init_durations,
             instance,
             gpu: gpu_for_runner,
             created: false,
-            alive_handles: 0,
+            resumed_fired: false,
         }).unwrap();
 
-        // Winit loop 结束后等待渲染线程退出。
-        match render_thread.join() {
-            Ok(inner) => inner,
-            Err(payload) => Err(panic_payload_to_string(payload).into()),
+        // Winit loop 结束后等待 supervisor 线程退出。
+        match supervisor.join() {
+            Ok(()) => Ok(()),
+            Err(payload) => Err(crate::window::panic_payload_to_string(payload).into()),
         }
     }
-}
-
-/// 渲染线程主循环：处理 winit 事件 → 调用用户 on_frame → 重复。
-/// 帧节奏诊断样本（`VIREO_PACING_STATS=1` 时在 `render_on_frame` 内采集）。
-#[derive(Clone, Copy)]
-struct PacingSample {
-    /// 本帧循环起点到上一帧起点的间隔（CPU 帧节奏）
-    interval_ms: f64,
-    /// `get_current_texture` 耗时（swapchain 阻塞则大；拖动拉伸时不阻塞 → 小）
-    acquire_ms: f64,
-    /// `queue.present` 耗时（异步 → 通常 ~20µs）
-    present_ms: f64,
-    /// 本帧是否 stretch present（`Presented { suboptimal: true }`）
-    stretch: bool,
-    /// 拖动中（`pending_resize_at` 非空）
-    dragging: bool,
-}
-
-/// 把 `VIREO_PACING_STATS` 样本输出摘要（stderr）。按 stretch / 正常分两组，
-/// 各报 interval/acquire/present 的 min/p50/p95/max，定位「CPU 帧节奏是否均匀、
-/// 是否阻塞在 acquire/present」。
-fn pacing_summary(samples: &[PacingSample]) {
-    fn pct(sorted: &[f64], q: f64) -> f64 {
-        if sorted.is_empty() {
-            return 0.0;
-        }
-        let i = ((sorted.len() as f64 - 1.0) * q).round() as usize;
-        sorted[i]
-    }
-    fn line(tag: &str, v: &mut Vec<f64>) {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!(
-            "  {:<12} min={:7.3} p50={:7.3} p95={:7.3} max={:7.3} (ms)",
-            tag,
-            v.first().copied().unwrap_or(0.0),
-            pct(v, 0.50),
-            pct(v, 0.95),
-            v.last().copied().unwrap_or(0.0),
-        );
-    }
-
-    let n_stretch = samples.iter().filter(|s| s.stretch).count();
-    let n_normal = samples.len().saturating_sub(n_stretch);
-    let n_drag = samples.iter().filter(|s| s.dragging).count();
-    eprintln!(
-        "[pacing] n={} stretch={} normal={} drag={}",
-        samples.len(),
-        n_stretch,
-        n_normal,
-        n_drag
-    );
-
-    let mut iv = samples.iter().map(|s| s.interval_ms).collect::<Vec<_>>();
-    let mut iv_st = samples.iter().filter(|s| s.stretch).map(|s| s.interval_ms).collect::<Vec<_>>();
-    let mut iv_nm = samples.iter().filter(|s| !s.stretch).map(|s| s.interval_ms).collect::<Vec<_>>();
-    line("interval", &mut iv);
-    line("interval*st", &mut iv_st);
-    line("interval*norm", &mut iv_nm);
-
-    let mut aq = samples.iter().map(|s| s.acquire_ms).collect::<Vec<_>>();
-    line("acquire", &mut aq);
-    let mut pr = samples.iter().map(|s| s.present_ms).collect::<Vec<_>>();
-    line("present", &mut pr);
-}
-
-/// 相位诊断样本（`VIREO_PHASE_STATS=1`，`draw_frame` 内 present 后采集）。
-#[derive(Clone, Copy)]
-struct PhaseSample {
-    /// present 相对最近一次 vblank 的相位（0~1，0=vblank 刚过，1=马上到下一个 vblank）
-    phase: f64,
-    /// 两次相邻 vblank 的间隔（QPC ticks → ms），判断 DWM 合成时钟是否均匀
-    vblank_ms: f64,
-    /// 本帧是否 stretch present
-    stretch: bool,
-    /// 拖动中
-    dragging: bool,
-}
-
-/// 相位诊断摘要：phase 的 min/p50/p95/max + 直方图（分 10 桶），
-/// 验证「present 相位在拖动时漂移」的拍频假说。
-fn phase_summary(samples: &[PhaseSample]) {
-    let n_st = samples.iter().filter(|s| s.stretch).count();
-    let n_drag = samples.iter().filter(|s| s.dragging).count();
-    eprintln!(
-        "[phase] n={} stretch={} drag={}",
-        samples.len(),
-        n_st,
-        n_drag
-    );
-    let mut ph = samples.iter().map(|s| s.phase).collect::<Vec<_>>();
-    ph.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pct = |q: f64| {
-        if ph.is_empty() {
-            return 0.0;
-        }
-        let i = ((ph.len() as f64 - 1.0) * q).round() as usize;
-        ph[i]
-    };
-    eprintln!(
-        "  phase       min={:.3} p50={:.3} p95={:.3} max={:.3}",
-        ph.first().copied().unwrap_or(0.0),
-        pct(0.50),
-        pct(0.95),
-        ph.last().copied().unwrap_or(0.0),
-    );
-    let mut vb = samples.iter().map(|s| s.vblank_ms).collect::<Vec<_>>();
-    vb.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pct_vb = |q: f64| {
-        if vb.is_empty() {
-            return 0.0;
-        }
-        let i = ((vb.len() as f64 - 1.0) * q).round() as usize;
-        vb[i]
-    };
-    eprintln!(
-        "  vblank_ms   min={:.3} p50={:.3} p95={:.3} max={:.3}",
-        vb.first().copied().unwrap_or(0.0),
-        pct_vb(0.50),
-        pct_vb(0.95),
-        vb.last().copied().unwrap_or(0.0),
-    );
-    let mut hist = [0usize; 10];
-    for s in samples {
-        let b = ((s.phase * 10.0) as usize).min(9);
-        hist[b] += 1;
-    }
-    for (i, c) in hist.iter().enumerate() {
-        let pct = *c as f64 / samples.len().max(1) as f64 * 100.0;
-        let bar = "*".repeat((pct / 2.0).round() as usize);
-        eprintln!(
-            "  phase {:0.1}-{:0.1} | {:>3} 帧 {:5.1}% {}",
-            i as f64 * 0.1,
-            (i + 1) as f64 * 0.1,
-            c,
-            pct,
-            bar
-        );
-    }
-}
-
-/// 读取 DWM 合成时钟：返回 `(qpcVBlank, qpcRefreshPeriod)`（QPC ticks）。
-/// `qpcVBlank` = 最近一次 vblank 的 QPC 时间；`qpcRefreshPeriod` = 刷新周期。
-/// 失败返回 `None`（非 Windows / DWM 不可用 / 远程会话）。
-fn dwm_timing() -> Option<(u64, u64)> {
-    crate::platform::windows::dwm_timing()
-}
-
-/// 当前 QPC 计数（`QueryPerformanceCounter`）。
-fn qpc_now() -> u64 {
-    crate::platform::windows::qpc_now()
-}
-
-/// QPC 频率（每类 QPC tick 的纳秒数），用于把 ticks 转成 ms。
-fn qpc_ticks_per_sec() -> u64 {
-    crate::platform::windows::qpc_ticks_per_sec()
 }
 
 /// 将 `catch_unwind` 捕获的 panic payload 转成可读字符串。
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -2330,362 +2411,351 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn render_on_frame<F>(
-    mut app: App,
-    mut on_frame: F,
-    event_tx: mpsc::Sender<WinitEvent>,
-    rx: mpsc::Receiver<WinitEvent>,
-    cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
-    exit_tx: mpsc::Sender<()>,
-    frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
-    aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
-    // NC 状态变更通道（§7.6，render thread → winit thread）。
-    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
-    // 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
-    close_tx: mpsc::Sender<usize>,
-    device_lost: Arc<std::sync::atomic::AtomicBool>,
-    expected_windows: usize,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where F: FnMut(&App) -> bool + Send + 'static
-{
-    let mut created_windows = 0usize;
-    // 用户 on_frame 至少跑过一次后，才允许「零窗口退出」判定生效。
-    // 否则 expected_windows==0（纯 run 内创建窗口）会在首帧 on_frame 前就退出。
-    let mut on_frame_called = false;
-    let request_exit = || {
-        let _ = exit_tx.send(());
-    };
-    // `VIREO_PACING_STATS=1`：帧节奏诊断（仅诊断用，默认零开销）。
-    let pacing = std::env::var_os("VIREO_PACING_STATS").is_some();
-    let mut pacing_samples: Vec<PacingSample> = Vec::new();
-    let mut pacing_prev: Option<std::time::Instant> = None;
-    // `VIREO_PHASE_STATS=1`：present 相对 vblank 相位诊断（需 Windows + DWM）。
-    let phase_diag = std::env::var_os("VIREO_PHASE_STATS").is_some();
-    let mut phase_samples: Vec<PhaseSample> = Vec::new();
-    // 循环前先跑一次到期延迟任务（frame_count 仍为 0）：
-    // run 之前排的 after_frames(0) 会在第一个 on_frame 之前执行。
-    // 将整个渲染线程运行段包进 catch_unwind：任何渲染线程 panic（用户代码或 vireo 内部）
-    // 都转为「整 app 干净退出」而非僵尸——否则渲染线程 unwind 死掉、主线程卡在
-    // run_app 无法观察，进程既不退出也不渲染。
-    let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        app.run_due_deferred_tasks();
-        loop {
-        let frame_start = std::time::Instant::now();
-        let interval_ms = pacing_prev
-            .map(|p| frame_start.duration_since(p).as_secs_f64() * 1e3)
-            .unwrap_or(0.0);
-        pacing_prev = Some(frame_start);
-        // 处理所有待处理事件
-        loop {
-            match rx.try_recv() {
-                Ok(WinitEvent::WindowCreated {
-                    handle, window, surface, surface_config, renderer,
-                    dpi_scale, dpi_override, init_duration,
-                    frame_style, pending_show,
-                }) => {
-                    let vw = VireoWindow::new(
-                        window,
-                        app.gpu.clone(),
-                        surface,
-                        app.instance.clone().expect("instance available"),
-                        surface_config,
-                        renderer,
-                        dpi_scale,
-                        dpi_override,
-                        init_duration,
-                    frame_style,
-                    pending_show,
-                    event_tx.clone(),
-                    cb_tx.clone(),
-                    nc_tx.clone(),
-                    close_tx.clone(),
-                    handle,
-                );
-                    while app.windows.len() <= handle {
-                        app.windows.push(None);
-                    }
-                    app.windows[handle] = Some(vw);
-                    created_windows += 1;
-                    // 运行期创建的窗口：pending 计数递减（退出判定依赖它）。
-                    if handle >= expected_windows {
-                        app.pending_creates.set(app.pending_creates.get().saturating_sub(1));
-                    }
-                }
-
-                Ok(WinitEvent::Resized { handle, width, height }) => {
-                    if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        win.resize(width, height);
-                    }
-                }
-
-                Ok(WinitEvent::ScaleFactorChanged { handle, scale: _scale }) => {
-                    if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        let size = win.inner.inner_size();
-                        win.resize(size.width, size.height);
-                    }
-                }
-
-                Ok(WinitEvent::CursorMoved { handle, x, y }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::CursorMoved { handle, x, y });
-                    }
-                }
-
-                Ok(WinitEvent::KeyboardInput { handle, event }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::KeyboardInput { handle, event });
-                    }
-                }
-
-                Ok(WinitEvent::MouseInput { handle, button, pressed }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::MouseInput { handle, button, pressed });
-                    }
-                }
-
-                Ok(WinitEvent::MouseWheel { handle, delta }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::MouseWheel { handle, delta });
-                    }
-                }
-
-                Ok(WinitEvent::ModifiersChanged { handle, modifiers }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::ModifiersChanged { handle, modifiers });
-                    }
-                }
-
-                Ok(WinitEvent::Focused { handle, focused }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::Focused { handle, focused });
-                    }
-                }
-
-                Ok(WinitEvent::CursorEntered { handle }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::CursorEntered { handle });
-                    }
-                }
-
-                Ok(WinitEvent::CursorLeft { handle }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::CursorLeft { handle });
-                    }
-                }
-
-                Ok(WinitEvent::Touch { handle, event }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.pending_input.borrow_mut().push(WinitEvent::Touch { handle, event });
-                    }
-                }
-
-                Ok(WinitEvent::CloseRequested { handle, .. }) => {
-                    if let Some(Some(win)) = app.windows.get_mut(handle) {
-                        win.closing.set(true);
-                        // 置 closing 后再 drop：此时无 outstanding SurfaceTexture
-                        // （draw 内的 st 在 present 后已释放），drop surface 安全。
-                    }
-                    if let Some(w) = app.windows.get_mut(handle) {
-                        *w = None;
-                    }
-                }
-
-                // Winit 窗口操作：转发到正确的窗口
-                Ok(WinitEvent::SetTitle { handle, title }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_title(&title);
-                    }
-                }
-                Ok(WinitEvent::SetSize { handle, size }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        let _ = win.inner.request_inner_size(size);
-                    }
-                }
-                Ok(WinitEvent::SetMinSize { handle, size }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_min_inner_size(size);
-                    }
-                }
-                Ok(WinitEvent::SetMaxSize { handle, size }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_max_inner_size(size);
-                    }
-                }
-                Ok(WinitEvent::SetFullscreen { handle, fullscreen }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_fullscreen(fullscreen);
-                    }
-                }
-                Ok(WinitEvent::SetMaximized { handle, maximized }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_maximized(maximized);
-                    }
-                }
-                Ok(WinitEvent::SetMinimized { handle, minimized }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_minimized(minimized);
-                    }
-                }
-                Ok(WinitEvent::SetVisible { handle, visible }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_visible(visible);
-                    }
-                }
-                Ok(WinitEvent::FocusWindow { handle }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.focus_window();
-                    }
-                }
-                Ok(WinitEvent::SetWindowLevel { handle, level }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_window_level(level);
-                    }
-                }
-                Ok(WinitEvent::SetFrameStyle { handle, style }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.frame_style.set(style);
-                        win.inner.set_decorations(style.decorated());
-                        // SetWindowSubclass / RemoveWindowSubclass 必须在 winit
-                        // 事件线程调用（见 platform::windows::install 注释），
-                        // 这里仅转发到 winit 线程，由 Runner::about_to_wait 执行。
-                        if let Some(hwnd) = win_hwnd(&win.inner) {
-                            let _ = frame_style_tx.send((hwnd, style));
-                        }
-                    }
-                }
-                Ok(WinitEvent::SetAspectRatio { handle, ratio }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        if let Some(hwnd) = win_hwnd(&win.inner) {
-                            let _ = aspect_ratio_tx.send((hwnd, ratio));
-                        }
-                    }
-                }
-                Ok(WinitEvent::SetIcon { handle, icon }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_window_icon(Some(icon));
-                    }
-                }
-                Ok(WinitEvent::SetCursor { handle, cursor }) => {
-                    if let Some(Some(win)) = app.windows.get(handle) {
-                        win.inner.set_cursor(cursor);
-                    }
-                }
-
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
-                Err(mpsc::TryRecvError::Empty) => break,
-            }
-        }
-
-        // 零窗口不再自动退出：仅 on_frame 返回 false（或 device lost）才结束。
-        // 这样关闭所有窗口后仍可在 on_frame 内 app.window() 重新创建窗口。
-
-        // FPS 统计
-        let now = std::time::Instant::now();
-        app.frame_count += 1;
-        if app.frame_count == 1 {
-            app.last_frame = now;
-        } else {
-            let dt = now.duration_since(app.last_frame).as_secs_f64();
-            app.last_frame = now;
-            if dt > 0.0 && dt < 0.5 {
-                app.frame_time = dt;
-                app.fps_samples.push(dt);
-                if app.fps_samples.len() > FPS_SAMPLE_CAP {
-                    app.fps_samples.remove(0);
-                }
-                let sum: f64 = app.fps_samples.iter().sum();
-                if sum > 0.0 {
-                    app.fps = app.fps_samples.len() as f64 / sum;
-                }
-            }
-        }
-
-// 等所有窗口创建完才开始调用用户代码
-        if created_windows >= expected_windows {
-            for win in app.windows.iter().flatten() {
-                win.last_draw_outcome.set(None);
-            }
-            if !(on_frame)(&app) {
-                // 用户请求退出：通知 winit 线程 exit，本线程返回。
-                request_exit();
-                break Ok(());
-            }
-            on_frame_called = true;
-            if pacing {
-                for win in app.windows.iter().flatten() {
-                    if let Some(rep) = win.last_draw_report.get() {
-                        pacing_samples.push(PacingSample {
-                            interval_ms,
-                            acquire_ms: rep.timings.acquire_secs * 1e3,
-                            present_ms: rep.timings.present_secs * 1e3,
-                            stretch: matches!(
-                                rep.outcome,
-                                DrawOutcome::Presented { suboptimal: true }
-                            ),
-                            dragging: win.pending_resize_at.get().is_some(),
-                        });
-                    }
-                }
-                if pacing_samples.len() >= 240 {
-                    pacing_summary(&pacing_samples);
-                    pacing_samples.clear();
-                }
-            }
-            if phase_diag {
-                for win in app.windows.iter().flatten() {
-                    if let Some(ps) = win.last_phase_sample.get() {
-                        phase_samples.push(ps);
-                    }
-                }
-                if phase_samples.len() >= 240 {
-                    phase_summary(&phase_samples);
-                    phase_samples.clear();
-                }
-            }
-            if should_backoff_after_draws(
-                app.windows.iter().flatten().map(|win| win.last_draw_outcome.get()),
-            ) {
-                std::thread::sleep(std::time::Duration::from_millis(16));
-            }
-            if device_lost.load(std::sync::atomic::Ordering::Acquire) {
-                log::error!("vireo GPU device lost — terminating");
-                request_exit();
-                break Ok(());
-            }
-        } else {
-            std::thread::yield_now();
-        }
-
-        // 执行所有到期的延迟任务（帧末，on_frame / draw 之后）
-        app.run_due_deferred_tasks();
-
-        // 空转抑制：相位锁——本帧滞后于 stride 时（无 vsync / acquire 不阻塞），
-        // 下一帧 sleep 到「绝对 deadline」，且落后不追赶（跳 slot），避免双帧。
-        // 有 vsync 阻塞（acquire 自然到刷新率）时 stride 早已过去，deadline 总是
-        // 落后 → 直接跳 now+stride 不睡，cap 不干预 vsync。精确 vsync 由 present 保证。
-        let now = std::time::Instant::now();
-        let effective_cap = app.effective_max_fps();
-        let (next_deadline, sleep) = pac_advance(now, app.pacing_deadline.get(), effective_cap);
-        app.pacing_deadline.set(next_deadline);
-        if let Some(s) = sleep {
-            std::thread::sleep(s);
-        }
-    }
-    }));
-    match render_result {
-        Ok(inner) => inner,
-        Err(payload) => {
-            let msg = panic_payload_to_string(payload);
-            log::error!(
-                "vireo: render thread panicked, terminating app: {:?}",
-                msg
+/// 应用单个 winit 事件到 App 状态（free function，供 supervisor 线程调用）。
+/// 这是 supervisor 线程事件处理分支，语义与原渲染帧循环逐位一致，
+/// 仅把 `app` 与各 channel 改为参数传入。
+fn apply_winit_event_one(
+    app: &App,
+    event: WinitEvent,
+    event_tx: &mpsc::Sender<WinitEvent>,
+    frame_style_tx: &mpsc::Sender<(isize, FrameStyle)>,
+    aspect_ratio_tx: &mpsc::Sender<(isize, Option<f64>)>,
+    nc_tx: &mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    close_tx: &mpsc::Sender<usize>,
+) {
+    match event {
+        WinitEvent::WindowCreated {
+            handle,
+            window,
+            surface,
+            surface_config,
+            renderer,
+            dpi_scale,
+            dpi_override,
+            init_duration,
+            frame_style,
+            pending_show,
+        } => {
+            let vw = VireoWindow::new(
+                window,
+                app.gpu.clone(),
+                surface,
+                app.instance.borrow().clone().expect("instance available"),
+                surface_config,
+                renderer,
+                dpi_scale,
+                dpi_override,
+                init_duration,
+                frame_style,
+                pending_show,
+                event_tx.clone(),
+                app.inner
+                    .cb_tx
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| {
+                        unreachable!(
+                            "vireo: cb_tx is always Some after run_entry/init_run_channels; \
+                             App::window is only reachable with cb_tx set"
+                        )
+                    }),
+                nc_tx.clone(),
+                close_tx.clone(),
+                handle,
             );
-            request_exit();
-            Err(msg.into())
+            vw.set_max_fps(app.max_fps());
+            vw.set_drag_cap(app.drag_cap());
+            while app.windows.borrow().len() <= handle {
+                app.windows.borrow_mut().push(None);
+            }
+            app.windows.borrow_mut()[handle] = Some(Arc::new(vw));
+            app.alive_window_count
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            app.created_window_count
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+
+        WinitEvent::Resized { handle, width, height } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.resize(width, height);
+            }
+        }
+
+        WinitEvent::ScaleFactorChanged { handle, scale: _scale } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                let size = win.inner.inner_size();
+                win.resize(size.width, size.height);
+            }
+        }
+
+        WinitEvent::CursorMoved { handle, x, y } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::CursorMoved { handle, x, y });
+            }
+        }
+
+        WinitEvent::KeyboardInput { handle, event } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::KeyboardInput { handle, event });
+            }
+        }
+
+        WinitEvent::MouseInput { handle, button, pressed } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::MouseInput { handle, button, pressed });
+            }
+        }
+
+        WinitEvent::MouseWheel { handle, delta } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::MouseWheel { handle, delta });
+            }
+        }
+
+        WinitEvent::ModifiersChanged { handle, modifiers } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::ModifiersChanged { handle, modifiers });
+            }
+        }
+
+        WinitEvent::Focused { handle, focused } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::Focused { handle, focused });
+            }
+        }
+
+        WinitEvent::CursorEntered { handle } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::CursorEntered { handle });
+            }
+        }
+
+        WinitEvent::CursorLeft { handle } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::CursorLeft { handle });
+            }
+        }
+
+        WinitEvent::Touch { handle, event } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.pending_input
+                    .borrow_mut()
+                    .push(WinitEvent::Touch { handle, event });
+            }
+        }
+
+        WinitEvent::CloseRequested { handle, .. } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.closing.set(true);
+                // 等渲染线程当前帧结束（已 present、不再持有 SurfaceTexture）再释放 Surface，
+                // 避免 in-flight draw 与 Surface drop 竞态导致 wgpu 校验 panic。正常帧已 present，
+                // 此处仅亚毫秒级等待；上限自旋避免渲染线程异常卡死时永久阻塞关闭。
+                let mut spins = 0u32;
+                while !win.draw_idle.load(std::sync::atomic::Ordering::Acquire) && spins < 1_000_000 {
+                    std::thread::yield_now();
+                    spins += 1;
+                }
+                // 置 closing 后再 drop：此时无 outstanding SurfaceTexture，drop surface 安全。
+            }
+            if let Some(w) = app.windows.borrow_mut().get_mut(handle) {
+                *w = None;
+                app.alive_window_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        // Winit 窗口操作：转发到正确的窗口
+        WinitEvent::SetTitle { handle, title } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_title(&title);
+            }
+        }
+        WinitEvent::SetSize { handle, size } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                let _ = win.inner.request_inner_size(size);
+            }
+        }
+        WinitEvent::SetMinSize { handle, size } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_min_inner_size(size);
+            }
+        }
+        WinitEvent::SetMaxSize { handle, size } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_max_inner_size(size);
+            }
+        }
+        WinitEvent::SetFullscreen { handle, fullscreen } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_fullscreen(fullscreen);
+            }
+        }
+        WinitEvent::SetMaximized { handle, maximized } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_maximized(maximized);
+            }
+        }
+        WinitEvent::SetMinimized { handle, minimized } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_minimized(minimized);
+            }
+        }
+        WinitEvent::SetVisible { handle, visible } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_visible(visible);
+            }
+        }
+        WinitEvent::FocusWindow { handle } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.focus_window();
+            }
+        }
+        WinitEvent::SetWindowLevel { handle, level } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_window_level(level);
+            }
+        }
+        WinitEvent::SetFrameStyle { handle, style } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.frame_style.set(style);
+                win.inner.set_decorations(style.decorated());
+                // SetWindowSubclass / RemoveWindowSubclass 必须在 winit
+                // 事件线程调用（见 platform::windows::install 注释），
+                // 这里仅转发到 winit 线程，由 Runner::about_to_wait 执行。
+                if let Some(hwnd) = win_hwnd(&win.inner) {
+                    let _ = frame_style_tx.send((hwnd, style));
+                }
+            }
+        }
+        WinitEvent::SetAspectRatio { handle, ratio } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                if let Some(hwnd) = win_hwnd(&win.inner) {
+                    let _ = aspect_ratio_tx.send((hwnd, ratio));
+                }
+            }
+        }
+        WinitEvent::SetIcon { handle, icon } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_window_icon(Some(icon));
+            }
+        }
+        WinitEvent::SetCursor { handle, cursor } => {
+            if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
+                win.inner.set_cursor(cursor);
+            }
         }
     }
 }
 
+/// supervisor 线程主循环：集中应用事件 + 判定退出。
+/// 与 winit 线程解耦——winit 只发 `WinitEvent`，本线程 drain 并应用到 `App` 状态；
+/// 当所有 `loop_states` 结束（或设备丢失）时通知 winit 线程退出事件循环。
+fn supervisor_loop(
+    app: App,
+    rx: mpsc::Receiver<WinitEvent>,
+    event_tx: mpsc::Sender<WinitEvent>,
+    frame_style_tx: mpsc::Sender<(isize, FrameStyle)>,
+    aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
+    nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
+    close_tx: mpsc::Sender<usize>,
+    exit_tx: mpsc::Sender<()>,
+    expected_windows: usize,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut created_windows = 0usize;
+    loop {
+        let mut processed = false;
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    // 先应用事件（把窗口写入 `app.windows`），再递减待创建计数 / 递增已创建计数——
+                    // 保证 window 真实存在后才解除「待创建」状态。
+                    let is_created = matches!(ev, WinitEvent::WindowCreated { .. });
+                    apply_winit_event_one(
+                        &app, ev, &event_tx, &frame_style_tx, &aspect_ratio_tx, &nc_tx, &close_tx,
+                    );
+                    if is_created {
+                        created_windows += 1;
+                        app.pending_window_creates
+                            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                    processed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => return,
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+        // 放开 loop 线程：已创建窗口数 `>=` 预期数即放行（含预期 0 的纯运行期 / 零窗口场景）。
+        // 「窗口已注册但未建出」的误退防护由 `pending_window_creates` 承担，无需在此卡。
+        if created_windows >= expected_windows {
+            app.windows_ready
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        // 退出判定（顶层权威 = vireo-main 的 `main` future 完成，见 `main_done`）：
+        // (a) `main_done && all_loops_done && windows_settled` —— 用户代码已结束、无 loop 在跑、
+        //     无窗口在途/存活即退出（覆盖零窗口零 loop 的 `main` 立即返回场景；旧 `app_started`
+        //     守卫在此会挂死）；
+        // (b) `all_windows_closed` —— 至少一窗口曾创建、现已全关（不依赖 loop 返回 false）；
+        // (c) `device_lost`。
+        // `loops_ever_requested` 仅用于 (a) 的 `all_loops_done`：
+        // - 已请求：必须等 `loop_states` 非空且全部 `done`（避免 `spawn` 尚未把状态推入前的竞态早退）；
+        // - 从未请求：循环计数视为「已完成」。
+        let all_loops_done = {
+            let loops_requested =
+                app.loops_ever_requested.load(std::sync::atomic::Ordering::Acquire);
+            if loops_requested {
+                let states = app.loop_states.borrow();
+                !states.is_empty()
+                    && states
+                        .iter()
+                        .all(|s| s.done.load(std::sync::atomic::Ordering::Acquire))
+            } else {
+                true
+            }
+        };
+        let windows_settled = created_windows >= expected_windows
+            && app.window_count() == 0
+            && app.pending_window_creates.load(std::sync::atomic::Ordering::Acquire) == 0;
+        // 所有窗口已关闭（至少一个曾被创建、现无存活窗口、无在途建窗）即退出，不再强依赖
+        // loop 线程返回 false：关窗那一帧 loop 可能在正在销毁的窗口上 `get_current_texture`
+        // 阻塞（draw_frame 的 closing 早退无法覆盖已进入的 in-flight acquire），进程退出时
+        // 该线程被强杀，无需等待其 `done`。零窗口 / 纯运行期建窗场景 `created_windows==0`
+        // 不触发本分支，避免启动即退出。
+        let all_windows_closed =
+            created_windows > 0 && app.window_count() == 0 && app.pending_window_creates.load(std::sync::atomic::Ordering::Acquire) == 0;
+        if (app.inner
+            .main_done
+            .load(std::sync::atomic::Ordering::Acquire)
+            && all_loops_done
+            && windows_settled)
+            || all_windows_closed
+            || device_lost.load(std::sync::atomic::Ordering::Acquire)
+        {
+            let _ = exit_tx.send(());
+            return;
+        }
+        // 仅当本轮无任何事件时退避，降低输入/窗口事件的响应延迟。
+        if !processed {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
 /// 窗口索引 —— 用于在 run() 闭包中引用窗口。稳定 handle：关窗后该索引失效（`window_ref` 返回 None），
 /// 不会因其他窗口关闭而重指向新窗口。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -2755,18 +2825,26 @@ impl App {
 
     /// 根据索引获取窗口引用。
     ///
-    /// 返回 `Err` 表示窗口已关闭或索引无效。调用方应处理 `Err`（例如在 `on_frame` 中
+    /// 返回 `Err` 表示窗口已关闭或索引无效。调用方应处理 `Err`（例如在 `on_tick` 中
     /// `return false`），而不是 `.unwrap()`——否则窗口关闭会让整个渲染线程 panic。
-    pub fn window_ref(&self, idx: &WindowIndex) -> Result<&VireoWindow, VireoError> {
-        match self.windows.get(idx.0 as usize).and_then(|w| w.as_ref()) {
+    pub fn window_ref(&self, idx: &WindowIndex) -> Result<Arc<VireoWindow>, VireoError> {
+        match self.windows.borrow().get(idx.0 as usize).and_then(|w| w.clone()) {
             Some(w) => Ok(w),
             None => Err(VireoError::WindowNotFound(idx.0)),
         }
     }
 
-    /// 存活窗口数量
+    /// 存活窗口数量（O(1)，读 `alive_window_count` 原子量；`windows` 历史表只增不缩）。
     pub fn window_count(&self) -> usize {
-        self.windows.iter().filter(|w| w.is_some()).count()
+        self.alive_window_count
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 累计已创建窗口数（O(1)，读 `created_window_count` 原子量；只增不缩）。
+    /// 渲染线程据此判定「曾创建且现已全部关闭」，独立于 `on_tick` 返回值退出。
+    pub(crate) fn created_window_count(&self) -> usize {
+        self.created_window_count
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
 /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
@@ -2774,10 +2852,12 @@ impl App {
         self.init_duration
     }
 
-    /// 设置渲染循环帧率上限。`Some(n)` 在有 vsync 阻塞时基本不生效（acquire 自然
+    /// 设置帧率上限的**默认值**。`Some(n)` 在有 vsync 阻塞时基本不生效（acquire 自然
     /// 锁到刷新率），仅在 acquire 不阻塞（拖动拉伸、`Immediate`、后台等）时用
     /// sleep 把 CPU 循环拉回约 n fps，避免空转烧 CPU。`None` 不限制。
     /// 默认 `Some(240)`——给足余量，正常 vsync 下 cap 不生效，仅空转时兜底。
+    /// 此值仅作为默认值：通过 `App::window` 或在 `run` 回调内动态创建的窗口，在创建时
+    /// 读取它；**已存在的窗口不受影响**。要改某个窗口的上限，用该 `VireoWindow::set_max_fps`。
     /// `&self` 即可，可在 `run` 回调内随时切换。
     pub fn set_max_fps(&self, fps: Option<u32>) {
         self.max_fps.set(fps);
@@ -2788,7 +2868,7 @@ impl App {
         self.max_fps.get()
     }
 
-    /// 设置「拖动期帧率上限」独立开关。与 `set_max_fps` **解耦**：开启（默认）时，
+    /// 设置「拖动期帧率上限」独立开关的**默认值**。与 `set_max_fps` **解耦**：开启（默认）时，
     /// resize 拖动期间（acquire 失去 vsync 节流、渲染循环会全速空转）即使
     /// `set_max_fps(None)` 也会把实际上限压到该窗口显示器刷新率；关闭则拖动期
     /// 不做任何额外压制（完全跟随 `set_max_fps`）。松手 snap 后自动恢复。
@@ -2800,6 +2880,8 @@ impl App {
     /// `set_max_fps` 决定），合成器每帧都有新鲜帧可选，画面内容变化更平滑——
     /// 代价是拖动期间 CPU/GPU 空转、发热略高。资源敏感场景（笔记本省电/持续拖动）
     /// 可保持开启；以观感为先时建议关闭。
+    /// 此值仅作为默认值，仅作用于之后新建的窗口；已存在的窗口不受影响。要改某个
+    /// 窗口，用该 `VireoWindow::set_drag_cap`。
     pub fn set_drag_cap(&self, enabled: bool) {
         self.drag_cap.set(enabled);
     }
@@ -2810,30 +2892,14 @@ impl App {
         self.drag_cap.get()
     }
 
-    /// 实际生效的帧率上限。用户设的值（`set_max_fps`）基础上，若任一窗口正在
-    /// resize 拖动（acquire 失去 vsync 节流）且 `drag_cap` 开启，则压到该窗口
-    /// 显示器的刷新率，避免渲染循环全速空转；松手 snap（configure）后自动恢复。
-    /// 拖动中不额外压（`drag_cap` 关）或非拖动时返回用户值。纯决策，供渲染循环帧末调用。
-    fn effective_max_fps(&self) -> Option<u32> {
-        let user = self.max_fps.get();
-        for win in self.windows.iter().flatten() {
-            if win.pending_resize_at.get().is_some() {
-                if let Some(mhz) = win.drag_refresh_mhz.get() {
-                    return drag_cap_effective(user, self.drag_cap.get(), mhz);
-                }
-            }
-        }
-        user
-    }
-
-pub fn windows(&self) -> Vec<&VireoWindow> {
-        self.windows.iter().filter_map(|w| w.as_ref()).collect()
+pub fn windows(&self) -> Vec<Arc<VireoWindow>> {
+        self.windows.borrow().iter().filter_map(|w| w.clone()).collect()
     }
 
     /// 所有存活窗口索引（与 `window_ref` 配合使用）。
     /// handle 是稳定 id；同一 handle 跨关窗事件不变（关窗后 `window_ref` 返回 None）。
     pub fn window_indices(&self) -> Vec<WindowIndex> {
-        self.windows.iter().enumerate()
+        self.windows.borrow().iter().enumerate()
             .filter(|(_, w)| w.is_some())
             .map(|(i, _)| WindowIndex::new(i as u64))
             .collect()
@@ -2888,7 +2954,8 @@ impl VireoWindow {
     /// **保持 vireo 逻辑尺寸不变**，按新 dpi 重新计算并调整物理窗口大小
     /// （`request_resize` 以物理意图请求）；`draw` 在物理 resize 落地后按新 override
     /// 一次性 apply（重算相机/scale/逻辑尺寸并 configure）。切换由用户主动触发，
-    /// 期间每次 configure 的 DX12 阻塞（~60-90ms）可接受。
+    /// 期间每次 configure 在 Vulkan 后端（wgpu 默认）上的阻塞（~60-90ms）可接受；
+    /// DX12 同操作阻塞显著更低。
     ///
     /// 示例：`examples/window_api.rs` 按 `O` 键循环切换。
     pub fn set_dpi_override(&self, dpi: Option<f64>) {
@@ -3061,7 +3128,7 @@ impl VireoWindow {
             let prev_frameless = prev == FrameStyle::Frameless;
             let new_frameless = style == FrameStyle::Frameless;
             if prev_frameless != new_frameless {
-                if let Some(hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
+                if let Some(_hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
                     let target = if new_frameless {
                         crate::platform::windows::CornerPreference::Default
                     } else {
@@ -3077,7 +3144,7 @@ impl VireoWindow {
                     #[cfg(not(target_os = "windows"))]
                     {
                         let _ = target;
-                        let _ = hwnd;
+                        let _ = _hwnd;
                     }
                 } else {
                     let _ = new_frameless;
@@ -3650,6 +3717,44 @@ impl VireoWindow {
     /// - `1` → 2 buffer：在途封顶 1，vsync 拖动时 camera 时差更小。
     ///
     /// 值域为 wgpu 能力范围（通常 1..=16），超出会被 wgpu 夹紧。`0` 非法。
+    /// 本窗口帧率上限（`None` = 不限制）。默认取 `App::set_max_fps` 创建时的值；
+    /// `set_max_fps` 可在运行期按窗口独立调整（不与 `App` 全局值联动，除非再次经
+    /// `App::set_max_fps` 传播）。与渲染循环解耦：`draw` 是窗口唯一帧入口，节流在
+    /// `draw_frame` 内按本窗口 cap 执行。
+    pub fn set_max_fps(&self, fps: Option<u32>) {
+        self.max_fps.set(fps);
+    }
+
+    /// 当前本窗口帧率上限（见 `set_max_fps`）。
+    pub fn max_fps(&self) -> Option<u32> {
+        self.max_fps.get()
+    }
+
+    /// 本窗口「拖动期帧率上限」开关，与 `set_max_fps` 解耦。详见 `App::set_drag_cap` 的语义
+    /// 说明：开启（默认）时 resize 拖动期即使 `set_max_fps(None)` 也压到刷新率防空转；
+    /// 关闭则拖动期全速产帧、画面内容变化更平滑。
+    pub fn set_drag_cap(&self, enabled: bool) {
+        self.drag_cap.set(enabled);
+    }
+
+    /// 当前本窗口「拖动期帧率上限」开关。
+    pub fn drag_cap(&self) -> bool {
+        self.drag_cap.get()
+    }
+
+    /// 实际生效的帧率上限（窗口级）。`set_max_fps` 用户值基础上，若本窗口正在 resize
+    /// 拖动（acquire 失去 vsync 节流）且 `drag_cap` 开启，则压到本窗口显示器刷新率，
+    /// 避免渲染循环全速空转；松手 snap 后自动恢复。纯决策，供 `draw_frame` 帧节流调用。
+    fn effective_max_fps(&self) -> Option<u32> {
+        let user = self.max_fps.get();
+        if self.drag_cap.get() && self.pending_resize_at.get().is_some() {
+            if let Some(mhz) = self.drag_refresh_mhz.get() {
+                return drag_cap_effective(user, true, mhz);
+            }
+        }
+        user
+    }
+
     pub fn set_frame_latency(&self, latency: u32) {
         self.pending_frame_latency.set(Some(latency));
     }
@@ -3767,10 +3872,10 @@ impl VireoWindow {
     /// 请求关闭窗口（走与用户点关闭按钮相同的完整关窗路径）。
     ///
     /// 内部经 `close_tx` 通道转发到 winit 线程，在 winit 线程依次执行
-    /// close_hooks / Windows NC 状态清理 / `alive_handles` 递减，并发送
-    /// `WinitEvent::CloseRequested` 给渲染线程——渲染线程随后置 `closing`、
-    /// 从 `App.windows` 移除本窗口，最后一个窗口关闭时请求退出 event loop。
-    /// 返回前不阻塞；实际关窗在下一次 winit 事件循环迭代生效。
+    /// close_hooks / Windows NC 状态清理，并发送 `WinitEvent::CloseRequested` 给渲染线程
+    /// ——渲染线程随后置 `closing`、从 `App.windows` 移除本窗口，最后一个窗口关闭时请求退出
+    /// event loop。关窗幂等（重复调用不影响）。返回前不阻塞；实际关窗在下一次 winit 事件循环
+    /// 迭代生效。
     pub fn close(&self) {
         let _ = self.close_tx.send(self.handle);
     }
@@ -4720,32 +4825,32 @@ mod metrics_tests {
         assert_eq!(desc.flags, wgpu::InstanceFlags::VALIDATION);
         assert_eq!(desc.memory_budget_thresholds.for_resource_creation, Some(80));
         assert_eq!(desc.memory_budget_thresholds.for_device_loss, Some(90));
-        // App::new 与 with_descriptor 共用同一构造路径（编译/逻辑层验证：
-        // 不实际创建 GPU，避免开窗口）。
-        let _ = super::App::with_descriptor; // 存在且可调用
+        // `App::new` 与 `with_descriptor` 共用同一构造路径（逻辑层验证：不实际创建 GPU，
+        // 避免开窗口）。两者现在均为泛型入口 `FnOnce(App) -> Future`，此处仅验证
+        // `desc` 字段正确构造；调用路径由 examples 覆盖。
     }
 
     #[test]
-    fn deferred_after_frames_timing_table() {
-        // 验证「after_frames(k) 于 frame_count + k 帧末执行」的 4 种情况：
+    fn deferred_after_ticks_timing_table() {
+        // 验证「after_ticks(k) 于 tick_count + k 帧末执行」的 4 种情况：
         // run 前注册（fc=0）与帧内注册（第 N 帧），k=0/1 都能区分。
-        // 初始 drain 在 fc=0（第一个 on_frame 之前）；每帧末 drain 在对应 fc。
+        // 初始 drain 在 fc=0（第一个 on_tick 之前）；每帧末 drain 在对应 fc。
 
         // —— run 之前注册（fc=0）——
-        let run0 = super::DeferredTask::for_frames(0); // after_frames(0) → target 0
-        let run1 = super::DeferredTask::for_frames(1); // after_frames(1) → target 1
+        let run0 = super::DeferredTask::for_frames(0); // after_ticks(0) → target 0
+        let run1 = super::DeferredTask::for_frames(1); // after_ticks(1) → target 1
         // 初始 drain（fc=0）：
-        assert!(run0.is_ready(0), "run 前 after_frames(0) 应在第一个 on_frame 之前执行");
-        assert!(!run1.is_ready(0), "run 前 after_frames(1) 初始 drain 时未到期");
+        assert!(run0.is_ready(0), "run 前 after_ticks(0) 应在第一个 on_tick 之前执行");
+        assert!(!run1.is_ready(0), "run 前 after_ticks(1) 初始 drain 时未到期");
         // 第 1 帧末 drain（fc=1）：
-        assert!(run1.is_ready(1), "run 前 after_frames(1) 应在第 1 帧末尾执行");
+        assert!(run1.is_ready(1), "run 前 after_ticks(1) 应在第 1 帧末尾执行");
 
         // —— 帧内注册（第 N 帧，N 任意）——
         let n = 7u64;
-        let inner0 = super::DeferredTask::for_frames(n);     // after_frames(0) at frame N → target N
-        let inner1 = super::DeferredTask::for_frames(n + 1); // after_frames(1) at frame N → target N+1
-        assert!(inner0.is_ready(n), "帧内 after_frames(0) 于本帧末尾执行");
-        assert!(!inner1.is_ready(n), "帧内 after_frames(1) 本帧末尾未到期");
-        assert!(inner1.is_ready(n + 1), "帧内 after_frames(1) 于下一帧末尾执行");
+        let inner0 = super::DeferredTask::for_frames(n);     // after_ticks(0) at frame N → target N
+        let inner1 = super::DeferredTask::for_frames(n + 1); // after_ticks(1) at frame N → target N+1
+        assert!(inner0.is_ready(n), "帧内 after_ticks(0) 于本帧末尾执行");
+        assert!(!inner1.is_ready(n), "帧内 after_ticks(1) 本帧末尾未到期");
+        assert!(inner1.is_ready(n + 1), "帧内 after_ticks(1) 于下一帧末尾执行");
     }
 }

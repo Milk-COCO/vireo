@@ -89,10 +89,10 @@ fn compute_stats(history: &[f64]) -> (f64, f64, f64, f64, f64, f64, f64) {
     )
 }
 
-fn main() {
+#[vireo::main]
+async fn main() {
     let quiet = std::env::var("VIREO_QUIET").is_ok();
 
-    let mut app = App::new();
     let idx = app.window(
         WindowDesc::new("Vireo Frame Stats", 720, 440).anti_aliasing(AntiAliasing::None),
         None::<fn()>,
@@ -160,8 +160,8 @@ fn main() {
         }
     });
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -171,7 +171,7 @@ fn main() {
 
         let focused = win.focused();
         if !quiet && focused != was_focused {
-            eprintln!("[focus] F{} focused={}", app.frame_count, focused);
+            eprintln!("[focus] F{} focused={}", ctx.tick_count(), focused);
         }
         was_focused = focused;
 
@@ -205,7 +205,7 @@ fn main() {
             let next = CAP_CYCLE.iter().copied().position(|c| c == current_cap)
                 .map_or(0, |i| (i + 1) % CAP_CYCLE.len());
             current_cap = CAP_CYCLE[next];
-            app.set_max_fps(current_cap);
+            win.set_max_fps(current_cap);
             history.clear();
             if !quiet {
                 eprintln!("[diag] max_fps={:?}", current_cap);
@@ -223,7 +223,7 @@ fn main() {
             }
         }
 
-        let ft_ms = app.frame_time * 1000.0;
+        let ft_ms = ctx.frame_time() * 1000.0;
         let t_build = std::time::Instant::now();
 
         let mut batch = DrawBatch::new();
@@ -235,8 +235,8 @@ fn main() {
         let (lo, hi, avg, p50, p95, p99, stddev) = compute_stats(&history);
         let spike_count = history.iter().filter(|&&v| v > SPIKE_THRESHOLD_MS).count();
 
-        if !quiet && app.frame_count % 60 == 0 {
-            eprintln!("[fps] text={} fps={:.1} ft={:.2}ms gpu={:.3}ms", show_text, app.fps, ft_ms, last_gpu_ms.unwrap_or(0.0));
+        if !quiet && ctx.tick_count() % 60 == 0 {
+            eprintln!("[fps] text={} fps={:.1} ft={:.2}ms gpu={:.3}ms", show_text, ctx.fps(), ft_ms, last_gpu_ms.unwrap_or(0.0));
         }
 
         let present_label = if present_immediate {
@@ -247,7 +247,7 @@ fn main() {
         if show_text {
             let def = TextDef::default().font_size(12.0);
             let rows = [
-                (vec![TextPart::normal("FPS: "), TextPart::glyphs(format!("{:.1}", app.fps))], 12.0),
+                (vec![TextPart::normal("FPS: "), TextPart::glyphs(format!("{:.1}", ctx.fps()))], 12.0),
                 (vec![
                     TextPart::normal("Frame time: "), TextPart::glyphs(format!("{:6.2}", ft_ms)),
                     TextPart::normal("ms  avg "), TextPart::glyphs(format!("{:5.2}", avg)),
@@ -285,7 +285,7 @@ fn main() {
                 ], 82.0),
                 (vec![
                     TextPart::normal("Focus: "), TextPart::dynamic(if focused { "yes" } else { "NO" }),
-                    TextPart::normal("  |  Frames: "), TextPart::glyphs(app.frame_count.to_string()),
+                    TextPart::normal("  |  Frames: "), TextPart::glyphs(ctx.tick_count().to_string()),
                 ], 96.0),
                 (vec![
                     TextPart::normal("Init: app "), TextPart::glyphs(format!("{:.0}", app_init_ms)),
@@ -374,7 +374,7 @@ fn main() {
             };
             eprintln!(
                 "[spike] F{} dt={:6.2}ms build={:5.2} wait={:5.2} encode={:5.2} gpu={:>5} kind={} focus={} text={} present={}",
-                app.frame_count,
+                ctx.tick_count(),
                 ft_ms,
                 build_ms,
                 acq_ms,
@@ -388,5 +388,5 @@ fn main() {
         }
         last_gpu_ms = gpu_ms;
         true
-    }).unwrap();
+    }).await.unwrap();
 }

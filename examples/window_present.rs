@@ -15,8 +15,8 @@ fn mode_name(m: PresentMode) -> &'static str {
     }
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Present Mode", 640, 360).present_mode(PresentMode::AutoVsync),
         None::<fn()>,
@@ -33,8 +33,8 @@ fn main() {
     let mut last_acq_ms = 0.0f64;
     let mut last_enc_ms = 0.0f64;
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -60,8 +60,8 @@ fn main() {
             "1 AutoVsync  2 Fifo  3 Mailbox  4 Immediate".into(),
             format!(
                 "Update FPS: {:.1}   update dt: {:.2} ms",
-                app.fps,
-                app.frame_time * 1000.0
+                ctx.fps(),
+                ctx.frame_time() * 1000.0
             ),
             format!(
                 "last acquire: {:.2} ms   encode: {:.2} ms",
@@ -84,7 +84,7 @@ fn main() {
             );
         }
 
-        let t = app.frame_count as f32 * 0.05;
+        let t = ctx.tick_count() as f32 * 0.05;
         let x = 80.0 + (t.sin() * 0.5 + 0.5) * 400.0;
         draw_rounded_rect(&mut batch, Pos::new(x, 220.0), 80.0, 60.0, 10.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
 
@@ -92,5 +92,5 @@ fn main() {
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
         true
-    }).unwrap();
+    }).await.unwrap();
 }

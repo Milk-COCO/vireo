@@ -93,8 +93,8 @@ fn hint(b: &mut DrawBatch, x: f32, y: f32, text: &str) {
     );
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("Window Control", 960, 600), None::<fn()>);
 
     let st = Arc::new(Mutex::new(WinState {
@@ -168,8 +168,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     let mut mac_alt: u8 = 0; // 0=Both 1=OnlyLeft 2=OnlyRight
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -727,5 +727,5 @@ fn main() {
 
         win.draw(Color::new(0.07, 0.08, 0.12, if transparent { 0.55 } else { 1.0 }), &[&b]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

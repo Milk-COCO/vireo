@@ -2,17 +2,17 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let off_idx = app.offscreen(256, 256, AntiAliasing::None);
     let idx = app.window(WindowDesc::new("Offscreen Render", 800, 600), None::<fn()>);
 
-    app.run(move |app| {
-        let canvas = match app.offscreen_ref(&off_idx) {
+    app.run(move |ctx| {
+        let canvas = match ctx.app().offscreen_ref(&off_idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let win = match app.window_ref(&idx) {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -34,5 +34,5 @@ fn main() {
         win.draw(BLACK, &[&win_batch]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

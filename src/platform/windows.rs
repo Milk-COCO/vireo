@@ -1130,7 +1130,7 @@ pub trait WindowExtWindows {
 
     /// 声明式 hit-test 区域（客户端逻辑像素，与 DrawBatch 绘制坐标一致）。
     ///
-    /// 按钮外观由用户在 `on_frame` 里用 DrawBatch 画在客户端；`WM_NCHITTEST` 返回
+    /// 按钮外观由用户在 `on_tick` 里用 DrawBatch 画在客户端；`WM_NCHITTEST` 返回
     /// `HT*` 让 Windows 自动接管交互（snap layout / 双击 / 右键菜单 / 按钮点击 /
     /// Aero Snap）。不产生 NC 区域，系统不画标准标题栏/按钮。
     ///
@@ -1620,51 +1620,7 @@ pub(crate) fn apply_window_focusable(hwnd: isize, focusable: bool) {
     }
 }
 
-pub(crate) fn cleanup_window_state(hwnd: isize) {
-    if hwnd == 0 {
-        return;
-    }
-    nc_remove(hwnd);
-    drop_thumbar_icons(hwnd);
-    drop_overlay_icons(hwnd);
-    clear_thumbar_callback(hwnd);
-    remove_window_icons_entry(hwnd);
-}
 
-pub fn dwm_timing() -> Option<(u64, u64)> {
-    use windows_sys::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
-    unsafe {
-        let mut ti: DWM_TIMING_INFO = std::mem::zeroed();
-        ti.cbSize = std::mem::size_of::<DWM_TIMING_INFO>() as u32;
-        if DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut ti) == 0 {
-            if ti.qpcRefreshPeriod > 0 {
-                return Some((ti.qpcVBlank, ti.qpcRefreshPeriod));
-            }
-        }
-    }
-    None
-}
-
-pub fn qpc_now() -> u64 {
-    use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
-    let mut v: i64 = 0;
-    unsafe {
-        let _ = QueryPerformanceCounter(&mut v);
-    }
-    v as u64
-}
-
-pub fn qpc_ticks_per_sec() -> u64 {
-    use windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
-    static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *FREQ.get_or_init(|| {
-        let mut v: i64 = 0;
-        unsafe {
-            let _ = QueryPerformanceFrequency(&mut v);
-        }
-        v.max(1) as u64
-    })
-}
 
 #[cfg(test)]
 mod tests {

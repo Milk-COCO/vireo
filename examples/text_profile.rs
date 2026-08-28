@@ -63,7 +63,8 @@ fn scene_text_static(b: &mut DrawBatch) {
     }
 }
 
-fn main() {
+#[vireo::main]
+async fn main() {
     let frames: u32 = std::env::var("VIREO_PROFILE_FRAMES")
         .ok()
         .and_then(|s| s.parse().ok())

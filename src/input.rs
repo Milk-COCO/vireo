@@ -1,5 +1,6 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+use crate::lock::Lock;
 
 // ------ Re-exports (winit types direct) ------
 
@@ -194,31 +195,31 @@ impl Default for InputCallbacks {
 /// 持久的输入状态（VireoWindow 内部持有）
 pub struct InputState {
     /// 当前按下的键集合（不包含 repeat 事件）
-    pub keys_down: RefCell<HashSet<KeyCode>>,
+    pub keys_down: Lock<HashSet<KeyCode>>,
     /// 当前按下的鼠标按钮集合
-    pub mouse_buttons_down: RefCell<HashSet<MouseButton>>,
+    pub mouse_buttons_down: Lock<HashSet<MouseButton>>,
     /// 当前修饰键状态
-    pub modifiers: RefCell<Modifiers>,
+    pub modifiers: Lock<Modifiers>,
     /// 本帧滚轮增量累计（按单位分开，避免鼠标滚轮 vs 触控板的单位混淆）
-    pub scroll_delta: RefCell<ScrollDeltaAccum>,
+    pub scroll_delta: Lock<ScrollDeltaAccum>,
     /// 窗口是否有焦点
-    pub focused: RefCell<bool>,
+    pub focused: Lock<bool>,
     /// 鼠标是否在窗口内
-    pub cursor_inside: RefCell<bool>,
+    pub cursor_inside: Lock<bool>,
     /// 活跃的触摸点: id -> (x, y, force)
-    pub touches: RefCell<HashMap<u64, (f32, f32, Option<f64>)>>,
+    pub touches: Lock<HashMap<u64, (f32, f32, Option<f64>)>>,
 }
 
 impl Default for InputState {
     fn default() -> Self {
         Self {
-            keys_down: RefCell::new(HashSet::new()),
-            mouse_buttons_down: RefCell::new(HashSet::new()),
-            modifiers: RefCell::new(Modifiers::NONE),
-            scroll_delta: RefCell::new(ScrollDeltaAccum::default()),
-            focused: RefCell::new(false),
-            cursor_inside: RefCell::new(false),
-            touches: RefCell::new(HashMap::new()),
+            keys_down: Lock::new(HashSet::new()),
+            mouse_buttons_down: Lock::new(HashSet::new()),
+            modifiers: Lock::new(Modifiers::NONE),
+            scroll_delta: Lock::new(ScrollDeltaAccum::default()),
+            focused: Lock::new(false),
+            cursor_inside: Lock::new(false),
+            touches: Lock::new(HashMap::new()),
         }
     }
 }

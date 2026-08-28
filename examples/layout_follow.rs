@@ -25,8 +25,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Layout Follow Smoothing", 720, 480).present_mode(PresentMode::AutoVsync),
         None::<fn()>,
@@ -60,8 +60,8 @@ fn main() {
     let mut follow_enabled = true;
     let mut key_was = [false; 4]; // [ ] L V
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -107,7 +107,7 @@ fn main() {
         let mut batch = DrawBatch::new();
 
         // 动画方块（验证重排节奏；正方形在拉伸中变成分率）
-        let t = app.frame_count as f32 * 0.05;
+        let t = ctx.tick_count() as f32 * 0.05;
         let w = (lw as f32).max(1.0);
         let h = (lh as f32).max(1.0);
         let bx = (w - 120.0) * (t.sin() * 0.5 + 0.5);
@@ -139,7 +139,7 @@ fn main() {
             format!("current(): {:?}", current),
             format!(
                 "window: {}x{} (logical)   Update FPS: {:.1}",
-                lw as u32, lh as u32, app.fps
+                lw as u32, lh as u32, ctx.fps()
             ),
             "[ ]=切预设  L=开/关跟随  V=present mode  — 拖动窗口边缘/标题栏观察".into(),
         ];
@@ -156,5 +156,5 @@ fn main() {
         let report = win.draw(Color::new(0.06, 0.07, 0.10, 1.0), &[&batch]);
         let _ = report;
         true
-    }).unwrap();
+    }).await.unwrap();
 }

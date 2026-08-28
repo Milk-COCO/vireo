@@ -54,8 +54,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Custom Material (manual BGL)", 500, 400),
         None::<fn()>,
@@ -102,8 +102,8 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -116,7 +116,7 @@ fn main() {
             hue: t * 0.1,
             _pad: 0.0,
         };
-        app.gpu.queue.write_buffer(
+        ctx.app().gpu.queue.write_buffer(
             &buf,
             0,
             bytemuck::cast_slice(std::slice::from_ref(&params)),
@@ -144,5 +144,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

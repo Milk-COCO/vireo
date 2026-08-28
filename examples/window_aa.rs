@@ -23,8 +23,8 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
               TextDef::default().font_size(14.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)));
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     let ssaa = app.window(
         WindowDesc::new("SSAA x4", 320, 240)
@@ -43,11 +43,11 @@ fn main() {
     );
     let raw = app.window(WindowDesc::new("No AA", 320, 240), None::<fn()>);
 
-    app.run(move |app| {
-        if let Ok(w) = app.window_ref(&ssaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "SSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = app.window_ref(&msaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "MSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = app.window_ref(&sdf) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 1.0, "SDF 1px");      w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = app.window_ref(&raw) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "No AA");             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+    app.run(move |ctx| {
+        if let Ok(w) = ctx.app().window_ref(&ssaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "SSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Ok(w) = ctx.app().window_ref(&msaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "MSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Ok(w) = ctx.app().window_ref(&sdf) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 1.0, "SDF 1px");      w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Ok(w) = ctx.app().window_ref(&raw) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "No AA");             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
         true
-    }).unwrap();
+    }).await.unwrap();
 }

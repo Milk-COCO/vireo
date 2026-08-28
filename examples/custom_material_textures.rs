@@ -45,8 +45,8 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
     v
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Custom Material Multi-Texture", 560, 360),
         None::<fn()>,
@@ -90,8 +90,8 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -99,7 +99,7 @@ fn main() {
 
         let t = start.elapsed().as_secs_f32();
         mat.set_uniform(
-            &app.gpu.queue,
+            &ctx.app().gpu.queue,
             "u_mix",
             &MixParams {
                 time: t,
@@ -129,5 +129,5 @@ fn main() {
             &[&b, &title],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }

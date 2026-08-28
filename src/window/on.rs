@@ -17,9 +17,15 @@ macro_rules! def_app_ons {
     ) => {
         $(
             $(#[$meta])*
-            pub fn $fname(&mut self, handle: $crate::window::WindowIndex, callback: $cb) -> &mut Self {
+            pub fn $fname(&self, handle: $crate::window::WindowIndex, callback: $cb) -> &Self {
                 let h = handle.0;
-                self.callbacks.entry(h).or_default().$field.push(Box::new(callback));
+                let mut cbs = $crate::input::InputCallbacks::default();
+                cbs.$field.push(Box::new(callback));
+                if let Some(tx) = self.cb_tx.borrow().as_ref() {
+                    if let Err(_) = tx.send((h as usize, cbs)) {
+                        ::log::warn!("vireo: failed to deliver app callback (receiver closed)");
+                    }
+                }
                 self
             }
         )*
@@ -39,7 +45,9 @@ macro_rules! def_window_ons {
             pub fn $fname(&self, callback: $cb) -> &Self {
                 let mut cbs = $crate::input::InputCallbacks::default();
                 cbs.$field.push(Box::new(callback));
-                let _ = self.cb_tx.send((self.handle, cbs));
+                if let Err(_) = self.cb_tx.send((self.handle, cbs)) {
+                    ::log::warn!("vireo: failed to deliver window callback (receiver closed)");
+                }
                 self
             }
         )*

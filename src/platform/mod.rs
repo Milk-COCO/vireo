@@ -64,16 +64,6 @@ pub mod windows {
     pub(crate) fn set_thumbar_callback(_hwnd: isize, _cb: Box<dyn FnMut(u32)>) {}
     pub(crate) fn apply_window_opacity(_hwnd: isize, _opacity: f64) {}
     pub(crate) fn apply_window_focusable(_hwnd: isize, _focusable: bool) {}
-    pub(crate) fn cleanup_window_state(_hwnd: isize) {}
-    pub fn dwm_timing() -> Option<(u64, u64)> {
-        None
-    }
-    pub fn qpc_now() -> u64 {
-        0
-    }
-    pub fn qpc_ticks_per_sec() -> u64 {
-        1
-    }
 }
 #[cfg(target_os = "macos")]
 pub mod macos;

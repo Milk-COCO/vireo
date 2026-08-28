@@ -25,8 +25,8 @@ fn draw_shapes(batch: &mut DrawBatch) {
     draw_triangle_outline(batch, 700.0, 135.0, 720.0, 90.0, 740.0, 135.0, 2.5, Some(WHITE));
 }
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
 
     let tex = Some(app.load_texture("logo_quad.png"));
 
@@ -35,15 +35,15 @@ fn main() {
         None::<fn()>,
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
 
         match tex {
             Some(i) => {
-                let t = match app.texture(i) {
+                let t = match ctx.app().texture(i) {
                     Ok(v) => v,
                     Err(_) => return false,
                 };
@@ -51,7 +51,7 @@ fn main() {
 
                 // ---- 上半：几何模式 ----
                 let mut geo = DrawBatch::new();
-                geo.set_texture(Some(t));
+                geo.set_texture(Some(&*t));
                 draw_shapes(&mut geo);
                 draw_text(&mut geo.texts, "Geometry (sdf_feather = None)",
                           Pos::new(10.0, 155.0), TextDef::default().font_size(14.0), TextOverride::from_color(label));
@@ -59,7 +59,7 @@ fn main() {
                 // ---- 下半：SDF 模式 ----
                 let mut sdf = DrawBatch::new();
                 sdf.set_position(0.0, 175.0);
-                sdf.set_texture(Some(t));
+                sdf.set_texture(Some(&*t));
                 sdf.set_sdf_feather(Some(1.0));
                 draw_shapes(&mut sdf);
                 draw_text(&mut sdf.texts, "SDF (sdf_feather = 1.0)",
@@ -76,5 +76,5 @@ fn main() {
         }
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

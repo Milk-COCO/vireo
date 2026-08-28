@@ -38,8 +38,8 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
     px
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     let check = Texture::from_rgba(64, 64, &checkerboard(64, 64, 8), &app.gpu);
     let grad = Texture::from_rgba(128, 64, &gradient(128, 64), &app.gpu);
@@ -52,8 +52,8 @@ fn main() {
 
     let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)), None::<fn()>);
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -110,5 +110,5 @@ fn main() {
 
         win.draw(Color::new(0.07, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

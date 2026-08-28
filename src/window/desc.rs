@@ -151,6 +151,8 @@ pub struct WindowDesc {
     /// winit 建窗是先以默认尺寸+边框显示、再改尺寸/去边框，`preparable` 让窗口
     /// 第一次出现即「正确尺寸 + 无边框 + 已渲染内容」，消除 4 阶段闪烁。
     /// 设 `false` 回到旧行为（创建即显示，可能短暂闪烁）。
+    /// 注意：若窗口始终为 0×0 或立即关闭（命中 zero-size / closing / device-lost 早退分支），
+    /// `maybe_show_prepared_window` 不会被调用，窗口将保持隐藏而永不显示。
     pub preparable: bool,
     pub transparent: bool,
     /// 窗口边框样式（标题栏 + resize 边框的组合语义）。默认 [`FrameStyle::Normal`]。

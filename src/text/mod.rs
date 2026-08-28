@@ -333,7 +333,7 @@ impl TextContext {
     ///
     /// **不要在 `Renderer::draw` 帧内调用**：本方法会重建 `shape_slots` / `shape_map`，
     /// 若 draw 路径中途还在引用槽 index，会导致 map 与 slot 不一致。约定仅在
-    /// `on_frame` 返回前/后、或下一帧开始前调用。
+    /// `on_tick` 返回前/后、或下一帧开始前调用。
     pub fn clear_shape_cache(&mut self) {
         self.scavenge_dead_liveness();
         // 重建：只保留活跃持有的槽（其余回池 + 从 map 移除）

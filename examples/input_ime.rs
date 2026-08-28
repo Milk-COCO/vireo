@@ -25,8 +25,8 @@ struct ImeState {
     dropped: Vec<String>,
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(WindowDesc::new("IME Input + Drag Drop", 800, 560), None::<fn()>);
 
     let st = Arc::new(Mutex::new(ImeState {
@@ -43,8 +43,8 @@ fn main() {
     let mut last_mouse_down = false;
     let mut text_cursor = (400.0f32, 260.0f32);
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -224,5 +224,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&ui, &b]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

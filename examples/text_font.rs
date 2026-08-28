@@ -17,8 +17,8 @@ fn try_load(app: &App, path: &str) -> bool {
     }
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     // load_font_file：系统 TTF
     let consolas = try_load(&app, r"C:\Windows\Fonts\consola.ttf");
@@ -35,8 +35,8 @@ fn main() {
         None::<fn()>,
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -95,5 +95,5 @@ fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

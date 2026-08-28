@@ -50,8 +50,8 @@ const TITLE_H: f32 = 32.0;
 #[cfg(target_os = "windows")]
 const BTN_W: f32 = 46.0;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     // ---- W1：默认逻辑尺寸 + vireo 全自持像素 ----
     let w1 = app.window(
@@ -70,7 +70,7 @@ fn main() {
     // `FrameStyle::HiddenTitlebar` = Electron `titleBarStyle:'hidden'`：
     // 系统 resize 边框（≈8px）由 `frame_subclass` 保留 + `WM_NCHITTEST`
     // 手动命中热区（HTTOP/HTLEFT/...）接管 resize。
-    // §7.6 NC API 在 on_frame 闭包里设置（需 hwnd 已就绪）：
+    // §7.6 NC API 在 on_tick 闭包里设置（需 hwnd 已就绪）：
     //   set_non_client_regions([Caption 全条 + 3 buttons]) → 拖动/snap + 按钮命中
     //   客户端标题栏 + 按钮外观由 DrawBatch 自绘；点击按钮自管发 WM_SYSCOMMAND
     let w2 = app.window(
@@ -105,11 +105,11 @@ fn main() {
     #[cfg(not(target_os = "windows"))]
     let w2_top = 0.0;
 
-    app.run(move |app| {
+    app.run(move |ctx| {
         let (win1, win2, win3) = match (
-            app.window_ref(&w1),
-            app.window_ref(&w2),
-            app.window_ref(&w3),
+            ctx.app().window_ref(&w1),
+            ctx.app().window_ref(&w2),
+            ctx.app().window_ref(&w3),
         ) {
             (Ok(a), Ok(b), Ok(c)) => (a, b, c),
             _ => return false,
@@ -158,7 +158,7 @@ fn main() {
                 .outer_position()
                 .map(|p| p.physical())
                 .unwrap_or((0.0, 0.0));
-            let idx = app.window(
+            let idx = ctx.app().window(
                 WindowDesc::new("popup (1s)", 220, 120)
                     .frame_style(FrameStyle::Frameless)
                     .position(px(ox + mx as f64 * sf), px(oy + my as f64 * sf)),
@@ -170,7 +170,7 @@ fn main() {
 
         // popup：每帧画内容；满 1 秒后 close()（程序化关窗，走完整路径）。
         if let Some((idx, born)) = popup {
-            if let Ok(win) = app.window_ref(&idx) {
+            if let Ok(win) = ctx.app().window_ref(&idx) {
                 let mut pb = DrawBatch::new();
                 draw_rectangle(
                     &mut pb,
@@ -204,17 +204,17 @@ fn main() {
 
         // W2 标题栏画在客户端 y=0..32（DrawBatch 自绘），WM_NCHITTEST 返回 HT* 让
         // Windows 自动接管交互（拖动 / 双击 / 右键 / snap layout / 按钮点击）。
-        draw_window(win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑", 0.0);
+        draw_window(&win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑", 0.0);
         draw_window(
-            win2,
+            &win2,
             2,
             "W2",
             "Px · HiddenTitlebar · 客户端标题栏 · HT* 自动交互",
             w2_top,
         );
-        draw_window(win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
+        draw_window(&win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
-    }).unwrap();
+    }).await.unwrap();
 }
 
 fn draw_window(

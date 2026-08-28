@@ -6,15 +6,15 @@
 use vireo::prelude::*;
 use std::f32::consts::PI;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Vireo Shapes Demo", 1000, 450),
         None::<fn()>,
     );
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -55,5 +55,5 @@ fn main() {
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }

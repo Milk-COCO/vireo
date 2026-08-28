@@ -15,8 +15,8 @@ fn draw_off(batch: &mut DrawBatch, sdf: f32) {
     draw_line(batch, 30.0, 150.0, 270.0, 150.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
 }
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let off_ssaa = app.offscreen(300, 300, AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: true });
     let off_msaa = app.offscreen(300, 300, AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true });
     let off_sdf  = app.offscreen(300, 300, AntiAliasing::None);
@@ -25,15 +25,15 @@ fn main() {
         None::<fn()>,
     );
 
-    app.run(move |app| {
-        if let Ok(c) = app.offscreen_ref(&off_ssaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Ok(c) = app.offscreen_ref(&off_msaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 0.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Ok(c) = app.offscreen_ref(&off_sdf) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+    app.run(move |ctx| {
+        if let Ok(c) = ctx.app().offscreen_ref(&off_ssaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Ok(c) = ctx.app().offscreen_ref(&off_msaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 0.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Ok(c) = ctx.app().offscreen_ref(&off_sdf) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
         if let (Ok(w), Ok(c1), Ok(c2), Ok(c3)) = (
-            app.window_ref(&win),
-            app.offscreen_ref(&off_ssaa),
-            app.offscreen_ref(&off_msaa),
-            app.offscreen_ref(&off_sdf),
+            ctx.app().window_ref(&win),
+            ctx.app().offscreen_ref(&off_ssaa),
+            ctx.app().offscreen_ref(&off_msaa),
+            ctx.app().offscreen_ref(&off_sdf),
         ) {
             let mut b = DrawBatch::new();
             b.set_texture(Some(&c1.texture)); draw_rectangle(&mut b, Pos::new(15.0, 30.0), 300.0, 300.0, Some(WHITE));
@@ -48,5 +48,5 @@ fn main() {
             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         true
-    }).unwrap();
+    }).await.unwrap();
 }

@@ -1,6 +1,6 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
-use std::cell::RefCell;
+use crate::lock::Lock;
 use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
@@ -8,20 +8,16 @@ use wgpu::util::DeviceExt;
 
 pub use crate::gpu::Vertex;
 pub use crate::math::{Pos, Rect, Transform, UvRect};
-use crate::math::{left_mul_view_table, IDENTITY_TRANSFORM_ROW};
 use crate::gpu::{GpuContext, GeoInstance, GeoVertex, ShapeInstance};
-use crate::gpu::MaterialTarget;
 use crate::material::Material;
-use crate::area::{Area, AreaGeom, AreaStencilOp, effective_area};
+use crate::area::AreaStencilOp;
 
 mod batch;
 mod cull;
 mod draw;
 pub use batch::{DrawBatch, InheritFromParent};
-pub(crate) use batch::{
-    BatchShapeCommand, EdgeTemplate, EdgeTemplateKind, InstanceTextureSegment, TextureSegment,
-};
-pub(crate) use cull::{compute_subtree_aabb, prepare_culling, viewport_for_culling, AabbMap, ViewMap};
+pub(crate) use batch::BatchShapeCommand;
+pub(crate) use cull::{prepare_culling, AabbMap, ViewMap};
 
 /// CPU 真实数据分布（诊断用）。
 ///
@@ -371,12 +367,12 @@ pub struct Renderer {
     pub(crate) gpu: std::sync::Arc<GpuContext>,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    vertex_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    index_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    instance_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    geo_instance_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    geo_template_vertex_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    geo_template_index_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
+    vertex_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    index_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    instance_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    geo_instance_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    geo_template_vertex_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    geo_template_index_buf: Lock<Option<(wgpu::Buffer, u64)>>,
     physical_width: u32,
     physical_height: u32,
     scale: f32,
@@ -384,44 +380,44 @@ pub struct Renderer {
     /// `Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi）：glyph 不重新光栅化
     /// （scale/dpi 不变 → 图集 cache key 稳定），仅 shader NDC 映射补偿 DXGI 拉伸。
     /// `None` = 用 `physical_width/height`（旧 surface 尺寸）。
-    text_viewport_override: std::cell::Cell<Option<(u32, u32)>>,
+    text_viewport_override: Lock<Option<(u32, u32)>>,
     sample_count: u32,
     alpha_to_coverage: bool,
     ssaa: bool,
-    msaa_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
-    ds_tex: RefCell<Option<(wgpu::Texture, wgpu::TextureView)>>,
-    polygon_edge_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    transform_buf: RefCell<Option<(wgpu::Buffer, u64)>>,
-    engine_storage_bind_group_cache: RefCell<Option<wgpu::BindGroup>>,
+    msaa_tex: Lock<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    ds_tex: Lock<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    polygon_edge_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    transform_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    engine_storage_bind_group_cache: Lock<Option<wgpu::BindGroup>>,
     /// 逻辑视口尺寸（逻辑像素，浮点用户坐标系）
     logical_width: f32,
     logical_height: f32,
     /// 帧间复用的 CPU 暂存，避免每帧大块分配
-    scratch_vdata: RefCell<Vec<u8>>,
-    scratch_idata: RefCell<Vec<u8>>,
-    scratch_transforms: RefCell<Vec<f32>>,
-    scratch_poly_edges: RefCell<Vec<f32>>,
-    scratch_event_infos: RefCell<Vec<EventInfo>>,
-    scratch_aabb_map: RefCell<AabbMap>,
-    scratch_view_map: RefCell<ViewMap>,
-    scratch_view_table: RefCell<Vec<f32>>,
-    scratch_ref_stack: RefCell<Vec<u32>>,
-    scratch_batch_transform_bases: RefCell<Vec<u32>>,
-    scratch_batch_poly_base: RefCell<Vec<u32>>,
-    scratch_batch_geo_vertex_base: RefCell<Vec<u32>>,
-    scratch_batch_geo_index_base: RefCell<Vec<u32>>,
-    scratch_last_dynamic_offsets: RefCell<Vec<u32>>,
-    scratch_scissor_stack: RefCell<Vec<(u32, u32, u32, u32)>>,
-    scratch_instances: RefCell<Vec<ShapeInstance>>,
-    scratch_geo_instances: RefCell<Vec<GeoInstance>>,
-    scratch_geo_vertices: RefCell<Vec<GeoVertex>>,
-    scratch_geo_indices: RefCell<Vec<u32>>,
-    scratch_geo_merge_per_inst_seg: RefCell<Vec<u32>>,
-    scratch_geo_merge_order: RefCell<Vec<u32>>,
-    scratch_geo_merge_sorted: RefCell<Option<Vec<u32>>>,
+    scratch_vdata: Lock<Vec<u8>>,
+    scratch_idata: Lock<Vec<u8>>,
+    scratch_transforms: Lock<Vec<f32>>,
+    scratch_poly_edges: Lock<Vec<f32>>,
+    scratch_event_infos: Lock<Vec<EventInfo>>,
+    scratch_aabb_map: Lock<AabbMap>,
+    scratch_view_map: Lock<ViewMap>,
+    scratch_view_table: Lock<Vec<f32>>,
+    scratch_ref_stack: Lock<Vec<u32>>,
+    scratch_batch_transform_bases: Lock<Vec<u32>>,
+    scratch_batch_poly_base: Lock<Vec<u32>>,
+    scratch_batch_geo_vertex_base: Lock<Vec<u32>>,
+    scratch_batch_geo_index_base: Lock<Vec<u32>>,
+    scratch_last_dynamic_offsets: Lock<Vec<u32>>,
+    scratch_scissor_stack: Lock<Vec<(u32, u32, u32, u32)>>,
+    scratch_instances: Lock<Vec<ShapeInstance>>,
+    scratch_geo_instances: Lock<Vec<GeoInstance>>,
+    scratch_geo_vertices: Lock<Vec<GeoVertex>>,
+    scratch_geo_indices: Lock<Vec<u32>>,
+    scratch_geo_merge_per_inst_seg: Lock<Vec<u32>>,
+    scratch_geo_merge_order: Lock<Vec<u32>>,
+    scratch_geo_merge_sorted: Lock<Option<Vec<u32>>>,
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
     /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
-    last_draw_calls: std::cell::Cell<u32>,
+    last_draw_calls: Lock<u32>,
 }
 
 impl Renderer {
@@ -461,47 +457,47 @@ impl Renderer {
             gpu,
             camera_buf,
             camera_bind_group,
-            vertex_buf: RefCell::new(None),
-            index_buf: RefCell::new(None),
-            instance_buf: RefCell::new(None),
-            geo_instance_buf: RefCell::new(None),
-            geo_template_vertex_buf: RefCell::new(None),
-            geo_template_index_buf: RefCell::new(None),
+            vertex_buf: Lock::new(None),
+            index_buf: Lock::new(None),
+            instance_buf: Lock::new(None),
+            geo_instance_buf: Lock::new(None),
+            geo_template_vertex_buf: Lock::new(None),
+            geo_template_index_buf: Lock::new(None),
             physical_width,
             physical_height,
             scale,
-            text_viewport_override: std::cell::Cell::new(None),
+            text_viewport_override: Lock::new(None),
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
             ssaa: aa.is_ssaa(),
-            msaa_tex: RefCell::new(None),
-            ds_tex: RefCell::new(None),
-            polygon_edge_buf: RefCell::new(None),
-            transform_buf: RefCell::new(None),
-            engine_storage_bind_group_cache: RefCell::new(None),
-            scratch_vdata: RefCell::new(Vec::new()),
-            scratch_idata: RefCell::new(Vec::new()),
-            scratch_transforms: RefCell::new(Vec::new()),
-            scratch_poly_edges: RefCell::new(Vec::new()),
-            scratch_event_infos: RefCell::new(Vec::new()),
-            scratch_aabb_map: RefCell::new(FxHashMap::default()),
-            scratch_view_map: RefCell::new(FxHashMap::default()),
-            scratch_view_table: RefCell::new(Vec::new()),
-            scratch_ref_stack: RefCell::new(Vec::new()),
-            scratch_batch_transform_bases: RefCell::new(Vec::new()),
-            scratch_batch_poly_base: RefCell::new(Vec::new()),
-            scratch_batch_geo_vertex_base: RefCell::new(Vec::new()),
-            scratch_batch_geo_index_base: RefCell::new(Vec::new()),
-            scratch_last_dynamic_offsets: RefCell::new(Vec::new()),
-            scratch_scissor_stack: RefCell::new(Vec::new()),
-            scratch_instances: RefCell::new(Vec::new()),
-            scratch_geo_instances: RefCell::new(Vec::new()),
-            scratch_geo_vertices: RefCell::new(Vec::new()),
-            scratch_geo_indices: RefCell::new(Vec::new()),
-            scratch_geo_merge_per_inst_seg: RefCell::new(Vec::new()),
-            scratch_geo_merge_order: RefCell::new(Vec::new()),
-            scratch_geo_merge_sorted: RefCell::new(None),
-            last_draw_calls: std::cell::Cell::new(0),
+            msaa_tex: Lock::new(None),
+            ds_tex: Lock::new(None),
+            polygon_edge_buf: Lock::new(None),
+            transform_buf: Lock::new(None),
+            engine_storage_bind_group_cache: Lock::new(None),
+            scratch_vdata: Lock::new(Vec::new()),
+            scratch_idata: Lock::new(Vec::new()),
+            scratch_transforms: Lock::new(Vec::new()),
+            scratch_poly_edges: Lock::new(Vec::new()),
+            scratch_event_infos: Lock::new(Vec::new()),
+            scratch_aabb_map: Lock::new(FxHashMap::default()),
+            scratch_view_map: Lock::new(FxHashMap::default()),
+            scratch_view_table: Lock::new(Vec::new()),
+            scratch_ref_stack: Lock::new(Vec::new()),
+            scratch_batch_transform_bases: Lock::new(Vec::new()),
+            scratch_batch_poly_base: Lock::new(Vec::new()),
+            scratch_batch_geo_vertex_base: Lock::new(Vec::new()),
+            scratch_batch_geo_index_base: Lock::new(Vec::new()),
+            scratch_last_dynamic_offsets: Lock::new(Vec::new()),
+            scratch_scissor_stack: Lock::new(Vec::new()),
+            scratch_instances: Lock::new(Vec::new()),
+            scratch_geo_instances: Lock::new(Vec::new()),
+            scratch_geo_vertices: Lock::new(Vec::new()),
+            scratch_geo_indices: Lock::new(Vec::new()),
+            scratch_geo_merge_per_inst_seg: Lock::new(Vec::new()),
+            scratch_geo_merge_order: Lock::new(Vec::new()),
+            scratch_geo_merge_sorted: Lock::new(None),
+            last_draw_calls: Lock::new(0),
             logical_width,
             logical_height,
         }
@@ -793,6 +789,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::area::Area;
     use crate::color::colors::*;
     use crate::math::{left_mul_view_table, transform_key};
     use crate::shapes::{draw_circle, draw_polygon, draw_rectangle, draw_rounded_rect};

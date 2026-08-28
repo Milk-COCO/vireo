@@ -19,8 +19,8 @@ fn hue(h: f32) -> Color {
     Color::new(r, g, b, 0.65)
 }
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let logo_idx = Some(app.load_texture("logo.png"));
     let idx = app.window(
         WindowDesc::new("Ciallo, Vireo!", 640, 420).icon_from_path("logo.png"),
@@ -28,8 +28,8 @@ fn main() {
     );
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -48,7 +48,7 @@ fn main() {
 
         // Logo 贴图
         let mut logo_batch = DrawBatch::new();
-        if let Some(logo) = logo_idx.and_then(|i| app.texture(i).ok()) {
+        if let Some(logo) = logo_idx.and_then(|i| ctx.app().texture(i).ok()) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
             logo_batch.set_texture(Some(&logo));
             draw_rectangle(&mut logo_batch, Pos::new(cx - s / 2.0, cy - s / 2.0), s, s, Some(WHITE));
@@ -67,5 +67,5 @@ fn main() {
         win.draw(Color::new(0.04, 0.06, 0.1, 1.0), &[&ring, &logo_batch, &text]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

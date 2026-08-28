@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use crate::lock::Lock;
 
 use rustc_hash::FxHashMap;
 
@@ -41,8 +41,8 @@ pub(crate) fn prepare_culling<'a>(
     batches: &[&'a DrawBatch],
     logical_width: f32,
     logical_height: f32,
-    scratch_aabb_map: &RefCell<AabbMap>,
-    scratch_view_map: &RefCell<ViewMap>,
+    scratch_aabb_map: &Lock<AabbMap>,
+    scratch_view_map: &Lock<ViewMap>,
     events: &mut Vec<DrawEvent<'a>>,
 ) -> (Rect, bool) {
     let viewport = viewport_for_culling(logical_width, logical_height);

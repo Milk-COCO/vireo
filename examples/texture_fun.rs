@@ -2,8 +2,8 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
     let logo_idx = app.load_texture("logo.png");
     let logo_bg_idx = app.load_texture("logo_bg.png");
     let idx = app.window(
@@ -12,16 +12,16 @@ fn main() {
     );
 
     let mut angle: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let logo = match app.texture(logo_idx) {
+        let logo = match ctx.app().texture(logo_idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let logo_bg = match app.texture(logo_bg_idx) {
+        let logo_bg = match ctx.app().texture(logo_bg_idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -68,5 +68,5 @@ fn main() {
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&glow, &batch]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

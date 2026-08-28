@@ -14,8 +14,8 @@ const SCENES: &[(&str, fn(&mut DrawBatch))] = &[
     ("8: Text static x200", scene_text_static),
 ];
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Vireo Performance Benchmark", 900, 700),
         None::<fn()>,
@@ -27,8 +27,8 @@ fn main() {
     let mut max_frame = 0.0f64;
     let mut preserve_order = true;
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -61,7 +61,7 @@ fn main() {
         batch.preserve_order = preserve_order;
 
         // ---- 帧时间统计 ----
-        let ft_ms = app.frame_time * 1000.0;
+        let ft_ms = ctx.frame_time() * 1000.0;
         frame_times.push(ft_ms);
         if frame_times.len() > 300 { frame_times.remove(0); }
         min_frame = min_frame.min(ft_ms);
@@ -89,12 +89,12 @@ fn main() {
              Draw calls:  {:>8}\n\
              Order:       {:>8}",
             name,
-            app.fps,
+            ctx.fps(),
             ft_ms,
             avg,
             min_frame,
             max_frame,
-            app.frame_count,
+            ctx.tick_count(),
             stats.mesh_vertices,
             stats.sdf_instances,
             stats.geo_instances,
@@ -120,7 +120,7 @@ fn main() {
 
         win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }
 
 // ─── 场景定义 ─────────────────────────────────────────────

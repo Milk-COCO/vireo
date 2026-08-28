@@ -6,16 +6,16 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("Batch Clip — Circle Stencil", 900, 480).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -122,5 +122,5 @@ fn main() {
             &[&ui, &clip_batch, &no_clip_batch],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }

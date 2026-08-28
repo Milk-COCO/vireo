@@ -1,0 +1,14 @@
+[package]
+name = "vireo_macro"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Procedural macros for vireo (#[vireo::main])"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

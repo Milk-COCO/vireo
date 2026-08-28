@@ -3,8 +3,8 @@
 //! ## 背景：为什么需要这套东西
 //!
 //! **这是针对 Windows 的 workaround/优化**：
-//! wgpu-hal 在 DX12 上每次 `surface.configure` 都会无条件 `wait_for_present_queue_idle`
-//! 来等 present queue 排空（实测每帧 ~60-90ms），于是就有了三个 API：
+//! wgpu-hal 在 Vulkan 后端（wgpu 默认）上每次 `surface.configure` 都会等待 present queue
+//! 排空（实测每帧 ~60-90ms）；DX12 同操作阻塞显著更低。于是就有了三个 API：
 //! 1. **`set_resize_refresh_policy`**：拖动中要不要（以及怎样）实时 configure。
 //!    `ResizeRefreshPolicy` 提供 `OnRelease` / `EveryFrame` / `Periodic(interval)` 三档，详见其文档。
 //! 2. **`set_resize_debounce`**：尺寸**稳定**之后的多久之后，一次性 `surface.configure`
@@ -17,13 +17,13 @@
 //!
 //! 三者默认配合的效果：拖动全程不 configure（`layout_follow` 默认开 → 内容**实时重排**而非
 //! 停在旧布局，DXGI 拉伸只损失分辨率、不损失布局），尺寸已停止变化后满 debounce 时长
-//! 即一次性 snap 到新尺寸（`surface.configure` 每帧 ~60-90ms 的阻塞只发生这一次）。
+//! 即一次性 snap 到新尺寸（`surface.configure` 在 Vulkan 后端每帧 ~60-90ms 的阻塞只发生这一次）。
 //! 判定「尺寸已停止变化」靠渲染线程逐帧轮询 `inner_size()` 与上一帧对比，**移动**会重置计时器。
 //!
 //! **如果只面向非 Windows 平台开发，且可忽略卡顿、需要拖动时画面更实时**，可以完全关掉这些 workaround：
 //!
 //! ```rust,ignore
-//! // 拖动中每帧实时 configure（无 DX12 阻塞代价时这就是最实时路径）
+//! // 拖动中每帧实时 configure（Vulkan 默认后端阻塞重，无此代价时这就是最实时路径）
 //! win.set_resize_refresh_policy(ResizeRefreshPolicy::EveryFrame);
 //! // 去抖时长缩到几乎为零（EveryFrame 下由 Live 路径接管，Stable 优先仅兜底）
 //! win.set_resize_debounce(std::time::Duration::from_millis(1));
@@ -32,7 +32,7 @@
 //! ```
 //!
 //! 也就是说：非 Windows 上直接选 `EveryFrame` + 极小去抖即可拿到最实时画面；
-//! 本示例的 OnRelease / Periodic + `layout_follow` 是专为 DX12 阻塞代价设计的取舍。
+//! 本示例的 OnRelease / Periodic + `layout_follow` 是专为 Vulkan 后端（wgpu 默认）configure 阻塞代价设计的取舍。
 //!
 //! ## 操作
 //!
@@ -40,8 +40,8 @@
 //! - `O`：OnRelease（默认）——拖动全程不 `surface.configure`（配合 `layout_follow` 默认开：
 //!   内容按新布局实时重排、旧 surface 拉伸 present、帧流满速），松手尺寸稳定满去抖时长后
 //!   一次性 snap。
-//! - `F`：EveryFrame——拖动中每帧 configure 实时跟踪（DX12 每次阻塞 ~50-80ms，
-//!   掉帧是预期代价）。
+//! - `F`：EveryFrame——拖动中每帧 configure 实时跟踪（Vulkan 默认后端每次阻塞 ~50-80ms，
+//!   掉帧是预期代价；DX12 阻塞显著更低）。
 //! - `P`：Periodic(400ms)——拖动中每 400ms 强制 configure 一次（折中）。
 //!
 //! `D`：循环切去抖时长 0 / 32 / 100 / 250 / 500ms（0 = 尺寸变化当帧就 snap，
@@ -56,7 +56,7 @@
 //!
 //! ## 看什么
 //!
-//! 画面中央有动画方块验证 update/`on_frame` 是否持续。HUD 的 `Update FPS` 是应用更新
+//! 画面中央有动画方块验证 update/`on_tick` 是否持续。HUD 的 `Update FPS` 是应用更新
 //! 频率，不是 displayed FPS。`suboptimal` 仅原样展示 wgpu acquire 状态；它不是规范的
 //! 「拖动拉伸中」信号，后端可能在拖动时仍返回 false，也可能因其他 surface 状态返回 true。
 //! 默认 `Immediate` 便于观察帧流，按 `V` 切 `AutoVsync` 看真实显示节奏。
@@ -98,8 +98,8 @@ fn policy_label(p: ResizeRefreshPolicy) -> String {
     }
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     // `new` 裸宽高恒为 vireo 逻辑像素；尺寸族/位置 builder 收 `impl ToPx`（裸数 = 逻辑）。
     let idx = app.window(
         WindowDesc::new("Resize Refresh Policy", 640, 360)
@@ -123,8 +123,8 @@ fn main() {
     let mut last_conf_ms = 0.0f64;
     let mut last_suboptimal = false;
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -173,7 +173,7 @@ fn main() {
         let mut batch = DrawBatch::new();
 
         // 动画方块（验证拖动期间帧流是否持续）
-        let t = app.frame_count as f32 * 0.05;
+        let t = ctx.tick_count() as f32 * 0.05;
         let w = (lw as f32).max(1.0);
         let h = (lh as f32).max(1.0);
         let bx = (w - 80.0) * (t.sin() * 0.5 + 0.5);
@@ -201,7 +201,7 @@ fn main() {
             format!("Layout follow: {}  (L)", follow_label),
             format!(
                 "window: {}x{} (logical)  {}x{} (physical)  Update FPS: {:.1}  update dt: {:.2} ms",
-                lw as u32, lh as u32, pw as u32, ph as u32, app.fps, app.frame_time * 1000.0
+                lw as u32, lh as u32, pw as u32, ph as u32, ctx.fps(), ctx.frame_time() * 1000.0
             ),
             format!(
                 "last configure: {:.2} ms  acquire: {:.2} ms  encode: {:.2} ms",
@@ -232,5 +232,5 @@ fn main() {
         last_enc_ms = report.timings.encode_secs * 1000.0;
         last_conf_ms = report.timings.configure_secs * 1000.0;
         true
-    }).unwrap();
+    }).await.unwrap();
 }

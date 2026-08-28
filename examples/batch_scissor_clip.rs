@@ -21,16 +21,16 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
     );
 }
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
     let idx = app.window(
         WindowDesc::new("scissor Scissor Demo", 900, 540).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
     let mut t: f32 = 0.0;
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -132,5 +132,5 @@ fn main() {
             &[&ui, &scissor_batch, &no_clip],
         );
         true
-    }).unwrap();
+    }).await.unwrap();
 }

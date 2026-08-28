@@ -1,8 +1,8 @@
 /// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
 use vireo::prelude::*;
 
-fn main() {
-    let app = App::new();
+#[vireo::main]
+async fn main() {
 
     let idx_a = app.window(
         WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
@@ -13,12 +13,12 @@ fn main() {
         Some(|| println!("窗口 B 已关闭")),
     );
 
-    app.run(move |app| {
-        let win_a = match app.window_ref(&idx_a) {
+    app.run(move |ctx| {
+        let win_a = match ctx.app().window_ref(&idx_a) {
             Ok(w) => w,
             Err(_) => return true,
         };
-        let win_b = match app.window_ref(&idx_b) {
+        let win_b = match ctx.app().window_ref(&idx_b) {
             Ok(w) => w,
             Err(_) => return true,
         };
@@ -85,5 +85,5 @@ fn main() {
         win_b.draw(Color::new(0.12, 0.12, 0.18, 1.0), &[&batch]);
 
         true
-    }).unwrap();
+    }).await.unwrap();
 }

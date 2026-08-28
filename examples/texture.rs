@@ -2,15 +2,15 @@
 
 use vireo::prelude::*;
 
-fn main() {
-    let mut app = App::new();
+#[vireo::main]
+async fn main() {
 
     let tex = Some(app.load_texture("logo.png"));
 
     let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).dpi_override(Some(1.0)), None::<fn()>);
 
-    app.run(move |app| {
-        let win = match app.window_ref(&idx) {
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -18,12 +18,12 @@ fn main() {
 
         match tex {
             Some(i) => {
-                let t = match app.texture(i) {
+                let t = match ctx.app().texture(i) {
                     Ok(v) => v,
                     Err(_) => return false,
                 };
                 let s = 0.2; // logo 是 1000x1000，缩小到可看
-                batch.set_texture(Some(t));
+                batch.set_texture(Some(&*t));
                 draw_rectangle(&mut batch, Pos::new(20.0, 80.0), t.width as f32 * s, t.height as f32 * s, Some(WHITE));
                 draw_rectangle(&mut batch, Pos::new(250.0, 200.0), t.width as f32 * s * 2.0, t.height as f32 * s * 2.0, Some(WHITE));
 
@@ -49,5 +49,5 @@ fn main() {
 
         win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
-    }).unwrap();
+    }).await.unwrap();
 }
