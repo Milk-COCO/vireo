@@ -4,3 +4,4 @@ target/
 .opencode/
 opencode.json
 .vscode/
+Cargo.lock
