@@ -9,6 +9,6 @@ description = "Procedural macros for vireo (#[vireo::main])"
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

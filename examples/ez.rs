@@ -5,10 +5,10 @@ async fn main(app: App) {
     let idx = app.window(WindowDesc::new("EZ Vireo", 800, 600), None::<fn()>);
 
     app.run(move |ctx| {
-    let win = match ctx.app().window_ref(&idx) {
-        Ok(v) => v,
-        Err(_) => return true,
-    };
+        let win = match ctx.app().window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return true,
+        };
 
         let mut batch = DrawBatch::new();
 
