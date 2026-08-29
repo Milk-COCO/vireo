@@ -2879,7 +2879,21 @@ fn supervisor_loop(
         // 仅当本轮无任何事件时阻塞在 `rx.recv()`，等待下一个真实事件或 `WinitEvent::Wake`
         // （`main_done` / 设备丢失 / loop 完成由相应置位点发 `Wake` 唤醒）。事件驱动、无忙等、无魔法数字。
         if !processed {
-            let _ = rx.recv();
+            match rx.recv() {
+                Ok(ev) => {
+                    let is_created = matches!(ev, WinitEvent::WindowCreated { .. });
+                    apply_winit_event_one(
+                        &app, ev, &event_tx, &frame_style_tx, &aspect_ratio_tx, &nc_tx, &close_tx,
+                    );
+                    if is_created {
+                        created_windows += 1;
+                        app.pending_window_creates
+                            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        app.inner.loop_wake.1.notify_all();
+                    }
+                }
+                Err(_) => return,
+            }
         }
     }
 }
