@@ -67,7 +67,7 @@ pub(crate) use desc::clamp_aa;
 pub(crate) use metrics::{
     DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON,
     ResizeRefresh, drag_cap_effective, drag_effective_cap, mhz_to_hz, observed_moved,
-    pac_advance, phys_to_logical, resize_refresh, should_backoff_after_draws,
+    pac_advance, phys_to_logical, resize_refresh,
     size_drifted_beyond, skip_report, sliding_rate, validate_aspect_ratio,
 };
 
@@ -1447,9 +1447,13 @@ pub struct AppInner {
     offscreens: Lock<Vec<Arc<OffscreenCanvas>>>,
     /// App::new 内部耗时（秒）：GPU 设备、shader 模块、bind group layout 构造。
     pub init_duration: f64,
-    /// 可选帧率上限（`App::set_max_fps`）。仅在 acquire 不阻塞（拖动/无 vsync）时
-    /// 用 sleep 把 CPU 循环拉回目标频率，避免空转。默认 `Some(240)`：给足余量，
-    /// 正常 vsync 下 acquire 更早卡住、cap 不生效；仅在空转时兜底。
+    /// 可选帧率上限（`App::set_max_fps`）。它**只作为默认值种子**：
+    /// - [`Thread::max_tps`] 在 `App::spawn` 时若未显式设置则取此值，之后由 Thread 独立生效；
+    /// - 新窗口在创建时以 `App::max_fps()` 种子自身 `max_fps`（`VireoWindow::set_max_fps`），
+    ///   运行期改 `App::max_fps` 不影响已 spawn 的 Thread / 已建出的窗口。
+    /// 真正限速发生在 acquire 不阻塞（拖动/无 vsync）时由相位锁 `pac_advance` 以 sleep 把 CPU
+    /// 循环拉回目标频率，避免空转。默认 `Some(240)`：给足余量，正常 vsync 下 acquire 更早卡住、
+    /// cap 不生效；仅在空转时兜底。
     max_fps: Lock<Option<u32>>,
     /// 拖动期帧率上限开关（`App::set_drag_cap`）。与 `set_max_fps` 解耦：开启时
     /// resize 拖动中即使 `max_fps(None)` 也压到显示器刷新率（省资源但画面内容
@@ -1859,7 +1863,8 @@ impl App {
     /// 在独立线程上启动 winit owner + 渲染线程，立即返回 [`ThreadHandle`]；句柄实现 `Future`，
     /// 调用方 `.await` 即可等待本组所有循环结束并取回结果（错误同样经 `.await` 返回），析构时
     /// 亦会 join 渲染线程（见 [`ThreadHandle`]）。与 [`App::run`] / [`App::loops`] 共用同一套渲染机件；
-    /// 每个 [`Loop`] 拥有独立的 [`LoopContext`]（帧计数 / 延迟任务 / 帧率上限）。
+    /// 每个 [`Loop`] 拥有独立的 [`LoopContext`]（帧计数 / 延迟任务 / FPS 统计，即本 Thread 的
+    /// tick 速率读数）；tick 速率上限由 [`Thread::max_tps`] 决定（以 [`App::max_fps`] 作默认值种子）。
     pub fn spawn(&self, thread: crate::thread::Thread) -> crate::thread::ThreadHandle {
         let loops = thread.loops;
         let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::thread::Loop>::new()));
@@ -1874,6 +1879,9 @@ impl App {
         let shared_for_thread = shared.clone();
         let fps_for_thread = fps_stats.clone();
         let device_lost_for_thread = device_lost.clone();
+        // 本 Thread 的 tick 上限：用户显式 `with_max_tps` 优先，否则以 `App::max_fps` 作默认值种子
+        // （运行期改 `App::max_fps` 不影响已 spawn 的 Thread，与逐窗口 `max_fps` 同构）。
+        let thread_tps = thread.max_tps.or(app.max_fps());
         let thread_name = thread.name.clone().unwrap_or_else(|| {
             let n = NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             format!("vireo-thread-{n}")
@@ -1888,6 +1896,7 @@ impl App {
                     fps_for_thread,
                     shared_for_thread,
                     device_lost_for_thread,
+                    thread_tps,
                 );
             })
             .expect("failed to spawn vireo thread");
@@ -4499,27 +4508,6 @@ mod metrics_tests {
         assert!(sleep.is_none());
         let d = d.expect("next deadline after late frame");
         assert!(d <= now + std::time::Duration::from_millis(17)); // 重锚，不追平历史
-    }
-
-    #[test]
-    fn draw_backoff_requires_every_active_window_to_skip() {
-        assert!(super::should_backoff_after_draws([
-            Some(DrawOutcome::Skipped(DrawSkipReason::ZeroSized)),
-            Some(DrawOutcome::Skipped(DrawSkipReason::Occluded)),
-        ]));
-        assert!(!super::should_backoff_after_draws([
-            Some(DrawOutcome::Skipped(DrawSkipReason::ZeroSized)),
-            Some(DrawOutcome::Presented { suboptimal: false }),
-        ]));
-    }
-
-    #[test]
-    fn draw_backoff_does_not_throttle_undrawn_or_empty_windows() {
-        assert!(!super::should_backoff_after_draws([None]));
-        assert!(!super::should_backoff_after_draws(std::iter::empty()));
-        assert!(!super::should_backoff_after_draws([
-            Some(DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured)),
-        ]));
     }
 
     #[test]

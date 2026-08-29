@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex};
 use crate::lock::Lock;
 use crate::window::App;
 use crate::window::{
-    panic_payload_to_string, should_backoff_after_draws, WinitEvent, DeferredTask,
-    DeferredTaskKind,
+    panic_payload_to_string, WinitEvent, DeferredTask, DeferredTaskKind,
 };
 
 /// FPS 采样滑动窗口容量（per-thread）。
@@ -79,7 +78,7 @@ impl Loop {
     /// 新建循环。闭包签名 `|ctx: &mut LoopContext| -> bool`。
     ///
     /// 通过 [`LoopContext::app`] 取回共享的 `App`；`ctx` 同时承载本循环的帧计数 / 延迟任务 /
-    /// 帧率上限 / FPS 统计。
+    /// FPS 统计（本 Thread 的 tick 速率读数，非上限；tick 上限见 [`Thread::max_tps`]）。
     pub fn new<F>(f: F) -> Self
     where
         F: FnMut(&mut LoopContext) -> bool + Send + 'static,
@@ -248,6 +247,14 @@ impl LoopHandleState {
 pub struct Thread {
     pub(crate) loops: Vec<Loop>,
     pub(crate) name: Option<String>,
+    /// 本 Thread 的 tick 速率上限（ticks per second）。
+    ///
+    /// 一整个 Thread 循环一次称为一个 **tick**（每个 `Loop` 各执行一次，称为该 Loop 的一个 tick，
+    /// 而非 frame）。`None` = 不限速；`Some(n)` = 用相位锁 [`pac_advance`] 把 tick 间隔钳到
+    /// `1/n` 秒。该上限在 [`App::spawn`] 时由 `App::max_fps` **作为默认值**种子
+    /// （未显式设置时取 `app.max_fps()`，运行期改 `App::max_fps` 不影响已 spawn 的 Thread），
+    /// 之后由本字段独立决定，App 不再直接控制。
+    pub max_tps: Option<u32>,
 }
 
 impl Thread {
@@ -255,6 +262,7 @@ impl Thread {
         Self {
             loops: Vec::new(),
             name: None,
+            max_tps: None,
         }
     }
     pub fn with_loop(mut self, l: Loop) -> Self {
@@ -263,6 +271,11 @@ impl Thread {
     }
     pub fn with_loops(mut self, loops: impl IntoIterator<Item = Loop>) -> Self {
         self.loops.extend(loops);
+        self
+    }
+    /// 设置本 Thread 的 tick 速率上限（覆盖 `App::max_fps` 默认值）。
+    pub fn with_max_tps(mut self, tps: impl Into<Option<u32>>) -> Self {
+        self.max_tps = tps.into();
         self
     }
     pub fn push(&mut self, l: Loop) {
@@ -366,10 +379,11 @@ pub(crate) fn run_thread_loop(
     fps_stats: Arc<Lock<FpsStats>>,
     shared: Arc<Mutex<Vec<Loop>>>,
     device_lost: Arc<AtomicBool>,
+    max_tps: Option<u32>,
 ) {
     let result: std::thread::Result<()> = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut runtimes: Vec<LoopRuntime> = loops.into_iter().map(LoopRuntime::new).collect();
-        let mut idle_deadline: Option<std::time::Instant> = None;
+        let mut tick_deadline: Option<std::time::Instant> = None;
         while !state.done.load(Ordering::Acquire) {
             // 动态追加的运行期 loop（跨线程安全）。
             {
@@ -437,19 +451,15 @@ pub(crate) fn run_thread_loop(
                 }
                 break;
             }
-            // 全部活动窗口不可绘制（均 Skipped）时的空闲退避。
-            // 不硬编码速率：依用户 `max_fps` 经相位锁 `pac_advance` 退避，无魔法数字；
-            // 用户亦可在 `on_frame` 内据 `render_advice()` 自行暂停（返回 `false`）。
-            if should_backoff_after_draws(
-                app.windows
-                    .borrow()
-                    .iter()
-                    .filter_map(|o| o.clone())
-                    .map(|win| win.last_draw_outcome.get()),
-            ) {
+            // 整轮 Thread tick 的速率上限（tps）。一整个 Thread 循环一次 = 一个 tick；
+            // `max_tps` 由 `App::spawn` 时以 `App::max_fps` 作为默认值种子，运行期独立生效。
+            // 相位锁 `pac_advance` 无条件应用：正常 tick（有窗口绘制）与空闲 tick（均 Skipped）
+            // 都受同一上限约束，无魔法数字、不硬编码速率；各窗口自身的 `max_fps` 作为更细的
+            // 逐窗口覆盖仍生效。用户亦可在 `on_frame` 内据 `render_advice()` 自行暂停（返回 `false`）。
+            {
                 let now = std::time::Instant::now();
-                let (next, sleep_dur) = crate::window::pac_advance(now, idle_deadline, app.max_fps());
-                idle_deadline = next;
+                let (next, sleep_dur) = crate::window::pac_advance(now, tick_deadline, max_tps);
+                tick_deadline = next;
                 if let Some(s) = sleep_dur {
                     std::thread::sleep(s);
                 }

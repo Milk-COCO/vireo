@@ -324,25 +324,3 @@ pub(crate) fn drag_cap_effective(user: Option<u32>, drag_cap: bool, drag_refresh
 pub(crate) fn mhz_to_hz(millihertz: u32) -> u32 {
     (millihertz + 500) / 1000
 }
-
-pub(crate) fn should_backoff_after_draws(
-    outcomes: impl IntoIterator<Item = Option<DrawOutcome>>,
-) -> bool {
-    let mut any = false;
-    for outcome in outcomes {
-        any = true;
-        if !matches!(
-            outcome,
-            Some(DrawOutcome::Skipped(
-                DrawSkipReason::ZeroSized
-                    | DrawSkipReason::Timeout
-                    | DrawSkipReason::Occluded
-                    | DrawSkipReason::Closing
-            ))
-        ) {
-            return false;
-        }
-    }
-
-    any
-}
