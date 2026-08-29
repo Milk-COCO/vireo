@@ -355,6 +355,8 @@ fn wake(state: &Arc<LoopHandleState>) {
 /// - 由 [`crate::window::App::spawn`] 在独立 OS 线程上调用，对应一条 `ThreadHandle`。
 /// - `App` 内部的跨线程字段经 `Lock` / `Atomic*` 包裹，可安全从多线程访问；窗口事件已由
 ///   supervisor 线程集中应用到 `App`（见 `crate::window::supervisor_loop`），故此处只读 `app.windows`。
+
+
 /// - `panic` 被捕获并经由 `LoopHandleState.result` 转成 `Err`，使 `ThreadHandle::await` 返回错误，
 ///   而非向上炸毁进程。
 pub(crate) fn run_thread_loop(
@@ -367,6 +369,7 @@ pub(crate) fn run_thread_loop(
 ) {
     let result: std::thread::Result<()> = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut runtimes: Vec<LoopRuntime> = loops.into_iter().map(LoopRuntime::new).collect();
+        let mut idle_deadline: Option<std::time::Instant> = None;
         while !state.done.load(Ordering::Acquire) {
             // 动态追加的运行期 loop（跨线程安全）。
             {
@@ -417,7 +420,9 @@ pub(crate) fn run_thread_loop(
                 }
                 break;
             }
-            // 拖动 / 空转退避：全部活动窗口不可绘制时短退避。
+            // 全部活动窗口不可绘制（均 Skipped）时的空闲退避。
+            // 不硬编码速率：依用户 `max_fps` 经相位锁 `pac_advance` 退避，无魔法数字；
+            // 用户亦可在 `on_frame` 内据 `render_advice()` 自行暂停（返回 `false`）。
             if should_backoff_after_draws(
                 app.windows
                     .borrow()
@@ -425,7 +430,12 @@ pub(crate) fn run_thread_loop(
                     .filter_map(|o| o.clone())
                     .map(|win| win.last_draw_outcome.get()),
             ) {
-                std::thread::sleep(std::time::Duration::from_millis(16));
+                let now = std::time::Instant::now();
+                let (next, sleep_dur) = crate::window::pac_advance(now, idle_deadline, app.max_fps());
+                idle_deadline = next;
+                if let Some(s) = sleep_dur {
+                    std::thread::sleep(s);
+                }
             }
             if device_lost.load(Ordering::Acquire) {
                 break;

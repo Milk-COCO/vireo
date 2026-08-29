@@ -60,7 +60,7 @@ mod on;
 pub use desc::{AntiAliasing, FrameStyle, SendRawWindowHandle, WindowDesc};
 pub use metrics::{
     DrawFailure, DrawOutcome, DrawReport, DrawSkipReason, DrawTimings, FollowAmount,
-    FollowFramesOrTime, ResizeRefreshPolicy,
+    FollowFramesOrTime, RenderAdvice, ResizeRefreshPolicy,
 };
 pub(crate) use desc::clamp_aa;
 #[allow(unused_imports)]
@@ -499,6 +499,32 @@ impl VireoWindow {
         report
     }
 
+    /// 引擎对「本帧是否应该渲染」的建议（见 [`RenderAdvice`]）。
+    ///
+    /// 只读引擎已知缓存状态（焦点 / 尺寸 / 上次 draw 结局），不调 OS、不阻塞、macOS 安全；
+    /// 状态由 `refresh_input` / `draw` 推进，用户负责刷新时机，故读到的是上次刷新后的值
+    /// （最多滞后约 1 帧）。用于在构建渲染内容**之前**判断本帧是否值得画，避免失焦时
+    /// 仍全速构建内容后被 vsync 丢弃。
+    ///
+    /// 引擎只报状态、不做策略：返回 `Unthrottled` 时**不会**自动限速，用户需自行
+    /// 限流（降 `max_fps` 或在 `on_frame` 内返回 `false`）。
+    pub fn render_advice(&self) -> RenderAdvice {
+        if self.closing.get() {
+            return RenderAdvice::Skip;
+        }
+        match self.last_draw_outcome.get() {
+            Some(DrawOutcome::Skipped(
+                DrawSkipReason::ZeroSized | DrawSkipReason::Occluded | DrawSkipReason::Closing,
+            )) => return RenderAdvice::Skip,
+            _ => {}
+        }
+        // 失焦：present 不被 vsync 节流 → 渲染循环全速空转。报 Unthrottled 让用户自行限流。
+        if !self.focused() {
+            return RenderAdvice::Unthrottled;
+        }
+        RenderAdvice::Render
+    }
+
     /// 记录一次成功 present 的间隔（供 `presented_fps` 滑动窗口）。
     fn record_present(&self) {
         let now = std::time::Instant::now();
@@ -515,6 +541,27 @@ impl VireoWindow {
         self.last_present.set(Some(now));
     }
 
+    /// 极简 resize 诊断：仅在「决策」切换时打印（一次拖动约 2-5 行），用于定位 resize 拖动黑边回归。
+    /// 决策 = RECONFIGURE（重配填满）/ STRETCH(suboptimal)（画旧 buffer，靠 DWM 拉伸）/ STABLE。
+    /// 由 `VIREO_RESIZE_TRACE=1` 触发；正常运行无开销。
+    fn trace_resize_state(handle: usize, decision: &str, detail: &str) {
+        if std::env::var_os("VIREO_RESIZE_TRACE").is_none() {
+            return;
+        }
+        use std::sync::{Mutex, OnceLock};
+        static LAST: OnceLock<Mutex<std::collections::HashMap<usize, String>>> =
+            OnceLock::new();
+        let mut g = LAST
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap();
+        let prev = g.get(&handle).cloned().unwrap_or_default();
+        if prev != decision {
+            g.insert(handle, decision.to_string());
+            eprintln!("[resize-trace] win{}: {} | {}", handle, decision, detail);
+        }
+    }
+
     fn draw_frame(
         &self,
         clear_color: crate::color::Color,
@@ -525,12 +572,14 @@ impl VireoWindow {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                vsync_throttled: false,
             };
         }
         if self.gpu.is_device_lost() {
             return DrawReport {
                 outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                vsync_throttled: false,
             };
         }
         // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_tick 内手动调）
@@ -572,6 +621,7 @@ impl VireoWindow {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                vsync_throttled: false,
             };
         }
         let sf = self.inner.scale_factor();
@@ -604,6 +654,8 @@ impl VireoWindow {
         let new_scale = dpi_override.unwrap_or(sf) as f32;
         let mut configured_this_frame = false;
         let mut follow_pending = false;
+        let trace_size_drifted;
+        let trace_need_configure;
         {
             let sc = self.surface_config.borrow();
             // 尺寸漂移只看物理（逻辑 = 物理 ÷ scale，物理在容差内且 scale 不变 ⇒
@@ -613,6 +665,7 @@ impl VireoWindow {
                 (size.width, size.height),
                 RESIZE_DRIFT_EPSILON,
             ) || new_scale != self.layout_scale() as f32;
+            trace_size_drifted = size_drifted;
             let mode_drifted = sc.present_mode != self.applied_present_mode.get();
             let latency_drifted =
                 sc.desired_maximum_frame_latency != self.applied_frame_latency.get();
@@ -653,6 +706,7 @@ impl VireoWindow {
             let need_configure = self.needs_initial_configure.get()
                 || (size_drifted && refresh != ResizeRefresh::None)
                 || mode_drifted || latency_drifted;
+            trace_need_configure = need_configure;
             if need_configure {
                 configured_this_frame = true;
                 let t_conf = std::time::Instant::now();
@@ -709,12 +763,14 @@ impl VireoWindow {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                vsync_throttled: false,
             };
         }
         if self.gpu.is_device_lost() {
             return DrawReport {
                 outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
                 timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                vsync_throttled: false,
             };
         }
         let t1 = std::time::Instant::now();
@@ -738,10 +794,16 @@ impl VireoWindow {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
                         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        vsync_throttled: false,
                     };
                 }
                 let t_conf = std::time::Instant::now();
                 self.configure_surface(size, t_conf);
+                Self::trace_resize_state(
+                    self.handle,
+                    "RECONFIGURE(outdated)",
+                    &format!("win={}x{}", size.width, size.height),
+                );
                 // `preparable` 兜底：首帧若走重配跳过，窗口会永远隐藏——显示它
                 // （宁可无内容一帧，不可永不出现），与 Timeout/Occluded 兜底一致。
                 self.maybe_show_prepared_window();
@@ -752,6 +814,7 @@ impl VireoWindow {
                         gpu_secs,
                         ..DrawTimings::default()
                     },
+                    vsync_throttled: false,
                 };
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
@@ -771,6 +834,7 @@ impl VireoWindow {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
                         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        vsync_throttled: false,
                     };
                 }
                 if let Some(new_surface) = self.recreate_surface() {
@@ -784,6 +848,7 @@ impl VireoWindow {
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings { configure_secs, gpu_secs, ..DrawTimings::default() },
+                    vsync_throttled: false,
                 };
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -796,6 +861,7 @@ impl VireoWindow {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
                         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        vsync_throttled: false,
                     };
                 }
                 let t_conf = std::time::Instant::now();
@@ -809,9 +875,28 @@ impl VireoWindow {
                         gpu_secs,
                         ..DrawTimings::default()
                     },
+                    vsync_throttled: false,
                 };
             }
         };
+        {
+            let sc = self.surface_config.borrow();
+            let decision = if trace_need_configure {
+                "RECONFIGURE"
+            } else if trace_size_drifted {
+                "STRETCH(suboptimal)"
+            } else {
+                "STABLE"
+            };
+            Self::trace_resize_state(
+                self.handle,
+                decision,
+                &format!(
+                    "win={}x{} swap={}x{} suboptimal={}",
+                    size.width, size.height, sc.width, sc.height, suboptimal
+                ),
+            );
+        }
         if trace {
             eprintln!("[draw] acq-end {:?}us", t1.elapsed().as_micros());
         }
@@ -945,6 +1030,7 @@ let dpi_override = self.applied_dpi_override.get();
 
         DrawReport {
             outcome: DrawOutcome::Presented { suboptimal },
+            vsync_throttled: self.focused(),
             timings: DrawTimings {
                 configure_secs,
                 acquire_secs,

@@ -115,6 +115,8 @@ pub(crate) fn resize_refresh(
         }
     }
     match policy {
+        // OnRelease：拖动期尺寸持续变化 → 不轮询重配（留待 acquire 的 Outdated 路径处理，
+        // 该路径会重配并在本帧直接重绘，见 `draw_frame`）；松手稳定满 debounce → Stable 干净 snap。
         ResizeRefreshPolicy::OnRelease => {}
         ResizeRefreshPolicy::EveryFrame => return ResizeRefresh::Live,
         ResizeRefreshPolicy::Periodic(iv) => {
@@ -187,6 +189,28 @@ pub struct DrawReport {
     pub outcome: DrawOutcome,
     /// 分段耗时
     pub timings: DrawTimings,
+    /// 本帧 present 是否被 vsync 节流（前台有焦点时通常为 `true`；失焦/被遮挡时
+    /// present 不被 vsync 钳制、渲染循环会全速空转）。`false` 表示「没被阻塞」——
+    /// 用户若在意 CPU 占用应自行限流（降 `max_fps` 或在 `on_frame` 内返回 `false`）。
+    /// 跳过/失败帧无 present 发生，恒为 `false`。
+    pub vsync_throttled: bool,
+}
+
+/// 引擎对「本帧是否应该渲染」的建议。引擎只报**已知缓存状态**，不做策略、不 sleep。
+/// 用户在 `on_frame` 开头查询，据此决定是否构建渲染内容（以及是否自行限流/暂停）。
+///
+/// 状态来自缓存（焦点/尺寸/上次 draw 结果），由 `refresh_input` / `draw` 推进；用户负责
+/// 决定刷新时机，因此读到的是「上次刷新后的状态」（最多滞后约 1 帧，焦点等低频变化无感）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderAdvice {
+    /// 正常渲染（可见、有焦点、尺寸有效）。
+    Render,
+    /// 不该渲染：窗口正在关闭 / 0×0 / 被遮挡（`Occluded`）——构建内容会被丢弃。
+    /// 用户应跳过构建（返回 `false` 或重建空 batch）。
+    Skip,
+    /// 可以渲染，但本帧不被 vsync 节流（窗口失焦等）：渲染循环会全速空转。
+    /// 引擎不替用户限速；用户若想省资源应自行限流（降 `max_fps` 或返回 `false`）。
+    Unthrottled,
 }
 
 /// 一次 [`VireoWindow::draw`] 的结局。
@@ -230,6 +254,7 @@ pub(crate) fn skip_report(gpu_secs: Option<f64>, reason: DrawSkipReason) -> Draw
     DrawReport {
         outcome: DrawOutcome::Skipped(reason),
         timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+        vsync_throttled: false,
     }
 }
 
