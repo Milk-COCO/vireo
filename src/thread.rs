@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use crate::lock::Lock;
 use crate::window::App;
 use crate::window::{
-    panic_payload_to_string, should_backoff_after_draws,
-    DeferredTask, DeferredTaskKind,
+    panic_payload_to_string, should_backoff_after_draws, WinitEvent, DeferredTask,
+    DeferredTaskKind,
 };
 
 /// FPS 采样滑动窗口容量（per-thread）。
@@ -380,13 +380,30 @@ pub(crate) fn run_thread_loop(
                     }
                 }
             }
-            // 窗口尚未就绪（winit owner 仍在建窗）→ 让出 CPU，等待 supervisor 置 `windows_ready`。
-            if !app.windows_ready.load(Ordering::Acquire) {
-                if device_lost.load(Ordering::Acquire) {
-                    break;
+            // 窗口尚未就绪（winit owner 仍在建窗）或仍有运行期建窗在途 → 事件化等待：
+            // supervisor 在 `windows_ready` 置位 / `pending_window_creates` 递减时 `notify_all`，
+            // 取代原先 `yield_now` 自旋 / 固定间隔 `sleep`（无魔法数字、无忙等）。
+            {
+                let wake = &app.inner.loop_wake;
+                let mut guard = wake.0.lock().unwrap();
+                while !app.windows_ready.load(Ordering::Acquire)
+                    || app.pending_window_creates.load(Ordering::Acquire) > 0
+                {
+                    if device_lost.load(Ordering::Acquire) {
+                        // 唤醒 supervisor 重新判定退出（设备丢失分支）。
+                        if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                            let _ = tx.send(WinitEvent::Wake);
+                        }
+                        return;
+                    }
+                    guard = wake.1.wait(guard).unwrap();
                 }
-                std::thread::yield_now();
-                continue;
+            }
+            if device_lost.load(Ordering::Acquire) {
+                if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                    let _ = tx.send(WinitEvent::Wake);
+                }
+                break;
             }
             let any = match drive_loops(&mut runtimes, &app, &fps_stats) {
                 Ok(any) => any,
@@ -412,10 +429,10 @@ pub(crate) fn run_thread_loop(
                 break;
             }
             if !any {
-                // `on_tick` 返回 false（或已无窗口）。但若仍有「已注册但未建出」的窗口
-                // （运行期建窗 / ez 竞态），不要退出——等 `WindowCreated` 到达后再正常走。
+                // `on_tick` 返回 false（或已无窗口）。若仍有「已注册但未建出」的窗口
+                // （运行期建窗 / ez 竞态），回到循环顶事件化等待 `WindowCreated` 到达后再正常走；
+                // 否则退出（窗口均已就绪，pending 已为 0）。
                 if app.pending_window_creates.load(Ordering::Acquire) > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
                 }
                 break;
@@ -438,6 +455,10 @@ pub(crate) fn run_thread_loop(
                 }
             }
             if device_lost.load(Ordering::Acquire) {
+                // 唤醒 supervisor 重新判定退出（设备丢失分支）。
+                if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                    let _ = tx.send(WinitEvent::Wake);
+                }
                 break;
             }
             std::thread::yield_now();
@@ -448,6 +469,10 @@ pub(crate) fn run_thread_loop(
         Ok(()) => {
             state.done.store(true, Ordering::Release);
             wake(&state);
+            // loop 正常完成 → 唤醒 supervisor 重新判定退出（事件驱动，取代固定间隔 sleep）。
+            if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                let _ = tx.send(WinitEvent::Wake);
+            }
         }
         Err(payload) => {
             state
@@ -457,7 +482,24 @@ pub(crate) fn run_thread_loop(
                 .replace(Err(panic_payload_to_string(payload).into()));
             state.done.store(true, Ordering::Release);
             wake(&state);
+            // loop panic → 同样唤醒 supervisor 重新判定退出。
+            if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                let _ = tx.send(WinitEvent::Wake);
+            }
         }
+    }
+
+    // 渲染线程退出（正常或 panic）→ 不再有任何 draw，所有窗口的 `draw_idle` 永久为真；
+    // 唤醒正在等待关闭的 supervisor 路径，否则其 Condvar 等待会因本线程已死而永不唤醒
+    // （最坏情况下渲染线程崩溃、当前帧未置 idle，关窗路径也据此安全放行）。
+    for win in app
+        .windows
+        .borrow()
+        .iter()
+        .filter_map(|o| o.clone())
+    {
+        win.draw_idle.store(true, Ordering::Release);
+        win.draw_idle_cv.1.notify_all();
     }
 }
 

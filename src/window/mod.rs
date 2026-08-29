@@ -99,7 +99,7 @@ fn nanos_to_deadline(n: i64) -> Option<std::time::Instant> {
 use crate::thread::Loop;
 
 /// 从 winit 线程发往渲染线程的事件（全是 Send-safe 的自定义类型）。
-enum WinitEvent {
+pub(crate) enum WinitEvent {
     WindowCreated {
         handle: usize,
         window: Arc<winit::window::Window>,
@@ -146,6 +146,9 @@ enum WinitEvent {
     /// 必须经 winit 线程执行 `SetWindowSubclass`（同 `set_frame_style`），
     /// 渲染线程收到本事件后转发 `aspect_ratio_tx` → winit 线程。
     SetAspectRatio { handle: usize, ratio: Option<f64> },
+    /// 内部唤醒哨兵：由 `main_done` 置位点 / 渲染线程检测设备丢失或 loop 结束时发送，
+    /// 用于唤醒阻塞在 `rx.recv()` 的 supervisor 重新判定退出条件。无业务载荷。
+    Wake,
 }
 
 /// 窗口实例 —— 渲染线程独占，持有 surface/renderer/input 与完整帧循环。
@@ -283,7 +286,10 @@ pub struct VireoWindow {
     closing: Lock<bool>,
     /// 当前帧是否 in-flight（已 acquire SurfaceTexture 尚未 present）。关窗路径据此等待
     /// 当前帧结束后再释放 Surface，避免 in-flight draw 与 Surface drop 竞态导致 wgpu 校验 panic。
-    draw_idle: std::sync::atomic::AtomicBool,
+    pub(crate) draw_idle: std::sync::atomic::AtomicBool,
+    /// 关窗路径等待 `draw_idle` 置位的 Condvar：渲染线程每帧绘制完成时唤醒，渲染线程
+    /// 正常结束 / panic退出时对所有窗口置位并唤醒——事件驱动、无忙等、无魔法数字超时。
+    pub(crate) draw_idle_cv: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
     gpu_timing_enabled: std::sync::atomic::AtomicBool,
     /// 上一份已完成提交的 GPU queue latency（由 `on_submitted_work_done` 写回）
@@ -384,6 +390,7 @@ impl VireoWindow {
             ),
             closing: Lock::new(false),
             draw_idle: std::sync::atomic::AtomicBool::new(true),
+            draw_idle_cv: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
             gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
             last_gpu_secs: Arc::new(Mutex::new(None)),
             pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1010,6 +1017,8 @@ let dpi_override = self.applied_dpi_override.get();
         let t3 = std::time::Instant::now();
         self.gpu.queue.present(st);
         self.draw_idle.store(true, std::sync::atomic::Ordering::Release);
+        // 唤醒可能正在等待本帧完成的关窗路径（事件驱动，取代原先百万次自旋）。
+        self.draw_idle_cv.1.notify_all();
         let present_secs = t3.elapsed().as_secs_f64();
 
         if trace {
@@ -1481,6 +1490,12 @@ pub struct AppInner {
     /// `app.window`/`app.run` 早已执行（`pending_window_creates` 已自增），故不存在「supervisor
     /// 首轮迭代早于 `app.window` 调用而误退」的启动竞态。
     pub(crate) main_done: std::sync::atomic::AtomicBool,
+    /// 内部事件 sender 镜像：`main_done` / 设备丢失 / loop 完成等置位时借此发 `WinitEvent::Wake`
+    /// 唤醒 supervisor（阻塞在 `rx.recv()`）。`None` 仅在构造早期、通道尚未建立时短暂存在。
+    pub(crate) event_tx: Lock<Option<mpsc::Sender<WinitEvent>>>,
+    /// 渲染线程等待「窗口就绪 / 运行期建窗完成」的 Condvar：由 supervisor 在对应状态变更时
+    /// `notify_all`，取代原先的 `yield_now` 自旋 / 固定间隔 `sleep`（事件驱动、无魔法数字）。
+    pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
 }
 
 pub struct App {
@@ -1608,6 +1623,10 @@ impl App {
                 app_inner_for_flag
                     .main_done
                     .store(true, std::sync::atomic::Ordering::Release);
+                // 唤醒阻塞在 `rx.recv()` 的 supervisor 重新判定退出（事件驱动，取代固定间隔 sleep）。
+                if let Some(tx) = app_inner_for_flag.event_tx.borrow().clone() {
+                    let _ = tx.send(WinitEvent::Wake);
+                }
             })
             .expect("failed to spawn vireo-main thread");
         if let Err(e) = self.run_blocking(channels) {
@@ -1629,6 +1648,7 @@ impl App {
         let (close_tx, close_rx) = mpsc::channel();
         *self.create_tx.borrow_mut() = Some(create_tx);
         *self.cb_tx.borrow_mut() = Some(cb_tx);
+        *self.event_tx.borrow_mut() = Some(event_tx.clone());
         RunChannels {
             event_tx,
             event_rx,
@@ -1686,6 +1706,8 @@ impl App {
                 pending_window_creates: std::sync::atomic::AtomicUsize::new(0),
                 loops_ever_requested: std::sync::atomic::AtomicBool::new(false),
                 main_done: std::sync::atomic::AtomicBool::new(false),
+                event_tx: Lock::new(None),
+                loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
             }),
         };
 
@@ -2650,12 +2672,15 @@ fn apply_winit_event_one(
             if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
                 win.closing.set(true);
                 // 等渲染线程当前帧结束（已 present、不再持有 SurfaceTexture）再释放 Surface，
-                // 避免 in-flight draw 与 Surface drop 竞态导致 wgpu 校验 panic。正常帧已 present，
-                // 此处仅亚毫秒级等待；上限自旋避免渲染线程异常卡死时永久阻塞关闭。
-                let mut spins = 0u32;
-                while !win.draw_idle.load(std::sync::atomic::Ordering::Acquire) && spins < 1_000_000 {
-                    std::thread::yield_now();
-                    spins += 1;
+                // 避免 in-flight draw 与 Surface drop 竞态导致 wgpu 校验 panic。事件驱动：渲染线程
+                // 每帧绘制完成时 `notify_all`；其正常结束或 panic退出时也会对所有窗口置位并唤醒，
+                // 故无任何忙等、无需超时魔法数字（最坏情况下渲染线程已死，draw_idle 必为真，不会挂起）。
+                {
+                    let cv = &win.draw_idle_cv;
+                    let mut guard = cv.0.lock().unwrap();
+                    while !win.draw_idle.load(std::sync::atomic::Ordering::Acquire) {
+                        guard = cv.1.wait(guard).unwrap();
+                    }
                 }
                 // 置 closing 后再 drop：此时无 outstanding SurfaceTexture，drop surface 安全。
             }
@@ -2746,6 +2771,8 @@ fn apply_winit_event_one(
                 win.inner.set_cursor(cursor);
             }
         }
+        // 内部唤醒哨兵：supervisor 阻塞在 `rx.recv()` 时收到后仅重新判定退出条件（无业务动作）。
+        WinitEvent::Wake => {}
     }
 }
 
@@ -2780,6 +2807,8 @@ fn supervisor_loop(
                         created_windows += 1;
                         app.pending_window_creates
                             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        // 唤醒等待运行期建窗完成的渲染线程（事件驱动，取代固定间隔 sleep）。
+                        app.inner.loop_wake.1.notify_all();
                     }
                     processed = true;
                 }
@@ -2792,6 +2821,8 @@ fn supervisor_loop(
         if created_windows >= expected_windows {
             app.windows_ready
                 .store(true, std::sync::atomic::Ordering::Release);
+            // 唤醒等待窗口就绪的渲染线程（事件驱动，取代 yield_now 自旋）。
+            app.inner.loop_wake.1.notify_all();
         }
         // 退出判定（顶层权威 = vireo-main 的 `main` future 完成，见 `main_done`）：
         // (a) `main_done && all_loops_done && windows_settled` —— 用户代码已结束、无 loop 在跑、
@@ -2836,9 +2867,10 @@ fn supervisor_loop(
             let _ = exit_tx.send(());
             return;
         }
-        // 仅当本轮无任何事件时退避，降低输入/窗口事件的响应延迟。
+        // 仅当本轮无任何事件时阻塞在 `rx.recv()`，等待下一个真实事件或 `WinitEvent::Wake`
+        // （`main_done` / 设备丢失 / loop 完成由相应置位点发 `Wake` 唤醒）。事件驱动、无忙等、无魔法数字。
         if !processed {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            let _ = rx.recv();
         }
     }
 }
