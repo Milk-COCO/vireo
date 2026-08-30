@@ -46,7 +46,7 @@ impl Renderer {
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
-            self.last_draw_calls.set(0);
+            *self.last_draw_calls.lock() = 0;
             let empty_encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("vireo empty encoder"),
             });
@@ -73,19 +73,19 @@ impl Renderer {
         let lh = self.logical_height;
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
-        let mut event_infos = self.scratch_event_infos.borrow_mut();
+        let mut event_infos = self.scratch_event_infos.lock();
         event_infos.clear();
         let vertex_count: u32 = 0;
         let ndx_accum: u32 = 0;
 
         // ---- 单次扫描：合并 transform/poly + 统计顶点数 ----
-        let mut global_transforms = self.scratch_transforms.borrow_mut();
+        let mut global_transforms = self.scratch_transforms.lock();
         global_transforms.clear();
         // 全局表槽 0 = 单位阵（与 batch `transform_table` 槽 0 约定一致）。
         // `draw_text` / glyphon 默认 transform_index=0 表示恒等；batch 表上传时
         // `transform_base` 会偏移局部 index，故全局槽 0 仍须单独预留，不能被首个 batch 占用。
         global_transforms.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
-        let mut polygon_edges_global = self.scratch_poly_edges.borrow_mut();
+        let mut polygon_edges_global = self.scratch_poly_edges.lock();
         polygon_edges_global.clear();
 
         // stencil 两路计数（不可混用）：
@@ -125,7 +125,7 @@ impl Renderer {
             }
         }
 
-        let mut ref_stack = self.scratch_ref_stack.borrow_mut();
+        let mut ref_stack = self.scratch_ref_stack.lock();
         ref_stack.clear();
         let mut clip_depth: u32 = 0;
         let mut area_depth: u32 = 0;
@@ -253,9 +253,9 @@ impl Renderer {
         }
 
         // 收集 transform/poly 信息
-        let mut batch_transform_bases = self.scratch_batch_transform_bases.borrow_mut();
+        let mut batch_transform_bases = self.scratch_batch_transform_bases.lock();
         batch_transform_bases.clear();
-        let mut batch_poly_base = self.scratch_batch_poly_base.borrow_mut();
+        let mut batch_poly_base = self.scratch_batch_poly_base.lock();
         batch_poly_base.clear();
         let mut total_vcount: u32 = 0;
         let mut total_icount: u32 = 0;
@@ -263,17 +263,17 @@ impl Renderer {
         let mut pop_screen_verts: u32 = 0; // 全屏 Pop 顶点数
         let mut pop_screen_idx: u32 = 0;
 
-        let mut combined_geo_vertices = self.scratch_geo_vertices.borrow_mut();
-        let mut combined_geo_indices = self.scratch_geo_indices.borrow_mut();
+        let mut combined_geo_vertices = self.scratch_geo_vertices.lock();
+        let mut combined_geo_indices = self.scratch_geo_indices.lock();
         combined_geo_vertices.clear();
         combined_geo_indices.clear();
-        let mut batch_geo_vertex_base = self.scratch_batch_geo_vertex_base.borrow_mut();
-        let mut batch_geo_index_base = self.scratch_batch_geo_index_base.borrow_mut();
+        let mut batch_geo_vertex_base = self.scratch_batch_geo_vertex_base.lock();
+        let mut batch_geo_index_base = self.scratch_batch_geo_index_base.lock();
         batch_geo_vertex_base.clear();
         batch_geo_index_base.clear();
         {
-            let view_map = self.scratch_view_map.borrow();
-            let mut view_table = self.scratch_view_table.borrow_mut();
+            let view_map = self.scratch_view_map.lock();
+            let mut view_table = self.scratch_view_table.lock();
 
             for (ei, event) in events.iter().enumerate() {
                 if let DrawEvent::Batch(batch) = event {
@@ -344,10 +344,10 @@ impl Renderer {
         let total_ibytes = (total_icount + pop_screen_idx) as u64 * 4;
         self.ensure_vertex_buffer(total_vbytes);
         self.ensure_index_buffer(total_ibytes);
-        let mut combined_vdata = self.scratch_vdata.borrow_mut();
-        let mut combined_idata = self.scratch_idata.borrow_mut();
-        let mut combined_instances = self.scratch_instances.borrow_mut();
-        let mut combined_geo_instances = self.scratch_geo_instances.borrow_mut();
+        let mut combined_vdata = self.scratch_vdata.lock();
+        let mut combined_idata = self.scratch_idata.lock();
+        let mut combined_instances = self.scratch_instances.lock();
+        let mut combined_geo_instances = self.scratch_geo_instances.lock();
         combined_vdata.clear();
         combined_idata.clear();
         combined_instances.clear();
@@ -365,7 +365,7 @@ impl Renderer {
         let mut v_offset = vertex_count;
         let mut idx_offset = ndx_accum;
         // merge_geo 排序后每实例的 texture segment 索引（None = 本轮未启用重排）
-        let mut geo_merge_sorted_seg = self.scratch_geo_merge_sorted.borrow_mut();
+        let mut geo_merge_sorted_seg = self.scratch_geo_merge_sorted.lock();
         for (ei, event) in events.iter().enumerate() {
             match event {
                 DrawEvent::Batch(batch) => {
@@ -402,7 +402,7 @@ impl Renderer {
                         if merge_geo {
                             // 每实例原始下标 → texture segment 索引（超出段尾 → segments.len()，走 batch.bind_group）
                             let seg_count = batch.geo_instance_texture_segments.len() as u32;
-                            let mut per_inst_seg = self.scratch_geo_merge_per_inst_seg.borrow_mut();
+                            let mut per_inst_seg = self.scratch_geo_merge_per_inst_seg.lock();
                             per_inst_seg.clear();
                             per_inst_seg.resize(batch.geo_instances.len(), seg_count);
                             for (si, seg) in batch.geo_instance_texture_segments.iter().enumerate() {
@@ -410,7 +410,7 @@ impl Renderer {
                                     per_inst_seg[k as usize] = si as u32;
                                 }
                             }
-                            let mut order = self.scratch_geo_merge_order.borrow_mut();
+                            let mut order = self.scratch_geo_merge_order.lock();
                             order.clear();
                             order.extend(0..batch.geo_instances.len() as u32);
                             order.sort_by_key(|&i| {
@@ -851,17 +851,17 @@ impl Renderer {
 
         // ---- 合并上传 ----
         if !combined_vdata.is_empty() {
-            let vbuf = self.vertex_buf.borrow();
+            let vbuf = self.vertex_buf.lock();
             self.gpu.queue.write_buffer(&vbuf.as_ref().unwrap().0, 0, &combined_vdata);
         }
         if !combined_idata.is_empty() {
-            let ibuf = self.index_buf.borrow();
+            let ibuf = self.index_buf.lock();
             self.gpu.queue.write_buffer(&ibuf.as_ref().unwrap().0, 0, &combined_idata);
         }
         if !combined_instances.is_empty() {
             let size = (combined_instances.len() * size_of::<ShapeInstance>()) as u64;
             self.ensure_instance_buffer(size);
-            let instance_buf = self.instance_buf.borrow();
+            let instance_buf = self.instance_buf.lock();
             self.gpu.queue.write_buffer(
                 &instance_buf.as_ref().unwrap().0,
                 0,
@@ -873,13 +873,13 @@ impl Renderer {
         if !combined_geo_vertices.is_empty() {
             let size = (combined_geo_vertices.len() * size_of::<GeoVertex>()) as u64;
             self.ensure_geo_template_vertex_buffer(size);
-            let buf = self.geo_template_vertex_buf.borrow();
+            let buf = self.geo_template_vertex_buf.lock();
             self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_vertices));
         }
         if !combined_geo_indices.is_empty() {
             let size = (combined_geo_indices.len() * 4) as u64;
             self.ensure_geo_template_index_buffer(size);
-            let buf = self.geo_template_index_buf.borrow();
+            let buf = self.geo_template_index_buf.lock();
             self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_indices));
         }
 
@@ -887,7 +887,7 @@ impl Renderer {
         if !combined_geo_instances.is_empty() {
             let size = (combined_geo_instances.len() * size_of::<GeoInstance>()) as u64;
             self.ensure_geo_instance_buffer(size);
-            let buf = self.geo_instance_buf.borrow();
+            let buf = self.geo_instance_buf.lock();
             self.gpu.queue.write_buffer(&buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&combined_geo_instances));
         }
 
@@ -896,7 +896,7 @@ impl Renderer {
             let size = (polygon_edges_global.len() * 4) as u64;
             self.ensure_polygon_edge_buffer(size);
             {
-                let buf = self.polygon_edge_buf.borrow();
+                let buf = self.polygon_edge_buf.lock();
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&polygon_edges_global));
             }
@@ -916,13 +916,13 @@ impl Renderer {
             if let DrawEvent::Batch(batch) = event {
                 if !batch.texts.entries.is_empty() {
                     // layout_follow 时用虚拟新物理尺寸（screen_resolution uniform 补偿 DXGI 拉伸）
-                    let (tw, th) = self.text_viewport_override.get()
+                    let (tw, th) = self.text_viewport_override.lock()
                         .unwrap_or((self.physical_width, self.physical_height));
                     // 文字与几何共用同一张表：左乘有效视图，保证 view 同时作用于文字。
-                    let mut view_table = self.scratch_view_table.borrow_mut();
+                    let mut view_table = self.scratch_view_table.lock();
                     let eff = self
                         .scratch_view_map
-                        .borrow()
+                        .lock()
                         .get(&(*batch as *const DrawBatch as *const () as usize))
                         .copied()
                         .unwrap_or(Transform::IDENTITY);
@@ -992,16 +992,16 @@ impl Renderer {
             let size = (global_transforms.len() * 4) as u64;
             self.ensure_transform_buffer(size);
             {
-                let buf = self.transform_buf.borrow();
+                let buf = self.transform_buf.lock();
                 let buf_ref = buf.as_ref().unwrap();
                 self.gpu.queue.write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&global_transforms));
             }
         }
         let engine_storage_bind_group = {
-            let mut cache = self.engine_storage_bind_group_cache.borrow_mut();
+            let mut cache = self.engine_storage_bind_group_cache.lock();
             if cache.is_none() {
-                let transforms = self.transform_buf.borrow();
-                let polygons = self.polygon_edge_buf.borrow();
+                let transforms = self.transform_buf.lock();
+                let polygons = self.polygon_edge_buf.lock();
                 let transform_buf = transforms
                     .as_ref()
                     .map(|(buf, _)| buf)
@@ -1064,22 +1064,22 @@ impl Renderer {
                 ..Default::default()
             });
 
-            let vbuf = self.vertex_buf.borrow();
-            let ibuf = self.index_buf.borrow();
-            let instance_buf = self.instance_buf.borrow();
-            let geo_template_vbuf = self.geo_template_vertex_buf.borrow();
-            let geo_template_ibuf = self.geo_template_index_buf.borrow();
-            let geo_instance_buf = self.geo_instance_buf.borrow();
+            let vbuf = self.vertex_buf.lock();
+            let ibuf = self.index_buf.lock();
+            let instance_buf = self.instance_buf.lock();
+            let geo_template_vbuf = self.geo_template_vertex_buf.lock();
+            let geo_template_ibuf = self.geo_template_index_buf.lock();
+            let geo_instance_buf = self.geo_instance_buf.lock();
             let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
             let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
             let mut last_custom_ptr: *const Material = std::ptr::null();
-            let mut last_dynamic_offsets = self.scratch_last_dynamic_offsets.borrow_mut();
+            let mut last_dynamic_offsets = self.scratch_last_dynamic_offsets.lock();
             last_dynamic_offsets.clear();
             let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
-            let mut scissor_stack = self.scratch_scissor_stack.borrow_mut();
+            let mut scissor_stack = self.scratch_scissor_stack.lock();
             scissor_stack.clear();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
 
@@ -1677,7 +1677,7 @@ ibuf.as_ref().unwrap().0.slice(..),
             }
         }
 
-        self.last_draw_calls.set(shape_draw_calls);
+        *self.last_draw_calls.lock() = shape_draw_calls;
         encoder.finish()
     }
 }

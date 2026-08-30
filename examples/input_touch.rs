@@ -45,7 +45,7 @@ async fn main() {
         let (mx, my) = win.mouse_pos().logical();
         let (mx, my) = (mx as f32, my as f32);
         {
-            let mut touches = win.input.touches.borrow_mut();
+            let mut touches = win.input.touches.lock();
             if left && !mouse_touch_active {
                 mouse_touch_active = true;
                 touches.insert(sim_id, (mx, my, Some(0.5)));
@@ -97,7 +97,7 @@ async fn main() {
         let touches: Vec<(u64, f32, f32, Option<f64>)> = win
             .input
             .touches
-            .borrow()
+            .lock()
             .iter()
             .map(|(&id, &(x, y, f))| (id, x, y, f))
             .collect();

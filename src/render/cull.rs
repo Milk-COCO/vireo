@@ -1,4 +1,4 @@
-use crate::lock::Lock;
+use parking_lot::Mutex;
 
 use rustc_hash::FxHashMap;
 
@@ -41,13 +41,13 @@ pub(crate) fn prepare_culling<'a>(
     batches: &[&'a DrawBatch],
     logical_width: f32,
     logical_height: f32,
-    scratch_aabb_map: &Lock<AabbMap>,
-    scratch_view_map: &Lock<ViewMap>,
+    scratch_aabb_map: &Mutex<AabbMap>,
+    scratch_view_map: &Mutex<ViewMap>,
     events: &mut Vec<DrawEvent<'a>>,
 ) -> (Rect, bool) {
     let viewport = viewport_for_culling(logical_width, logical_height);
     {
-        let mut aabb_map = scratch_aabb_map.borrow_mut();
+        let mut aabb_map = scratch_aabb_map.lock();
         aabb_map.clear();
         for b in batches {
             compute_subtree_aabb(b, &mut aabb_map, &Transform::IDENTITY);
@@ -55,8 +55,8 @@ pub(crate) fn prepare_culling<'a>(
     }
     let mut uses_stencil = false;
     {
-        let aabb_map = scratch_aabb_map.borrow();
-        let mut view_map = scratch_view_map.borrow_mut();
+        let aabb_map = scratch_aabb_map.lock();
+        let mut view_map = scratch_view_map.lock();
         view_map.clear();
         for b in batches {
             let event_start = events.len();

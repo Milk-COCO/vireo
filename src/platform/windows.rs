@@ -1259,10 +1259,10 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn set_corner_preference(&self, preference: CornerPreference) {
-        self.user_corner_pref.set(preference);
+        *self.user_corner_pref.lock() = preference;
         // Frameless 无边框时 DWM 无法圆角，钳回 Default（偏好已记录，
         // 待 set_frame_style 切回 Normal/HiddenTitlebar 时恢复）。
-        if self.frame_style.get() == crate::window::FrameStyle::Frameless {
+        if *self.frame_style.lock() == crate::window::FrameStyle::Frameless {
             winit::platform::windows::WindowExtWindows::set_corner_preference(
                 &*self.inner,
                 winit::platform::windows::CornerPreference::Default,

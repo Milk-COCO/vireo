@@ -21,7 +21,7 @@ macro_rules! def_app_ons {
                 let h = handle.0;
                 let mut cbs = $crate::input::InputCallbacks::default();
                 cbs.$field.push(Box::new(callback));
-                if let Some(tx) = self.cb_tx.borrow().as_ref() {
+                if let Some(tx) = self.cb_tx.lock().as_ref() {
                     if let Err(_) = tx.send((h as usize, cbs)) {
                         ::log::warn!("vireo: failed to deliver app callback (receiver closed)");
                     }

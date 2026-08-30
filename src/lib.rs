@@ -35,7 +35,6 @@ pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
-pub mod lock;
 pub mod nc;
 pub mod dpi;
 pub mod math;

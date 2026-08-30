@@ -1,6 +1,6 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
-use crate::lock::Lock;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
@@ -367,12 +367,12 @@ pub struct Renderer {
     pub(crate) gpu: std::sync::Arc<GpuContext>,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    vertex_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    index_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    instance_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    geo_instance_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    geo_template_vertex_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    geo_template_index_buf: Lock<Option<(wgpu::Buffer, u64)>>,
+    vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    geo_instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    geo_template_vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    geo_template_index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     physical_width: u32,
     physical_height: u32,
     scale: f32,
@@ -380,44 +380,44 @@ pub struct Renderer {
     /// `Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi）：glyph 不重新光栅化
     /// （scale/dpi 不变 → 图集 cache key 稳定），仅 shader NDC 映射补偿 DXGI 拉伸。
     /// `None` = 用 `physical_width/height`（旧 surface 尺寸）。
-    text_viewport_override: Lock<Option<(u32, u32)>>,
+    text_viewport_override: Mutex<Option<(u32, u32)>>,
     sample_count: u32,
     alpha_to_coverage: bool,
     ssaa: bool,
-    msaa_tex: Lock<Option<(wgpu::Texture, wgpu::TextureView)>>,
-    ds_tex: Lock<Option<(wgpu::Texture, wgpu::TextureView)>>,
-    polygon_edge_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    transform_buf: Lock<Option<(wgpu::Buffer, u64)>>,
-    engine_storage_bind_group_cache: Lock<Option<wgpu::BindGroup>>,
+    msaa_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    ds_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    polygon_edge_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    transform_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    engine_storage_bind_group_cache: Mutex<Option<wgpu::BindGroup>>,
     /// 逻辑视口尺寸（逻辑像素，浮点用户坐标系）
     logical_width: f32,
     logical_height: f32,
     /// 帧间复用的 CPU 暂存，避免每帧大块分配
-    scratch_vdata: Lock<Vec<u8>>,
-    scratch_idata: Lock<Vec<u8>>,
-    scratch_transforms: Lock<Vec<f32>>,
-    scratch_poly_edges: Lock<Vec<f32>>,
-    scratch_event_infos: Lock<Vec<EventInfo>>,
-    scratch_aabb_map: Lock<AabbMap>,
-    scratch_view_map: Lock<ViewMap>,
-    scratch_view_table: Lock<Vec<f32>>,
-    scratch_ref_stack: Lock<Vec<u32>>,
-    scratch_batch_transform_bases: Lock<Vec<u32>>,
-    scratch_batch_poly_base: Lock<Vec<u32>>,
-    scratch_batch_geo_vertex_base: Lock<Vec<u32>>,
-    scratch_batch_geo_index_base: Lock<Vec<u32>>,
-    scratch_last_dynamic_offsets: Lock<Vec<u32>>,
-    scratch_scissor_stack: Lock<Vec<(u32, u32, u32, u32)>>,
-    scratch_instances: Lock<Vec<ShapeInstance>>,
-    scratch_geo_instances: Lock<Vec<GeoInstance>>,
-    scratch_geo_vertices: Lock<Vec<GeoVertex>>,
-    scratch_geo_indices: Lock<Vec<u32>>,
-    scratch_geo_merge_per_inst_seg: Lock<Vec<u32>>,
-    scratch_geo_merge_order: Lock<Vec<u32>>,
-    scratch_geo_merge_sorted: Lock<Option<Vec<u32>>>,
+    scratch_vdata: Mutex<Vec<u8>>,
+    scratch_idata: Mutex<Vec<u8>>,
+    scratch_transforms: Mutex<Vec<f32>>,
+    scratch_poly_edges: Mutex<Vec<f32>>,
+    scratch_event_infos: Mutex<Vec<EventInfo>>,
+    scratch_aabb_map: Mutex<AabbMap>,
+    scratch_view_map: Mutex<ViewMap>,
+    scratch_view_table: Mutex<Vec<f32>>,
+    scratch_ref_stack: Mutex<Vec<u32>>,
+    scratch_batch_transform_bases: Mutex<Vec<u32>>,
+    scratch_batch_poly_base: Mutex<Vec<u32>>,
+    scratch_batch_geo_vertex_base: Mutex<Vec<u32>>,
+    scratch_batch_geo_index_base: Mutex<Vec<u32>>,
+    scratch_last_dynamic_offsets: Mutex<Vec<u32>>,
+    scratch_scissor_stack: Mutex<Vec<(u32, u32, u32, u32)>>,
+    scratch_instances: Mutex<Vec<ShapeInstance>>,
+    scratch_geo_instances: Mutex<Vec<GeoInstance>>,
+    scratch_geo_vertices: Mutex<Vec<GeoVertex>>,
+    scratch_geo_indices: Mutex<Vec<u32>>,
+    scratch_geo_merge_per_inst_seg: Mutex<Vec<u32>>,
+    scratch_geo_merge_order: Mutex<Vec<u32>>,
+    scratch_geo_merge_sorted: Mutex<Option<Vec<u32>>>,
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
     /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
-    last_draw_calls: Lock<u32>,
+    last_draw_calls: Mutex<u32>,
 }
 
 impl Renderer {
@@ -457,47 +457,47 @@ impl Renderer {
             gpu,
             camera_buf,
             camera_bind_group,
-            vertex_buf: Lock::new(None),
-            index_buf: Lock::new(None),
-            instance_buf: Lock::new(None),
-            geo_instance_buf: Lock::new(None),
-            geo_template_vertex_buf: Lock::new(None),
-            geo_template_index_buf: Lock::new(None),
+            vertex_buf: Mutex::new(None),
+            index_buf: Mutex::new(None),
+            instance_buf: Mutex::new(None),
+            geo_instance_buf: Mutex::new(None),
+            geo_template_vertex_buf: Mutex::new(None),
+            geo_template_index_buf: Mutex::new(None),
             physical_width,
             physical_height,
             scale,
-            text_viewport_override: Lock::new(None),
+            text_viewport_override: Mutex::new(None),
             sample_count: aa.sample_count(),
             alpha_to_coverage: aa.alpha_to_coverage(),
             ssaa: aa.is_ssaa(),
-            msaa_tex: Lock::new(None),
-            ds_tex: Lock::new(None),
-            polygon_edge_buf: Lock::new(None),
-            transform_buf: Lock::new(None),
-            engine_storage_bind_group_cache: Lock::new(None),
-            scratch_vdata: Lock::new(Vec::new()),
-            scratch_idata: Lock::new(Vec::new()),
-            scratch_transforms: Lock::new(Vec::new()),
-            scratch_poly_edges: Lock::new(Vec::new()),
-            scratch_event_infos: Lock::new(Vec::new()),
-            scratch_aabb_map: Lock::new(FxHashMap::default()),
-            scratch_view_map: Lock::new(FxHashMap::default()),
-            scratch_view_table: Lock::new(Vec::new()),
-            scratch_ref_stack: Lock::new(Vec::new()),
-            scratch_batch_transform_bases: Lock::new(Vec::new()),
-            scratch_batch_poly_base: Lock::new(Vec::new()),
-            scratch_batch_geo_vertex_base: Lock::new(Vec::new()),
-            scratch_batch_geo_index_base: Lock::new(Vec::new()),
-            scratch_last_dynamic_offsets: Lock::new(Vec::new()),
-            scratch_scissor_stack: Lock::new(Vec::new()),
-            scratch_instances: Lock::new(Vec::new()),
-            scratch_geo_instances: Lock::new(Vec::new()),
-            scratch_geo_vertices: Lock::new(Vec::new()),
-            scratch_geo_indices: Lock::new(Vec::new()),
-            scratch_geo_merge_per_inst_seg: Lock::new(Vec::new()),
-            scratch_geo_merge_order: Lock::new(Vec::new()),
-            scratch_geo_merge_sorted: Lock::new(None),
-            last_draw_calls: Lock::new(0),
+            msaa_tex: Mutex::new(None),
+            ds_tex: Mutex::new(None),
+            polygon_edge_buf: Mutex::new(None),
+            transform_buf: Mutex::new(None),
+            engine_storage_bind_group_cache: Mutex::new(None),
+            scratch_vdata: Mutex::new(Vec::new()),
+            scratch_idata: Mutex::new(Vec::new()),
+            scratch_transforms: Mutex::new(Vec::new()),
+            scratch_poly_edges: Mutex::new(Vec::new()),
+            scratch_event_infos: Mutex::new(Vec::new()),
+            scratch_aabb_map: Mutex::new(FxHashMap::default()),
+            scratch_view_map: Mutex::new(FxHashMap::default()),
+            scratch_view_table: Mutex::new(Vec::new()),
+            scratch_ref_stack: Mutex::new(Vec::new()),
+            scratch_batch_transform_bases: Mutex::new(Vec::new()),
+            scratch_batch_poly_base: Mutex::new(Vec::new()),
+            scratch_batch_geo_vertex_base: Mutex::new(Vec::new()),
+            scratch_batch_geo_index_base: Mutex::new(Vec::new()),
+            scratch_last_dynamic_offsets: Mutex::new(Vec::new()),
+            scratch_scissor_stack: Mutex::new(Vec::new()),
+            scratch_instances: Mutex::new(Vec::new()),
+            scratch_geo_instances: Mutex::new(Vec::new()),
+            scratch_geo_vertices: Mutex::new(Vec::new()),
+            scratch_geo_indices: Mutex::new(Vec::new()),
+            scratch_geo_merge_per_inst_seg: Mutex::new(Vec::new()),
+            scratch_geo_merge_order: Mutex::new(Vec::new()),
+            scratch_geo_merge_sorted: Mutex::new(None),
+            last_draw_calls: Mutex::new(0),
             logical_width,
             logical_height,
         }
@@ -506,7 +506,7 @@ impl Renderer {
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数。
     /// 由 [`Self::draw`] 在每帧统计；未 draw 时为 0。
     pub fn last_draw_calls(&self) -> u32 {
-        self.last_draw_calls.get()
+        *self.last_draw_calls.lock()
     }
 
     /// 更新抗锯齿设置。
@@ -514,8 +514,8 @@ impl Renderer {
         self.sample_count = aa.sample_count();
         self.alpha_to_coverage = aa.alpha_to_coverage();
         self.ssaa = aa.is_ssaa();
-        *self.msaa_tex.borrow_mut() = None;
-        *self.ds_tex.borrow_mut() = None;
+        *self.msaa_tex.lock() = None;
+        *self.ds_tex.lock() = None;
     }
 
     /// 获取匹配当前 sample_count 的 pipeline
@@ -523,7 +523,7 @@ impl Renderer {
     /// 获取 multisampled 视图（必要时创建），无 MSAA 返回 None
     fn msaa_view(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
         if self.sample_count <= 1 { return None; }
-        let mut mt = self.msaa_tex.borrow_mut();
+        let mut mt = self.msaa_tex.lock();
         if mt.is_none()
             || mt.as_ref().unwrap().0.width() != self.physical_width
             || mt.as_ref().unwrap().0.height() != self.physical_height
@@ -545,7 +545,7 @@ impl Renderer {
 
     /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。sample_count 与 color 一致。
     fn ds_view(&self) -> wgpu::TextureView {
-        let mut dt = self.ds_tex.borrow_mut();
+        let mut dt = self.ds_tex.lock();
         let ok = dt.as_ref()
             .map(|(t,_)| {
                 t.width() == self.physical_width
@@ -601,7 +601,7 @@ impl Renderer {
     /// `None` = 用物理 surface 尺寸；`Some((w,h))` = 虚拟新物理尺寸（新逻辑 × dpi），
     /// glyph 不重新光栅化（`scale` 保持 dpi 不变），纯 shader 层 NDC 补偿拉伸。
     pub(crate) fn set_text_viewport_override(&self, size: Option<(u32, u32)>) {
-        self.text_viewport_override.set(size);
+        *self.text_viewport_override.lock() = size;
     }
 
     /// 更新相机投影（窗口 resize 时调用）。
@@ -619,9 +619,9 @@ impl Renderer {
         self.update_layout(logical_width, logical_height, scale, dpi_scale);
         self.physical_width = physical_width;
         self.physical_height = physical_height;
-        self.text_viewport_override.set(None);
-        *self.msaa_tex.borrow_mut() = None;
-        *self.ds_tex.borrow_mut() = None;
+        *self.text_viewport_override.lock() = None;
+        *self.msaa_tex.lock() = None;
+        *self.ds_tex.lock() = None;
     }
 
 
@@ -664,7 +664,7 @@ impl Renderer {
 
     fn ensure_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.vertex_buf.borrow_mut();
+        let mut slot = self.vertex_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -679,7 +679,7 @@ impl Renderer {
 
     fn ensure_instance_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.instance_buf.borrow_mut();
+        let mut slot = self.instance_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -694,7 +694,7 @@ impl Renderer {
 
     fn ensure_geo_instance_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.geo_instance_buf.borrow_mut();
+        let mut slot = self.geo_instance_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -709,7 +709,7 @@ impl Renderer {
 
     fn ensure_geo_template_vertex_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.geo_template_vertex_buf.borrow_mut();
+        let mut slot = self.geo_template_vertex_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -724,7 +724,7 @@ impl Renderer {
 
     fn ensure_geo_template_index_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.geo_template_index_buf.borrow_mut();
+        let mut slot = self.geo_template_index_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -739,7 +739,7 @@ impl Renderer {
 
     fn ensure_index_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.index_buf.borrow_mut();
+        let mut slot = self.index_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
@@ -754,7 +754,7 @@ impl Renderer {
 
     fn ensure_polygon_edge_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.polygon_edge_buf.borrow_mut();
+        let mut slot = self.polygon_edge_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two().max(64) } else { (cur * 2).max(size) };
@@ -765,12 +765,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *slot = Some((buf, new_cap));
-        *self.engine_storage_bind_group_cache.borrow_mut() = None;
+        *self.engine_storage_bind_group_cache.lock() = None;
     }
 
     fn ensure_transform_buffer(&self, size: u64) {
         if size == 0 { return; }
-        let mut slot = self.transform_buf.borrow_mut();
+        let mut slot = self.transform_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size { return; }
         let new_cap = if cur == 0 { size.next_power_of_two().max(48) } else { (cur * 2).max(size) };
@@ -781,7 +781,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *slot = Some((buf, new_cap));
-        *self.engine_storage_bind_group_cache.borrow_mut() = None;
+        *self.engine_storage_bind_group_cache.lock() = None;
     }
 }
 

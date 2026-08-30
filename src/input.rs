@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::lock::Lock;
+use parking_lot::Mutex;
 
 // ------ Re-exports (winit types direct) ------
 
@@ -195,31 +195,31 @@ impl Default for InputCallbacks {
 /// 持久的输入状态（VireoWindow 内部持有）
 pub struct InputState {
     /// 当前按下的键集合（不包含 repeat 事件）
-    pub keys_down: Lock<HashSet<KeyCode>>,
+    pub keys_down: Mutex<HashSet<KeyCode>>,
     /// 当前按下的鼠标按钮集合
-    pub mouse_buttons_down: Lock<HashSet<MouseButton>>,
+    pub mouse_buttons_down: Mutex<HashSet<MouseButton>>,
     /// 当前修饰键状态
-    pub modifiers: Lock<Modifiers>,
+    pub modifiers: Mutex<Modifiers>,
     /// 本帧滚轮增量累计（按单位分开，避免鼠标滚轮 vs 触控板的单位混淆）
-    pub scroll_delta: Lock<ScrollDeltaAccum>,
+    pub scroll_delta: Mutex<ScrollDeltaAccum>,
     /// 窗口是否有焦点
-    pub focused: Lock<bool>,
+    pub focused: Mutex<bool>,
     /// 鼠标是否在窗口内
-    pub cursor_inside: Lock<bool>,
+    pub cursor_inside: Mutex<bool>,
     /// 活跃的触摸点: id -> (x, y, force)
-    pub touches: Lock<HashMap<u64, (f32, f32, Option<f64>)>>,
+    pub touches: Mutex<HashMap<u64, (f32, f32, Option<f64>)>>,
 }
 
 impl Default for InputState {
     fn default() -> Self {
         Self {
-            keys_down: Lock::new(HashSet::new()),
-            mouse_buttons_down: Lock::new(HashSet::new()),
-            modifiers: Lock::new(Modifiers::NONE),
-            scroll_delta: Lock::new(ScrollDeltaAccum::default()),
-            focused: Lock::new(false),
-            cursor_inside: Lock::new(false),
-            touches: Lock::new(HashMap::new()),
+            keys_down: Mutex::new(HashSet::new()),
+            mouse_buttons_down: Mutex::new(HashSet::new()),
+            modifiers: Mutex::new(Modifiers::NONE),
+            scroll_delta: Mutex::new(ScrollDeltaAccum::default()),
+            focused: Mutex::new(false),
+            cursor_inside: Mutex::new(false),
+            touches: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -391,34 +391,34 @@ mod tests {
     #[test]
     fn input_state_default() {
         let state = InputState::default();
-        assert!(state.keys_down.borrow().is_empty());
-        assert!(state.mouse_buttons_down.borrow().is_empty());
-        assert_eq!(*state.modifiers.borrow(), Modifiers::NONE);
-        assert_eq!(*state.scroll_delta.borrow(), ScrollDeltaAccum::default());
-        assert!(!*state.focused.borrow());
-        assert!(!*state.cursor_inside.borrow());
-        assert!(state.touches.borrow().is_empty());
+        assert!(state.keys_down.lock().is_empty());
+        assert!(state.mouse_buttons_down.lock().is_empty());
+        assert_eq!(*state.modifiers.lock(), Modifiers::NONE);
+        assert_eq!(*state.scroll_delta.lock(), ScrollDeltaAccum::default());
+        assert!(!*state.focused.lock());
+        assert!(!*state.cursor_inside.lock());
+        assert!(state.touches.lock().is_empty());
     }
 
     #[test]
     fn input_state_key_tracking() {
         let state = InputState::default();
-        state.keys_down.borrow_mut().insert(KeyCode::KeyW);
-        assert!(state.keys_down.borrow().contains(&KeyCode::KeyW));
-        assert!(!state.keys_down.borrow().contains(&KeyCode::KeyA));
+        state.keys_down.lock().insert(KeyCode::KeyW);
+        assert!(state.keys_down.lock().contains(&KeyCode::KeyW));
+        assert!(!state.keys_down.lock().contains(&KeyCode::KeyA));
     }
 
     #[test]
     fn input_state_scroll_accumulate() {
         let state = InputState::default();
         {
-            let mut d = state.scroll_delta.borrow_mut();
+            let mut d = state.scroll_delta.lock();
             d.line.0 += 1.5;
             d.line.1 += -3.0;
             d.pixel.0 += 100.0;
             d.pixel.1 += -200.0;
         }
-        let d = *state.scroll_delta.borrow();
+        let d = *state.scroll_delta.lock();
         assert_eq!(d.line, (1.5, -3.0));
         assert_eq!(d.pixel, (100.0, -200.0));
     }

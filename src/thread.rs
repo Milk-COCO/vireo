@@ -10,9 +10,9 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::lock::Lock;
+use parking_lot::Mutex;
 use crate::window::App;
 use crate::window::{
     panic_payload_to_string, WinitEvent, DeferredTask, DeferredTaskKind,
@@ -94,7 +94,7 @@ pub struct LoopContext {
     tick_count: u64,
     deferred: Vec<DeferredTask>,
     app: App,
-    fps_stats: Arc<Lock<FpsStats>>,
+    fps_stats: Arc<Mutex<FpsStats>>,
 }
 
 impl LoopContext {
@@ -110,12 +110,12 @@ impl LoopContext {
 
     /// 本循环所属线程的瞬时 FPS（滑动窗口估计）。
     pub fn fps(&self) -> f64 {
-        self.fps_stats.borrow().fps()
+        self.fps_stats.lock().fps()
     }
 
     /// 本循环所属线程的瞬时帧时间（秒）。
     pub fn frame_time(&self) -> f64 {
-        self.fps_stats.borrow().frame_time()
+        self.fps_stats.lock().frame_time()
     }
 
     /// 延迟若干 tick 后执行（计数基于本循环）。
@@ -165,7 +165,7 @@ impl LoopRuntime {
 pub(crate) fn drive_loops(
     runtimes: &mut Vec<LoopRuntime>,
     app: &App,
-    fps_stats: &Arc<Lock<FpsStats>>,
+    fps_stats: &Arc<Mutex<FpsStats>>,
 ) -> Result<bool, Box<dyn std::any::Any + Send>> {
     let mut any = false;
     for i in 0..runtimes.len() {
@@ -297,28 +297,28 @@ impl Thread {
 pub struct ThreadHandle {
     pub(crate) state: Arc<LoopHandleState>,
     pub(crate) thread: Option<std::thread::JoinHandle<()>>,
-    pub(crate) shared: Arc<std::sync::Mutex<Vec<Loop>>>,
-    pub(crate) fps_stats: Arc<Lock<FpsStats>>,
+    pub(crate) shared: Arc<parking_lot::Mutex<Vec<Loop>>>,
+    pub(crate) fps_stats: Arc<parking_lot::Mutex<FpsStats>>,
 }
 
 impl ThreadHandle {
     /// 向本线程追加单个循环（运行期，跨线程安全）。
     pub fn push(&self, l: Loop) {
-        self.shared.lock().unwrap().push(l);
+        self.shared.lock().push(l);
     }
     /// 向本线程追加多个循环（运行期）。
     pub fn extend(&self, loops: impl IntoIterator<Item = Loop>) {
-        self.shared.lock().unwrap().extend(loops);
+        self.shared.lock().extend(loops);
     }
 
     /// 本组循环所属线程的瞬时 FPS（滑动窗口估计）。
     pub fn fps(&self) -> f64 {
-        self.fps_stats.borrow().fps()
+        self.fps_stats.lock().fps()
     }
 
     /// 本组循环所属线程的瞬时帧时间（秒）。
     pub fn frame_time(&self) -> f64 {
-        self.fps_stats.borrow().frame_time()
+        self.fps_stats.lock().frame_time()
     }
 }
 
@@ -376,7 +376,7 @@ pub(crate) fn run_thread_loop(
     app: App,
     loops: Vec<Loop>,
     state: Arc<LoopHandleState>,
-    fps_stats: Arc<Lock<FpsStats>>,
+    fps_stats: Arc<Mutex<FpsStats>>,
     shared: Arc<Mutex<Vec<Loop>>>,
     device_lost: Arc<AtomicBool>,
     max_tps: Option<u32>,
@@ -387,7 +387,7 @@ pub(crate) fn run_thread_loop(
         while !state.done.load(Ordering::Acquire) {
             // 动态追加的运行期 loop（跨线程安全）。
             {
-                let mut extra = shared.lock().unwrap();
+                let mut extra = shared.lock();
                 if !extra.is_empty() {
                     for l in extra.drain(..) {
                         runtimes.push(LoopRuntime::new(l));
@@ -405,7 +405,7 @@ pub(crate) fn run_thread_loop(
                 {
                     if device_lost.load(Ordering::Acquire) {
                         // 唤醒 supervisor 重新判定退出（设备丢失分支）。
-                        if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                        if let Some(tx) = app.inner.event_tx.lock().clone() {
                             let _ = tx.send(WinitEvent::Wake);
                         }
                         return;
@@ -414,7 +414,7 @@ pub(crate) fn run_thread_loop(
                 }
             }
             if device_lost.load(Ordering::Acquire) {
-                if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                if let Some(tx) = app.inner.event_tx.lock().clone() {
                     let _ = tx.send(WinitEvent::Wake);
                 }
                 break;
@@ -433,7 +433,7 @@ pub(crate) fn run_thread_loop(
                     return;
                 }
             };
-            fps_stats.borrow_mut().tick(std::time::Instant::now());
+            fps_stats.lock().tick(std::time::Instant::now());
             // 所有窗口已创建且现已全部关闭（关窗后 `on_tick` 仍可能返回 `true`）→ 独立于
             // `on_tick` 返回值退出，与 supervisor 的 `all_windows_closed` 判定对齐，避免进程空转不退出。
             if app.created_window_count() > 0
@@ -466,7 +466,7 @@ pub(crate) fn run_thread_loop(
             }
             if device_lost.load(Ordering::Acquire) {
                 // 唤醒 supervisor 重新判定退出（设备丢失分支）。
-                if let Some(tx) = app.inner.event_tx.borrow().clone() {
+                if let Some(tx) = app.inner.event_tx.lock().clone() {
                     let _ = tx.send(WinitEvent::Wake);
                 }
                 break;
@@ -481,7 +481,7 @@ pub(crate) fn run_thread_loop(
             state.done.store(true, Ordering::Release);
             wake(&state);
             // loop 正常完成 → 唤醒 supervisor 重新判定退出（事件驱动，取代固定间隔 sleep）。
-            if let Some(tx) = app.inner.event_tx.borrow().clone() {
+            if let Some(tx) = app.inner.event_tx.lock().clone() {
                 let _ = tx.send(WinitEvent::Wake);
             }
         }
@@ -494,7 +494,7 @@ pub(crate) fn run_thread_loop(
             state.done.store(true, Ordering::Release);
             wake(&state);
             // loop panic → 同样唤醒 supervisor 重新判定退出。
-            if let Some(tx) = app.inner.event_tx.borrow().clone() {
+            if let Some(tx) = app.inner.event_tx.lock().clone() {
                 let _ = tx.send(WinitEvent::Wake);
             }
         }
@@ -505,7 +505,7 @@ pub(crate) fn run_thread_loop(
     // （最坏情况下渲染线程崩溃、当前帧未置 idle，关窗路径也据此安全放行）。
     for win in app
         .windows
-        .borrow()
+        .lock()
         .iter()
         .filter_map(|o| o.clone())
     {
