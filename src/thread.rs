@@ -3,7 +3,7 @@
 //! 设计原则（见 `.opencode/多循环.md`）：`App::run(on_tick)` / `App::spawn(loops)` / `App::loops`
 //! 各自在一条独立的 OS 线程上驱动一组 `Loop`。`App` 内部的跨线程字段经 `Lock` / `Atomic*` 包裹
 //! （见 `AppInner` / `VireoWindow`），可安全从多条线程并发访问；winit 事件由 owner 线程转发、
-//! 经 supervisor 线程集中应用到 `App` 状态（见 `crate::window::supervisor_loop`）。
+//! 经 supervisor 线程集中应用到 `App` 状态（见 `crate::app::supervisor_loop`）。
 //!
 //! 每条 loop 线程跑 [`run_thread_loop`]，在其中以非阻塞轮询方式驱动多 loop，并在 `App::windows`
 //! 就绪（`windows_ready`）后开始；`panic` 经 `LoopHandleState` 转成 `Err` 对外暴露。
@@ -13,10 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use crate::window::App;
-use crate::window::{
-    panic_payload_to_string, WinitEvent, DeferredTask, DeferredTaskKind,
-};
+use crate::app::App;
+use crate::app::{panic_payload_to_string, DeferredTask, DeferredTaskKind};
+use crate::window::WinitEvent;
 
 /// FPS 采样滑动窗口容量（per-thread）。
 pub(crate) const FPS_SAMPLE_CAP: usize = 30;
@@ -365,9 +364,9 @@ fn wake(state: &Arc<LoopHandleState>) {
 
 /// 单条 loop 线程的主驱动：以非阻塞轮询方式跑所给 `Loop` 组，直到全部结束或设备丢失。
 ///
-/// - 由 [`crate::window::App::spawn`] 在独立 OS 线程上调用，对应一条 `ThreadHandle`。
+/// - 由 [`crate::app::App::spawn`] 在独立 OS 线程上调用，对应一条 `ThreadHandle`。
 /// - `App` 内部的跨线程字段经 `Lock` / `Atomic*` 包裹，可安全从多线程访问；窗口事件已由
-///   supervisor 线程集中应用到 `App`（见 `crate::window::supervisor_loop`），故此处只读 `app.windows`。
+///   supervisor 线程集中应用到 `App`（见 `crate::app::supervisor_loop`），故此处只读 `app.windows`。
 
 
 /// - `panic` 被捕获并经由 `LoopHandleState.result` 转成 `Err`，使 `ThreadHandle::await` 返回错误，

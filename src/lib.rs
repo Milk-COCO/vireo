@@ -22,10 +22,10 @@ pub mod area;
 pub use vireo_macro::main;
 
 #[doc(hidden)]
-pub use crate::window::App;
+pub use crate::app::App;
 #[doc(hidden)]
 
-
+pub mod app;
 pub mod thread;
 
 pub mod color;
@@ -129,7 +129,7 @@ pub mod prelude {
     pub use crate::window::FollowFramesOrTime;
     pub use crate::window::AntiAliasing;
     pub use crate::window::FrameStyle;
-    pub use crate::window::App;
+    pub use crate::app::App;
     pub use crate::window::DrawOutcome;
     pub use crate::window::DrawReport;
     pub use crate::window::DrawSkipReason;
