@@ -5,3 +5,4 @@ target/
 opencode.json
 .vscode/
 Cargo.lock
+flamegraph.svg
