@@ -218,7 +218,8 @@ pub struct VireoWindow {
     close_tx: mpsc::Sender<usize>,
     /// winit 事件循环代理（与 `AppInner::event_loop_proxy` 共享）：`close()` 等方法在
     /// `ControlFlow::Wait` 下通过它唤醒事件循环，使其重新进入 `about_to_wait` 排空通道。
-    event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
+    /// `EventLoopProxy` 是 `Send + Sync + Clone`，设置后永不变更，无需 `Lock`。
+    event_loop_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: Lock<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
@@ -327,7 +328,7 @@ impl VireoWindow {
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
         nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
         close_tx: mpsc::Sender<usize>,
-        event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
+        event_loop_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
         handle: usize,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
@@ -1514,7 +1515,8 @@ pub struct AppInner {
     /// 渲染线程通过 `create_tx` / `close_tx` / `cb_tx` 等通道发消息给 winit 线程后，
     /// 调用 `proxy.send_event(())` 唤醒事件循环，使其重新进入 `about_to_wait` 排空所有通道。
     /// `None` 仅在构造早期（`run_blocking` 创建 EventLoop 前）短暂存在。
-    pub(crate) event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
+    /// `EventLoopProxy` 是 `Send + Sync`，设置后永不变更，用 `OnceLock` 无需 `Mutex`。
+    pub(crate) event_loop_proxy: std::sync::OnceLock<winit::event_loop::EventLoopProxy<()>>,
 }
 
 pub struct App {
@@ -1727,7 +1729,7 @@ impl App {
                 main_done: std::sync::atomic::AtomicBool::new(false),
                 event_tx: Lock::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
-                event_loop_proxy: Lock::new(None),
+                event_loop_proxy: std::sync::OnceLock::new(),
             }),
         };
 
@@ -1792,7 +1794,7 @@ impl App {
     /// 在 `run_blocking` 之前调用（预注册窗口）时 proxy 尚为 `None`，但此时事件循环未启动，
     /// 消息已在通道中，`resumed` + 首次 `about_to_wait` 会立即 drain。
     fn wake_event_loop(&self) {
-        if let Some(proxy) = self.event_loop_proxy.borrow().as_ref() {
+        if let Some(proxy) = self.event_loop_proxy.get() {
             let _ = proxy.send_event(());
         }
     }
@@ -1957,7 +1959,7 @@ impl App {
         // 创建 EventLoopProxy：渲染线程通过它在 `ControlFlow::Wait` 下唤醒事件循环，
         // 使其重新进入 `about_to_wait` 排空所有通道（create_rx/close_rx/cb_rx 等）。
         // 需要在 `run_app` 之前设置，保证渲染线程 condvar 唤醒后能立即使用。
-        *self.event_loop_proxy.borrow_mut() = Some(event_loop.create_proxy());
+        let _ = self.event_loop_proxy.set(event_loop.create_proxy());
 
         let default_icon = self.default_icon.take();
         // 保留 self.instance（渲染线程重建 surface 需要）；Runner 拿 clone。
@@ -2615,7 +2617,7 @@ fn apply_winit_event_one(
                     }),
                 nc_tx.clone(),
                 close_tx.clone(),
-                Lock::new(app.event_loop_proxy.borrow().clone()),
+                app.event_loop_proxy.get().cloned(),
                 handle,
             );
             vw.set_max_fps(app.max_fps());
@@ -4054,9 +4056,9 @@ impl VireoWindow {
     }
 
     /// 唤醒 winit 事件循环（`ControlFlow::Wait` 下）。
-    /// 与 `App::wake_event_loop` 共享同一 `EventLoopProxy`（Arc clone）。
+    /// 与 `App::wake_event_loop` 共享同一 `EventLoopProxy`（Clone）。
     pub(crate) fn wake_event_loop(&self) {
-        if let Some(proxy) = self.event_loop_proxy.borrow().as_ref() {
+        if let Some(proxy) = self.event_loop_proxy.as_ref() {
             let _ = proxy.send_event(());
         }
     }
