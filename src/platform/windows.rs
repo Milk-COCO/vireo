@@ -1505,6 +1505,7 @@ if buttons.is_empty() {
     fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
         let Some(hwnd) = win_hwnd(&self.inner) else { return; };
         let _ = self.nc_tx.send((hwnd, NcUpdate::SetRegions(regions.to_vec())));
+        self.wake_event_loop();
     }
 
     fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
@@ -1522,6 +1523,7 @@ if buttons.is_empty() {
             None => NcUpdate::ClearHitTestCb,
         };
         let _ = self.nc_tx.send((hwnd, upd));
+        self.wake_event_loop();
     }
 
     fn on_thumb_button(&self, callback: impl FnMut(u32) + 'static) -> &Self {

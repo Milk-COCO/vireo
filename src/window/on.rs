@@ -26,6 +26,7 @@ macro_rules! def_app_ons {
                         ::log::warn!("vireo: failed to deliver app callback (receiver closed)");
                     }
                 }
+                self.wake_event_loop();
                 self
             }
         )*
@@ -48,6 +49,7 @@ macro_rules! def_window_ons {
                 if let Err(_) = self.cb_tx.send((self.handle, cbs)) {
                     ::log::warn!("vireo: failed to deliver window callback (receiver closed)");
                 }
+                self.wake_event_loop();
                 self
             }
         )*

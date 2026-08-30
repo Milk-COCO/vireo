@@ -471,7 +471,8 @@ pub(crate) fn run_thread_loop(
                 }
                 break;
             }
-            std::thread::yield_now();
+            // 不 yield：下轮要么 condvar wait（无事件时阻塞），要么 draw（acquire 阻塞等 vsync），
+            // yield_now 只是白白做一次内核上下文切换。
         }
     }));
 

@@ -1,4 +1,4 @@
-﻿use std::sync::{Arc, Mutex, mpsc};
+﻿use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use rustc_hash::FxHashMap;
 
 use crate::lock::Lock;
@@ -216,6 +216,9 @@ pub struct VireoWindow {
     pub(crate) nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     /// 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
     close_tx: mpsc::Sender<usize>,
+    /// winit 事件循环代理（与 `AppInner::event_loop_proxy` 共享）：`close()` 等方法在
+    /// `ControlFlow::Wait` 下通过它唤醒事件循环，使其重新进入 `about_to_wait` 排空通道。
+    event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
     /// 待应用的 present mode（在 draw 开头应用）
     pending_mode: Lock<Option<wgpu::PresentMode>>,
     /// 真正 configure 到 surface 的 present mode（仅 configure 时更新）
@@ -324,6 +327,7 @@ impl VireoWindow {
         cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
         nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
         close_tx: mpsc::Sender<usize>,
+        event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
         handle: usize,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
@@ -362,6 +366,7 @@ impl VireoWindow {
             event_tx,
             cb_tx,
             close_tx,
+            event_loop_proxy,
             pending_mode: Lock::new(None),
             applied_present_mode: Lock::new(initial_present_mode),
             pending_frame_latency: Lock::new(None),
@@ -593,7 +598,12 @@ impl VireoWindow {
         if self.auto_refresh_input.get() {
             self.refresh_input();
         }
-        let trace = std::env::var_os("VIREO_DRAW_TRACE").is_some();
+        // 缓存 env var：每帧调 GetEnvironmentVariableW 是内核调用，空闲时无意义。
+        fn draw_trace_enabled() -> bool {
+            static VAL: OnceLock<bool> = OnceLock::new();
+            *VAL.get_or_init(|| std::env::var_os("VIREO_DRAW_TRACE").is_some())
+        }
+        let trace = draw_trace_enabled();
         let t_trace = std::time::Instant::now();
         let mut configure_secs = 0.0;
 
@@ -1500,6 +1510,11 @@ pub struct AppInner {
     /// 渲染线程等待「窗口就绪 / 运行期建窗完成」的 Condvar：由 supervisor 在对应状态变更时
     /// `notify_all`，取代原先的 `yield_now` 自旋 / 固定间隔 `sleep`（事件驱动、无魔法数字）。
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+    /// winit 事件循环代理：用于在 `ControlFlow::Wait` 下唤醒事件循环。
+    /// 渲染线程通过 `create_tx` / `close_tx` / `cb_tx` 等通道发消息给 winit 线程后，
+    /// 调用 `proxy.send_event(())` 唤醒事件循环，使其重新进入 `about_to_wait` 排空所有通道。
+    /// `None` 仅在构造早期（`run_blocking` 创建 EventLoop 前）短暂存在。
+    pub(crate) event_loop_proxy: Lock<Option<winit::event_loop::EventLoopProxy<()>>>,
 }
 
 pub struct App {
@@ -1712,6 +1727,7 @@ impl App {
                 main_done: std::sync::atomic::AtomicBool::new(false),
                 event_tx: Lock::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
+                event_loop_proxy: Lock::new(None),
             }),
         };
 
@@ -1768,6 +1784,19 @@ impl App {
         }
     }
 
+    /// 唤醒 winit 事件循环（`ControlFlow::Wait` 下）。
+    ///
+    /// 渲染线程通过 mpsc 通道（`create_tx`/`close_tx`/`cb_tx` 等）发消息给 winit 线程后调用，
+    /// 使事件循环从 `Wait` 中醒来、重新进入 `about_to_wait` 排空所有通道。
+    /// `EventLoopProxy` 在 `run_blocking` 创建 `EventLoop` 后设置，此后恒为 `Some`。
+    /// 在 `run_blocking` 之前调用（预注册窗口）时 proxy 尚为 `None`，但此时事件循环未启动，
+    /// 消息已在通道中，`resumed` + 首次 `about_to_wait` 会立即 drain。
+    fn wake_event_loop(&self) {
+        if let Some(proxy) = self.event_loop_proxy.borrow().as_ref() {
+            let _ = proxy.send_event(());
+        }
+    }
+
     /// 配置一个待创建的窗口。可选 on_close 钩子在窗口被关闭时调用。
     /// 同步预热窗口 AA 对应的 SDF + geo 管线，并把 AA clamp 到硬件上限（避免 wgpu panic）。
     /// 构造耗时在 `App::run` 创建窗口后由 `VireoWindow::init_duration()` 暴露。
@@ -1804,6 +1833,10 @@ impl App {
                 });
                 self.pending_window_creates
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                // 唤醒 winit 事件循环：`ControlFlow::Wait` 下它可能阻塞在 `about_to_wait`，
+                // 不会主动 drain `create_rx`；proxy.send_event 触发 `user_event`→`about_to_wait`
+                // 排空通道，在本线程完成窗口创建。
+                self.wake_event_loop();
             }
             None => unreachable!(
                 "vireo: create_tx is always Some after run_entry/init_run_channels; \
@@ -1921,6 +1954,10 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // winit 事件循环由 OS 主线程运行的入口构造，满足线程要求（含 macOS）；无需 `any_thread`。
         let event_loop = EventLoop::new().unwrap();
+        // 创建 EventLoopProxy：渲染线程通过它在 `ControlFlow::Wait` 下唤醒事件循环，
+        // 使其重新进入 `about_to_wait` 排空所有通道（create_rx/close_rx/cb_rx 等）。
+        // 需要在 `run_app` 之前设置，保证渲染线程 condvar 唤醒后能立即使用。
+        *self.event_loop_proxy.borrow_mut() = Some(event_loop.create_proxy());
 
         let default_icon = self.default_icon.take();
         // 保留 self.instance（渲染线程重建 surface 需要）；Runner 拿 clone。
@@ -2337,11 +2374,11 @@ impl App {
                     self.request_close(handle);
                 }
                 if exit_requested {
-                    // 必须在 `set_control_flow(Poll)` 之前短路：否则 Poll 会覆盖 `Exit`，
+                    // 必须在 `set_control_flow(Wait)` 之前短路：否则 Wait 会覆盖 `Exit`，
                     // 导致 supervisor 已发出退出信号、事件循环却永不退出（进程残留）。
                     event_loop.exit();
                 } else {
-                    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
                 }
             }
 
@@ -2578,6 +2615,7 @@ fn apply_winit_event_one(
                     }),
                 nc_tx.clone(),
                 close_tx.clone(),
+                Lock::new(app.event_loop_proxy.borrow().clone()),
                 handle,
             );
             vw.set_max_fps(app.max_fps());
@@ -2760,6 +2798,9 @@ fn apply_winit_event_one(
                 // 这里仅转发到 winit 线程，由 Runner::about_to_wait 执行。
                 if let Some(hwnd) = win_hwnd(&win.inner) {
                     let _ = frame_style_tx.send((hwnd, style));
+                    // 唤醒 winit 事件循环：frame_style 由 Runner::about_to_wait drain，
+                    // Wait 模式下需主动唤醒。
+                    app.wake_event_loop();
                 }
             }
         }
@@ -2767,6 +2808,7 @@ fn apply_winit_event_one(
             if let Some(win) = app.windows.borrow().get(handle).and_then(|o| o.clone()) {
                 if let Some(hwnd) = win_hwnd(&win.inner) {
                     let _ = aspect_ratio_tx.send((hwnd, ratio));
+                    app.wake_event_loop();
                 }
             }
         }
@@ -2874,6 +2916,7 @@ fn supervisor_loop(
             || device_lost.load(std::sync::atomic::Ordering::Acquire)
         {
             let _ = exit_tx.send(());
+            app.wake_event_loop();
             return;
         }
         // 仅当本轮无任何事件时阻塞在 `rx.recv()`，等待下一个真实事件或 `WinitEvent::Wake`
@@ -4010,6 +4053,14 @@ impl VireoWindow {
         self.handle
     }
 
+    /// 唤醒 winit 事件循环（`ControlFlow::Wait` 下）。
+    /// 与 `App::wake_event_loop` 共享同一 `EventLoopProxy`（Arc clone）。
+    pub(crate) fn wake_event_loop(&self) {
+        if let Some(proxy) = self.event_loop_proxy.borrow().as_ref() {
+            let _ = proxy.send_event(());
+        }
+    }
+
     /// 请求关闭窗口（走与用户点关闭按钮相同的完整关窗路径）。
     ///
     /// 内部经 `close_tx` 通道转发到 winit 线程，在 winit 线程依次执行
@@ -4019,6 +4070,7 @@ impl VireoWindow {
     /// 迭代生效。
     pub fn close(&self) {
         let _ = self.close_tx.send(self.handle);
+        self.wake_event_loop();
     }
 
     /// 返回 `WindowIndex`（与 `app.on_key_down` 等注册方法共用）

@@ -111,17 +111,15 @@ impl OffscreenCanvas {
         );
         gpu.queue.submit(Some(encoder.finish()));
         let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
+        let (tx, _rx) = std::sync::mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        // 阻塞等 map 完成：loop 调 device.poll 直到 callback 触发
-        loop {
-            if rx.try_recv().is_ok() {
-                break;
-            }
-            let _ = gpu.device.poll(wgpu::PollType::Poll);
-        }
+        // 阻塞等 map 完成：Wait 阻塞直到回调触发，无需轮询
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         let data = slice.get_mapped_range().expect("readback map").to_vec();
         buf.unmap();
         if padded == bytes_per_row {
