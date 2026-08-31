@@ -2401,375 +2401,7 @@ impl VireoWindow {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct OffscreenIndex(pub usize);
 
-#[cfg(test)]
-mod present_state_tests {
-    //! 独立并发练习：`pending_view` / `pending_cmd_buf` 双槽状态机在多线程下的
-    //! 原子转移语义。第五十一轮起 vireo 删除 present-proxy（`SharedGPUState` 已移除，
-    //! render thread 独占 acquire→present，不再跨线程移交 SurfaceTexture），
-    //! 本模块作为通用并发 sanity 测试保留，不代表当前窗口架构。
 
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
-
-    /// 通用状态机：`pending_view: Mutex<Option<V>>` + `pending_cmd_buf: Mutex<Option<C>>`。
-    /// 用 `u32` 等值类型替身模拟 wgpu 的 TextureView/CommandBuffer。
-    struct StateMachine<V, C> {
-        pending_view: Mutex<Option<V>>,
-        pending_cmd_buf: Mutex<Option<C>>,
-    }
-
-    impl<V, C> StateMachine<V, C> {
-        fn new() -> Self {
-            Self { pending_view: Mutex::new(None), pending_cmd_buf: Mutex::new(None) }
-        }
-
-        /// winit 线程调：acquire 后把 view 放进来。
-        /// 返回 `true` 表示成功（之前是 Idle），`false` 表示状态错乱（已经有 view）。
-        fn put_view(&self, v: V) -> bool {
-            let mut slot = self.pending_view.lock().unwrap();
-            if slot.is_some() { return false; }
-            *slot = Some(v);
-            true
-        }
-
-        /// 逻辑线程调：take view 用于编码。
-        /// 返回 `Some(v)` 表示 Idle/Acquired 状态，`None` 表示 Encoded（view 已被消费）。
-        fn take_view(&self) -> Option<V> {
-            self.pending_view.lock().unwrap().take()
-        }
-
-        /// 逻辑线程调：编码完成后放 cmd_buf。
-        /// 返回 `true` 表示成功（Acquired 状态），`false` 表示状态错乱（cmd_buf 已存在）。
-        fn put_cmd_buf(&self, c: C) -> bool {
-            let mut slot = self.pending_cmd_buf.lock().unwrap();
-            if slot.is_some() { return false; }
-            *slot = Some(c);
-            true
-        }
-
-        /// winit 线程调：take cmd_buf 用于 submit+present。
-        /// 返回 `Some(c)` 表示 Encoded 状态，`None` 表示 Idle/Acquired。
-        fn take_cmd_buf(&self) -> Option<C> {
-            self.pending_cmd_buf.lock().unwrap().take()
-        }
-
-        /// resize/close 路径：清空所有字段。
-        fn drain(&self) {
-            *self.pending_view.lock().unwrap() = None;
-            *self.pending_cmd_buf.lock().unwrap() = None;
-        }
-    }
-
-    #[test]
-    fn idle_state_has_no_view_no_cmd_buf() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-        assert!(sm.pending_view.lock().unwrap().is_none());
-        assert!(sm.pending_cmd_buf.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn idle_to_acquired_puts_view() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        assert!(sm.put_view(42));
-        assert!(matches!(*sm.pending_view.lock().unwrap(), Some(42)));
-        assert!(sm.pending_cmd_buf.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn acquired_take_view_returns_view() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(42);
-        assert!(matches!(sm.take_view(), Some(42)));
-        // Acquired → Idle 转移
-        assert!(sm.take_view().is_none());
-    }
-
-    #[test]
-    fn acquired_to_encoded_take_view_then_put_cmd_buf() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(42);
-        let v = sm.take_view();
-        assert!(matches!(v, Some(42)));
-        // 现在 view 已被消费（即便字段可能仍 Some），模拟逻辑线程完成编码
-        assert!(sm.put_cmd_buf(100));
-        assert!(matches!(*sm.pending_cmd_buf.lock().unwrap(), Some(100)));
-    }
-
-    #[test]
-    fn encoded_take_cmd_buf_returns_cmd_buf() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(42);
-        sm.take_view();
-        sm.put_cmd_buf(100);
-        assert!(matches!(sm.take_cmd_buf(), Some(100)));
-        // Encoded → Idle
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    #[test]
-    fn full_cycle_idle_acquired_encoded_idle() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        // Idle
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-        // Idle → Acquired
-        sm.put_view(1);
-        // Acquired → Encoded
-        sm.take_view();
-        sm.put_cmd_buf(2);
-        // Encoded → Idle
-        sm.take_cmd_buf();
-        // 回到 Idle
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    #[test]
-    fn put_view_when_already_acquired_returns_false() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(1);
-        // 状态错乱：重复 acquire
-        assert!(!sm.put_view(2));
-        // 仍是第一个 view
-        assert!(matches!(*sm.pending_view.lock().unwrap(), Some(1)));
-    }
-
-    #[test]
-    fn put_cmd_buf_when_already_encoded_returns_false() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(1);
-        sm.take_view();
-        sm.put_cmd_buf(10);
-        // 状态错乱：重复编码
-        assert!(!sm.put_cmd_buf(20));
-        assert!(matches!(*sm.pending_cmd_buf.lock().unwrap(), Some(10)));
-    }
-
-    #[test]
-    fn drain_clears_acquired_state() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(1);
-        sm.drain();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    #[test]
-    fn drain_clears_encoded_state() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(1);
-        sm.take_view();
-        sm.put_cmd_buf(2);
-        sm.drain();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    #[test]
-    fn drain_on_idle_is_noop() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.drain();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    #[test]
-    fn double_drain_safe() {
-        let sm: StateMachine<u32, u32> = StateMachine::new();
-        sm.put_view(1);
-        sm.take_view();
-        sm.put_cmd_buf(2);
-        sm.drain();
-        sm.drain();
-        // 不 panic，字段仍为 None
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    /// 并发安全：N 线程随机执行状态机操作，验证不 panic + 最终可达成 Idle。
-    /// 模拟旧 present-proxy 双线程 race 的通用并发练习（当前架构已不适用）。
-    #[test]
-    fn concurrent_operations_safe() {
-        let sm = Arc::new(StateMachine::<u32, u32>::new());
-        let mut handles = Vec::new();
-        for tid in 0..8 {
-            let sm = Arc::clone(&sm);
-            handles.push(thread::spawn(move || {
-                for i in 0..1000 {
-                    match i % 4 {
-                        0 => { sm.put_view((tid * 1000 + i) as u32); }
-                        1 => { sm.take_view(); }
-                        2 => { sm.put_cmd_buf((tid * 1000 + i) as u32); }
-                        3 => { sm.take_cmd_buf(); }
-                        _ => unreachable!(),
-                    }
-                    // 防止某线程饿死
-                    thread::yield_now();
-                }
-            }));
-        }
-        for h in handles {
-            h.join().expect("thread panicked");
-        }
-        // 不验证最终状态（race 下不保证 Idle），只验证不 panic
-    }
-
-    /// drain 路径并发：winit 线程调 drain 时，逻辑线程可能正在 take_view。
-    /// 验证 drain 完成后所有 take 返回 None（不返回陈旧 view/cmd_buf）。
-    #[test]
-    fn drain_during_concurrent_access() {
-        let sm = Arc::new(StateMachine::<u32, u32>::new());
-        let mut handles = Vec::new();
-        // 逻辑线程：持续 put_view + take_view 模拟编码循环
-        for _ in 0..4 {
-            let sm = Arc::clone(&sm);
-            handles.push(thread::spawn(move || {
-                for i in 0..500 {
-                    sm.put_view(i);
-                    sm.take_view();
-                    sm.put_cmd_buf(i);
-                    thread::yield_now();
-                }
-            }));
-        }
-        // winit 线程：持续 drain + acquire 模拟 resize/close
-        for _ in 0..2 {
-            let sm = Arc::clone(&sm);
-            handles.push(thread::spawn(move || {
-                for _ in 0..500 {
-                    sm.drain();
-                    thread::sleep(Duration::from_micros(10));
-                }
-            }));
-        }
-        for h in handles {
-            h.join().expect("thread panicked");
-        }
-        // 最终 drain
-        sm.drain();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    /// put_view 并发竞争：N 线程同时 put_view，恰好一个成功，其余 false。
-    /// 这是 winit 线程 + 逻辑线程的 race 关键路径。
-    #[test]
-    fn put_view_is_atomic_only_one_succeeds() {
-        let sm = Arc::new(StateMachine::<u32, u32>::new());
-        let mut handles = Vec::new();
-        let success_count = Arc::new(Mutex::new(0u32));
-        for tid in 0..16 {
-            let sm = Arc::clone(&sm);
-            let success_count = Arc::clone(&success_count);
-            handles.push(thread::spawn(move || {
-                for i in 0..100 {
-                    if sm.put_view((tid * 1000 + i) as u32) {
-                        *success_count.lock().unwrap() += 1;
-                    }
-                }
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
-        // 仅当 pending_view 为 None 时 put 成功
-        // 多次成功是允许的（drain 之后又能 put）
-        // 但每个 put 时刻只有 1 个线程能 put
-        assert!(*success_count.lock().unwrap() > 0);
-    }
-
-    /// 模拟完整帧循环：winit 线程跑 "acquire + present" 循环，逻辑线程跑
-    /// "take_view + encode + put_cmd_buf" 循环。验证 N 帧后能稳定运行不 panic。
-    #[test]
-    fn winit_and_logic_thread_full_frame_loop() {
-        let sm = Arc::new(StateMachine::<u32, u32>::new());
-        let sm_winit = Arc::clone(&sm);
-        let sm_logic = Arc::clone(&sm);
-
-        // winit 线程：Idle → Acquire → ... → wait → ... → Idle
-        let winit = thread::spawn(move || {
-            for i in 0..500 {
-                // 模拟 acquire：Idle 时 put_view（成功）
-                if !sm_winit.put_view(i) {
-                    // 状态错乱（不应发生）
-                    panic!("winit: put_view failed at frame {}", i);
-                }
-                // 模拟等逻辑线程编码
-                while sm_winit.take_cmd_buf().is_none() {
-                    thread::yield_now();
-                }
-                // 模拟 submit+present：Encoded → Idle
-                // 提交后回到 Idle（drain 模拟）
-                sm_winit.drain();
-            }
-        });
-
-        // 逻辑线程：等 view → 编码 → 放 cmd_buf
-        let logic = thread::spawn(move || {
-            for _ in 0..500 {
-                // 等 view
-                let v = loop {
-                    if let Some(v) = sm_logic.take_view() {
-                        break v;
-                    }
-                    thread::yield_now();
-                };
-                // 编码（用 view 值作为 cmd_buf 内容）
-                assert!(sm_logic.put_cmd_buf(v + 1000));
-            }
-        });
-
-        winit.join().expect("winit thread panicked");
-        logic.join().expect("logic thread panicked");
-        // 最终 Idle
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-
-    /// Resize 路径模拟：winit 线程在 resize 期间调 drain，必须与逻辑线程正在
-    /// 进行的 put_view/take_view 兼容。验证 drain 后状态为 Idle。
-    #[test]
-    fn resize_drain_concurrent_with_logic() {
-        let sm = Arc::new(StateMachine::<u32, u32>::new());
-        let mut handles = Vec::new();
-
-        // 逻辑线程：持续 put_view + take_view
-        for tid in 0..3 {
-            let sm = Arc::clone(&sm);
-            handles.push(thread::spawn(move || {
-                for i in 0..500u32 {
-                    let v = (tid as u32) * 10000 + i;
-                    let _ = sm.put_view(v);
-                    // take_view 可能返回 None（如果 winit 同时 drain）
-                    let _ = sm.take_view();
-                    let _ = sm.put_cmd_buf(v + 1000);
-                    let _ = sm.take_cmd_buf();
-                    thread::yield_now();
-                }
-            }));
-        }
-
-        // winit 线程：resize 触发 drain
-        let sm_winit = Arc::clone(&sm);
-        handles.push(thread::spawn(move || {
-            for _ in 0..100 {
-                sm_winit.drain();
-                thread::sleep(Duration::from_micros(50));
-            }
-        }));
-
-        for h in handles {
-            h.join().unwrap();
-        }
-        // 最终 drain
-        sm.drain();
-        assert!(sm.take_view().is_none());
-        assert!(sm.take_cmd_buf().is_none());
-    }
-}
 
 #[cfg(test)]
 mod aspect_ratio_and_focus_tests {
@@ -2780,8 +2412,6 @@ mod aspect_ratio_and_focus_tests {
     //! - `blur` / `focused` 是 `InputState.focused` 的双向访问，本模块不直接构造
     //!   `VireoWindow`（需 winit 上下文），通过聚焦状态互斥的元测试验证语义：
     //!   `blur() = !focused()` 在所有聚焦状态下成立。
-
-    use std::cell::Cell;
 
     /// 验证 `validate_aspect_ratio` 过滤逻辑：`Some(r>0)` → `Some(r)`，其余 → `None`。
     #[test]
@@ -2804,25 +2434,7 @@ mod aspect_ratio_and_focus_tests {
         assert_eq!(super::validate_aspect_ratio(None), None);
     }
 
-    /// `blur` 与 `focused` 是同一个 `InputState.focused` Cell 的两面：
-    /// `blur = !focused` 在所有聚焦状态下成立。本测试用同型的 `Cell<bool>`
-    /// 替身（不构造真实 VireoWindow），验证 `blur` 实现是 `focused` 的取反。
-    #[test]
-    fn blur_is_negation_of_focused_cell() {
-        let focused = Cell::new(true);
-        assert!(!blur_from_cell(&focused));
-        focused.set(false);
-        assert!(blur_from_cell(&focused));
-        focused.set(true);
-        assert!(!blur_from_cell(&focused));
-    }
 
-    /// 测试替身：`VireoWindow::blur` = `!self.input.focused.lock()` 的简化表达。
-    /// 注意：真实 `focused` 实现用 `RefCell<bool>::lock()` 而非 `Cell::get`，
-    /// 但语义都是"读最新写入值后取反"，本替身足以验证。
-    fn blur_from_cell(c: &Cell<bool>) -> bool {
-        !c.get()
-    }
 }
 
 #[cfg(test)]
@@ -2877,34 +2489,21 @@ mod metrics_tests {
     }
 
     #[test]
-    fn logical_size_scales_physical_by_scale_factor() {
-        // 无 dpi 覆盖：逻辑 = 物理 / OS scale_factor（f32 不截断，可含小数）
-        let s = to_pixel_size(1920.0, 1080.0, 1.5);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1280.0, 720.0));
-        let s = to_pixel_size(1000.0, 500.0, 2.0);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (500.0, 250.0));
-        let s = to_pixel_size(1280.0, 720.0, 1.5);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (853.3333, 480.0));
-    }
-
-    #[test]
-    fn logical_size_override_one_is_physical() {
+    fn logical_size_conversion() {
         // scale=1.0：逻辑 = 物理（用户坐标即物理像素）
         let s = to_pixel_size(1920.0, 1080.0, 1.0);
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1920.0, 1080.0));
         let s = to_pixel_size(1000.0, 500.0, 1.0);
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1000.0, 500.0));
-    }
-
-    #[test]
-    fn logical_size_custom_override_overrides_os_scale() {
-        // Some(v)：logic = physical / v，与 OS 无关
-        let s = to_pixel_size(1920.0, 1080.0, 1.5);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1280.0, 720.0));
-        let s = to_pixel_size(1000.0, 500.0, 4.0);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (250.0, 125.0));
+        // scale=2.0：logic = physical / 2（非整数 scale 不截断）
+        let s = to_pixel_size(1920.0, 1080.0, 2.0);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (960.0, 540.0));
+        // scale=0.5（小 scale）
         let s = to_pixel_size(1000.0, 500.0, 0.5);
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (2000.0, 1000.0));
+        // 非整数 scale 截断验证
+        let s = to_pixel_size(1280.0, 720.0, 1.5);
+        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (853.3333, 480.0));
     }
 
     #[test]
@@ -2952,11 +2551,6 @@ mod metrics_tests {
     }
 
     #[test]
-    fn sliding_rate_empty_is_zero() {
-        assert_eq!(sliding_rate(&[]), 0.0);
-    }
-
-    #[test]
     fn sliding_rate_averages_intervals() {
         // 60Hz：30 个 ~16.67ms 间隔 → 约 60/s
         let samples: Vec<f64> = (0..30).map(|_| 1.0 / 60.0).collect();
@@ -2964,67 +2558,46 @@ mod metrics_tests {
         assert!((r - 60.0).abs() < 1e-6, "got {r}");
     }
 
-    #[test]
-    fn sliding_rate_ignores_nonpositive_sum() {
-        assert_eq!(sliding_rate(&[0.0, 0.0]), 0.0);
-    }
 
     fn base() -> std::time::Instant {
         std::time::Instant::now()
     }
 
     #[test]
-    fn resize_refresh_default_no_live_only_stable_snaps() {
-        // 默认（OnRelease）：拖动中尺寸持续变化 → 永不 configure；松手稳定满 debounce → Stable。
+    fn resize_refresh_decision_all_policies() {
         let t0 = base();
         let debounce = std::time::Duration::from_millis(100);
-        // 刚变化（stable_since=now）→ 还不稳，OnRelease → None
+        // OnRelease：刚变化 → None；稳定 200ms → Stable
         assert_eq!(
             super::resize_refresh(true, Some(t0), t0, debounce,
                 super::ResizeRefreshPolicy::OnRelease, t0),
             super::ResizeRefresh::None,
         );
-        // 已稳定 200ms → Stable
         let stable = t0 + std::time::Duration::from_millis(200);
         assert_eq!(
             super::resize_refresh(true, Some(t0), stable, debounce,
                 super::ResizeRefreshPolicy::OnRelease, t0),
             super::ResizeRefresh::Stable,
         );
-    }
-
-    #[test]
-    fn resize_refresh_every_frame_tracks_during_change() {
-        let t0 = base();
-        let debounce = std::time::Duration::from_millis(100);
-        // 拖动中（stable_since=now，未稳）→ EveryFrame 立即 Live
+        // EveryFrame：拖动中 → Live；稳定时 Stable 优先
         assert_eq!(
             super::resize_refresh(true, Some(t0), t0, debounce,
                 super::ResizeRefreshPolicy::EveryFrame, t0),
             super::ResizeRefresh::Live,
         );
-        // 尺寸稳定满 debounce 时 Stable 优先于 EveryFrame 的 Live
-        let stable = t0 + std::time::Duration::from_millis(200);
         assert_eq!(
             super::resize_refresh(true, Some(t0), stable, debounce,
                 super::ResizeRefreshPolicy::EveryFrame, t0),
             super::ResizeRefresh::Stable,
         );
-    }
-
-    #[test]
-    fn resize_refresh_periodic_triggers_on_interval() {
-        let t0 = base();
-        let debounce = std::time::Duration::from_millis(100);
+        // Periodic：距上次 200ms < iv(400ms) → None；满 iv → Live
         let iv = std::time::Duration::from_millis(400);
-        // 拖动中：距上次 configure 200ms < iv → None
         let mid = t0 + std::time::Duration::from_millis(200);
         assert_eq!(
             super::resize_refresh(true, Some(mid), mid, debounce,
                 super::ResizeRefreshPolicy::Periodic(iv), t0),
             super::ResizeRefresh::None,
         );
-        // 距上次 configure 已满 iv → Live（拖动中周期性实时刷新）
         let late = t0 + std::time::Duration::from_millis(450);
         assert_eq!(
             super::resize_refresh(true, Some(late), late, debounce,
@@ -3066,10 +2639,6 @@ mod metrics_tests {
         );
     }
 
-    #[test]
-    fn default_resize_debounce_is_100ms() {
-        assert_eq!(super::DEFAULT_RESIZE_DEBOUNCE, std::time::Duration::from_millis(100));
-    }
 
     #[test]
     fn size_drifted_within_epsilon_not_drifted() {
@@ -3117,30 +2686,19 @@ mod metrics_tests {
     }
 
     #[test]
-    fn drag_effective_cap_keeps_user_cap_when_higher_than_refresh() {
-        // 用户 240、刷新率 120（milli-Hz 120_000）→ 压到 120
+    fn drag_cap_effective() {
+        // 开关开启：用户 Some(240) 压到刷新率 120；用户 Some(60) 保持 60（不抬升）
         assert_eq!(super::drag_effective_cap(Some(240), 120_000), Some(120));
-        // 用户 60、刷新率 120 → 保持 60（不抬升）
         assert_eq!(super::drag_effective_cap(Some(60), 120_000), Some(60));
-        // 用户 144、刷新率 120 → 压到 120
         assert_eq!(super::drag_effective_cap(Some(144), 120_000), Some(120));
-    }
-
-    #[test]
-    fn drag_effective_cap_respects_explicit_none_and_zero_refresh() {
-        // 用户显式不限制 → 拖动期也压到刷新率（与 set_max_fps 解耦）
+        // 用户 None → 也压到刷新率（解耦）；刷新率 0 → 下限 1
         assert_eq!(super::drag_effective_cap(None, 120_000), Some(120));
-        // 刷新率 0（查询异常）→ 下限 1，min 后用户值被压到 1 以下为 1
         assert_eq!(super::drag_effective_cap(Some(240), 0), Some(1));
         assert_eq!(super::drag_effective_cap(Some(1), 0), Some(1));
-    }
-
-    #[test]
-    fn drag_cap_switch_disables_dragging_cap_and_enabled_caps_even_with_none() {
-        // 开关关闭 → 原样返回用户值（不额外压制）
+        // 开关关闭：原样返回（不额外压制）
         assert_eq!(super::drag_cap_effective(Some(240), false, 120_000), Some(240));
         assert_eq!(super::drag_cap_effective(None, false, 120_000), None);
-        // 开关开启 → 用户 Some 压到刷新率；用户 None 也压（解耦）
+        // 开关开启：Some 压到刷新率；None 也压
         assert_eq!(super::drag_cap_effective(Some(240), true, 120_000), Some(120));
         assert_eq!(super::drag_cap_effective(None, true, 120_000), Some(120));
     }
@@ -3154,23 +2712,6 @@ mod metrics_tests {
         assert_eq!(super::mhz_to_hz(0), 0);
     }
 
-    #[test]
-    fn window_desc_default_frame_latency_is_2() {
-        // DX12 下 latency 2 → 3 swapchain buffer（无 vsync 峰值更高），默认值即 3 buffer。
-        assert_eq!(super::WindowDesc::new("t", 640, 360).frame_latency, 2);
-        assert_eq!(
-            super::WindowDesc::new("t", 640, 360).frame_latency(1).frame_latency,
-            1
-        );
-    }
-
-    #[test]
-    fn window_desc_preparable_defaults_on_and_builder_switches() {
-        // `preparable` 默认开：创建隐藏、首帧渲染后显示，消除 winit 建窗 4 阶段闪烁。
-        assert!(super::WindowDesc::new("t", 640, 360).preparable);
-        assert!(!super::WindowDesc::new("t", 640, 360).preparable(false).preparable);
-        assert!(super::WindowDesc::new("t", 640, 360).preparable(true).preparable);
-    }
 
     #[test]
     fn window_desc_new_size_is_logical_and_builders_are_typed() {

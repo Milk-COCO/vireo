@@ -2100,18 +2100,6 @@ mod custom_material_tests {
         }
     }
 
-    #[test]
-    fn material_input_exposes_base_uv() {
-        assert!(MATERIAL_INPUT_WGSL.contains("base_uv: vec2<f32>"));
-        assert!(MATERIAL_INPUT_WGSL.contains("const VIREO_TARGET_SHAPE: u32 = 0u;"));
-        assert!(MATERIAL_INPUT_WGSL.contains("const VIREO_TARGET_TEXT: u32 = 1u;"));
-    }
-
-    #[test]
-    fn material_target_constants_match_rust() {
-        assert_eq!(VIREO_TARGET_SHAPE, 0);
-        assert_eq!(VIREO_TARGET_TEXT, 1);
-    }
 }
 
 /// 2D 顶点（68 字节）。

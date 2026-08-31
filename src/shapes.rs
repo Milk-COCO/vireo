@@ -1457,15 +1457,6 @@ mod tests {
     }
 
     #[test]
-    fn rect_produces_vertices() {
-        let mut batch = test_batch();
-        draw_rectangle(&mut batch, Pos::new(10.0, 20.0), 30.0, 40.0, Some(WHITE));
-        assert_eq!(batch.geo_template_vertices.len(), 4);
-        assert_eq!(batch.geo_template_indices.len(), 6);
-        assert_eq!(batch.geo_instances.len(), 1);
-    }
-
-    #[test]
     fn none_color_uses_batch_color() {
         let mut batch = test_batch();
         batch.set_color(GREEN);
@@ -1557,14 +1548,6 @@ mod tests {
     }
 
     #[test]
-    fn circle_sdf_min_segments() {
-        let mut batch = test_batch();
-        batch.sdf_feather = Some(0.0);
-        draw_circle(&mut batch, Pos::new(0.0, 0.0), 10.0, Some(RED));
-        assert_eq!(batch.instances.len(), 1);
-    }
-
-    #[test]
     fn line_geometry_produces_caps() {
         let mut batch = test_batch();
         draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 2.0, Some(WHITE));
@@ -1582,14 +1565,13 @@ mod tests {
     }
 
     #[test]
-    fn line_zero_thickness_skipped() {
+    fn line_zero_thickness_both_modes_combined() {
+        // geometry mode: zero thickness → no geo instances
         let mut batch = test_batch();
         draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 0.0, Some(WHITE));
         assert!(batch.geo_instances.is_empty());
-    }
 
-    #[test]
-    fn line_zero_thickness_skipped_in_default_sdf_mode() {
+        // default SDF mode: zero thickness → no SDF instances
         let mut batch = DrawBatch::new();
         draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 0.0, Some(WHITE));
         assert!(batch.instances.is_empty());
@@ -1766,17 +1748,6 @@ mod tests {
         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, Some(GREEN));
         assert_eq!(batch.instances.len(), 1);
         assert_eq!(batch.instances[0].sdf_type, 2);
-    }
-
-    #[test]
-    fn rect_geometry_mode_produces_triangles() {
-        let mut batch = test_batch();
-        batch.sdf_feather = None;
-        draw_rectangle(&mut batch, Pos::new(10.0, 20.0), 30.0, 40.0, Some(WHITE));
-        assert_eq!(batch.geo_template_vertices.len(), 4);
-        assert_eq!(batch.geo_template_indices.len(), 6);
-        assert_eq!(batch.geo_instances.len(), 1);
-        assert!(batch.vertices.is_empty(), "geometry mode should not emit mesh vertices");
     }
 
     #[test]

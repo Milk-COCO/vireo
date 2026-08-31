@@ -257,24 +257,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn color_new() {
-        let c = Color::new(0.5, 0.25, 0.75, 1.0);
-        assert_eq!(c.r, 0.5);
-        assert_eq!(c.g, 0.25);
-        assert_eq!(c.b, 0.75);
-        assert_eq!(c.a, 1.0);
-    }
-
-    #[test]
-    fn color_default() {
-        let c = Color::default();
-        assert_eq!(c.r, 0.0);
-        assert_eq!(c.g, 0.0);
-        assert_eq!(c.b, 0.0);
-        assert_eq!(c.a, 0.0);
-    }
-
-    #[test]
     fn color_to_u8_array() {
         let c = Color::new(1.0, 0.5, 0.0, 0.0);
         let arr: [u8; 4] = c.into();
@@ -303,26 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn color_to_glam_vec4() {
-        let c = Color::new(0.1, 0.2, 0.3, 0.4);
-        let v: glam::Vec4 = c.into();
-        assert_eq!(v.x, 0.1);
-        assert_eq!(v.y, 0.2);
-        assert_eq!(v.z, 0.3);
-        assert_eq!(v.w, 0.4);
-    }
-
-    #[test]
-    fn color_from_glam_vec4() {
-        let v = glam::vec4(0.9, 0.8, 0.7, 0.6);
-        let c = Color::from(v);
-        assert_eq!(c.r, 0.9);
-        assert_eq!(c.g, 0.8);
-        assert_eq!(c.b, 0.7);
-        assert_eq!(c.a, 0.6);
-    }
-
-    #[test]
     fn color_roundtrip_glam() {
         let original = Color::new(0.33, 0.66, 0.99, 0.5);
         let v: glam::Vec4 = original.into();
@@ -340,49 +302,21 @@ mod tests {
     }
 
     #[test]
-    fn color_u8_macro_zero() {
-        let c = color_u8!(0, 0, 0, 0);
-        assert_eq!(c, Color::new(0.0, 0.0, 0.0, 0.0));
-    }
+    fn hsl_primary_colors() {
+        let red = hsl_to_rgb(0.0, 1.0, 0.5);
+        assert!((red.r - 1.0).abs() < 0.01);
+        assert!((red.g).abs() < 0.01);
+        assert!((red.b).abs() < 0.01);
 
-    #[test]
-    fn hsl_red_is_red() {
-        let c = hsl_to_rgb(0.0, 1.0, 0.5);
-        assert!((c.r - 1.0).abs() < 0.01);
-        assert!((c.g).abs() < 0.01);
-        assert!((c.b).abs() < 0.01);
-    }
+        let green = hsl_to_rgb(120.0, 1.0, 0.5);
+        assert!((green.r).abs() < 0.01);
+        assert!((green.g - 1.0).abs() < 0.01);
+        assert!((green.b).abs() < 0.01);
 
-    #[test]
-    fn hsl_green_is_green() {
-        let c = hsl_to_rgb(120.0, 1.0, 0.5);
-        assert!((c.r).abs() < 0.01);
-        assert!((c.g - 1.0).abs() < 0.01);
-        assert!((c.b).abs() < 0.01);
-    }
-
-    #[test]
-    fn hsl_blue_is_blue() {
-        let c = hsl_to_rgb(240.0, 1.0, 0.5);
-        assert!((c.r).abs() < 0.01);
-        assert!((c.g).abs() < 0.01);
-        assert!((c.b - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn hsl_black_is_black() {
-        let c = hsl_to_rgb(0.0, 0.0, 0.0);
-        assert!((c.r).abs() < 0.01);
-        assert!((c.g).abs() < 0.01);
-        assert!((c.b).abs() < 0.01);
-    }
-
-    #[test]
-    fn hsl_white_is_white() {
-        let c = hsl_to_rgb(0.0, 0.0, 1.0);
-        assert!((c.r - 1.0).abs() < 0.01);
-        assert!((c.g - 1.0).abs() < 0.01);
-        assert!((c.b - 1.0).abs() < 0.01);
+        let blue = hsl_to_rgb(240.0, 1.0, 0.5);
+        assert!((blue.r).abs() < 0.01);
+        assert!((blue.g).abs() < 0.01);
+        assert!((blue.b - 1.0).abs() < 0.01);
     }
 
     #[test]

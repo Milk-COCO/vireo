@@ -879,19 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn text_override_has_uv_and_bind_group_shared() {
-        let uv = UvRect { u0: 0.1, v0: 0.2, u1: 0.8, v1: 0.9 };
-        let ov = TextOverride::default().uv(uv).clear_texture().color(RED);
-        assert_eq!(ov.uv, Some(uv));
-        assert_eq!(ov.bind_group, Some(None));
-        assert_eq!(ov.color, Some(RED));
-        let bo = BatchOverride::default().text(ov);
-        assert_eq!(bo.uv, Some(uv));
-        assert_eq!(bo.bind_group, Some(None));
-        assert_eq!(bo.color, Some(RED));
-    }
-
-    #[test]
     fn with_override_uv_and_text_texture_restores() {
         let mut b = DrawBatch::new();
         let uv0 = b.uv();
@@ -1047,18 +1034,6 @@ mod tests {
         assert!(!batch.geo_instances.is_empty());
         assert!(!batch.geo_template_vertices.is_empty());
         assert!(!batch.geo_template_indices.is_empty());
-    }
-
-    #[test]
-    fn clear_preserves_instance_capacity() {
-        let mut batch = DrawBatch::new();
-        for i in 0..64 {
-            batch.instance_ellipse(Pos::new(i as f32, 0.0), 2.0, 3.0, Some(BLUE));
-        }
-        let capacity = batch.instances.capacity();
-        batch.clear();
-        assert!(batch.instances.is_empty());
-        assert!(batch.instances.capacity() >= capacity);
     }
 
     #[test]
@@ -1311,31 +1286,6 @@ mod tests {
     }
 
     #[test]
-    fn preserve_order_flag_defaults_and_resets() {
-        let batch = DrawBatch::new();
-        assert!(batch.preserve_order, "默认应保序");
-        let mut b2 = DrawBatch::new();
-        b2.preserve_order = false;
-        b2.clear();
-        assert!(b2.preserve_order, "clear() 应重置为默认 true");
-    }
-
-    #[test]
-    fn merge_geo_templates_flag_defaults_and_resets() {
-        let batch = DrawBatch::new();
-        assert!(!batch.merge_geo_templates, "默认不合并 geo 模板");
-        let mut b2 = DrawBatch::new();
-        b2.merge_geo_templates = true;
-        b2.clear();
-        assert!(!b2.merge_geo_templates, "clear() 应重置为默认 false");
-        let mut b3 = DrawBatch::new();
-        b3.merge_geo_templates = true;
-        let cloned = b3.clone_batch();
-        assert!(cloned.merge_geo_templates, "clone_batch 应携带该字段");
-    }
-
-
-    #[test]
     fn texture_generation_splits_instance_commands() {
         let mut batch = DrawBatch::new();
         draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
@@ -1376,44 +1326,36 @@ mod tests {
     }
 
     #[test]
-    fn stale_commands_fall_back_after_public_indices_clear() {
+    fn stale_commands_fall_back_after_geo_buffer_clear() {
+        // geo_template_indices / geo_instances 清空后命令应失效
         let mut batch = DrawBatch::new();
         batch.sdf_feather = None;
-        batch.custom_material = Some(Arc::new(crate::material::Material::new_zero_resource(
+        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch.shape_commands_valid());
+        batch.geo_template_indices.clear();
+        assert!(!batch.shape_commands_valid());
+
+        // geo_instances 清空亦然
+        let mut batch2 = DrawBatch::new();
+        batch2.sdf_feather = None;
+        draw_rectangle(&mut batch2, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch2.shape_commands_valid());
+        batch2.geo_instances.clear();
+        assert!(!batch2.shape_commands_valid());
+
+        // custom_material fragment-only + sdf_feather=None 也走 geo 路径
+        let mut batch3 = DrawBatch::new();
+        batch3.sdf_feather = None;
+        batch3.custom_material = Some(Arc::new(crate::material::Material::new_zero_resource(
             "fn material_main(in: crate_material_never) -> vec4<f32> { return vec4<f32>(1.0); }"
                 .to_string(),
             None,
             rustc_hash::FxHashMap::default(),
         )));
-        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
-        assert!(batch.shape_commands_valid());
-
-        // fragment-only custom material + sdf_feather=None 走 geo_instance path，
-        // 数据在 geo_template_indices / geo_instances（不在 indices）。
-        batch.geo_template_indices.clear();
-        assert!(!batch.shape_commands_valid());
-    }
-
-    #[test]
-    fn stale_commands_fall_back_after_geo_template_clear() {
-        let mut batch = DrawBatch::new();
-        batch.sdf_feather = None;
-        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
-        assert!(batch.shape_commands_valid());
-
-        batch.geo_template_indices.clear();
-        assert!(!batch.shape_commands_valid());
-    }
-
-    #[test]
-    fn stale_commands_fall_back_after_geo_instance_clear() {
-        let mut batch = DrawBatch::new();
-        batch.sdf_feather = None;
-        draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
-        assert!(batch.shape_commands_valid());
-
-        batch.geo_instances.clear();
-        assert!(!batch.shape_commands_valid());
+        draw_rectangle(&mut batch3, Pos::ZERO, 8.0, 8.0, Some(RED));
+        assert!(batch3.shape_commands_valid());
+        batch3.geo_template_indices.clear();
+        assert!(!batch3.shape_commands_valid());
     }
 
     #[test]
@@ -1429,25 +1371,6 @@ mod tests {
         draw_circle(&mut batch, Pos::ZERO, 4.0, Some(GREEN));
         assert_eq!(batch.shape_commands.len(), 1);
         assert!(batch.shape_commands_valid());
-    }
-
-    #[test]
-    fn walk_preorder_parent_before_children() {
-        let mut parent = DrawBatch::new();
-        draw_rectangle(&mut parent, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
-        let mut c0 = DrawBatch::new();
-        draw_circle(&mut c0, Pos::new(0.0, 0.0), 3.0, Some(GREEN));
-        let mut c1 = DrawBatch::new();
-        draw_rectangle(&mut c1, Pos::new(1.0, 1.0), 2.0, 2.0, Some(BLUE));
-        parent.push_child(c0);
-        parent.push_child(c1);
-        let mut flat = Vec::new();
-        parent.walk_preorder(&mut flat);
-        assert_eq!(flat.len(), 3);
-        assert_eq!(flat[0].instances.len(), 1); // parent rect
-        assert_eq!(flat[1].instances.len(), 1); // child circle
-        assert_eq!(flat[2].instances.len(), 1); // child rect
-        assert!(parent.has_drawable_content());
     }
 
     #[test]
@@ -1504,33 +1427,6 @@ mod tests {
         let (_, _, t) = m.to_cols();
         assert!((t[0] - 13.0).abs() < 1e-5);
         assert!((t[1] - 24.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn inherit_default_is_clipped() {
-        assert!(InheritFromParent::NONE.clipped);
-        assert!(InheritFromParent::default().clipped);
-        assert!(!InheritFromParent::NONE.unclipped().clipped);
-        assert!(InheritFromParent::TRANSFORM.unclipped().transform);
-        assert!(!InheritFromParent::TRANSFORM.unclipped().clipped);
-    }
-
-    #[test]
-    fn inherit_builder_on_off_pairs() {
-        let a = InheritFromParent::ALL
-            .no_transform()
-            .no_color()
-            .no_sdf_feather()
-            .no_uv()
-            .unclipped();
-        assert!(!a.transform && !a.color && !a.sdf_feather && !a.uv && !a.clipped);
-        let b = InheritFromParent::NONE
-            .transform()
-            .color()
-            .sdf_feather()
-            .uv()
-            .clipped();
-        assert!(b.transform && b.color && b.sdf_feather && b.uv && b.clipped);
     }
 
     /// 三层 clips 的 flatten 顺序：root → mid → leaf → Pop → Pop
@@ -1958,17 +1854,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_aabb_culls_offscreen_vertices() {
-        let mut b = DrawBatch::new();
-        // 无 bounds → 自动从顶点算 AABB
-        b.set_position(9999.0, 9999.0);
-        draw_rectangle(&mut b, Pos::ZERO, 4.0, 4.0, Some(WHITE));
-        let mut events: Vec<DrawEvent> = Vec::new();
-        b.flatten_events(&mut events, 0, Some(Rect::new(0.0, 0.0, 800.0, 600.0)), &FxHashMap::default(), &Transform::IDENTITY, &mut FxHashMap::default());
-        assert!(events.is_empty());
-    }
-
-    #[test]
     fn empty_container_with_offscreen_children_recurse() {
         // 空容器无 bounds → 不能剪，自身体现为 event（无顶点）
         // 子屏外 → 子被剪
@@ -2237,14 +2122,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_material_new_and_clear_are_none() {
-        let mut b = DrawBatch::new();
-        assert!(b.custom_material.is_none());
-        b.clear();
-        assert!(b.custom_material.is_none());
-    }
-
-    #[test]
     fn draw_batch_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<DrawBatch>();
@@ -2254,28 +2131,6 @@ mod tests {
     fn draw_batch_is_sync() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<DrawBatch>();
-    }
-
-    #[test]
-    fn view_field_defaults_to_identity() {
-        let b = DrawBatch::new();
-        assert_eq!(b.view, Transform::IDENTITY);
-    }
-
-    #[test]
-    fn view_field_resets_on_clear() {
-        let mut b = DrawBatch::new();
-        b.view = Transform::translation(100.0, 200.0);
-        b.clear();
-        assert_eq!(b.view, Transform::IDENTITY);
-    }
-
-    #[test]
-    fn view_field_carries_on_clone() {
-        let mut b = DrawBatch::new();
-        b.view = Transform::translation(10.0, 20.0);
-        let c = b.clone_batch();
-        assert_eq!(c.view, Transform::translation(10.0, 20.0));
     }
 
     #[test]

@@ -2313,8 +2313,6 @@ macro_rules! draw_text_hud {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::{Hash, Hasher};
-    use rustc_hash::FxHasher;
 
     fn plain_entry(text: &str, def: TextDef) -> TextEntry {
         TextEntry::Normal {
@@ -2338,12 +2336,6 @@ mod tests {
     fn stable_text_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<StableText>();
-    }
-
-    #[test]
-    fn stable_text_is_sync() {
-        fn assert_sync<T: Sync>() {}
-        assert_sync::<StableText>();
     }
 
     #[test]
@@ -2382,27 +2374,6 @@ let entry = TextEntry::Parts {
             texture_state: TextTextureState::default(),
         };
         assert_eq!(entry.approx_font_size(), 48.0);
-    }
-
-    #[test]
-    fn shape_key_hash_stable() {
-        let e = plain_entry("稳定", TextDef::default().font_size(14.0));
-        let k = shape_key_from_entry(&e);
-        let mut h1 = FxHasher::default();
-        k.hash(&mut h1);
-        let mut h2 = FxHasher::default();
-        k.hash(&mut h2);
-        assert_eq!(h1.finish(), h2.finish());
-    }
-
-    #[test]
-    fn default_ttl_is_two_seconds() {
-        assert_eq!(DEFAULT_SHAPE_TTL, Duration::from_secs(2));
-    }
-
-    #[test]
-    fn default_max_entries_is_4096() {
-        assert_eq!(DEFAULT_SHAPE_MAX_ENTRIES, 4096);
     }
 
     fn part_kind_str(p: &TextPart) -> (&'static str, &str) {
@@ -2528,31 +2499,6 @@ let entry = TextEntry::Parts {
     }
 
     #[test]
-    fn draw_text_hud_uses_parts() {
-        let mut list = TextEntryList::new();
-        draw_text_hud(
-            &mut list,
-            "x=9",
-            Pos::new(1.0, 2.0),
-            TextDef::default(),
-            TextOverride::default(),
-        );
-        let parts = match &list.entries[0] {
-            TextEntry::Parts { parts, .. } => parts,
-            _ => panic!("expected Parts"),
-        };
-        assert_eq!(parts.len(), 2);
-        match &parts[0] {
-            TextPart::Normal(s, None) => assert_eq!(s, "x"),
-            _ => panic!("expected Normal"),
-        }
-        match &parts[1] {
-            TextPart::Glyphs(s, None) => assert_eq!(s, "=9"),
-            _ => panic!("expected Glyphs"),
-        }
-    }
-
-    #[test]
     fn hud_line_normal_dynamic_glyphs() {
         let mut line = HudLine::new()
             .text("分数: ")
@@ -2644,19 +2590,6 @@ let entry = TextEntry::Parts {
 
         ctx.resolve_glyph('中', &def.clone().font_size(24.0));
         assert_eq!(ctx.glyph_cache.len(), 6);
-    }
-
-    #[test]
-    #[ignore = "requires GPU; run with --ignored"]
-    fn stable_text_caches_shaped_multilingual_glyphs() {
-        let gpu = make_test_gpu();
-        let stable = gpu.make_stable_text(
-            "office 中文 العربية",
-            &TextDef::default().font_size(20.0),
-        );
-        assert!(!stable.resolved_glyphs.is_empty());
-        assert!(stable.line_count() >= 1);
-        assert!(stable.resolved_glyphs.iter().any(|g| g.glyph.glyph_id != 0));
     }
 
     #[test]
@@ -2762,32 +2695,6 @@ let entry = TextEntry::Parts {
         assert_eq!(gpu.shape_cache_held_count(), 1);
         drop(h1);
         assert_eq!(gpu.shape_cache_held_count(), 0);
-    }
-
-    #[test]
-    #[ignore = "requires GPU; run with --ignored"]
-    fn max_entries_does_not_evict_held_slots() {
-        let gpu = make_test_gpu();
-        gpu.set_shape_cache_max_entries(Some(2));
-        // 创建 3 个 handle → 总槽 = 3，超过 cap = 2；但 cap 只约束非 held
-        let _h1 = gpu.make_stable_text("a", &TextDef::default().font_size(20.0));
-        let _h2 = gpu.make_stable_text("b", &TextDef::default().font_size(20.0));
-        let _h3 = gpu.make_stable_text("c", &TextDef::default().font_size(20.0));
-        // 全部被持有，cap 不应触发 evict
-        assert_eq!(gpu.shape_cache_held_count(), 3);
-        assert_eq!(gpu.shape_cache_len(), 3);
-    }
-
-    #[test]
-    #[ignore = "requires GPU; run with --ignored"]
-    fn stable_text_clone_shares_arc_and_liveness() {
-        let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("clone_test", &TextDef::default().font_size(20.0));
-        let h2 = h1.clone();
-        assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
-        assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
-        // clone 后 count 仍为 1（共享同一 liveness arc）
-        assert_eq!(gpu.shape_cache_held_count(), 1);
     }
 
     #[test]

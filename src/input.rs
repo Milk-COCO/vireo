@@ -328,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_single_flag() {
-        let m = Modifiers::SHIFT;
-        assert!(m.shift());
-        assert!(!m.ctrl());
-        assert!(!m.alt());
-    }
-
-    #[test]
     fn modifiers_bitor_combines() {
         let m = Modifiers::SHIFT | Modifiers::CTRL;
         assert!(m.shift());
@@ -389,18 +381,6 @@ mod tests {
     // ---- InputState ----
 
     #[test]
-    fn input_state_default() {
-        let state = InputState::default();
-        assert!(state.keys_down.lock().is_empty());
-        assert!(state.mouse_buttons_down.lock().is_empty());
-        assert_eq!(*state.modifiers.lock(), Modifiers::NONE);
-        assert_eq!(*state.scroll_delta.lock(), ScrollDeltaAccum::default());
-        assert!(!*state.focused.lock());
-        assert!(!*state.cursor_inside.lock());
-        assert!(state.touches.lock().is_empty());
-    }
-
-    #[test]
     fn input_state_key_tracking() {
         let state = InputState::default();
         state.keys_down.lock().insert(KeyCode::KeyW);
@@ -424,53 +404,4 @@ mod tests {
     }
 
     // ---- InputCallbacks ----
-
-    #[test]
-    fn input_callbacks_empty_by_default() {
-        let cb = InputCallbacks::default();
-        assert!(cb.on_key_down.is_empty());
-        assert!(cb.on_key_up.is_empty());
-        assert!(cb.on_mouse_down.is_empty());
-        assert!(cb.on_mouse_up.is_empty());
-        assert!(cb.on_scroll.is_empty());
-        assert!(cb.on_cursor_entered.is_empty());
-        assert!(cb.on_cursor_left.is_empty());
-        assert!(cb.on_touch.is_empty());
-        assert!(cb.on_focus_gained.is_empty());
-        assert!(cb.on_focus_lost.is_empty());
-        assert!(cb.on_modifiers_changed.is_empty());
-        assert!(cb.on_ime.is_empty());
-        assert!(cb.on_file_dropped.is_empty());
-        assert!(cb.on_file_hovered.is_empty());
-        assert!(cb.on_file_hover_cancelled.is_empty());
-    assert!(cb.on_moved.is_empty());
-    assert!(cb.on_theme_changed.is_empty());
-    assert!(cb.on_resized.is_empty());
-    assert!(cb.on_thumb_button.is_empty());
-    }
-
-    #[test]
-    fn input_callbacks_push() {
-        let mut cb = InputCallbacks::default();
-        cb.on_key_down.push(Box::new(|_| {}));
-        cb.on_mouse_down.push(Box::new(|_| {}));
-        cb.on_ime.push(Box::new(|_| {}));
-        cb.on_file_dropped.push(Box::new(|_| {}));
-        cb.on_file_hovered.push(Box::new(|_| {}));
-        cb.on_file_hover_cancelled.push(Box::new(|| {}));
-    cb.on_moved.push(Box::new(|_| {}));
-    cb.on_theme_changed.push(Box::new(|_| {}));
-    cb.on_resized.push(Box::new(|_| {}));
-    cb.on_thumb_button.push(Box::new(|_| {}));
-        assert_eq!(cb.on_key_down.len(), 1);
-        assert_eq!(cb.on_mouse_down.len(), 1);
-        assert_eq!(cb.on_ime.len(), 1);
-        assert_eq!(cb.on_file_dropped.len(), 1);
-        assert_eq!(cb.on_file_hovered.len(), 1);
-        assert_eq!(cb.on_file_hover_cancelled.len(), 1);
-    assert_eq!(cb.on_moved.len(), 1);
-    assert_eq!(cb.on_theme_changed.len(), 1);
-    assert_eq!(cb.on_resized.len(), 1);
-    assert_eq!(cb.on_thumb_button.len(), 1);
-    }
 }

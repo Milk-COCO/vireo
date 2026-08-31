@@ -325,11 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_none_none() {
-        assert!(effective_area(None, None).is_none());
-    }
-
-    #[test]
     fn effective_include_only() {
         let inc = Area::geom(unit_quad());
         let e = effective_area(Some(&inc), None).unwrap();

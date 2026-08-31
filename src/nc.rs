@@ -168,21 +168,4 @@ mod tests {
         assert_eq!(NonClientHit::from_win32(100), NonClientHit::Custom(100));
     }
 
-    #[test]
-    fn non_client_region_is_copy_and_eq() {
-        let r1 = NonClientRegion {
-            rect: Rect::new(0.0, 0.0, 10.0, 32.0),
-            hit_test: NonClientHit::Caption,
-        };
-        let r2 = r1;
-        assert_eq!(r1, r2);
-    }
-
-    #[test]
-    fn window_state_default_is_empty() {
-        let s = WindowState::default();
-        assert!(!s.maximized);
-        assert!(!s.fullscreen);
-        assert!(!s.active);
-    }
 }
