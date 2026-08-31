@@ -90,7 +90,7 @@ async fn main() {
         );
 
         let mut child = DrawBatch::new();
-        child.custom_material = Some(mat.clone());
+        child.set_custom_material(Some(mat.clone()));
         for i in 0..6 {
             child.set_position(40.0 + i as f32 * 50.0, 40.0 + (i % 3) as f32 * 70.0);
             child.set_rad(t * 1.1 + i as f32 * 0.7);
@@ -99,7 +99,7 @@ async fn main() {
         parent.push_child(child);
 
         let mut free = DrawBatch::new();
-        free.custom_material = Some(mat.clone());
+        free.set_custom_material(Some(mat.clone()));
         for i in 0..3 {
             free.set_position(480.0, 120.0 + i as f32 * 100.0);
             free.set_rad(t * 0.6 - i as f32 * 0.4);

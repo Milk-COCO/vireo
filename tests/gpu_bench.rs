@@ -455,7 +455,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
 
     let mut batch = DrawBatch::new();
-    batch.custom_material = Some(material.clone());
+    batch.set_custom_material(Some(material.clone()));
     batch.set_sdf_feather(Some(1.0));
     draw_rounded_rect(&mut batch, Pos::new(20.0, 20.0), 280.0, 140.0, 20.0, Some(WHITE));
     draw_text(
@@ -552,7 +552,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         &[(10.0, 10.0), (70.0, 10.0), (40.0, 70.0)],
         Some(RED),
     );
-    first.custom_material = Some(material);
+    first.set_custom_material(Some(material));
 
     let mut second = DrawBatch::new();
     draw_rectangle(&mut second, Pos::new(80.0, 20.0), 60.0, 80.0, Some(BLUE));
@@ -593,7 +593,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     {
         let canvas = OffscreenCanvas::new(&gpu, 256, 128);
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut batch, Pos::new(8.0, 8.0), 100.0, 48.0, Some(WHITE));
         draw_text(
@@ -610,7 +610,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     {
         let canvas = OffscreenCanvas::new(&gpu, 320, 160);
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&tex_red));
         batch.set_sdf_feather(Some(1.0));
         draw_rounded_rect(&mut batch, Pos::new(16.0, 16.0), 200.0, 80.0, 12.0, Some(WHITE));
@@ -628,7 +628,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     {
         let canvas = OffscreenCanvas::new(&gpu, 360, 120);
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&tex_red));
         batch.text(
             "red",
@@ -650,7 +650,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     {
         let canvas = OffscreenCanvas::new(&gpu, 200, 100);
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&tex_blue));
         batch.set_uv(0.25, 0.25, 0.75, 0.75);
         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 180.0, 80.0, Some(WHITE));
@@ -670,7 +670,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
             0.0,
         );
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&tex_red));
         batch.set_sdf_feather(Some(1.0));
         draw_circle(&mut batch, Pos::new(60.0, 60.0), 40.0, Some(WHITE));
@@ -693,7 +693,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         draw_rounded_rect(&mut parent, Pos::new(20.0, 20.0), 200.0, 120.0, 16.0, Some(WHITE));
 
         let mut child = DrawBatch::new();
-        child.custom_material = Some(material.clone());
+        child.set_custom_material(Some(material.clone()));
         child.set_texture(Some(&tex_blue));
         child.set_sdf_feather(Some(1.0));
         draw_rectangle(&mut child, Pos::new(40.0, 40.0), 160.0, 80.0, Some(WHITE));
@@ -745,7 +745,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
 
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material);
+    b.set_custom_material(Some(material));
     b.set_sdf_feather(Some(1.0));
     for i in 0..2000 {
         let x = (i % 50) as f32 * 17.0 + 10.0;
@@ -791,7 +791,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
 
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material);
+    b.set_custom_material(Some(material));
     b.clear_sdf_feather();
     for i in 0..500 {
         let x = (i % 25) as f32 * 35.0 + 15.0;
@@ -879,7 +879,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         .expect("material with custom VS");
 
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material);
+    b.set_custom_material(Some(material));
     b.set_sdf_feather(Some(1.0));
     for i in 0..20 {
         let x = (i % 5) as f32 * 60.0 + 20.0;
@@ -964,7 +964,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         .expect("material with custom VS");
 
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material);
+    b.set_custom_material(Some(material));
     for i in 0..20 {
         let x = (i % 5) as f32 * 60.0 + 20.0;
         let y = (i / 5) as f32 * 60.0 + 20.0;
@@ -1061,7 +1061,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
     let canvas = OffscreenCanvas::new(&gpu, 64, 64);
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material.clone());
+    b.set_custom_material(Some(material.clone()));
     draw_rectangle(&mut b, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
 
@@ -1113,7 +1113,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
     // 1) 未填纹理槽：整批跳过，不应 panic，区域应为 clear 色（黑）无色
     let mut b = DrawBatch::new();
-    b.custom_material = Some(material.clone());
+    b.set_custom_material(Some(material.clone()));
     draw_rectangle(&mut b, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let pixels = canvas.read_pixels();
@@ -1153,7 +1153,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     material.set_texture(&gpu.device, "tex", &view, &sampler);
 
     let mut b2 = DrawBatch::new();
-    b2.custom_material = Some(material.clone());
+    b2.set_custom_material(Some(material.clone()));
     draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b2]);
     let pixels = canvas.read_pixels();

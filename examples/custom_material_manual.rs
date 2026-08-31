@@ -125,7 +125,7 @@ async fn main() {
         // ── 绘制 ──
 
         let mut b = DrawBatch::new();
-        b.custom_material = Some(mat.clone());
+        b.set_custom_material(Some(mat.clone()));
         for i in 0..4 {
             b.set_position(80.0 + i as f32 * 110.0, 200.0);
             b.set_rad(t * 0.3 + i as f32 * 0.4);

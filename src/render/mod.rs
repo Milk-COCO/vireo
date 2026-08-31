@@ -164,6 +164,7 @@ struct InstanceSegment {
     instance_start: u32,
     instance_count: u32,
     bind_group: wgpu::BindGroup,
+    material: Option<Arc<Material>>,
 }
 
 #[derive(Clone)]
@@ -174,6 +175,7 @@ struct GeoInstanceSegment {
     template_index_start: u32,
     index_count: u32,
     bind_group: wgpu::BindGroup,
+    material: Option<Arc<Material>>,
 }
 
 /// 几何模板：batch 内 `geo_template_vertices` / `geo_template_indices` 的一段。
@@ -192,6 +194,7 @@ enum OrderedShapeSegment {
         ndx_count: u32,
         bind_group: wgpu::BindGroup,
         geometry: bool,
+        material: Option<Arc<Material>>,
     },
     Instances(InstanceSegment),
     GeoInstances(GeoInstanceSegment),
@@ -217,16 +220,18 @@ impl OrderedShapeSegment {
     fn try_merge(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (
-                OrderedShapeSegment::Mesh { ndx_start, ndx_count, bind_group, geometry },
+                OrderedShapeSegment::Mesh { ndx_start, ndx_count, bind_group, geometry, material },
                 OrderedShapeSegment::Mesh {
                     ndx_start: n2,
                     ndx_count: n2_count,
                     bind_group: b2,
                     geometry: g2,
+                    material: m2,
                 },
             ) => {
                 let merged = merge_decision(
-                    geometry == g2 && bind_group == b2,
+                    geometry == g2 && bind_group == b2
+                        && material.as_ref().map(Arc::as_ptr) == m2.as_ref().map(Arc::as_ptr),
                     *ndx_start,
                     *ndx_count,
                     *n2,
@@ -237,11 +242,14 @@ impl OrderedShapeSegment {
                     ndx_count: merged.1,
                     bind_group: bind_group.clone(),
                     geometry: *geometry,
+                    material: material.clone(),
                 })
             }
             (OrderedShapeSegment::Instances(s), OrderedShapeSegment::Instances(s2)) => {
                 let merged = merge_decision(
-                    s.bind_group == s2.bind_group,
+                    s.bind_group == s2.bind_group
+                        && s.material.as_ref().map(Arc::as_ptr)
+                            == s2.material.as_ref().map(Arc::as_ptr),
                     s.instance_start,
                     s.instance_count,
                     s2.instance_start,
@@ -251,6 +259,7 @@ impl OrderedShapeSegment {
                     instance_start: merged.0,
                     instance_count: merged.1,
                     bind_group: s.bind_group.clone(),
+                    material: s.material.clone(),
                 }))
             }
             (
@@ -261,7 +270,9 @@ impl OrderedShapeSegment {
                     s.bind_group == s2.bind_group
                         && s.template_vertex_start == s2.template_vertex_start
                         && s.template_index_start == s2.template_index_start
-                        && s.index_count == s2.index_count,
+                        && s.index_count == s2.index_count
+                        && s.material.as_ref().map(Arc::as_ptr)
+                            == s2.material.as_ref().map(Arc::as_ptr),
                     s.geo_instance_start,
                     s.geo_instance_count,
                     s2.geo_instance_start,
@@ -274,6 +285,7 @@ impl OrderedShapeSegment {
                     template_index_start: s.template_index_start,
                     index_count: s.index_count,
                     bind_group: s.bind_group.clone(),
+                    material: s.material.clone(),
                 }))
             }
             _ => None,

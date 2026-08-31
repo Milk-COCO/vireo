@@ -48,7 +48,7 @@ async fn main() {
         };
 
         let mut batch = DrawBatch::new();
-        batch.custom_material = Some(material.clone());
+        batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&texture));
         batch.set_sdf_feather(Some(1.5));
         draw_rounded_rect(

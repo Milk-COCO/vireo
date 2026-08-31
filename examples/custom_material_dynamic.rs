@@ -72,7 +72,7 @@ async fn main() {
         let mut batches: Vec<DrawBatch> = Vec::new();
         for i in 0..4u32 {
             let mut b = DrawBatch::new();
-            b.custom_material = Some(mat.clone());
+            b.set_custom_material(Some(mat.clone()));
             b.set_position(50.0 + i as f32 * 130.0, 150.0);
             b.dynamic_offsets = vec![i * stride];
             draw_rectangle(&mut b, Pos::new(-50.0, -50.0), 100.0, 100.0, Some(WHITE));

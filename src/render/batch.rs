@@ -269,12 +269,14 @@ pub(crate) enum BatchShapeCommand {
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         geometry: bool,
+        material: Option<Arc<Material>>,
     },
     Instances {
         instance_start: u32,
         instance_count: u32,
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
+        material: Option<Arc<Material>>,
     },
     GeoInstances {
         geo_instance_start: u32,
@@ -284,6 +286,7 @@ pub(crate) enum BatchShapeCommand {
         index_count: u32,
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
+        material: Option<Arc<Material>>,
     },
 }
 
@@ -388,18 +391,19 @@ pub struct DrawBatch {
     /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
     /// 可通过 `TextOverride.clip` 单条覆盖。
     pub text_clip: Option<crate::glyphon::TextBounds>,
-    /// 自定义材质（**整 batch 属性，不是画笔状态机**）。
+    /// 自定义材质（**画笔状态机**，同 `color`/`transform`/`sdf_feather`）。
     ///
-    /// - `Some` 时该 batch 的 shape/text 都走自定义材质 fragment shader；
-    ///   shape 仍用对应顶点管线；text 仍走 glyphon 顶点管线。
-    /// - `None` = 内置。
+    /// - `Some(mat)` = 后续 shape 走该材质的 fragment shader；
+    ///   shape 仍用对应顶点管线（SDF/geo/custom VS → mesh）；text 仍走 glyphon 顶点管线。
+    /// - `None` = 内置管线（默认）。
     /// - 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
     ///
-    /// **约定**：一次设置全程有效，**禁止批内切换**。材质在 record 阶段逐形状路由
-    /// （fragment-only → instance / custom VS → mesh），但渲染时整 batch 统一取
-    /// flatten 时的最终值选 pipeline；批内 `Some → None` 切换会使已画形状静默
-    /// 走内置管线（材质丢失）。需要多个材质请拆分 batch（child / multi-batch）。
-    pub custom_material: Option<Arc<Material>>,
+    /// 每个 shape 在 record 时捕获当前材质，render 时按 shape 自带的材质选 pipeline。
+    /// 批内可自由切换（`Some(A) → None → Some(B)`），不同材质的 shape 不会合并 draw call。
+    ///
+    /// 公开 API 走 [`Self::custom_material`] / [`Self::set_custom_material`] /
+    /// [`Self::clear_custom_material`]；字段私有，shape 内部可直接读。
+    pub(crate) custom_material: Option<Arc<Material>>,
     /// Dynamic uniform/storage offsets for group 3 binding（逐 draw 偏移，字节）。
     /// 长度必须等于 BGL 中 `has_dynamic_offset` 的 binding 数量。
     pub dynamic_offsets: Vec<u32>,
@@ -1112,6 +1116,25 @@ impl DrawBatch {
         self.sdf_feather = None;
     }
 
+    /// 当前自定义材质。`None` = 内置管线。
+    #[inline]
+    pub fn custom_material(&self) -> Option<&Arc<Material>> {
+        self.custom_material.as_ref()
+    }
+
+    /// 设置自定义材质：`Some(mat)` = 后续 shape 走该材质；`None` = 内置。
+    /// 每个 shape 在 draw 时捕获当前材质，批内可自由切换。
+    #[inline]
+    pub fn set_custom_material(&mut self, material: Option<Arc<Material>>) {
+        self.custom_material = material;
+    }
+
+    /// 清除自定义材质（设为 `None`），后续 shape 走内置管线。
+    #[inline]
+    pub fn clear_custom_material(&mut self) {
+        self.custom_material = None;
+    }
+
     /// 当前 UV 子区域。
     #[inline]
     pub fn uv(&self) -> UvRect {
@@ -1463,6 +1486,7 @@ impl DrawBatch {
                 bind_group: self.bind_group.clone(),
                 texture_generation: self.shape_texture_generation,
                 geometry: gap_geometry,
+                material: self.custom_material.clone(),
             });
         }
         if let Some(BatchShapeCommand::Mesh {
@@ -1470,12 +1494,15 @@ impl DrawBatch {
             ndx_count,
             texture_generation,
             geometry: last_geometry,
+            material: last_material,
             ..
         }) = self.shape_commands.last_mut()
         {
             if *texture_generation == self.shape_texture_generation
                 && *last_geometry == geometry
                 && *ndx_start + *ndx_count == start
+                && last_material.as_ref().map(Arc::as_ptr)
+                    == self.custom_material.as_ref().map(Arc::as_ptr)
             {
                 *ndx_count += end - start;
                 self.shape_mesh_end = end;
@@ -1488,6 +1515,7 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
             geometry,
+            material: self.custom_material.clone(),
         });
         self.shape_mesh_end = end;
     }
@@ -1563,11 +1591,14 @@ impl DrawBatch {
             instance_start,
             instance_count,
             texture_generation,
+            material: last_material,
             ..
         }) = self.shape_commands.last_mut()
         {
             if *texture_generation == self.shape_texture_generation
                 && *instance_start + *instance_count == start
+                && last_material.as_ref().map(Arc::as_ptr)
+                    == self.custom_material.as_ref().map(Arc::as_ptr)
             {
                 *instance_count += end - start;
                 return;
@@ -1578,6 +1609,7 @@ impl DrawBatch {
             instance_count: end - start,
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
+            material: self.custom_material.clone(),
         });
     }
 
@@ -1669,6 +1701,7 @@ impl DrawBatch {
             template_index_start,
             index_count,
             texture_generation,
+            material: last_material,
             ..
         }) = self.shape_commands.last_mut()
         {
@@ -1678,6 +1711,8 @@ impl DrawBatch {
                 && *template_vertex_start == cur.template_vertex_start
                 && *template_index_start == cur.template_index_start
                 && *index_count == cur.index_count
+                && last_material.as_ref().map(Arc::as_ptr)
+                    == self.custom_material.as_ref().map(Arc::as_ptr)
             {
                 *geo_instance_count += end - start;
                 return;
@@ -1692,6 +1727,7 @@ impl DrawBatch {
             index_count: cur.index_count,
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
+            material: self.custom_material.clone(),
         });
     }
 

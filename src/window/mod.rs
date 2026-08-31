@@ -2034,9 +2034,9 @@ impl VireoWindow {
         self.inner.drag_resize_window(direction)
     }
 
-    /// 显示系统窗口菜单（右键标题栏菜单）。
+    /// 显示系统窗口菜单（右键标题栏 / Alt+Space 菜单）。
     /// ## Platform-specific
-    /// - **仅 Windows** 支持。
+    /// - **仅 Windows** 支持；其余平台 no-op。
     pub fn show_window_menu<P: Into<winit::dpi::Position>>(&self, position: P) {
         self.inner.show_window_menu(position);
     }

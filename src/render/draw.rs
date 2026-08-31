@@ -444,6 +444,7 @@ impl Renderer {
                     let resolve_bg = |bg: Option<wgpu::BindGroup>| {
                         bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
                     };
+                    let batch_material = batch.custom_material.clone();
                     let instance_segments = if !use_instances {
                         Vec::new()
                     } else if batch.instance_texture_segments.is_empty() {
@@ -451,12 +452,14 @@ impl Renderer {
                             instance_start,
                             instance_count: batch.instances.len() as u32,
                             bind_group: resolve_bg(batch.bind_group.clone()),
+                            material: batch_material.clone(),
                         }]
                     } else {
                         let mut segments: Vec<InstanceSegment> = batch.instance_texture_segments.iter().map(|segment| InstanceSegment {
                             instance_start: instance_start + segment.instance_start,
                             instance_count: segment.instance_count,
                             bind_group: resolve_bg(segment.bind_group.clone()),
+                            material: batch_material.clone(),
                         }).collect();
                         let last_end = segments.last().map_or(instance_start, |s| s.instance_start + s.instance_count);
                         let total_end = instance_start + batch.instances.len() as u32;
@@ -465,6 +468,7 @@ impl Renderer {
                                 instance_start: last_end,
                                 instance_count: total_end - last_end,
                                 bind_group: resolve_bg(batch.bind_group.clone()),
+                                material: batch_material.clone(),
                             });
                         }
                         segments
@@ -475,6 +479,7 @@ impl Renderer {
                         // 实例已按（texture segment, 模板）重排：扫描排序后的连续范围，
                         // 每个 (segment, 模板) 组合一段，段用对应 segment 的 bind group。
                         let total = batch.geo_instances.len() as u32;
+                        let batch_material = batch.custom_material.clone();
                         let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
                             let tpl = combined_geo_instances[start as usize];
                             GeoInstanceSegment {
@@ -484,6 +489,7 @@ impl Renderer {
                                 template_index_start: tpl.template_index_start,
                                 index_count: tpl.index_count,
                                 bind_group: bg,
+                                material: batch_material.clone(),
                             }
                         };
                         let seg_count = batch.geo_instance_texture_segments.len() as u32;
@@ -521,6 +527,7 @@ impl Renderer {
                         }
                         segments
                     } else {
+                        let batch_material = batch.custom_material.clone();
                         let mk_seg = |start: u32, count: u32, bg: wgpu::BindGroup| -> GeoInstanceSegment {
                             let tpl = combined_geo_instances[start as usize];
                             GeoInstanceSegment {
@@ -530,6 +537,7 @@ impl Renderer {
                                 template_index_start: tpl.template_index_start,
                                 index_count: tpl.index_count,
                                 bind_group: bg,
+                                material: batch_material.clone(),
                             }
                         };
                         if batch.geo_instance_texture_segments.is_empty() {
@@ -646,20 +654,22 @@ impl Renderer {
                                 let mut geo_pushed = false;
                                 for command in &batch.shape_commands {
                                     match command {
-                                        BatchShapeCommand::Mesh { ndx_start, ndx_count, bind_group, geometry, .. } => {
+                                        BatchShapeCommand::Mesh { ndx_start, ndx_count, bind_group, geometry, material, .. } => {
                                             ordered.push(OrderedShapeSegment::Mesh {
                                                 ndx_start: idx_offset + *ndx_start,
                                                 ndx_count: *ndx_count,
                                                 bind_group: resolve_bg(bind_group.clone()),
                                                 geometry: *geometry,
+                                                material: material.clone(),
                                             });
                                         }
-                                        BatchShapeCommand::Instances { instance_start: local_start, instance_count, bind_group, .. } => {
+                                        BatchShapeCommand::Instances { instance_start: local_start, instance_count, bind_group, material, .. } => {
                                             if use_instances {
                                                 ordered.push(OrderedShapeSegment::Instances(InstanceSegment {
                                                     instance_start: instance_start + *local_start,
                                                     instance_count: *instance_count,
                                                     bind_group: resolve_bg(bind_group.clone()),
+                                                    material: material.clone(),
                                                 }));
                                             } else {
                                                 ordered.push(OrderedShapeSegment::Mesh {
@@ -667,10 +677,11 @@ impl Renderer {
                                                     ndx_count: *instance_count * 6,
                                                     bind_group: resolve_bg(bind_group.clone()),
                                                     geometry: false,
+                                                    material: material.clone(),
                                                 });
                                             }
                                         }
-                                        BatchShapeCommand::GeoInstances { geo_instance_start: local_start, geo_instance_count, bind_group, .. } => {
+                                        BatchShapeCommand::GeoInstances { geo_instance_start: local_start, geo_instance_count, bind_group, material, .. } => {
                                             if use_geo {
                                                 if geo_merged {
                                                     if !geo_pushed {
@@ -688,6 +699,7 @@ impl Renderer {
                                                         template_index_start: tpl.template_index_start,
                                                         index_count: tpl.index_count,
                                                         bind_group: resolve_bg(bind_group.clone()),
+                                                        material: material.clone(),
                                                     }));
                                                 }
                                             }
@@ -700,6 +712,7 @@ impl Renderer {
                                         ndx_count: batch.indices.len() as u32 - batch.shape_mesh_end,
                                         bind_group: resolve_bg(batch.bind_group.clone()),
                                         geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
+                                        material: batch.custom_material.clone(),
                                     });
                                 }
                                 if !batch.preserve_order {
@@ -1118,39 +1131,9 @@ impl Renderer {
                     pass.set_scissor_rect(cx, cy, cw, ch);
                 }
 
-                // 整批材质 bind group：有 group 3（非 ZeroResource）的材质若绑定失败
-                // （纹理槽未 set_texture 等），整批跳过——custom pipeline 引用 group 3，
-                // 不绑会触发 wgpu validation error。ZeroResource 无 group 3，None 合法。
-                let custom_bg: Option<wgpu::BindGroup> = match info.custom_material.as_ref() {
-                    Some(m) if m.bgl().is_some() => m.ensure_bind_group(
-                        &self.gpu.device,
-                        &self.gpu.queue,
-                        &self.gpu.bind_group_pool,
-                    ),
-                    _ => None,
-                };
-                if info.custom_material.is_some()
-                    && info.custom_material.as_ref().map_or(false, |m| m.bgl().is_some())
-                    && custom_bg.is_none()
-                {
-                    continue;
-                }
-
                 if let Some(ref shape) = info.shape {
                     // Area 事件：op 3/4 来自 area_op；普通 batch/StencilPop：op 0..3 来自 stencil_op。
                     let pipe_op = info.area_op.unwrap_or(info.stencil_op);
-                    let custom_ptr: *const Material = info.custom_material
-                        .as_ref()
-                        .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
-                    let use_custom = info.custom_material.is_some();
-                    let has_custom_vs = info
-                        .custom_material
-                        .as_ref()
-                        .map(|m| m.has_custom_vertex_shader())
-                        .unwrap_or(false);
-                    // instance 段仅在 fragment-only material 时可走对应 layout pipeline；
-                    // custom VS 必须 mesh。
-                    let use_custom_instance = use_custom && !has_custom_vs;
                     if !shape.ordered.is_empty() {
                         for segment in &shape.ordered {
                             match segment {
@@ -1159,17 +1142,38 @@ impl Renderer {
                                     ndx_count,
                                     bind_group,
                                     geometry,
+                                    material,
                                 } => {
+                                    // 逐 segment 从材质派生 pipeline 状态
+                                    let seg_custom_bg: Option<wgpu::BindGroup> =
+                                        match material.as_ref() {
+                                            Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                                &self.gpu.device,
+                                                &self.gpu.queue,
+                                                &self.gpu.bind_group_pool,
+                                            ),
+                                            _ => None,
+                                        };
+                                    if material.is_some()
+                                        && material.as_ref().map_or(false, |m| m.bgl().is_some())
+                                        && seg_custom_bg.is_none()
+                                    {
+                                        continue;
+                                    }
+                                    let seg_ptr: *const Material = material
+                                        .as_ref()
+                                        .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
+                                    let seg_use_custom = material.is_some();
                                     let need_rebind = !shapes_bound
-                                        || custom_ptr != last_custom_ptr
-                                        || (!use_custom && last_geometry != Some(*geometry))
+                                        || seg_ptr != last_custom_ptr
+                                        || (!seg_use_custom && last_geometry != Some(*geometry))
                                         || (uses_stencil && pipe_op != last_stencil_op)
                                         || info.dynamic_offsets != *last_dynamic_offsets;
                                     if need_rebind {
                                         let tmp_pipe: wgpu::RenderPipeline;
                                         let custom_pipe: Arc<wgpu::RenderPipeline>;
-                                        let pipe: &wgpu::RenderPipeline = if use_custom {
-                                            let mat = info.custom_material.as_ref().unwrap();
+                                        let pipe: &wgpu::RenderPipeline = if seg_use_custom {
+                                            let mat = material.as_ref().unwrap();
                                             custom_pipe = self.gpu.ensure_material_pipeline(
                                                 mat,
                                                 MaterialTarget::Shape,
@@ -1202,18 +1206,18 @@ impl Renderer {
                                         pass.set_pipeline(pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if use_custom {
-                                            if let Some(bg) = custom_bg.as_ref() {
+                                        if seg_use_custom {
+                                            if let Some(bg) = seg_custom_bg.as_ref() {
                                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                             }
                                         }
                                         pass.set_vertex_buffer(0, vbuf.as_ref().unwrap().0.slice(..));
                                         pass.set_index_buffer(
-ibuf.as_ref().unwrap().0.slice(..),
+                                            ibuf.as_ref().unwrap().0.slice(..),
                                             wgpu::IndexFormat::Uint32,
                                         );
                                         shapes_bound = true;
-                                        last_custom_ptr = custom_ptr;
+                                        last_custom_ptr = seg_ptr;
                                         last_geometry = Some(*geometry);
                                         last_stencil_op = pipe_op;
                                         last_dynamic_offsets.clone_from(&info.dynamic_offsets);
@@ -1230,8 +1234,33 @@ ibuf.as_ref().unwrap().0.slice(..),
                                     shape_draw_calls += 1;
                                 }
                                 OrderedShapeSegment::Instances(segment) => {
+                                    // 逐 segment 从材质派生 pipeline 状态
+                                    let seg_material = &segment.material;
+                                    let seg_custom_bg: Option<wgpu::BindGroup> =
+                                        match seg_material.as_ref() {
+                                            Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                                &self.gpu.device,
+                                                &self.gpu.queue,
+                                                &self.gpu.bind_group_pool,
+                                            ),
+                                            _ => None,
+                                        };
+                                    if seg_material.is_some()
+                                        && seg_material.as_ref().map_or(false, |m| m.bgl().is_some())
+                                        && seg_custom_bg.is_none()
+                                    {
+                                        shapes_bound = false;
+                                        last_geometry = None;
+                                        continue;
+                                    }
+                                    let seg_use_custom = seg_material.is_some();
+                                    let has_custom_vs = seg_material
+                                        .as_ref()
+                                        .map(|m| m.has_custom_vertex_shader())
+                                        .unwrap_or(false);
+                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
                                     if use_custom_instance {
-                                        let mat = info.custom_material.as_ref().unwrap();
+                                        let mat = seg_material.as_ref().unwrap();
                                         let custom_pipe = self.gpu.ensure_material_pipeline(
                                             mat,
                                             MaterialTarget::Shape,
@@ -1246,7 +1275,7 @@ ibuf.as_ref().unwrap().0.slice(..),
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if let Some(bg) = custom_bg.as_ref() {
+                                        if let Some(bg) = seg_custom_bg.as_ref() {
                                             pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                         }
                                         pass.set_vertex_buffer(
@@ -1310,8 +1339,33 @@ ibuf.as_ref().unwrap().0.slice(..),
                                     last_geometry = None;
                                 }
                                 OrderedShapeSegment::GeoInstances(segment) => {
+                                    // 逐 segment 从材质派生 pipeline 状态
+                                    let seg_material = &segment.material;
+                                    let seg_custom_bg: Option<wgpu::BindGroup> =
+                                        match seg_material.as_ref() {
+                                            Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                                &self.gpu.device,
+                                                &self.gpu.queue,
+                                                &self.gpu.bind_group_pool,
+                                            ),
+                                            _ => None,
+                                        };
+                                    if seg_material.is_some()
+                                        && seg_material.as_ref().map_or(false, |m| m.bgl().is_some())
+                                        && seg_custom_bg.is_none()
+                                    {
+                                        shapes_bound = false;
+                                        last_geometry = None;
+                                        continue;
+                                    }
+                                    let seg_use_custom = seg_material.is_some();
+                                    let has_custom_vs = seg_material
+                                        .as_ref()
+                                        .map(|m| m.has_custom_vertex_shader())
+                                        .unwrap_or(false);
+                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
                                     if use_custom_instance {
-                                        let mat = info.custom_material.as_ref().unwrap();
+                                        let mat = seg_material.as_ref().unwrap();
                                         let custom_pipe = self.gpu.ensure_material_pipeline(
                                             mat,
                                             MaterialTarget::Shape,
@@ -1326,7 +1380,7 @@ ibuf.as_ref().unwrap().0.slice(..),
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if let Some(bg) = custom_bg.as_ref() {
+                                        if let Some(bg) = seg_custom_bg.as_ref() {
                                             pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                         }
                                         pass.set_vertex_buffer(
@@ -1394,6 +1448,30 @@ ibuf.as_ref().unwrap().0.slice(..),
                             }
                         }
                     } else {
+                    let custom_ptr: *const Material = info.custom_material
+                        .as_ref()
+                        .map_or(std::ptr::null(), |m| Arc::as_ptr(m));
+                    let use_custom = info.custom_material.is_some();
+                    let has_custom_vs = info
+                        .custom_material
+                        .as_ref()
+                        .map(|m| m.has_custom_vertex_shader())
+                        .unwrap_or(false);
+                    let use_custom_instance = use_custom && !has_custom_vs;
+                    let custom_bg: Option<wgpu::BindGroup> = match info.custom_material.as_ref() {
+                        Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                            &self.gpu.bind_group_pool,
+                        ),
+                        _ => None,
+                    };
+                    if info.custom_material.is_some()
+                        && info.custom_material.as_ref().map_or(false, |m| m.bgl().is_some())
+                        && custom_bg.is_none()
+                    {
+                        continue;
+                    }
                     let need_rebind = !shapes_bound
                         || custom_ptr != last_custom_ptr
                         || (!use_custom && last_geometry != Some(shape.geometry))
@@ -1652,8 +1730,16 @@ ibuf.as_ref().unwrap().0.slice(..),
                     };
                     // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
                     // 否则部分后端会把 ref 重置为 0。
-                    // 复用循环顶部已计算的整批材质 bind group（ZeroResource 无 group 3 → None）。
-                    let material_bg = custom_bg.as_ref();
+                    // 文字路径：材质取 batch 最终值（text 无 per-shape command）。
+                    let material_bg = match info.custom_material.as_ref() {
+                        Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                            &self.gpu.bind_group_pool,
+                        ),
+                        _ => None,
+                    };
+                    let material_bg = material_bg.as_ref();
                     for segment in &info.text {
                         if let Err(e) = text_ctx.text_renderer.render_range_with_material(
                             &text_ctx.text_atlas,

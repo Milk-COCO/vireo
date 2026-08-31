@@ -59,7 +59,7 @@ async fn main() {
 
         let mut present = DrawBatch::new();
         present.set_texture(Some(&scene_canvas.texture));
-        present.custom_material = Some(material.clone());
+        present.set_custom_material(Some(material.clone()));
         draw_rectangle(&mut present, Pos::new(0.0, 0.0), 640.0, 400.0, Some(WHITE));
 
         win.draw(BLACK, &[&present]);

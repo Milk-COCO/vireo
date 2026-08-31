@@ -110,7 +110,7 @@ async fn main() {
         );
 
         let mut b = DrawBatch::new();
-        b.custom_material = Some(mat.clone());
+        b.set_custom_material(Some(mat.clone()));
         b.set_position(280.0, 180.0);
         b.set_rad(t * 0.25);
         draw_rectangle(&mut b, Pos::new(-120.0, -120.0), 240.0, 240.0, Some(WHITE));
