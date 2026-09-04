@@ -28,7 +28,7 @@ cargo run --example ez
 - **Immediate mode**: Build a `DrawBatch` each frame, fill shapes/text, submit to the window
 - **Single pass**: Multiple batches in one `draw()`; batch trees support children, inherit, and clipping
 - **Coordinates**: Top-left origin; x right, y down (vireo logical pixels). With `dpi_override=None` the logical units match winit logical units (OS scaling applies); with `Some(d)` vireo owns its pixels, physical = logical × d
-- **Pixel intent**: Window size/position APIs (`WindowDesc` dimension builders and `set_size`/`set_outer_position`/`set_cursor_position`/`resize_increments`) accept `impl ToPx` — bare numbers / [`Dp`] mean vireo logical pixels, [`Px`] means physical pixels; intent is declared at the call site and does not flip with `dpi_override`. Position/size getters return `Pixel`/`PixelPos`/`PixelSize` (physical + logical dual view)
+- **Pixel intent**: Window size/position APIs accept `impl ToPx` — bare numbers / `Dp` mean vireo logical pixels, `Px` means physical pixels; intent is declared at the call site and does not flip with `dpi_override`
 - **`Pos`**: Anchored shapes (circle/rect/…) take a `Pos` plus the transform table; polylines keep point coordinates as geometry
 
 ```rust
@@ -56,6 +56,25 @@ win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 - **`bounds`**: subtree AABB culling (auto by default; disable or set manually)  
 - **`text_clip` / `TextOverride.clip`**: text clip in logical pixels (scaled to physical internally)  
 
+## Multi-Loop Architecture
+
+Vireo supports multi-threaded multi-loop execution, each loop runs independently:
+
+```rust
+#[vireo::main]
+async fn main() {
+    let app = App::new();
+    // ... create windows ...
+    
+    // Main loop
+    app.run(|ctx| {
+        // ctx.app() access application
+        // ctx.tick_count() frame count
+        // ctx.after_secs(1.0, || { ... }) scheduled tasks
+    }).unwrap();
+}
+```
+
 ## Features
 
 - Filled + outlined shapes (SDF / geometry paths via `sdf_feather`)
@@ -65,7 +84,8 @@ win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 - Multi-window + offscreen rendering
 - Textures (file / bytes / RGBA, UV subregions)
 - Window controls (fullscreen, icon, PresentMode, AA, custom dpi override, …)
-- Frame stats + input (polling / events / touch)
+- Runtime dynamic window creation
+- Frame stats + input (polling / events / touch / IME)
 
 ### Material conventions (not frozen)
 
@@ -114,11 +134,13 @@ cargo run --example text_clip
 cargo run --example text_batch_clip
 cargo run --example text_shape_cache
 cargo run --example text_profile
+cargo run --example text_stress
 
 # Shapes / transform
 cargo run --example shapes
 cargo run --example shapes_lines
 cargo run --example shapes_rotate
+cargo run --example shapes_cover_text
 cargo run --example transform_stack
 
 # Texture
@@ -126,14 +148,17 @@ cargo run --example texture
 cargo run --example texture_rgba
 cargo run --example texture_region
 cargo run --example texture_sdf_geo
+cargo run --example texture_fun
 
 # Batch / clip
-cargo run --example batch_multi
 cargo run --example batch_inherit
 cargo run --example batch_child_clip
 cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
-cargo run --example clip_rect_demo
+cargo run --example batch_scissor_clip
+cargo run --example batch_override
+cargo run --example batch_extend
+cargo run --example batch_view
 
 # Custom Material
 cargo run --example custom_material
@@ -142,24 +167,32 @@ cargo run --example custom_material_textures
 cargo run --example custom_material_vertex
 cargo run --example custom_material_text
 cargo run --example custom_material_post
+cargo run --example custom_material_dynamic
+cargo run --example custom_material_manual
 
 # Window / input / offscreen
 cargo run --example window_create
 cargo run --example window_api
-cargo run --example input_ime
-cargo run --example window_present
-cargo run --example window_resize
-cargo run --example window_aa
 cargo run --example window_multi
+cargo run --example window_resize
+cargo run --example window_present
+cargo run --example window_aa
 cargo run --example input
 cargo run --example input_touch
+cargo run --example input_ime
 cargo run --example offscreen
+cargo run --example offscreen_aa
 cargo run --example color_palette
+cargo run --example layout_follow
+cargo run --example deferred
+cargo run --example multi_loop
 
 # Stress / diagnostics
 cargo run --example bench
 cargo run --example frame_stats
-cargo run --example text_stress
+cargo run --example frame_stats_multi
+cargo run --example frame_time_probe
+cargo run --example msaa_clamp
 ```
 
 ## Build & Test

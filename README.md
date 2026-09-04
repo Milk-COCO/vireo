@@ -28,7 +28,7 @@ cargo run --example ez
 - **即时模式**：每帧构建 `DrawBatch`，填充形状/文本，提交到窗口
 - **单 pass**：一次 `draw()` 内多 batch 按序渲染；batch 树可嵌套（子节点、继承、裁切）
 - **坐标系**：左上角原点，x 向右，y 向下（vireo 逻辑像素）。`dpi_override=None` 时逻辑即 winit 逻辑（OS 缩放参与）；`Some(d)` 时 vireo 全自持像素，物理 = 逻辑 × d
-- **像素意图**：窗口尺寸/位置 API（`WindowDesc` 尺寸族 builder 与 `set_size`/`set_outer_position`/`set_cursor_position`/`resize_increments`）接受 `impl ToPx`——裸数值 / [`Dp`] = vireo 逻辑像素，[`Px`] = 物理像素；语义由调用点声明，不随 `dpi_override` 翻转。位置/尺寸 getter 返回 `Pixel`/`PixelPos`/`PixelSize`（物理 + 逻辑双表示）
+- **像素意图**：窗口尺寸/位置 API 接受 `impl ToPx`——裸数值 / `Dp` = vireo 逻辑像素，`Px` = 物理像素；语义由调用点声明，不随 `dpi_override` 翻转
 - **位置 `Pos`**：圆/矩形等锚点形状的位置走 `Pos` + 变换表；线/多边形等点列即几何坐标
 
 ```rust
@@ -56,6 +56,25 @@ win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 - **`bounds`**：子树 AABB 剔除（默认自动；可关 / 可手动）  
 - **`text_clip` / `TextOverride.clip`**：文字逻辑像素裁切（内部 × scale 到物理）  
 
+## 多循环架构
+
+Vireo 支持多线程多循环，每个循环独立运行：
+
+```rust
+#[vireo::main]
+async fn main() {
+    let app = App::new();
+    // ... 创建窗口 ...
+    
+    // 主循环
+    app.run(|ctx| {
+        // ctx.app() 访问应用
+        // ctx.tick_count() 帧计数
+        // ctx.after_secs(1.0, || { ... }) 定时任务
+    }).unwrap();
+}
+```
+
 ## 功能
 
 - 填充形状 + 描边（SDF / 几何双路径，`sdf_feather`）
@@ -65,7 +84,8 @@ win.draw(bg_color, &[&batch1, &batch2, &batch3]);
 - 多窗口 + 离屏渲染
 - 纹理（文件 / 字节 / RGBA，UV 子区域）
 - 窗口控制（全屏、图标、PresentMode、AA、自定义 dpi 覆盖等）
-- 帧统计 + 输入（轮询 / 事件 / 触摸）
+- 运行时动态建窗
+- 帧统计 + 输入（轮询 / 事件 / 触摸 / IME）
 
 ### Material 约定（未冻结）
 
@@ -112,11 +132,13 @@ cargo run --example text_clip
 cargo run --example text_batch_clip
 cargo run --example text_shape_cache
 cargo run --example text_profile
+cargo run --example text_stress
 
 # 形状 / 变换
 cargo run --example shapes
 cargo run --example shapes_lines
 cargo run --example shapes_rotate
+cargo run --example shapes_cover_text
 cargo run --example transform_stack
 
 # 纹理
@@ -124,14 +146,17 @@ cargo run --example texture
 cargo run --example texture_rgba
 cargo run --example texture_region
 cargo run --example texture_sdf_geo
+cargo run --example texture_fun
 
 # Batch / 裁切
-cargo run --example batch_multi
 cargo run --example batch_inherit
 cargo run --example batch_child_clip
 cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
-cargo run --example clip_rect_demo
+cargo run --example batch_scissor_clip
+cargo run --example batch_override
+cargo run --example batch_extend
+cargo run --example batch_view
 
 # 自定义 Material
 cargo run --example custom_material
@@ -140,24 +165,32 @@ cargo run --example custom_material_textures
 cargo run --example custom_material_vertex
 cargo run --example custom_material_text
 cargo run --example custom_material_post
+cargo run --example custom_material_dynamic
+cargo run --example custom_material_manual
 
 # 窗口 / 输入 / 离屏
 cargo run --example window_create
 cargo run --example window_api
-cargo run --example input_ime
-cargo run --example window_present
-cargo run --example window_resize
-cargo run --example window_aa
 cargo run --example window_multi
+cargo run --example window_resize
+cargo run --example window_present
+cargo run --example window_aa
 cargo run --example input
 cargo run --example input_touch
+cargo run --example input_ime
 cargo run --example offscreen
+cargo run --example offscreen_aa
 cargo run --example color_palette
+cargo run --example layout_follow
+cargo run --example deferred
+cargo run --example multi_loop
 
 # 压力 / 诊断
 cargo run --example bench
 cargo run --example frame_stats
-cargo run --example text_stress
+cargo run --example frame_stats_multi
+cargo run --example frame_time_probe
+cargo run --example msaa_clamp
 ```
 
 ## 构建与测试
