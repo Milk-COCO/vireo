@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use cosmic_text::{AttrsOwned, Buffer};
 
-use crate::text::{TextAlign, TextDef};
+use super::{TextAlign, TextDef};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ShapeKey {
