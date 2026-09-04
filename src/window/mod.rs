@@ -461,11 +461,13 @@ impl VireoWindow {
             *self.last_draw_report.lock() = Some(r);
             match r.outcome {
                 DrawOutcome::Presented { .. } => {
-                    *self.presented_frames.lock() = self.presented_frames.lock().saturating_add(1);
+                    let mut f = self.presented_frames.lock();
+                    *f = f.saturating_add(1);
                     self.record_present();
                 }
                 DrawOutcome::Skipped(_) => {
-                    *self.skipped_frames.lock() = self.skipped_frames.lock().saturating_add(1);
+                    let mut f = self.skipped_frames.lock();
+                    *f = f.saturating_add(1);
                 }
                 DrawOutcome::Failed(_) => {}
             }
