@@ -58,10 +58,7 @@ impl WindowExtMacOS for crate::window::VireoWindow {
     }
 
     fn set_simple_fullscreen(&self, fullscreen: bool) -> bool {
-        winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(
-            &*self.inner,
-            fullscreen,
-        )
+        winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*self.inner, fullscreen)
     }
 
     fn has_shadow(&self) -> bool {
@@ -81,10 +78,7 @@ impl WindowExtMacOS for crate::window::VireoWindow {
     }
 
     fn set_option_as_alt(&self, option_as_alt: OptionAsAlt) {
-        winit::platform::macos::WindowExtMacOS::set_option_as_alt(
-            &*self.inner,
-            option_as_alt,
-        );
+        winit::platform::macos::WindowExtMacOS::set_option_as_alt(&*self.inner, option_as_alt);
     }
 
     fn is_borderless_game(&self) -> bool {
@@ -92,9 +86,6 @@ impl WindowExtMacOS for crate::window::VireoWindow {
     }
 
     fn set_borderless_game(&self, borderless_game: bool) {
-        winit::platform::macos::WindowExtMacOS::set_borderless_game(
-            &*self.inner,
-            borderless_game,
-        );
+        winit::platform::macos::WindowExtMacOS::set_borderless_game(&*self.inner, borderless_game);
     }
 }

@@ -1,15 +1,14 @@
 use super::{
-    custom_glyph::CustomGlyphCacheKey, ColorMode, ContentType, FontSystem, GlyphDetails,
-    GlyphToRender, GpuCacheStatus, PrepareError, RasterizeCustomGlyphRequest,
-    RasterizedCustomGlyph, RenderError, ResolvedGlyphArea, State, SwashCache, SwashContent,
-    TextArea, TextAtlas, Viewport,
+    ColorMode, ContentType, FontSystem, GlyphDetails, GlyphToRender, GpuCacheStatus, PrepareError,
+    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, RenderError, ResolvedGlyphArea, State,
+    SwashCache, SwashContent, TextArea, TextAtlas, Viewport, custom_glyph::CustomGlyphCacheKey,
 };
 use cosmic_text::{Color, SubpixelBin};
 use std::slice;
 use wgpu::{
-    BindGroup, Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d,
-    MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, TextureAspect, COPY_BUFFER_ALIGNMENT,
+    BindGroup, Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT, DepthStencilState,
+    Device, Extent3d, MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline,
+    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
 };
 
 /// A text renderer that uses cached glyphs to render text into an existing render pass.
@@ -292,7 +291,11 @@ impl TextRenderer {
         cache: &mut SwashCache,
     ) -> Result<(), PrepareError> {
         let state = State { device, queue };
-        let mut system = GlyphSystem { atlas, cache, font_system };
+        let mut system = GlyphSystem {
+            atlas,
+            cache,
+            font_system,
+        };
         let resolution = viewport.resolution();
 
         for area in glyphs {
@@ -391,7 +394,14 @@ impl TextRenderer {
         pass: &mut RenderPass<'_>,
         transform_bind_group: &BindGroup,
     ) -> Result<(), RenderError> {
-        self.render_range(atlas, viewport, pass, transform_bind_group, 0, self.glyph_vertices.len() as u32)
+        self.render_range(
+            atlas,
+            viewport,
+            pass,
+            transform_bind_group,
+            0,
+            self.glyph_vertices.len() as u32,
+        )
     }
 
     /// Renders a sub-range of prepared glyph vertices. Use after multiple `prepare()` calls
@@ -757,8 +767,14 @@ fn glyph_bounds(
 ) -> GlyphBounds {
     if transform_index != 0 {
         GlyphBounds {
-            x: Bounds { min: bounds.left, max: bounds.right },
-            y: Bounds { min: bounds.top, max: bounds.bottom },
+            x: Bounds {
+                min: bounds.left,
+                max: bounds.right,
+            },
+            y: Bounds {
+                min: bounds.top,
+                max: bounds.bottom,
+            },
         }
     } else {
         let x_min = bounds.left.max(0);
@@ -776,7 +792,10 @@ fn glyph_bounds(
     }
 }
 
-fn glyph_image(system: &mut GlyphSystem<'_>, key: cosmic_text::CacheKey) -> Option<GetGlyphImageResult> {
+fn glyph_image(
+    system: &mut GlyphSystem<'_>,
+    key: cosmic_text::CacheKey,
+) -> Option<GetGlyphImageResult> {
     let image = system.cache.get_image_uncached(system.font_system, key)?;
     let content_type = match image.content {
         SwashContent::Color => ContentType::Color,

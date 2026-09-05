@@ -58,7 +58,7 @@ async fn main() {
             draw_rounded_rect(&mut batch, Pos::new(x, 170.0), 56.0, 56.0, 8.0, Some(c));
             draw_text(
                 &mut batch.texts,
-                *h,
+                h,
                 Pos::new(x, 234.0),
                 TextDef::default().font_size(11.0),
                 TextOverride::from_color(Color::new(0.55, 0.55, 0.65, 1.0)),
@@ -79,7 +79,13 @@ async fn main() {
         for i in 0..steps {
             let u = i as f32 / (steps - 1) as f32;
             let c = a.lerp(&b, u);
-            draw_rectangle(&mut batch, Pos::new(30.0 + i as f32 * 18.0, 280.0), 16.0, 40.0, Some(c));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(30.0 + i as f32 * 18.0, 280.0),
+                16.0,
+                40.0,
+                Some(c),
+            );
         }
         // 动画 alpha
         let pulse = a.with_alpha(0.3 + 0.7 * (0.5 + 0.5 * t.sin()));
@@ -94,5 +100,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

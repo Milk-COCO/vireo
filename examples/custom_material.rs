@@ -48,8 +48,14 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 #[vireo::main]
 async fn main() {
     let aa = match std::env::var("VIREO_AA").as_deref() {
-        Ok("msaa4") => AntiAliasing::Msaa { samples: 4, alpha_to_coverage: false },
-        Ok("ssaa4") => AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },
+        Ok("msaa4") => AntiAliasing::Msaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
+        Ok("ssaa4") => AntiAliasing::Ssaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
         _ => AntiAliasing::None,
     };
     let title = match aa {
@@ -57,19 +63,25 @@ async fn main() {
         AntiAliasing::Msaa { .. } => "Custom Material (MSAA x4)",
         AntiAliasing::Ssaa { .. } => "Custom Material (SSAA x4)",
     };
-    let idx = app.window(WindowDesc::new(title, 500, 400).anti_aliasing(aa), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new(title, 500, 400).anti_aliasing(aa),
+        None::<fn()>,
+    );
 
-    let mat = app.material_with_resources(WGSL, MaterialResources(&[
-        MaterialResource {
-            name: "u_pulse",
-            kind: MaterialResourceKind::Storage {
-                read_only: true,
-                size: std::mem::size_of::<PulseParams>() as u64,
-                type_name: "Pulse",
-                dynamic: false,
-            },
-        },
-    ])).expect("WGSL compile");
+    let mat = app
+        .material_with_resources(
+            WGSL,
+            MaterialResources(&[MaterialResource {
+                name: "u_pulse",
+                kind: MaterialResourceKind::Storage {
+                    read_only: true,
+                    size: std::mem::size_of::<PulseParams>() as u64,
+                    type_name: "Pulse",
+                    dynamic: false,
+                },
+            }]),
+        )
+        .expect("WGSL compile");
 
     let start = std::time::Instant::now();
 
@@ -108,5 +120,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -78,7 +78,13 @@ async fn main() {
         batch.set_custom_material(Some(material.clone()));
         batch.set_position(320.0, 210.0);
         batch.set_rad(0.15);
-        draw_rectangle(&mut batch, Pos::new(-170.0, -110.0), 340.0, 220.0, Some(WHITE));
+        draw_rectangle(
+            &mut batch,
+            Pos::new(-170.0, -110.0),
+            340.0,
+            220.0,
+            Some(WHITE),
+        );
 
         let mut title = DrawBatch::new();
         draw_text(
@@ -91,5 +97,7 @@ async fn main() {
 
         win.draw(Color::new(0.04, 0.05, 0.09, 1.0), &[&batch, &title]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

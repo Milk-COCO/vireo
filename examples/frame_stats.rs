@@ -27,14 +27,20 @@ const SPIKE_THRESHOLD_MS: f64 = 20.0;
 fn aa_label(aa: AntiAliasing) -> String {
     match aa {
         AntiAliasing::None => "None".to_string(),
-        AntiAliasing::Msaa { samples, alpha_to_coverage } => {
+        AntiAliasing::Msaa {
+            samples,
+            alpha_to_coverage,
+        } => {
             if alpha_to_coverage {
                 format!("MSAA {}x (ATC)", samples)
             } else {
                 format!("MSAA {}x", samples)
             }
         }
-        AntiAliasing::Ssaa { samples, alpha_to_coverage } => {
+        AntiAliasing::Ssaa {
+            samples,
+            alpha_to_coverage,
+        } => {
             if alpha_to_coverage {
                 format!("SSAA {}x (ATC)", samples)
             } else {

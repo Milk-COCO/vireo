@@ -13,7 +13,6 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-
     let supported = app.gpu.supported_sample_counts().to_vec();
     let max_sc = app.gpu.max_sample_count();
     let snapped = app.gpu.clamp_sample_count(8);
@@ -25,7 +24,10 @@ async fn main() {
     eprintln!("=== MSAA capability ===");
     eprintln!("  supported_sample_counts = {:?}", supported);
     eprintln!("  max_sample_count        = {}", max_sc);
-    eprintln!("  TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES = {}", has_adapter_fmt);
+    eprintln!(
+        "  TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES = {}",
+        has_adapter_fmt
+    );
     eprintln!("  request 8x → clamp_sample_count = {}", snapped);
     eprintln!();
 
@@ -50,7 +52,10 @@ async fn main() {
         if !tried_runtime {
             tried_runtime = true;
             eprintln!();
-            eprintln!("[2] after create: max_sample_count still {}", win.gpu().max_sample_count());
+            eprintln!(
+                "[2] after create: max_sample_count still {}",
+                win.gpu().max_sample_count()
+            );
             eprintln!("[2] set_anti_aliasing(Msaa 8x) ...");
             // 路径 2：运行时再要一次 8x（应 clamp + eprintln，不应 panic）
             win.set_anti_aliasing(AntiAliasing::Msaa {
@@ -64,18 +69,31 @@ async fn main() {
         }
 
         let mut batch = DrawBatch::new();
-        draw_circle(&mut batch, Pos::new(240.0, 160.0), 80.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
-        draw_rounded_rect(&mut batch, Pos::new(40.0, 40.0), 120.0, 80.0, 16.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
-            draw_text(
-                &mut batch.texts,
-                &format!(
-                    "request 8x | hw max {} | supported {:?}",
-                    win.gpu().max_sample_count(),
-                    win.gpu().supported_sample_counts()
-                ),
-                Pos::new(12.0, 12.0), TextDef::default().font_size(14.0),
-                TextOverride::from_color(WHITE),
-            );
+        draw_circle(
+            &mut batch,
+            Pos::new(240.0, 160.0),
+            80.0,
+            Some(Color::new(0.2, 0.6, 1.0, 1.0)),
+        );
+        draw_rounded_rect(
+            &mut batch,
+            Pos::new(40.0, 40.0),
+            120.0,
+            80.0,
+            16.0,
+            Some(Color::new(0.15, 0.5, 0.3, 1.0)),
+        );
+        draw_text(
+            &mut batch.texts,
+            &format!(
+                "request 8x | hw max {} | supported {:?}",
+                win.gpu().max_sample_count(),
+                win.gpu().supported_sample_counts()
+            ),
+            Pos::new(12.0, 12.0),
+            TextDef::default().font_size(14.0),
+            TextOverride::from_color(WHITE),
+        );
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
 
         if ctx.tick_count() >= 3 {
@@ -84,5 +102,7 @@ async fn main() {
         } else {
             true
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

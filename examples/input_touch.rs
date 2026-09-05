@@ -4,8 +4,8 @@
 //! 触屏设备可多点；显示 id / phase / force。
 
 use std::sync::{Arc, Mutex};
-use wgpu::PresentMode::Immediate;
 use vireo::prelude::*;
+use wgpu::PresentMode::Immediate;
 
 struct TouchLog {
     last: Option<TouchEvent>,
@@ -14,7 +14,10 @@ struct TouchLog {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate),
+        None::<fn()>,
+    );
 
     let log = Arc::new(Mutex::new(TouchLog {
         last: None,
@@ -117,7 +120,13 @@ async fn main() {
             );
         }
 
-        draw_rectangle(&mut batch, Pos::new(0.0, 480.0), 800.0, 80.0, Some(Color::new(0.08, 0.09, 0.12, 1.0)));
+        draw_rectangle(
+            &mut batch,
+            Pos::new(0.0, 480.0),
+            800.0,
+            80.0,
+            Some(Color::new(0.08, 0.09, 0.12, 1.0)),
+        );
         // 先把 log 锁的作用域收窄：拷贝所需字段后立即释放。
         // 历史上 `win.draw()` 会等待 winit owner 线程完成 present；若期间仍持有 lock，
         // 而 owner 线程的 `on_touch` 回调也锁同一 Mutex，就会形成死锁。当前完整 surface
@@ -143,5 +152,7 @@ async fn main() {
 
         win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -24,17 +24,41 @@ async fn main() {
 
         // 同一次 draw：先 Clear（底色），再按序叠加 b1、b2
         let mut b1 = DrawBatch::new();
-        draw_rectangle(&mut b1, Pos::new(20.0, 40.0), 460.0, 50.0, Some(Color::new(0.15, 0.3, 0.5, 1.0)));
-        draw_text(&mut b1.texts, "Batch #1", Pos::new(30.0, 50.0),
-                  TextDef::default().font_size(20.0), TextOverride::from_color(WHITE));
+        draw_rectangle(
+            &mut b1,
+            Pos::new(20.0, 40.0),
+            460.0,
+            50.0,
+            Some(Color::new(0.15, 0.3, 0.5, 1.0)),
+        );
+        draw_text(
+            &mut b1.texts,
+            "Batch #1",
+            Pos::new(30.0, 50.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(WHITE),
+        );
 
         let mut b2 = DrawBatch::new();
-        draw_rectangle(&mut b2, Pos::new(20.0, 110.0), 460.0, 50.0, Some(Color::new(0.5, 0.2, 0.15, 1.0)));
-        draw_text(&mut b2.texts, "Batch #2（叠加）", Pos::new(30.0, 120.0),
-                  TextDef::default().font_size(20.0), TextOverride::from_color(WHITE));
+        draw_rectangle(
+            &mut b2,
+            Pos::new(20.0, 110.0),
+            460.0,
+            50.0,
+            Some(Color::new(0.5, 0.2, 0.15, 1.0)),
+        );
+        draw_text(
+            &mut b2.texts,
+            "Batch #2（叠加）",
+            Pos::new(30.0, 120.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(WHITE),
+        );
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b1, &b2]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

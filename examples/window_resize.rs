@@ -60,7 +60,7 @@
 //! 频率，不是 displayed FPS。`suboptimal` 仅原样展示 wgpu acquire 状态；它不是规范的
 //! 「拖动拉伸中」信号，后端可能在拖动时仍返回 false，也可能因其他 surface 状态返回 true。
 //! 默认 `Immediate` 便于观察帧流，按 `V` 切 `AutoVsync` 看真实显示节奏。
-//! 
+//!
 //! 想看更详细的帧用时，可以把 `frame_stats` 示例与本示例结合。或者直接改那个示例的刷新策略/去抖/布局跟随也行。
 //!
 //! ## 逻辑/物理像素（vireo 逻辑 + 可选 dpi 覆盖）
@@ -142,10 +142,15 @@ async fn main() {
                 match i {
                     0 => policy = ResizeRefreshPolicy::OnRelease,
                     1 => policy = ResizeRefreshPolicy::EveryFrame,
-                    2 => policy = ResizeRefreshPolicy::Periodic(std::time::Duration::from_millis(400)),
+                    2 => {
+                        policy =
+                            ResizeRefreshPolicy::Periodic(std::time::Duration::from_millis(400))
+                    }
                     3 => {
                         debounce_i = (debounce_i + 1) % DEBOUNCE_MS.len();
-                        win.set_resize_debounce(std::time::Duration::from_millis(DEBOUNCE_MS[debounce_i]));
+                        win.set_resize_debounce(std::time::Duration::from_millis(
+                            DEBOUNCE_MS[debounce_i],
+                        ));
                     }
                     4 => {
                         layout_follow = !layout_follow;
@@ -178,18 +183,41 @@ async fn main() {
         let h = (lh as f32).max(1.0);
         let bx = (w - 80.0) * (t.sin() * 0.5 + 0.5);
         let by = (h - 80.0) * (t.cos() * 0.5 + 0.5);
-        draw_rounded_rect(&mut batch, Pos::new(bx, by), 80.0, 80.0, 12.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
+        draw_rounded_rect(
+            &mut batch,
+            Pos::new(bx, by),
+            80.0,
+            80.0,
+            12.0,
+            Some(Color::new(0.3, 0.6, 1.0, 1.0)),
+        );
 
         // 参考网格（拖动时观察拉伸）
         let step = 64.0f32;
         let mut y = step;
         while y < h {
-            draw_line(&mut batch, 0.0, y, w, y, 1.0, Some(Color::new(0.2, 0.2, 0.3, 0.6)));
+            draw_line(
+                &mut batch,
+                0.0,
+                y,
+                w,
+                y,
+                1.0,
+                Some(Color::new(0.2, 0.2, 0.3, 0.6)),
+            );
             y += step;
         }
         let mut x = step;
         while x < w {
-            draw_line(&mut batch, x, 0.0, x, h, 1.0, Some(Color::new(0.2, 0.2, 0.3, 0.6)));
+            draw_line(
+                &mut batch,
+                x,
+                0.0,
+                x,
+                h,
+                1.0,
+                Some(Color::new(0.2, 0.2, 0.3, 0.6)),
+            );
             x += step;
         }
 
@@ -197,11 +225,20 @@ async fn main() {
         let follow_label = if layout_follow { "follow" } else { "frozen" };
         let lines = [
             format!("Resize refresh: {}  (O/F/P)", policy_label(policy)),
-            format!("Debounce: {}ms  (D)   present mode: {:?}", debounce_ms, win.present_mode()),
+            format!(
+                "Debounce: {}ms  (D)   present mode: {:?}",
+                debounce_ms,
+                win.present_mode()
+            ),
             format!("Layout follow: {}  (L)", follow_label),
             format!(
                 "window: {}x{} (logical)  {}x{} (physical)  Update FPS: {:.1}  update dt: {:.2} ms",
-                lw as u32, lh as u32, pw as u32, ph as u32, ctx.fps(), ctx.frame_time() * 1000.0
+                lw as u32,
+                lh as u32,
+                pw as u32,
+                ph as u32,
+                ctx.fps(),
+                ctx.frame_time() * 1000.0
             ),
             format!(
                 "last configure: {:.2} ms  acquire: {:.2} ms  encode: {:.2} ms",
@@ -209,7 +246,11 @@ async fn main() {
             ),
             format!(
                 "resize pending: {}  present: {} ({:.1}/s)  skipped: {}  wgpu suboptimal: {}",
-                win.resize_pending(), win.presented_frames(), win.presented_fps(), win.skipped_frames(), last_suboptimal,
+                win.resize_pending(),
+                win.presented_frames(),
+                win.presented_fps(),
+                win.skipped_frames(),
+                last_suboptimal,
             ),
             "drag edge: O=OnRelease F=EveryFrame P=Periodic(400ms) D=去抖 L=跟随 V=present".into(),
         ];
@@ -219,7 +260,13 @@ async fn main() {
                 line,
                 Pos::new(16.0, 20.0 + i as f32 * 22.0),
                 TextDef::default().font_size(15.0),
-                TextOverride::from_color(if i == 0 { GOLD } else if i == 5 { Color::new(0.6, 0.85, 0.7, 1.0) } else { WHITE }),
+                TextOverride::from_color(if i == 0 {
+                    GOLD
+                } else if i == 5 {
+                    Color::new(0.6, 0.85, 0.7, 1.0)
+                } else {
+                    WHITE
+                }),
             );
         }
 
@@ -232,5 +279,7 @@ async fn main() {
         last_enc_ms = report.timings.encode_secs * 1000.0;
         last_conf_ms = report.timings.configure_secs * 1000.0;
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

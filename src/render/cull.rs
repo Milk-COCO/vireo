@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 
 use rustc_hash::FxHashMap;
 
-use crate::math::{affine_rect_bounds, Rect, Transform};
+use crate::math::{Rect, Transform, affine_rect_bounds};
 use crate::render::{DrawBatch, DrawEvent};
 
 pub(crate) type AabbMap = FxHashMap<usize, Option<Rect>>;
@@ -75,5 +75,3 @@ pub(crate) fn prepare_culling<'a>(
     }
     (viewport, uses_stencil)
 }
-
-

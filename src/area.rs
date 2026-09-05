@@ -153,9 +153,7 @@ impl Area {
     /// 在 stencil==level 且落在本 Area 内的像素上 Dec。
     pub(crate) fn compile_erase(&self, level: u32, out: &mut Vec<AreaStencilOp>) {
         match self {
-            Area::Full => out.push(AreaStencilOp::EraseFull {
-                stencil_ref: level,
-            }),
+            Area::Full => out.push(AreaStencilOp::EraseFull { stencil_ref: level }),
             Area::Empty => {}
             Area::Geom(g) => {
                 if !g.is_empty() {
@@ -202,12 +200,8 @@ impl Area {
     pub fn max_stencil_level(&self, base: u32) -> u32 {
         match self {
             Area::Full | Area::Empty | Area::Geom(_) => base + 1,
-            Area::Union(a, b) => a
-                .max_stencil_level(base)
-                .max(b.max_stencil_level(base)),
-            Area::Difference(a, b) => a
-                .max_stencil_level(base)
-                .max(b.max_stencil_level(base + 1)),
+            Area::Union(a, b) => a.max_stencil_level(base).max(b.max_stencil_level(base)),
+            Area::Difference(a, b) => a.max_stencil_level(base).max(b.max_stencil_level(base + 1)),
             Area::Intersect(a, b) => {
                 // cover a at base, cover b at base+1 → up to base+2
                 a.max_stencil_level(base)
@@ -267,10 +261,7 @@ impl AreaStencilOp {
 }
 
 /// include \ exclude；二者皆 `None` 表示不走 Area 路径。
-pub fn effective_area(
-    include: Option<&Area>,
-    exclude: Option<&Area>,
-) -> Option<Area> {
+pub fn effective_area(include: Option<&Area>, exclude: Option<&Area>) -> Option<Area> {
     match (include, exclude) {
         (None, None) => None,
         (inc, exc) => {
@@ -297,9 +288,7 @@ mod tests {
                 Vertex::new_uv_xform(0.0, 1.0, 0.0, 0.0, WHITE, idx),
             ],
             indices: vec![0, 1, 2, 0, 2, 3],
-            transform_table: vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-            ],
+            transform_table: vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             polygon_edges: Vec::new(),
             has_sdf: false,
             sdf_feather: None,
@@ -384,7 +373,13 @@ mod tests {
         let a = Area::geom(unit_quad()).intersect(Area::geom(unit_quad()));
         let mut ops = Vec::new();
         a.compile_erase(1, &mut ops);
-        assert_eq!(ops.len(), 1, "expected 1 op, got {:?}: {:#?}", ops.len(), ops);
+        assert_eq!(
+            ops.len(),
+            1,
+            "expected 1 op, got {:?}: {:#?}",
+            ops.len(),
+            ops
+        );
         assert_eq!(ops[0].stencil_pipeline_op(), 3); // EraseGeom
         assert_eq!(ops[0].stencil_ref(), 1);
     }

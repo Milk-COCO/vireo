@@ -2,9 +2,9 @@ use std::sync::{Arc, OnceLock, mpsc};
 
 use parking_lot::Mutex;
 
-use crate::render::DrawBatch;
 use crate::gpu::GpuContext;
 use crate::input::InputState;
+use crate::render::DrawBatch;
 
 pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
@@ -32,22 +32,21 @@ pub use winit::window::WindowLevel;
 
 /// 进程级入口由 [`App::new`] / [`App::with_descriptor`] 提供：在 OS 主线程直接构造
 /// `App` 并把用户 future 放到独立的 `vireo-main` 线程，无需任何跨线程移交通道。
-
 mod desc;
 mod metrics;
 mod on;
+pub(crate) use desc::clamp_aa;
 pub use desc::{AntiAliasing, FrameStyle, SendRawWindowHandle, WindowDesc};
+#[allow(unused_imports)]
+pub(crate) use metrics::{
+    DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON, ResizeRefresh,
+    drag_cap_effective, drag_effective_cap, mhz_to_hz, observed_moved, pac_advance,
+    phys_to_logical, resize_refresh, size_drifted_beyond, skip_report, sliding_rate,
+    validate_aspect_ratio,
+};
 pub use metrics::{
     DrawFailure, DrawOutcome, DrawReport, DrawSkipReason, DrawTimings, FollowAmount,
     FollowFramesOrTime, RenderAdvice, ResizeRefreshPolicy,
-};
-pub(crate) use desc::clamp_aa;
-#[allow(unused_imports)]
-pub(crate) use metrics::{
-    DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON,
-    ResizeRefresh, drag_cap_effective, drag_effective_cap, mhz_to_hz, observed_moved,
-    pac_advance, phys_to_logical, resize_refresh,
-    size_drifted_beyond, skip_report, sliding_rate, validate_aspect_ratio,
 };
 
 pub use crate::dpi::{Dp, Pixel, PixelPos, PixelSize, Pp, Px, dp, px};
@@ -77,6 +76,7 @@ fn nanos_to_deadline(n: i64) -> Option<std::time::Instant> {
 }
 
 /// 从 winit 线程发往渲染线程的事件（全是 Send-safe 的自定义类型）。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum WinitEvent {
     WindowCreated {
         handle: usize,
@@ -91,39 +91,116 @@ pub(crate) enum WinitEvent {
         /// 首帧渲染后是否自动显示（`desc.visible && desc.preparable`）。
         pending_show: bool,
     },
-    Resized { handle: usize, width: u32, height: u32 },
-    ScaleFactorChanged { handle: usize, scale: f64 },
-    CursorMoved { handle: usize, x: f64, y: f64 },
-    KeyboardInput { handle: usize, event: crate::input::KeyEvent },
-    MouseInput { handle: usize, button: winit::event::MouseButton, pressed: bool },
-    MouseWheel { handle: usize, delta: crate::input::ScrollDelta },
-    ModifiersChanged { handle: usize, modifiers: crate::input::Modifiers },
-    Focused { handle: usize, focused: bool },
-    CursorEntered { handle: usize },
-    CursorLeft { handle: usize },
-    Touch { handle: usize, event: crate::input::TouchEvent },
-    CloseRequested { handle: usize },
-    SetTitle { handle: usize, title: String },
+    Resized {
+        handle: usize,
+        width: u32,
+        height: u32,
+    },
+    ScaleFactorChanged {
+        handle: usize,
+        scale: f64,
+    },
+    CursorMoved {
+        handle: usize,
+        x: f64,
+        y: f64,
+    },
+    KeyboardInput {
+        handle: usize,
+        event: crate::input::KeyEvent,
+    },
+    MouseInput {
+        handle: usize,
+        button: winit::event::MouseButton,
+        pressed: bool,
+    },
+    MouseWheel {
+        handle: usize,
+        delta: crate::input::ScrollDelta,
+    },
+    ModifiersChanged {
+        handle: usize,
+        modifiers: crate::input::Modifiers,
+    },
+    Focused {
+        handle: usize,
+        focused: bool,
+    },
+    CursorEntered {
+        handle: usize,
+    },
+    CursorLeft {
+        handle: usize,
+    },
+    Touch {
+        handle: usize,
+        event: crate::input::TouchEvent,
+    },
+    CloseRequested {
+        handle: usize,
+    },
+    SetTitle {
+        handle: usize,
+        title: String,
+    },
     /// size 为已按 dpi_override 换算后的 winit 尺寸（vireo 逻辑 × dpi）。
-    SetSize { handle: usize, size: Size },
-    SetMinSize { handle: usize, size: Option<Size> },
-    SetMaxSize { handle: usize, size: Option<Size> },
-    SetFullscreen { handle: usize, fullscreen: Option<Fullscreen> },
-    SetMaximized { handle: usize, maximized: bool },
-    SetMinimized { handle: usize, minimized: bool },
-    SetVisible { handle: usize, visible: bool },
-    FocusWindow { handle: usize },
-    SetWindowLevel { handle: usize, level: WindowLevel },
-    SetFrameStyle { handle: usize, style: FrameStyle },
-    SetIcon { handle: usize, icon: Icon },
-    SetCursor { handle: usize, cursor: winit::window::Cursor },
+    SetSize {
+        handle: usize,
+        size: Size,
+    },
+    SetMinSize {
+        handle: usize,
+        size: Option<Size>,
+    },
+    SetMaxSize {
+        handle: usize,
+        size: Option<Size>,
+    },
+    SetFullscreen {
+        handle: usize,
+        fullscreen: Option<Fullscreen>,
+    },
+    SetMaximized {
+        handle: usize,
+        maximized: bool,
+    },
+    SetMinimized {
+        handle: usize,
+        minimized: bool,
+    },
+    SetVisible {
+        handle: usize,
+        visible: bool,
+    },
+    FocusWindow {
+        handle: usize,
+    },
+    SetWindowLevel {
+        handle: usize,
+        level: WindowLevel,
+    },
+    SetFrameStyle {
+        handle: usize,
+        style: FrameStyle,
+    },
+    SetIcon {
+        handle: usize,
+        icon: Icon,
+    },
+    SetCursor {
+        handle: usize,
+        cursor: winit::window::Cursor,
+    },
     /// 设置窗口宽高比（`Some(r > 0)` = 宽/高比 = r；`None` 或非正数 = 清除）。
     /// 跨平台语义：Electron `setAspectRatio`（macOS）、Tauri 暂无；
     /// vireo 先在 Windows 上落地（`WM_GETMINMAXINFO` + `WM_SIZING` 子类），
     /// macOS 等后续 `NSWindow setContentAspectRatio` 实施时挂接。
     /// 必须经 winit 线程执行 `SetWindowSubclass`（同 `set_frame_style`），
     /// 渲染线程收到本事件后转发 `aspect_ratio_tx` → winit 线程。
-    SetAspectRatio { handle: usize, ratio: Option<f64> },
+    SetAspectRatio {
+        handle: usize,
+        ratio: Option<f64>,
+    },
     /// 内部唤醒哨兵：由 `main_done` 置位点 / 渲染线程检测设备丢失或 loop 结束时发送，
     /// 用于唤醒阻塞在 `rx.recv()` 的 supervisor 重新判定退出条件。无业务载荷。
     Wake,
@@ -327,12 +404,7 @@ impl VireoWindow {
             max_fps: Mutex::new(None),
             drag_cap: Mutex::new(true),
             pacing_deadline: std::sync::atomic::AtomicI64::new(i64::MIN),
-            configured_layout: Mutex::new((
-                initial_phys.0,
-                initial_phys.1,
-                scale,
-                dpi_scale,
-            )),
+            configured_layout: Mutex::new((initial_phys.0, initial_phys.1, scale, dpi_scale)),
             input: InputState::default(),
             pending_input: Mutex::new(Vec::new()),
             auto_refresh_input: Mutex::new(true),
@@ -347,11 +419,7 @@ impl VireoWindow {
             applied_frame_latency: Mutex::new(initial_frame_latency),
             last_configure: Mutex::new(std::time::Instant::now()),
             pending_resize_at: Mutex::new(None),
-            last_observed: Mutex::new((
-                initial_phys.0,
-                initial_phys.1,
-                scale,
-            )),
+            last_observed: Mutex::new((initial_phys.0, initial_phys.1, scale)),
             drag_refresh_mhz: Mutex::new(None),
             resize_policy: Mutex::new(ResizeRefreshPolicy::OnRelease),
             resize_debounce: Mutex::new(DEFAULT_RESIZE_DEBOUNCE),
@@ -364,9 +432,7 @@ impl VireoWindow {
             frame_style: Mutex::new(frame_style),
             focusable: Mutex::new(true),
             nc_tx,
-            user_corner_pref: Mutex::new(
-                crate::platform::windows::CornerPreference::Default,
-            ),
+            user_corner_pref: Mutex::new(crate::platform::windows::CornerPreference::Default),
             closing: Mutex::new(false),
             draw_idle: std::sync::atomic::AtomicBool::new(true),
             draw_idle_cv: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
@@ -388,7 +454,8 @@ impl VireoWindow {
         let dpi_override = *self.applied_dpi_override.lock();
         let scale = dpi_override.unwrap_or(sf) as f32;
         let dpi_scale = sf as f32;
-        let (logical_w, logical_h) = phys_to_logical((size.width, size.height), dpi_override.unwrap_or(sf));
+        let (logical_w, logical_h) =
+            phys_to_logical((size.width, size.height), dpi_override.unwrap_or(sf));
 
         let mut config = self.surface_config.lock().clone();
         config.width = size.width;
@@ -441,11 +508,7 @@ impl VireoWindow {
     /// resize 时残留 semaphore 引用。
     ///
     /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
-    pub fn draw(
-        &self,
-        clear_color: crate::color::Color,
-        batches: &[&DrawBatch],
-    ) -> DrawReport {
+    pub fn draw(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
         let report = {
             let _occupancy_guard = self.occupancy.lock().unwrap_or_else(|e| e.into_inner());
             let r = self.draw_frame(clear_color, batches);
@@ -472,10 +535,15 @@ impl VireoWindow {
         // 与渲染循环解耦：`draw` 是窗口唯一的帧循环入口，`App` 仅作默认值来源。
         let cap = self.effective_max_fps();
         let now = std::time::Instant::now();
-        let cur = nanos_to_deadline(self.pacing_deadline.load(std::sync::atomic::Ordering::Acquire));
+        let cur = nanos_to_deadline(
+            self.pacing_deadline
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         let (next_deadline, sleep_dur) = pac_advance(now, cur, cap);
-        self.pacing_deadline
-            .store(deadline_nanos(next_deadline), std::sync::atomic::Ordering::Release);
+        self.pacing_deadline.store(
+            deadline_nanos(next_deadline),
+            std::sync::atomic::Ordering::Release,
+        );
         if let Some(s) = sleep_dur {
             std::thread::sleep(s);
         }
@@ -495,11 +563,11 @@ impl VireoWindow {
         if *self.closing.lock() {
             return RenderAdvice::Skip;
         }
-        match *self.last_draw_outcome.lock() {
-            Some(DrawOutcome::Skipped(
-                DrawSkipReason::ZeroSized | DrawSkipReason::Occluded | DrawSkipReason::Closing,
-            )) => return RenderAdvice::Skip,
-            _ => {}
+        if let Some(DrawOutcome::Skipped(
+            DrawSkipReason::ZeroSized | DrawSkipReason::Occluded | DrawSkipReason::Closing,
+        )) = *self.last_draw_outcome.lock()
+        {
+            return RenderAdvice::Skip;
         }
         // 失焦：present 不被 vsync 节流 → 渲染循环全速空转。报 Unthrottled 让用户自行限流。
         if !self.focused() {
@@ -532,8 +600,7 @@ impl VireoWindow {
             return;
         }
         use std::sync::{Mutex, OnceLock};
-        static LAST: OnceLock<Mutex<std::collections::HashMap<usize, String>>> =
-            OnceLock::new();
+        static LAST: OnceLock<Mutex<std::collections::HashMap<usize, String>>> = OnceLock::new();
         let mut g = LAST
             .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
             .lock()
@@ -545,11 +612,7 @@ impl VireoWindow {
         }
     }
 
-    fn draw_frame(
-        &self,
-        clear_color: crate::color::Color,
-        batches: &[&DrawBatch],
-    ) -> DrawReport {
+    fn draw_frame(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
         if *self.closing.lock() {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
@@ -619,11 +682,13 @@ impl VireoWindow {
         // 尺寸漂移走下方正常的 resize 去抖 / 跟随 / configure 路径。
         if dpi_override != *self.applied_dpi_override.lock() {
             let reached = match *self.pending_override_target.lock() {
-                Some((pw, ph)) => (pw == size.width && ph == size.height)
-                    || self
-                        .pending_override_since
-                        .lock()
-                        .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(1)),
+                Some((pw, ph)) => {
+                    (pw == size.width && ph == size.height)
+                        || self
+                            .pending_override_since
+                            .lock()
+                            .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+                }
                 None => true,
             };
             if reached {
@@ -631,7 +696,7 @@ impl VireoWindow {
                 *self.pending_override_target.lock() = None;
                 *self.pending_override_since.lock() = None;
             }
-}
+        }
         // 构图缓存由 `refresh_metrics` 显式提供：此处复用它做 layout_follow 相机推进
         // （drift 判定与下方 resize 路径一致），避免 draw 内再复制一份尺寸轮询逻辑。
         // 用户也可在 on_tick 内手动调 `refresh_metrics` 以拿当帧构图新鲜度；漏调则由
@@ -678,8 +743,9 @@ impl VireoWindow {
                     // 拖动开始：缓存显示器刷新率（acquire 失去 vsync 节流时用它
                     // 临时压 cap 防空转）。只查一次；monitor 不跨屏时刷新率稳定。
                     // 原样存 milli-Hz（winit 返回值），换算只发生在 drag_effective_cap。
-                    *self.drag_refresh_mhz
-                        .lock() = self.current_monitor().and_then(|m| m.refresh_rate_millihertz());
+                    *self.drag_refresh_mhz.lock() = self
+                        .current_monitor()
+                        .and_then(|m| m.refresh_rate_millihertz());
                 }
             }
             let refresh = resize_refresh(
@@ -692,7 +758,8 @@ impl VireoWindow {
             );
             let need_configure = *self.needs_initial_configure.lock()
                 || (size_drifted && refresh != ResizeRefresh::None)
-                || mode_drifted || latency_drifted;
+                || mode_drifted
+                || latency_drifted;
             trace_need_configure = need_configure;
             if need_configure {
                 configured_this_frame = true;
@@ -703,8 +770,10 @@ impl VireoWindow {
                         ResizeRefresh::Live => "live",
                         ResizeRefresh::None => "mode",
                     };
-                    eprintln!("[draw] conf-start size={}x{} ({} {:?})", size.width, size.height,
-                        label, now);
+                    eprintln!(
+                        "[draw] conf-start size={}x{} ({} {:?})",
+                        size.width, size.height, label, now
+                    );
                 }
                 // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
                 self.configure_surface(size, now);
@@ -772,12 +841,14 @@ impl VireoWindow {
                 if acq_us > 1000 {
                     eprintln!("[acq] Success {:>6}us", acq_us);
                 }
-                self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
+                self.draw_idle
+                    .store(false, std::sync::atomic::Ordering::Release);
                 (st, false)
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
                 eprintln!("[acq] Suboptimal {:>6}us", acq_us);
-                self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
+                self.draw_idle
+                    .store(false, std::sync::atomic::Ordering::Release);
                 (st, true)
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
@@ -843,7 +914,10 @@ impl VireoWindow {
                 self.maybe_show_prepared_window();
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
-                    timings: DrawTimings { configure_secs, ..DrawTimings::default() },
+                    timings: DrawTimings {
+                        configure_secs,
+                        ..DrawTimings::default()
+                    },
                     vsync_throttled: false,
                 };
             }
@@ -904,12 +978,12 @@ impl VireoWindow {
         //     留下约一个刷新周期内的采样差异。
         //     只在 follow_pending（step 2 登记的漂移）且确实仍漂移时更新；否则清残留
         //     的虚拟 viewport。
-if follow_pending {
+        if follow_pending {
             let size = self.inner.inner_size();
             let sf = self.inner.scale_factor();
-let dpi_override = *self.applied_dpi_override.lock();
-        let new_scale = dpi_override.unwrap_or(sf) as f32;
-        let dpi_scale = sf as f32;
+            let dpi_override = *self.applied_dpi_override.lock();
+            let new_scale = dpi_override.unwrap_or(sf) as f32;
+            let dpi_scale = sf as f32;
             let still_drifted = {
                 let sc = self.surface_config.lock();
                 size_drifted_beyond(
@@ -947,10 +1021,9 @@ let dpi_override = *self.applied_dpi_override.lock();
                                 break;
                             }
                         }
-                        let (tw, th) = q.iter().fold(
-                            (0u64, 0u64),
-                            |(a, b), &(_, _, w, h)| (a + w as u64, b + h as u64),
-                        );
+                        let (tw, th) = q.iter().fold((0u64, 0u64), |(a, b), &(_, _, w, h)| {
+                            (a + w as u64, b + h as u64)
+                        });
                         let n = q.len().max(1) as u64;
                         drop(q);
                         Some(((tw / n).max(1) as u32, (th / n).max(1) as u32))
@@ -965,9 +1038,14 @@ let dpi_override = *self.applied_dpi_override.lock();
                     *self.physical_size.lock() = (pw, ph);
                     *self.dpi_scale.lock() = dpi_scale;
                     self.renderer.lock().update_layout(
-                        logical_w as f32, logical_h as f32, new_scale, dpi_scale,
+                        logical_w as f32,
+                        logical_h as f32,
+                        new_scale,
+                        dpi_scale,
                     );
-                    self.renderer.lock().set_text_viewport_override(Some((pw, ph)));
+                    self.renderer
+                        .lock()
+                        .set_text_viewport_override(Some((pw, ph)));
                 }
             } else {
                 // 松手尺寸回稳但尚未 snap（debounce 未满）：不再重排，清虚拟 viewport，
@@ -979,9 +1057,12 @@ let dpi_override = *self.applied_dpi_override.lock();
         // 4b) 编码
         let view = st.texture.create_view(&Default::default());
         let target = crate::render::RenderTarget::from_texture_view(view);
-        let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
+        let batch_refs: Vec<&DrawBatch> = batches.to_vec();
         let t2 = std::time::Instant::now();
-        let cmd_buf = self.renderer.lock().draw(&target, Some(clear_color), &batch_refs);
+        let cmd_buf = self
+            .renderer
+            .lock()
+            .draw(&target, Some(clear_color), &batch_refs);
         // 5) submit
         self.gpu.queue.submit([cmd_buf]);
         let encode_secs = t2.elapsed().as_secs_f64();
@@ -991,19 +1072,22 @@ let dpi_override = *self.applied_dpi_override.lock();
         self.inner.pre_present_notify();
         let t3 = std::time::Instant::now();
         self.gpu.queue.present(st);
-        self.draw_idle.store(true, std::sync::atomic::Ordering::Release);
+        self.draw_idle
+            .store(true, std::sync::atomic::Ordering::Release);
         // 唤醒可能正在等待本帧完成的关窗路径（事件驱动，取代原先百万次自旋）。
         self.draw_idle_cv.1.notify_all();
         let present_secs = t3.elapsed().as_secs_f64();
 
         if trace {
-            eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us suboptimal={}",
+            eprintln!(
+                "[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us suboptimal={}",
                 t_trace.elapsed().as_micros(),
                 configured_this_frame,
                 (acquire_secs * 1e6) as u64,
                 (encode_secs * 1e6) as u64,
                 (present_secs * 1e6) as u64,
-                suboptimal);
+                suboptimal
+            );
         }
 
         // `preparable`：首帧渲染成功（已 present）后显示窗口。此时 surface 已
@@ -1043,9 +1127,7 @@ let dpi_override = *self.applied_dpi_override.lock();
         requested: wgpu::PresentMode,
         supported: &[wgpu::PresentMode],
     ) -> wgpu::PresentMode {
-        if supported.contains(&requested)
-            || matches!(requested, wgpu::PresentMode::AutoVsync)
-        {
+        if supported.contains(&requested) || matches!(requested, wgpu::PresentMode::AutoVsync) {
             requested
         } else {
             log::warn!("vireo PresentMode {requested:?} not supported, falling back to AutoVsync");
@@ -1077,7 +1159,9 @@ let dpi_override = *self.applied_dpi_override.lock();
     /// `surface.configure` / renderer 视图更新由 `draw` 的逐帧尺寸同步完成——
     /// 拖动/模态循环期间 Resized 事件可能滞后，逐帧轮询 `inner_size` 才是可靠兜底。
     pub(crate) fn resize(&self, width: u32, height: u32) {
-        if width == 0 || height == 0 { return; }
+        if width == 0 || height == 0 {
+            return;
+        }
         let sf = self.inner.scale_factor();
         *self.physical_size.lock() = (width, height);
         *self.dpi_scale.lock() = sf as f32;
@@ -1159,7 +1243,9 @@ let dpi_override = *self.applied_dpi_override.lock();
                     self.input.keys_down.lock().remove(&event.key);
                 }
             }
-            WinitEvent::MouseInput { button, pressed, .. } => {
+            WinitEvent::MouseInput {
+                button, pressed, ..
+            } => {
                 if pressed {
                     self.input.mouse_buttons_down.lock().insert(button);
                 } else {
@@ -1196,12 +1282,18 @@ let dpi_override = *self.applied_dpi_override.lock();
                 *self.input.cursor_inside.lock() = false;
             }
             WinitEvent::Touch { event, .. } => {
-                let sf = self.applied_dpi_override.lock().unwrap_or(self.inner.scale_factor());
+                let sf = self
+                    .applied_dpi_override
+                    .lock()
+                    .unwrap_or(self.inner.scale_factor());
                 let tx = (event.x as f64 / sf) as f32;
                 let ty = (event.y as f64 / sf) as f32;
                 match event.phase {
                     crate::input::TouchPhase::Started | crate::input::TouchPhase::Moved => {
-                        self.input.touches.lock().insert(event.id, (tx, ty, event.force));
+                        self.input
+                            .touches
+                            .lock()
+                            .insert(event.id, (tx, ty, event.force));
                     }
                     _ => {
                         self.input.touches.lock().remove(&event.id);
@@ -1260,14 +1352,7 @@ let dpi_override = *self.applied_dpi_override.lock();
     /// 获取当前投影矩阵（逻辑像素）
     pub fn projection(&self) -> glam::Mat4 {
         let (w, h) = phys_to_logical(*self.physical_size.lock(), self.layout_scale());
-        glam::camera::rh::proj::opengl::orthographic(
-            0.0,
-            w as f32,
-            h as f32,
-            0.0,
-            -1.0,
-            1.0,
-        )
+        glam::camera::rh::proj::opengl::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0)
     }
 
     /// 获取共享 GPU 上下文
@@ -1352,7 +1437,6 @@ let dpi_override = *self.applied_dpi_override.lock();
     pub fn cursor_inside(&self) -> bool {
         *self.input.cursor_inside.lock()
     }
-
 }
 
 /// 窗口索引 —— 用于在 run() 闭包中引用窗口。稳定 handle：关窗后该索引失效（`window_ref` 返回 None），
@@ -1365,7 +1449,6 @@ impl WindowIndex {
         Self(handle)
     }
 }
-
 
 impl VireoWindow {
     /// 该窗口初始化耗时（秒）：app.window() 内的 AA 管线预热。
@@ -1420,7 +1503,10 @@ impl VireoWindow {
     ///
     /// 示例：`examples/window_api.rs` 按 `O` 键循环切换。
     pub fn set_dpi_override(&self, dpi: Option<f64>) {
-        debug_assert!(dpi.map_or(true, |d| d.is_finite() && d > 0.0), "dpi_override must be None or finite >0");
+        debug_assert!(
+            dpi.is_none_or(|d| d.is_finite() && d > 0.0),
+            "dpi_override must be None or finite >0"
+        );
         if *self.dpi_override.lock() == dpi {
             return;
         }
@@ -1891,10 +1977,8 @@ impl VireoWindow {
         let origin = monitor.position();
         let area = monitor.size();
         let size = self.outer_size();
-        let x = origin.x as f64
-            + ((area.width as f64 - size.width.px.0) / 2.0).round();
-        let y = origin.y as f64
-            + ((area.height as f64 - size.height.px.0) / 2.0).round();
+        let x = origin.x as f64 + ((area.width as f64 - size.width.px.0) / 2.0).round();
+        let y = origin.y as f64 + ((area.height as f64 - size.height.px.0) / 2.0).round();
         self.set_outer_position(Px(x), Px(y));
     }
 
@@ -2067,15 +2151,14 @@ impl VireoWindow {
     /// ## Platform-specific
     /// - iOS / Android / Web / Orbital 不支持。
     pub fn set_resize_increments<W: Into<Pp>, H: Into<Pp>>(&self, increments: Option<(W, H)>) {
-        let increments =
-            increments.map(|(w, h)| {
-                dim_to_winit_size(
-                    w.into(),
-                    h.into(),
-                    *self.dpi_override.lock(),
-                    self.inner.scale_factor(),
-                )
-            });
+        let increments = increments.map(|(w, h)| {
+            dim_to_winit_size(
+                w.into(),
+                h.into(),
+                *self.dpi_override.lock(),
+                self.inner.scale_factor(),
+            )
+        });
         self.inner.set_resize_increments(increments);
     }
 
@@ -2209,10 +2292,11 @@ impl VireoWindow {
     /// 避免渲染循环全速空转；松手 snap 后自动恢复。纯决策，供 `draw_frame` 帧节流调用。
     fn effective_max_fps(&self) -> Option<u32> {
         let user = *self.max_fps.lock();
-        if *self.drag_cap.lock() && self.pending_resize_at.lock().is_some() {
-            if let Some(mhz) = *self.drag_refresh_mhz.lock() {
-                return drag_cap_effective(user, true, mhz);
-            }
+        if *self.drag_cap.lock()
+            && self.pending_resize_at.lock().is_some()
+            && let Some(mhz) = *self.drag_refresh_mhz.lock()
+        {
+            return drag_cap_effective(user, true, mhz);
         }
         user
     }
@@ -2375,13 +2459,10 @@ impl VireoWindow {
     }
 }
 
-
 /// 离屏画布索引
 /// 离屏画布索引。handle 是稳定 id（构造顺序，不受其他 canvas 关闭影响）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct OffscreenIndex(pub usize);
-
-
 
 #[cfg(test)]
 mod aspect_ratio_and_focus_tests {
@@ -2396,7 +2477,10 @@ mod aspect_ratio_and_focus_tests {
     /// 验证 `validate_aspect_ratio` 过滤逻辑：`Some(r>0)` → `Some(r)`，其余 → `None`。
     #[test]
     fn validate_aspect_ratio_positive_passes_through() {
-        assert_eq!(super::validate_aspect_ratio(Some(16.0 / 9.0)), Some(16.0 / 9.0));
+        assert_eq!(
+            super::validate_aspect_ratio(Some(16.0 / 9.0)),
+            Some(16.0 / 9.0)
+        );
         assert_eq!(super::validate_aspect_ratio(Some(1.0)), Some(1.0));
         // 极小正数（避免 f64 subnormal 边界模糊，按"严格 > 0"语义放行）
         assert_eq!(super::validate_aspect_ratio(Some(0.0001)), Some(0.0001));
@@ -2413,8 +2497,6 @@ mod aspect_ratio_and_focus_tests {
     fn validate_aspect_ratio_none_stays_none() {
         assert_eq!(super::validate_aspect_ratio(None), None);
     }
-
-
 }
 
 #[cfg(test)]
@@ -2426,12 +2508,18 @@ mod metrics_tests {
 
     #[test]
     fn pace_none_when_no_cap() {
-        assert_eq!(super::pac_advance(std::time::Instant::now(), None, None), (None, None));
+        assert_eq!(
+            super::pac_advance(std::time::Instant::now(), None, None),
+            (None, None)
+        );
     }
 
     #[test]
     fn pace_zero_fps_disables() {
-        assert_eq!(super::pac_advance(std::time::Instant::now(), None, Some(0)), (None, None));
+        assert_eq!(
+            super::pac_advance(std::time::Instant::now(), None, Some(0)),
+            (None, None)
+        );
     }
 
     #[test]
@@ -2472,7 +2560,10 @@ mod metrics_tests {
     fn logical_size_conversion() {
         // scale=1.0：逻辑 = 物理（用户坐标即物理像素）
         let s = to_pixel_size(1920.0, 1080.0, 1.0);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1920.0, 1080.0));
+        assert_eq!(
+            (s.width.dp.0 as f32, s.height.dp.0 as f32),
+            (1920.0, 1080.0)
+        );
         let s = to_pixel_size(1000.0, 500.0, 1.0);
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (1000.0, 500.0));
         // scale=2.0：logic = physical / 2（非整数 scale 不截断）
@@ -2480,10 +2571,16 @@ mod metrics_tests {
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (960.0, 540.0));
         // scale=0.5（小 scale）
         let s = to_pixel_size(1000.0, 500.0, 0.5);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (2000.0, 1000.0));
+        assert_eq!(
+            (s.width.dp.0 as f32, s.height.dp.0 as f32),
+            (2000.0, 1000.0)
+        );
         // 非整数 scale 截断验证
         let s = to_pixel_size(1280.0, 720.0, 1.5);
-        assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (853.3333, 480.0));
+        assert_eq!(
+            (s.width.dp.0 as f32, s.height.dp.0 as f32),
+            (853.3333, 480.0)
+        );
     }
 
     #[test]
@@ -2499,20 +2596,32 @@ mod metrics_tests {
     fn resolve_present_mode_auto_vsync_alias_always_accepted() {
         // AutoVsync 是 wgpu 别名，get_capabilities 永不列出别名本身（只列 Fifo 等具体模式）
         let supported = [wgpu::PresentMode::Fifo];
-        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &supported), wgpu::PresentMode::AutoVsync);
-        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &[]), wgpu::PresentMode::AutoVsync);
+        assert_eq!(
+            super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &supported),
+            wgpu::PresentMode::AutoVsync
+        );
+        assert_eq!(
+            super::VireoWindow::resolve_present_mode(wgpu::PresentMode::AutoVsync, &[]),
+            wgpu::PresentMode::AutoVsync
+        );
     }
 
     #[test]
     fn resolve_present_mode_supported_mode_passes_through() {
         let supported = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
-        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported), wgpu::PresentMode::Immediate);
+        assert_eq!(
+            super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported),
+            wgpu::PresentMode::Immediate
+        );
     }
 
     #[test]
     fn resolve_present_mode_unsupported_mode_falls_back_to_auto_vsync() {
         let supported = [wgpu::PresentMode::Fifo];
-        assert_eq!(super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported), wgpu::PresentMode::AutoVsync);
+        assert_eq!(
+            super::VireoWindow::resolve_present_mode(wgpu::PresentMode::Immediate, &supported),
+            wgpu::PresentMode::AutoVsync
+        );
     }
 
     #[test]
@@ -2522,7 +2631,6 @@ mod metrics_tests {
         let r = sliding_rate(&samples);
         assert!((r - 60.0).abs() < 1e-6, "got {r}");
     }
-
 
     fn base() -> std::time::Instant {
         std::time::Instant::now()
@@ -2534,39 +2642,75 @@ mod metrics_tests {
         let debounce = std::time::Duration::from_millis(100);
         // OnRelease：刚变化 → None；稳定 200ms → Stable
         assert_eq!(
-            super::resize_refresh(true, Some(t0), t0, debounce,
-                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                t0,
+                debounce,
+                super::ResizeRefreshPolicy::OnRelease,
+                t0
+            ),
             super::ResizeRefresh::None,
         );
         let stable = t0 + std::time::Duration::from_millis(200);
         assert_eq!(
-            super::resize_refresh(true, Some(t0), stable, debounce,
-                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                stable,
+                debounce,
+                super::ResizeRefreshPolicy::OnRelease,
+                t0
+            ),
             super::ResizeRefresh::Stable,
         );
         // EveryFrame：拖动中 → Live；稳定时 Stable 优先
         assert_eq!(
-            super::resize_refresh(true, Some(t0), t0, debounce,
-                super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                t0,
+                debounce,
+                super::ResizeRefreshPolicy::EveryFrame,
+                t0
+            ),
             super::ResizeRefresh::Live,
         );
         assert_eq!(
-            super::resize_refresh(true, Some(t0), stable, debounce,
-                super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                stable,
+                debounce,
+                super::ResizeRefreshPolicy::EveryFrame,
+                t0
+            ),
             super::ResizeRefresh::Stable,
         );
         // Periodic：距上次 200ms < iv(400ms) → None；满 iv → Live
         let iv = std::time::Duration::from_millis(400);
         let mid = t0 + std::time::Duration::from_millis(200);
         assert_eq!(
-            super::resize_refresh(true, Some(mid), mid, debounce,
-                super::ResizeRefreshPolicy::Periodic(iv), t0),
+            super::resize_refresh(
+                true,
+                Some(mid),
+                mid,
+                debounce,
+                super::ResizeRefreshPolicy::Periodic(iv),
+                t0
+            ),
             super::ResizeRefresh::None,
         );
         let late = t0 + std::time::Duration::from_millis(450);
         assert_eq!(
-            super::resize_refresh(true, Some(late), late, debounce,
-                super::ResizeRefreshPolicy::Periodic(iv), t0),
+            super::resize_refresh(
+                true,
+                Some(late),
+                late,
+                debounce,
+                super::ResizeRefreshPolicy::Periodic(iv),
+                t0
+            ),
             super::ResizeRefresh::Live,
         );
     }
@@ -2576,8 +2720,14 @@ mod metrics_tests {
         let t0 = base();
         let debounce = std::time::Duration::from_millis(100);
         assert_eq!(
-            super::resize_refresh(false, Some(t0), t0 + std::time::Duration::from_millis(500),
-                debounce, super::ResizeRefreshPolicy::EveryFrame, t0),
+            super::resize_refresh(
+                false,
+                Some(t0),
+                t0 + std::time::Duration::from_millis(500),
+                debounce,
+                super::ResizeRefreshPolicy::EveryFrame,
+                t0
+            ),
             super::ResizeRefresh::None,
         );
     }
@@ -2592,27 +2742,54 @@ mod metrics_tests {
         let at_200ms = t0 + std::time::Duration::from_millis(200);
         // 短去抖（16ms）：稳定 50ms 已 snap
         assert_eq!(
-            super::resize_refresh(true, Some(t0), at_50ms, short,
-                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                at_50ms,
+                short,
+                super::ResizeRefreshPolicy::OnRelease,
+                t0
+            ),
             super::ResizeRefresh::Stable,
         );
         // 长去抖（500ms）：稳定 200ms 仍不 snap（旧默认 100ms 点也不 snap）
         assert_eq!(
-            super::resize_refresh(true, Some(t0), at_200ms, long,
-                super::ResizeRefreshPolicy::OnRelease, t0),
+            super::resize_refresh(
+                true,
+                Some(t0),
+                at_200ms,
+                long,
+                super::ResizeRefreshPolicy::OnRelease,
+                t0
+            ),
             super::ResizeRefresh::None,
         );
     }
-
 
     #[test]
     fn size_drifted_within_epsilon_not_drifted() {
         // ±RESIZE_DRIFT_EPSILON 内的小抖动不算漂移（松手后 Windows 短暂抖动不重配）
         let eps = super::RESIZE_DRIFT_EPSILON;
-        assert!(!super::size_drifted_beyond((800, 600), (800 + eps, 600), eps));
-        assert!(!super::size_drifted_beyond((800, 600), (800 - eps, 600), eps));
-        assert!(!super::size_drifted_beyond((800, 600), (800, 600 + eps), eps));
-        assert!(!super::size_drifted_beyond((800, 600), (800, 600 - eps), eps));
+        assert!(!super::size_drifted_beyond(
+            (800, 600),
+            (800 + eps, 600),
+            eps
+        ));
+        assert!(!super::size_drifted_beyond(
+            (800, 600),
+            (800 - eps, 600),
+            eps
+        ));
+        assert!(!super::size_drifted_beyond(
+            (800, 600),
+            (800, 600 + eps),
+            eps
+        ));
+        assert!(!super::size_drifted_beyond(
+            (800, 600),
+            (800, 600 - eps),
+            eps
+        ));
         assert!(!super::size_drifted_beyond((800, 600), (800, 600), eps));
     }
 
@@ -2620,9 +2797,21 @@ mod metrics_tests {
     fn size_drifted_beyond_epsilon_drifted() {
         // 任一轴超出容差 → 真漂移（真实 resize）
         let eps = super::RESIZE_DRIFT_EPSILON;
-        assert!(super::size_drifted_beyond((800, 600), (800 + eps + 1, 600), eps));
-        assert!(super::size_drifted_beyond((800, 600), (800 - eps - 1, 600), eps));
-        assert!(super::size_drifted_beyond((800, 600), (800, 600 + eps + 1), eps));
+        assert!(super::size_drifted_beyond(
+            (800, 600),
+            (800 + eps + 1, 600),
+            eps
+        ));
+        assert!(super::size_drifted_beyond(
+            (800, 600),
+            (800 - eps - 1, 600),
+            eps
+        ));
+        assert!(super::size_drifted_beyond(
+            (800, 600),
+            (800, 600 + eps + 1),
+            eps
+        ));
     }
 
     #[test]
@@ -2643,7 +2832,11 @@ mod metrics_tests {
         // 锚点=上次显著位置：物理累计超出容差才算移动（单调慢拖也能及时刷新去抖计时）
         let eps = 2.0f32;
         let anchor = (800, 600, 1.0);
-        assert!(super::observed_moved(anchor, (800 + eps as u32 + 1, 600, 1.0), eps));
+        assert!(super::observed_moved(
+            anchor,
+            (800 + eps as u32 + 1, 600, 1.0),
+            eps
+        ));
         // 物理在容差内且 scale 相同 → 不算移动（逻辑 = 物理/scale，物理没动逻辑必没动）
         assert!(!super::observed_moved(anchor, (800, 600, 1.0), eps));
         // scale 变化即便物理都在容差内也算移动（需要重配）
@@ -2661,10 +2854,16 @@ mod metrics_tests {
         assert_eq!(super::drag_effective_cap(Some(240), 0), Some(1));
         assert_eq!(super::drag_effective_cap(Some(1), 0), Some(1));
         // 开关关闭：原样返回（不额外压制）
-        assert_eq!(super::drag_cap_effective(Some(240), false, 120_000), Some(240));
+        assert_eq!(
+            super::drag_cap_effective(Some(240), false, 120_000),
+            Some(240)
+        );
         assert_eq!(super::drag_cap_effective(None, false, 120_000), None);
         // 开关开启：Some 压到刷新率；None 也压
-        assert_eq!(super::drag_cap_effective(Some(240), true, 120_000), Some(120));
+        assert_eq!(
+            super::drag_cap_effective(Some(240), true, 120_000),
+            Some(120)
+        );
         assert_eq!(super::drag_cap_effective(None, true, 120_000), Some(120));
     }
 
@@ -2676,7 +2875,6 @@ mod metrics_tests {
         assert_eq!(super::mhz_to_hz(59_950), 60); // 四舍五入
         assert_eq!(super::mhz_to_hz(0), 0);
     }
-
 
     #[test]
     fn window_desc_new_size_is_logical_and_builders_are_typed() {
@@ -2698,7 +2896,10 @@ mod metrics_tests {
         assert_eq!(d.size, (Pp::Dp(dp(1280.0)), Pp::Dp(dp(720.0))));
         assert_eq!(d.min_size, Some((Pp::Dp(dp(200.0)), Pp::Dp(dp(100.0)))));
         assert_eq!(d.max_size, Some((Pp::Dp(dp(2560.0)), Pp::Dp(dp(1440.0)))));
-        assert_eq!(d.resize_increments, Some((Pp::Dp(dp(10.0)), Pp::Dp(dp(10.0)))));
+        assert_eq!(
+            d.resize_increments,
+            Some((Pp::Dp(dp(10.0)), Pp::Dp(dp(10.0))))
+        );
         // 显式 `Px` 意图被保留
         let d = super::WindowDesc::new("t", 640, 360).size(px(1280.0), px(720.0));
         assert_eq!(d.size, (Pp::Px(px(1280.0)), Pp::Px(px(720.0))));
@@ -2719,8 +2920,8 @@ mod metrics_tests {
     #[test]
     fn dim_to_winit_size_and_position_follow_dpi_override() {
         use super::Pp;
-        use crate::dpi::{dp, px};
         use super::{dim_to_winit_position, dim_to_winit_size};
+        use crate::dpi::{dp, px};
         use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
         // `Dp` + `None` dpi：vireo 逻辑即 winit 逻辑（OS 缩放参与）
         assert_eq!(
@@ -2801,7 +3002,10 @@ mod metrics_tests {
         desc.backend_options = wgpu::BackendOptions::default();
         assert_eq!(desc.backends, wgpu::Backends::VULKAN | wgpu::Backends::DX12);
         assert_eq!(desc.flags, wgpu::InstanceFlags::VALIDATION);
-        assert_eq!(desc.memory_budget_thresholds.for_resource_creation, Some(80));
+        assert_eq!(
+            desc.memory_budget_thresholds.for_resource_creation,
+            Some(80)
+        );
         assert_eq!(desc.memory_budget_thresholds.for_device_loss, Some(90));
         // `App::new` 与 `with_descriptor` 共用同一构造路径（逻辑层验证：不实际创建 GPU，
         // 避免开窗口）。两者现在均为泛型入口 `FnOnce(App) -> Future`，此处仅验证
@@ -2818,17 +3022,29 @@ mod metrics_tests {
         let run0 = crate::app::DeferredTask::for_frames(0); // after_ticks(0) → target 0
         let run1 = crate::app::DeferredTask::for_frames(1); // after_ticks(1) → target 1
         // 初始 drain（fc=0）：
-        assert!(run0.is_ready(0), "run 前 after_ticks(0) 应在第一个 on_tick 之前执行");
-        assert!(!run1.is_ready(0), "run 前 after_ticks(1) 初始 drain 时未到期");
+        assert!(
+            run0.is_ready(0),
+            "run 前 after_ticks(0) 应在第一个 on_tick 之前执行"
+        );
+        assert!(
+            !run1.is_ready(0),
+            "run 前 after_ticks(1) 初始 drain 时未到期"
+        );
         // 第 1 帧末 drain（fc=1）：
-        assert!(run1.is_ready(1), "run 前 after_ticks(1) 应在第 1 帧末尾执行");
+        assert!(
+            run1.is_ready(1),
+            "run 前 after_ticks(1) 应在第 1 帧末尾执行"
+        );
 
         // —— 帧内注册（第 N 帧，N 任意）——
         let n = 7u64;
-        let inner0 = crate::app::DeferredTask::for_frames(n);     // after_ticks(0) at frame N → target N
+        let inner0 = crate::app::DeferredTask::for_frames(n); // after_ticks(0) at frame N → target N
         let inner1 = crate::app::DeferredTask::for_frames(n + 1); // after_ticks(1) at frame N → target N+1
         assert!(inner0.is_ready(n), "帧内 after_ticks(0) 于本帧末尾执行");
         assert!(!inner1.is_ready(n), "帧内 after_ticks(1) 本帧末尾未到期");
-        assert!(inner1.is_ready(n + 1), "帧内 after_ticks(1) 于下一帧末尾执行");
+        assert!(
+            inner1.is_ready(n + 1),
+            "帧内 after_ticks(1) 于下一帧末尾执行"
+        );
     }
 }

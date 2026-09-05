@@ -28,37 +28,32 @@
 //! `nc_tx` 通道是 `(isize, ...)`），仅在调用 windows-sys 0.61 的 FFI 函数时
 //! 用 `hwnd as HWND`（`isize as *mut c_void`）转换。
 
-use std::ffi::c_void;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
-use windows_sys::Win32::Foundation::{
-    PROPERTYKEY, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, PROPERTYKEY, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL, ScreenToClient,
+    GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect, ScreenToClient,
 };
+use windows_sys::Win32::System::Com::StructuredStorage::{PROPVARIANT, PropVariantClear};
 use windows_sys::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemAlloc,
 };
-use windows_sys::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows_sys::Win32::System::Variant::{VT_EMPTY, VT_LPWSTR};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture,
-};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows_sys::Win32::UI::Shell::PropertiesSystem::SHGetPropertyStoreForWindow;
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, TBPF_ERROR, TBPF_INDETERMINATE,
-    TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, THB_FLAGS, THB_ICON, THB_TOOLTIP,
-    THBF_DISABLED, THBF_DISMISSONCLICK, THBF_ENABLED, THBF_HIDDEN, THBF_NOBACKGROUND,
-    THBF_NONINTERACTIVE, THBN_CLICKED, THUMBBUTTON, THUMBBUTTONMASK,
+    TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, THB_FLAGS, THB_ICON, THB_TOOLTIP, THBF_DISABLED,
+    THBF_DISMISSONCLICK, THBF_ENABLED, THBF_HIDDEN, THBF_NOBACKGROUND, THBF_NONINTERACTIVE,
+    THBN_CLICKED, THUMBBUTTON, THUMBBUTTONMASK,
 };
-use windows_sys::Win32::UI::Shell::PropertiesSystem::SHGetPropertyStoreForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, DefWindowProcW, DestroyIcon, GetSystemMetrics, HICON, IsZoomed,
-    NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, WM_COMMAND,
-    IMAGE_FLAGS, LR_DEFAULTCOLOR, MINMAXINFO, WM_GETMINMAXINFO, WM_SIZING,
-    WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
-    WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+    CreateIconFromResourceEx, DefWindowProcW, DestroyIcon, GetSystemMetrics, HICON, IMAGE_FLAGS,
+    IsZoomed, LR_DEFAULTCOLOR, MINMAXINFO, NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER, SM_CXSIZEFRAME,
+    SM_CYSIZEFRAME, WM_COMMAND, WM_GETMINMAXINFO, WM_SIZING, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT,
+    WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
 };
 // 非客户区消息（§7.6）。windows-sys 0.52.0 未定义，手写补齐。
 const WM_NCHITTEST: u32 = 0x0084;
@@ -76,10 +71,10 @@ const SC_MAXIMIZE: usize = 0xF030;
 const SC_RESTORE: usize = 0xF120;
 const SC_CLOSE: usize = 0xF060;
 
-pub use winit::platform::windows::BackdropType;
-pub use winit::platform::windows::Color;
 pub use winit::dpi::PhysicalPosition;
 pub use winit::dpi::PhysicalSize;
+pub use winit::platform::windows::BackdropType;
+pub use winit::platform::windows::Color;
 
 /// 窗口圆角偏好（Windows 11 22000+，DWM `DWMWCP_*`）。
 ///
@@ -194,7 +189,10 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
     if rgba.len() < expected || w == 0 || h == 0 {
         log::warn!(
             "vireo taskbar: hicone_from_rgba 尺寸非法 ({}x{}, rgba len={}, expected={})",
-            width, height, rgba.len(), expected
+            width,
+            height,
+            rgba.len(),
+            expected
         );
         return 0;
     }
@@ -235,7 +233,11 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
             LR_DEFAULTCOLOR as IMAGE_FLAGS,
         );
         if icon.is_null() {
-            log::warn!("vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})", width, height);
+            log::warn!(
+                "vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})",
+                width,
+                height
+            );
         }
         icon as isize
     }
@@ -262,7 +264,10 @@ fn create_taskbar_list3() -> *mut c_void {
         )
     };
     if hr != KW_HRESULT_OK {
-        log::warn!("vireo taskbar: CoCreateInstance ITaskbarList3 hr=0x{:08X}", hr as u32);
+        log::warn!(
+            "vireo taskbar: CoCreateInstance ITaskbarList3 hr=0x{:08X}",
+            hr as u32
+        );
         return std::ptr::null_mut();
     }
     // HrInit 失败也保留对象（SetProgressValue 等仍可用）。
@@ -388,7 +393,12 @@ pub(crate) fn set_thumbar_callback(hwnd: isize, cb: Box<dyn FnMut(u32)>) {
     let mut map = THUMB_CALLBACKS.lock().unwrap();
     map.entry(hwnd).or_default().push(ThumbCallback(cb));
     unsafe {
-        SetWindowSubclass(hwnd as HWND, Some(thumb_subclass_proc), THUMB_SUBCLASS_ID, 0);
+        SetWindowSubclass(
+            hwnd as HWND,
+            Some(thumb_subclass_proc),
+            THUMB_SUBCLASS_ID,
+            0,
+        );
     }
 }
 
@@ -417,11 +427,11 @@ unsafe extern "system" fn thumb_subclass_proc(
         let hi = ((wparam as u32) >> 16) as u16;
         if hi as u32 == THBN_CLICKED {
             let id = (wparam as u32) & 0xFFFF;
-            if let Ok(mut map) = THUMB_CALLBACKS.lock() {
-                if let Some(cbs) = map.get_mut(&(hwnd as isize)) {
-                    for cb in cbs.iter_mut() {
-                        cb(id);
-                    }
+            if let Ok(mut map) = THUMB_CALLBACKS.lock()
+                && let Some(cbs) = map.get_mut(&(hwnd as isize))
+            {
+                for cb in cbs.iter_mut() {
+                    cb(id);
                 }
             }
         }
@@ -436,8 +446,7 @@ const REF_TITLEBAR: usize = 1 << 0;
 const REF_BORDER: usize = 1 << 1;
 
 fn encode_refdata(titlebar: bool, border: bool) -> usize {
-    (if titlebar { REF_TITLEBAR } else { 0 })
-        | (if border { REF_BORDER } else { 0 })
+    (if titlebar { REF_TITLEBAR } else { 0 }) | (if border { REF_BORDER } else { 0 })
 }
 
 /// 安装装饰子类。幂等：同一 (proc, SUBCLASS_ID) 重复调用会更新 dwRefData。
@@ -552,12 +561,8 @@ unsafe extern "system" fn frame_subclass_proc(
         return WVR_REDRAW as LRESULT;
     }
 
-    let sx = unsafe {
-        GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER)
-    };
-    let sy = unsafe {
-        GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER)
-    };
+    let sx = unsafe { GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) };
+    let sy = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) };
     let r = unsafe { &mut (*params).rgrc[0] };
     // top 不加 inset（Electron titleBarStyle:'hidden' 语义）：
     // 用户 `set_non_client_size(top,...)` 单独控制顶 inset；frame_subclass
@@ -612,73 +617,69 @@ unsafe extern "system" fn aspect_subclass_proc(
     _dwrefdata: usize,
 ) -> LRESULT {
     if umsg == WM_GETMINMAXINFO {
-        if let Ok(map) = ASPECT_RATIOS.lock() {
-            if let Some(&ratio) = map.get(&(hwnd as isize)) {
-                if ratio > 0.0 {
-                    let info = lparam as *mut MINMAXINFO;
-                    if !info.is_null() {
-                        let info = unsafe { &mut *info };
-                        // Windows 按 ptMaxTrackSize 限制拖拽最大尺寸；
-                        // 这里按 ratio 把"宽为主"换算成高，避免 Windows 给一对
-                        // 与 ratio 矛盾的最大宽/高后用户拖出非 ratio 窗口。
-                        if info.ptMaxTrackSize.x > 0 {
-                            let max_h_from_w =
-                                (info.ptMaxTrackSize.x as f64 / ratio).round() as i32;
-                            if max_h_from_w > 0 && max_h_from_w < info.ptMaxTrackSize.y {
-                                info.ptMaxTrackSize.y = max_h_from_w;
-                            }
-                        }
+        if let Ok(map) = ASPECT_RATIOS.lock()
+            && let Some(&ratio) = map.get(&(hwnd as isize))
+            && ratio > 0.0
+        {
+            let info = lparam as *mut MINMAXINFO;
+            if !info.is_null() {
+                let info = unsafe { &mut *info };
+                // Windows 按 ptMaxTrackSize 限制拖拽最大尺寸；
+                // 这里按 ratio 把"宽为主"换算成高，避免 Windows 给一对
+                // 与 ratio 矛盾的最大宽/高后用户拖出非 ratio 窗口。
+                if info.ptMaxTrackSize.x > 0 {
+                    let max_h_from_w = (info.ptMaxTrackSize.x as f64 / ratio).round() as i32;
+                    if max_h_from_w > 0 && max_h_from_w < info.ptMaxTrackSize.y {
+                        info.ptMaxTrackSize.y = max_h_from_w;
                     }
                 }
             }
         }
-    } else if umsg == WM_SIZING {
-        if let Ok(map) = ASPECT_RATIOS.lock() {
-            if let Some(&ratio) = map.get(&(hwnd as isize)) {
-                if ratio > 0.0 {
-                    let rc = lparam as *mut RECT;
-                    if !rc.is_null() {
-                        let r = unsafe { &mut *rc };
-                        let w = (r.right - r.left) as f64;
-                        let wmsz = wparam as u32;
-                        // 按 WMSZ_* 决定以哪条边为基准调整另一条：
-                        //   左右拖动 → 高度按 width / ratio 调整，固定 top+bottom
-                        //   上下拖动 → 宽度按 height * ratio 调整，固定 left+right
-                        //   角拖动 → 锚对角，按新宽算高
-                        match wmsz {
-                            WMSZ_LEFT | WMSZ_RIGHT => {
-                                let new_h = (w / ratio).round() as i32;
-                                r.bottom = r.top + new_h;
-                            }
-                            WMSZ_TOP | WMSZ_BOTTOM => {
-                                let h = (r.bottom - r.top) as f64;
-                                let new_w = (h * ratio).round() as i32;
-                                r.right = r.left + new_w;
-                            }
-                            WMSZ_TOPLEFT => {
-                                // 锚定 right + bottom（窗口右下角不动）
-                                let new_h = (w / ratio).round() as i32;
-                                r.top = r.bottom - new_h;
-                            }
-                            WMSZ_BOTTOMRIGHT => {
-                                // 锚定 left + top（左上角不动）
-                                let new_h = (w / ratio).round() as i32;
-                                r.bottom = r.top + new_h;
-                            }
-                            WMSZ_TOPRIGHT => {
-                                // 锚定 left + bottom
-                                let new_h = (w / ratio).round() as i32;
-                                r.top = r.bottom - new_h;
-                            }
-                            WMSZ_BOTTOMLEFT => {
-                                // 锚定 right + top
-                                let new_h = (w / ratio).round() as i32;
-                                r.bottom = r.top + new_h;
-                            }
-                            _ => {}
-                        }
-                    }
+    } else if umsg == WM_SIZING
+        && let Ok(map) = ASPECT_RATIOS.lock()
+        && let Some(&ratio) = map.get(&(hwnd as isize))
+        && ratio > 0.0
+    {
+        let rc = lparam as *mut RECT;
+        if !rc.is_null() {
+            let r = unsafe { &mut *rc };
+            let w = (r.right - r.left) as f64;
+            let wmsz = wparam as u32;
+            // 按 WMSZ_* 决定以哪条边为基准调整另一条：
+            //   左右拖动 → 高度按 width / ratio 调整，固定 top+bottom
+            //   上下拖动 → 宽度按 height * ratio 调整，固定 left+right
+            //   角拖动 → 锚对角，按新宽算高
+            match wmsz {
+                WMSZ_LEFT | WMSZ_RIGHT => {
+                    let new_h = (w / ratio).round() as i32;
+                    r.bottom = r.top + new_h;
                 }
+                WMSZ_TOP | WMSZ_BOTTOM => {
+                    let h = (r.bottom - r.top) as f64;
+                    let new_w = (h * ratio).round() as i32;
+                    r.right = r.left + new_w;
+                }
+                WMSZ_TOPLEFT => {
+                    // 锚定 right + bottom（窗口右下角不动）
+                    let new_h = (w / ratio).round() as i32;
+                    r.top = r.bottom - new_h;
+                }
+                WMSZ_BOTTOMRIGHT => {
+                    // 锚定 left + top（左上角不动）
+                    let new_h = (w / ratio).round() as i32;
+                    r.bottom = r.top + new_h;
+                }
+                WMSZ_TOPRIGHT => {
+                    // 锚定 left + bottom
+                    let new_h = (w / ratio).round() as i32;
+                    r.top = r.bottom - new_h;
+                }
+                WMSZ_BOTTOMLEFT => {
+                    // 锚定 right + top
+                    let new_h = (w / ratio).round() as i32;
+                    r.bottom = r.top + new_h;
+                }
+                _ => {}
             }
         }
     }
@@ -696,7 +697,12 @@ pub fn set_aspect_ratio(hwnd: isize, ratio: Option<f64>) {
         Some(r) if r > 0.0 => {
             map.insert(hwnd, r);
             unsafe {
-                SetWindowSubclass(hwnd as HWND, Some(aspect_subclass_proc), ASPECT_SUBCLASS_ID, 0);
+                SetWindowSubclass(
+                    hwnd as HWND,
+                    Some(aspect_subclass_proc),
+                    ASPECT_SUBCLASS_ID,
+                    0,
+                );
             }
         }
         _ => {
@@ -721,10 +727,14 @@ pub(crate) struct HitTestCallback(
 
 impl std::ops::Deref for HitTestCallback {
     type Target = Box<dyn FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for HitTestCallback {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 unsafe impl Send for HitTestCallback {}
 
@@ -867,19 +877,28 @@ fn nc_handle_button_down(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT 
     // 进入按下状态：记 HT + 捕获鼠标，等 WM_LBUTTONUP 决定是否触发动作。
     // 不调 DefSubclassProc/DefWindowProc → 经典按下按钮不渲染。
     // 若已处于按下状态则先清理，避免重复 SetCapture 泄漏。
-    let already_pressed = NC_STATES.lock().map(|m| m.get(&(hwnd as isize)).and_then(|s| s.pressed_ht).is_some()).unwrap_or(false);
+    let already_pressed = NC_STATES
+        .lock()
+        .map(|m| m.get(&(hwnd as isize)).and_then(|s| s.pressed_ht).is_some())
+        .unwrap_or(false);
     if already_pressed {
-        unsafe { ReleaseCapture(); }
-        if let Ok(mut map) = NC_STATES.lock() {
-            if let Some(s) = map.get_mut(&(hwnd as isize)) { s.pressed_ht = None; }
+        unsafe {
+            ReleaseCapture();
+        }
+        if let Ok(mut map) = NC_STATES.lock()
+            && let Some(s) = map.get_mut(&(hwnd as isize))
+        {
+            s.pressed_ht = None;
         }
     }
-    if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&(hwnd as isize)) {
-            s.pressed_ht = Some(ht);
-        }
+    if let Ok(mut map) = NC_STATES.lock()
+        && let Some(s) = map.get_mut(&(hwnd as isize))
+    {
+        s.pressed_ht = Some(ht);
     }
-    unsafe { SetCapture(hwnd); }
+    unsafe {
+        SetCapture(hwnd);
+    }
     0
 }
 
@@ -902,10 +921,10 @@ fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
     let hit = nc_hit_test_regions(hwnd, pt.x, pt.y, 0) as i32;
 
     // 清按下状态并解除捕获（无论是否触发）。
-    if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&(hwnd as isize)) {
-            s.pressed_ht = None;
-        }
+    if let Ok(mut map) = NC_STATES.lock()
+        && let Some(s) = map.get_mut(&(hwnd as isize))
+    {
+        s.pressed_ht = None;
     }
     unsafe {
         ReleaseCapture();
@@ -940,10 +959,10 @@ fn nc_handle_button_up(hwnd: HWND, wparam: WPARAM) -> LRESULT {
 
 /// `WM_CAPTURECHANGED`：捕获被系统剥夺（如点开系统菜单）时清按下状态。
 fn nc_handle_capture_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(s) = map.get_mut(&(hwnd as isize)) {
-            s.pressed_ht = None;
-        }
+    if let Ok(mut map) = NC_STATES.lock()
+        && let Some(s) = map.get_mut(&(hwnd as isize))
+    {
+        s.pressed_ht = None;
     }
     unsafe { DefSubclassProc(hwnd, WM_CAPTURECHANGED, wparam, lparam) }
 }
@@ -962,8 +981,10 @@ fn nc_handle_hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let mut wr: RECT = unsafe { std::mem::zeroed() };
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr) };
 
-    let sx = unsafe { GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
-    let sy = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
+    let sx =
+        unsafe { GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
+    let sy =
+        unsafe { GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) } as i32;
 
     // 窗口边缘 resize 热区（物理像素）。
     let left = screen_x >= wr.left && screen_x < wr.left + sx;
@@ -971,15 +992,41 @@ fn nc_handle_hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let top = screen_y >= wr.top && screen_y < wr.top + sy;
     let bottom = screen_y < wr.bottom && screen_y >= wr.bottom - sy;
 
-    let hit = if top && left { 13 }          // HTTOPLEFT
-        else if top && right { 14 }           // HTTOPRIGHT
-        else if bottom && left { 16 }         // HTBOTTOMLEFT
-        else if bottom && right { 17 }        // HTBOTTOMRIGHT
-        else if top { 12 }                    // HTTOP
-        else if bottom { 15 }                 // HTBOTTOM
-        else if left { 10 }                   // HTLEFT
-        else if right { 11 }                  // HTRIGHT
-        else { 0 }; // 0 = 未命中边框
+    let hit = if top && left {
+        13
+    }
+    // HTTOPLEFT
+    else if top && right {
+        14
+    }
+    // HTTOPRIGHT
+    else if bottom && left {
+        16
+    }
+    // HTBOTTOMLEFT
+    else if bottom && right {
+        17
+    }
+    // HTBOTTOMRIGHT
+    else if top {
+        12
+    }
+    // HTTOP
+    else if bottom {
+        15
+    }
+    // HTBOTTOM
+    else if left {
+        10
+    }
+    // HTLEFT
+    else if right {
+        11
+    }
+    // HTRIGHT
+    else {
+        0
+    }; // 0 = 未命中边框
 
     if hit != 0 {
         return hit as LRESULT;
@@ -990,7 +1037,10 @@ fn nc_handle_hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 
 /// 检查用户声明的 regions；未命中则返回 HTCLIENT。
 fn nc_hit_test_regions(hwnd: HWND, screen_x: i32, screen_y: i32, lparam: LPARAM) -> LRESULT {
-    let mut pt = POINT { x: screen_x, y: screen_y };
+    let mut pt = POINT {
+        x: screen_x,
+        y: screen_y,
+    };
     let ok = unsafe { ScreenToClient(hwnd, &mut pt) };
     if ok == 0 {
         return unsafe { DefSubclassProc(hwnd, WM_NCHITTEST, 0, lparam) };
@@ -1000,23 +1050,23 @@ fn nc_hit_test_regions(hwnd: HWND, screen_x: i32, screen_y: i32, lparam: LPARAM)
     let lx = pt.x as f32 / dpi as f32;
     let ly = pt.y as f32 / dpi as f32;
 
-    if let Ok(mut map) = NC_STATES.lock() {
-        if let Some(state) = map.get_mut(&(hwnd as isize)) {
-            for region in state.regions.iter().rev() {
-                if region.rect.contains([lx, ly]) {
-                    return region.hit_test.to_win32() as LRESULT;
-                }
+    if let Ok(mut map) = NC_STATES.lock()
+        && let Some(state) = map.get_mut(&(hwnd as isize))
+    {
+        for region in state.regions.iter().rev() {
+            if region.rect.contains([lx, ly]) {
+                return region.hit_test.to_win32() as LRESULT;
             }
-            if let Some(cb) = state.hit_test_cb.as_mut() {
-                let input = crate::nc::HitTestInput {
-                    pos: crate::math::Pos::new(lx, ly),
-                    state: get_window_state(hwnd),
-                    dpi_scale: dpi,
-                };
-                let hit = cb(input);
-                if hit != crate::nc::NonClientHit::Client {
-                    return hit.to_win32() as LRESULT;
-                }
+        }
+        if let Some(cb) = state.hit_test_cb.as_mut() {
+            let input = crate::nc::HitTestInput {
+                pos: crate::math::Pos::new(lx, ly),
+                state: get_window_state(hwnd),
+                dpi_scale: dpi,
+            };
+            let hit = cb(input);
+            if hit != crate::nc::NonClientHit::Client {
+                return hit.to_win32() as LRESULT;
             }
         }
     }
@@ -1220,10 +1270,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn set_taskbar_icon(&self, taskbar_icon: Option<winit::window::Icon>) {
-        winit::platform::windows::WindowExtWindows::set_taskbar_icon(
-            &*self.inner,
-            taskbar_icon,
-        );
+        winit::platform::windows::WindowExtWindows::set_taskbar_icon(&*self.inner, taskbar_icon);
     }
 
     fn set_skip_taskbar(&self, skip: bool) {
@@ -1238,24 +1285,15 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn set_border_color(&self, color: Option<Color>) {
-        winit::platform::windows::WindowExtWindows::set_border_color(
-            &*self.inner,
-            color,
-        );
+        winit::platform::windows::WindowExtWindows::set_border_color(&*self.inner, color);
     }
 
     fn set_title_background_color(&self, color: Option<Color>) {
-        winit::platform::windows::WindowExtWindows::set_title_background_color(
-            &*self.inner,
-            color,
-        );
+        winit::platform::windows::WindowExtWindows::set_title_background_color(&*self.inner, color);
     }
 
     fn set_title_text_color(&self, color: Color) {
-        winit::platform::windows::WindowExtWindows::set_title_text_color(
-            &*self.inner,
-            color,
-        );
+        winit::platform::windows::WindowExtWindows::set_title_text_color(&*self.inner, color);
     }
 
     fn set_corner_preference(&self, preference: CornerPreference) {
@@ -1276,15 +1314,15 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn move_top(&self) {
-        move_zorder(&*self.inner, true);
+        move_zorder(&self.inner, true);
     }
 
     fn move_above(&self) {
-        move_zorder(&*self.inner, false);
+        move_zorder(&self.inner, false);
     }
 
     fn set_progress_bar(&self, state: TaskbarProgress) {
-        let Some(hwnd) = window_hwnd(&*self.inner) else {
+        let Some(hwnd) = window_hwnd(&self.inner) else {
             return;
         };
         let Some(taskbar) = taskbar_list3() else {
@@ -1293,9 +1331,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
         unsafe {
             let (flag, value) = match state {
                 TaskbarProgress::None => (TBPF_NOPROGRESS, None),
-                TaskbarProgress::Normal(v) => {
-                    (TBPF_NORMAL, Some(clamp_progress(v, 10_000)))
-                }
+                TaskbarProgress::Normal(v) => (TBPF_NORMAL, Some(clamp_progress(v, 10_000))),
                 TaskbarProgress::Indeterminate => (TBPF_INDETERMINATE, None),
                 TaskbarProgress::Paused(v) => (TBPF_PAUSED, Some(clamp_progress(v, 10_000))),
                 TaskbarProgress::Error(v) => (TBPF_ERROR, Some(clamp_progress(v, 10_000))),
@@ -1316,7 +1352,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
     }
 
     fn set_thumbar_buttons(&self, buttons: Option<&[ThumbarButton]>) {
-        let Some(hwnd) = window_hwnd(&*self.inner) else {
+        let Some(hwnd) = window_hwnd(&self.inner) else {
             return;
         };
         let Some(taskbar) = taskbar_list3() else {
@@ -1327,13 +1363,13 @@ impl WindowExtWindows for crate::window::VireoWindow {
         let Some(buttons) = buttons else {
             // 空 = 清除全部按钮。
             clear_thumbar_callback(hwnd);
-unsafe {
-            let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
-            f(taskbar, hwnd as HWND, 0, std::ptr::null());
-        }
-        return;
-    };
-if buttons.is_empty() {
+            unsafe {
+                let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
+                f(taskbar, hwnd as HWND, 0, std::ptr::null());
+            }
+            return;
+        };
+        if buttons.is_empty() {
             clear_thumbar_callback(hwnd);
             unsafe {
                 let f: HrFnButtons = slot_fn(taskbar, taskbar::THUMB_BAR_ADD_BUTTONS);
@@ -1357,7 +1393,11 @@ if buttons.is_empty() {
                     icons.push(icon);
                 }
             }
-            let mut flags = if b.disabled { THBF_DISABLED } else { THBF_ENABLED };
+            let mut flags = if b.disabled {
+                THBF_DISABLED
+            } else {
+                THBF_ENABLED
+            };
             if b.dismiss_on_click {
                 flags |= THBF_DISMISSONCLICK;
             }
@@ -1405,7 +1445,7 @@ if buttons.is_empty() {
     }
 
     fn set_overlay_icon(&self, overlay: Option<TaskbarOverlay>) {
-        let Some(hwnd) = window_hwnd(&*self.inner) else {
+        let Some(hwnd) = window_hwnd(&self.inner) else {
             return;
         };
         let Some(taskbar) = taskbar_list3() else {
@@ -1448,16 +1488,12 @@ if buttons.is_empty() {
     }
 
     fn set_app_user_model_id(&self, app_id: Option<&str>) {
-        let Some(hwnd) = window_hwnd(&*self.inner) else {
+        let Some(hwnd) = window_hwnd(&self.inner) else {
             return;
         };
         unsafe {
             let mut pstore: *mut c_void = std::ptr::null_mut();
-            let hr = SHGetPropertyStoreForWindow(
-                hwnd as HWND,
-                &IID_IPROPERTY_STORE,
-                &mut pstore,
-            );
+            let hr = SHGetPropertyStoreForWindow(hwnd as HWND, &IID_IPROPERTY_STORE, &mut pstore);
             if hr != KW_HRESULT_OK || pstore.is_null() {
                 return;
             }
@@ -1486,12 +1522,18 @@ if buttons.is_empty() {
                 let f_state: HrFnSetValue = slot_fn(pstore, propstore::SET_VALUE);
                 let hr_set = f_state(pstore, &PKEY_APP_USER_MODEL_ID, &pv);
                 if hr_set != KW_HRESULT_OK {
-                    log::warn!("vireo taskbar: propstore SetValue hr=0x{:08X}", hr_set as u32);
+                    log::warn!(
+                        "vireo taskbar: propstore SetValue hr=0x{:08X}",
+                        hr_set as u32
+                    );
                 }
                 let f_commit: HrFnCommit = slot_fn(pstore, propstore::COMMIT);
                 let hr_commit = f_commit(pstore);
                 if hr_commit != KW_HRESULT_OK {
-                    log::warn!("vireo taskbar: propstore Commit hr=0x{:08X}", hr_commit as u32);
+                    log::warn!(
+                        "vireo taskbar: propstore Commit hr=0x{:08X}",
+                        hr_commit as u32
+                    );
                 }
                 // PropVariantClear 释放 VT_LPWSTR 的 CoTaskMemAlloc。
                 let _ = PropVariantClear(&mut pv);
@@ -1503,13 +1545,19 @@ if buttons.is_empty() {
     }
 
     fn set_non_client_regions(&self, regions: &[crate::nc::NonClientRegion]) {
-        let Some(hwnd) = win_hwnd(&self.inner) else { return; };
-        let _ = self.nc_tx.send((hwnd, NcUpdate::SetRegions(regions.to_vec())));
+        let Some(hwnd) = win_hwnd(&self.inner) else {
+            return;
+        };
+        let _ = self
+            .nc_tx
+            .send((hwnd, NcUpdate::SetRegions(regions.to_vec())));
         self.wake_event_loop();
     }
 
     fn non_client_regions(&self) -> Vec<crate::nc::NonClientRegion> {
-        let Some(hwnd) = win_hwnd(&self.inner) else { return Vec::new(); };
+        let Some(hwnd) = win_hwnd(&self.inner) else {
+            return Vec::new();
+        };
         nc_get_regions(hwnd).unwrap_or_default()
     }
 
@@ -1517,7 +1565,9 @@ if buttons.is_empty() {
         &self,
         callback: Option<impl FnMut(crate::nc::HitTestInput) -> crate::nc::NonClientHit + 'static>,
     ) {
-        let Some(hwnd) = win_hwnd(&self.inner) else { return; };
+        let Some(hwnd) = win_hwnd(&self.inner) else {
+            return;
+        };
         let upd = match callback {
             Some(f) => NcUpdate::SetHitTestCb(HitTestCallback(Box::new(f))),
             None => NcUpdate::ClearHitTestCb,
@@ -1571,13 +1621,17 @@ fn clamp_progress(v: f64, denom: u64) -> (u64, u64) {
 /// 需在窗口所属线程调用（winit 会 `maybe_queue_on_main` 转发）。
 fn move_zorder(window: &winit::window::Window, topmost: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
 
     let Some(hwnd) = window_hwnd(window) else {
         return;
     };
-    let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let insert_after = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
     unsafe {
         SetWindowPos(
             hwnd as HWND,
@@ -1594,7 +1648,7 @@ fn move_zorder(window: &winit::window::Window, topmost: bool) {
 pub(crate) fn apply_window_opacity(hwnd: isize, opacity: f64) {
     let opacity = opacity.clamp(0.0, 1.0);
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
         WS_EX_LAYERED,
     };
     unsafe {
@@ -1607,7 +1661,7 @@ pub(crate) fn apply_window_opacity(hwnd: isize, opacity: f64) {
 
 pub(crate) fn apply_window_focusable(hwnd: isize, focusable: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
     };
     unsafe {
         let ex_style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
@@ -1621,8 +1675,6 @@ pub(crate) fn apply_window_focusable(hwnd: isize, focusable: bool) {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1749,7 +1801,7 @@ mod tests {
 
     #[test]
     fn nc_regions_last_declared_wins() {
-        let regions = vec![
+        let regions = [
             NonClientRegion {
                 rect: crate::math::Rect::new(0.0, 0.0, 600.0, 32.0),
                 hit_test: NonClientHit::Caption,

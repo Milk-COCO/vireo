@@ -73,7 +73,8 @@ async fn main() {
             draw_text(
                 &mut batch.texts,
                 line,
-                Pos::new(24.0, 28.0 + i as f32 * 30.0), TextDef::default().font_size(17.0),
+                Pos::new(24.0, 28.0 + i as f32 * 30.0),
+                TextDef::default().font_size(17.0),
                 TextOverride::from_color(if i == 0 {
                     GOLD
                 } else if i == 3 {
@@ -86,11 +87,20 @@ async fn main() {
 
         let t = ctx.tick_count() as f32 * 0.05;
         let x = 80.0 + (t.sin() * 0.5 + 0.5) * 400.0;
-        draw_rounded_rect(&mut batch, Pos::new(x, 220.0), 80.0, 60.0, 10.0, Some(Color::new(0.3, 0.6, 1.0, 1.0)));
+        draw_rounded_rect(
+            &mut batch,
+            Pos::new(x, 220.0),
+            80.0,
+            60.0,
+            10.0,
+            Some(Color::new(0.3, 0.6, 1.0, 1.0)),
+        );
 
         let report = win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         last_acq_ms = report.timings.acquire_secs * 1000.0;
         last_enc_ms = report.timings.encode_secs * 1000.0;
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use crate::glyphon::{
-    Buffer, PrepareError, Shaping, TextArea, TextAtlas, TextBounds,
-};
-use crate::glyphon::Metrics;
 use crate::color::Color;
-use crate::render::Transform;
+use crate::glyphon::Metrics;
+use crate::glyphon::{Buffer, PrepareError, Shaping, TextArea, TextAtlas, TextBounds};
 use crate::gpu::GpuContext;
+use crate::render::Transform;
 
 use super::*;
 
@@ -35,7 +33,9 @@ pub(super) enum MetaBuf {
 /// 读取 transform_table[ti] 的列，越界返 None。
 pub(super) fn table_cols(table: &[f32], ti: u32) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
     let base = ti as usize * 12;
-    if base + 12 > table.len() { return None; }
+    if base + 12 > table.len() {
+        return None;
+    }
     let t = &table[base..base + 12];
     Some(([t[0], t[1], 0.0], [t[4], t[5], 0.0], [t[8], t[9], 1.0]))
 }
@@ -61,22 +61,32 @@ pub(super) fn composed_phys_cols(
     let (c0, c1, c2) = composed.to_cols();
     // to_cols() 总产出 [a c 0; b d 0; tx ty 1]，padding 三行/第三列固定；
     // 比 6 float 足够判定 identity，padding 不参与语义。
-    let is_identity = c0[0] == 1.0 && c0[1] == 0.0
-        && c1[0] == 0.0 && c1[1] == 1.0
-        && c2[0] == 0.0 && c2[1] == 0.0;
-    if is_identity { None } else {
-        Some(([c0[0], c0[1], 0.0], [c1[0], c1[1], 0.0], [c2[0] * scale, c2[1] * scale, 1.0]))
+    let is_identity = c0[0] == 1.0
+        && c0[1] == 0.0
+        && c1[0] == 0.0
+        && c1[1] == 1.0
+        && c2[0] == 0.0
+        && c2[1] == 0.0;
+    if is_identity {
+        None
+    } else {
+        Some((
+            [c0[0], c0[1], 0.0],
+            [c1[0], c1[1], 0.0],
+            [c2[0] * scale, c2[1] * scale, 1.0],
+        ))
     }
 }
 
 /// 把 composed 列写入 global_transforms，返回新 index；identity 返 0。
-pub(super) fn push_phys(global_transforms: &mut Vec<f32>, cols: ([f32; 3], [f32; 3], [f32; 3])) -> u32 {
+pub(super) fn push_phys(
+    global_transforms: &mut Vec<f32>,
+    cols: ([f32; 3], [f32; 3], [f32; 3]),
+) -> u32 {
     let idx = (global_transforms.len() / 12) as u32;
     let (c0, c1, c2) = cols;
     global_transforms.extend_from_slice(&[
-        c0[0], c0[1], 0.0, 0.0,
-        c1[0], c1[1], 0.0, 0.0,
-        c2[0], c2[1], 1.0, 0.0,
+        c0[0], c0[1], 0.0, 0.0, c1[0], c1[1], 0.0, 0.0, c2[0], c2[1], 1.0, 0.0,
     ]);
     idx
 }
@@ -96,10 +106,7 @@ pub(super) fn scale_text_bounds(b: TextBounds, scale: f32) -> TextBounds {
 
 /// 把物理 TextBounds 的四个角过 `cols` 变换后取 AABB。
 /// 用于让旋转/缩放文字的 clip 跟随变换（避免「旋转文字被未旋转的方框裁掉」）。
-pub(super) fn transform_bounds(
-    b: TextBounds,
-    cols: ([f32; 3], [f32; 3], [f32; 3]),
-) -> TextBounds {
+pub(super) fn transform_bounds(b: TextBounds, cols: ([f32; 3], [f32; 3], [f32; 3])) -> TextBounds {
     let (c0, c1, c2) = cols;
     let corners = [
         (b.left as f32, b.top as f32),
@@ -114,10 +121,18 @@ pub(super) fn transform_bounds(
     for (cx, cy) in corners {
         let wx = c0[0] * cx + c1[0] * cy + c2[0];
         let wy = c0[1] * cx + c1[1] * cy + c2[1];
-        if wx < min_x { min_x = wx; }
-        if wx > max_x { max_x = wx; }
-        if wy < min_y { min_y = wy; }
-        if wy > max_y { max_y = wy; }
+        if wx < min_x {
+            min_x = wx;
+        }
+        if wx > max_x {
+            max_x = wx;
+        }
+        if wy < min_y {
+            min_y = wy;
+        }
+        if wy > max_y {
+            max_y = wy;
+        }
     }
     TextBounds {
         left: min_x.round() as i32,
@@ -169,18 +184,29 @@ impl TextEntryList {
             let mut texture_state = entry.texture_state().clone();
             // uv / bind_group 覆盖：与 ShapeOverride 共享 semantics
             let effective_uv = ov.uv.unwrap_or(texture_state.uv);
-            let batch_base_uv = [effective_uv.u0, effective_uv.v0, effective_uv.u1, effective_uv.v1];
+            let batch_base_uv = [
+                effective_uv.u0,
+                effective_uv.v0,
+                effective_uv.u1,
+                effective_uv.v1,
+            ];
             // bind_group 覆盖：按覆盖后的状态分段
             if let Some(bg_opt) = &ov.bind_group {
                 texture_state.bind_group = bg_opt.clone();
                 texture_state.view = None;
-                let bg_hash = bg_opt.as_ref().map(|bg| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = rustc_hash::FxHasher::default();
-                    bg.hash(&mut h);
-                    h.finish()
-                }).unwrap_or(0x9E3779B97F4A7C15);
-                texture_state.generation = texture_state.generation.wrapping_add(1).wrapping_add(bg_hash);
+                let bg_hash = bg_opt
+                    .as_ref()
+                    .map(|bg| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = rustc_hash::FxHasher::default();
+                        bg.hash(&mut h);
+                        h.finish()
+                    })
+                    .unwrap_or(0x9E3779B97F4A7C15);
+                texture_state.generation = texture_state
+                    .generation
+                    .wrapping_add(1)
+                    .wrapping_add(bg_hash);
                 texture_state.uv = effective_uv;
             } else if ov.uv.is_some() {
                 texture_state.uv = effective_uv;
@@ -209,7 +235,9 @@ impl TextEntryList {
                     scale,
                 );
                 let new_bounds = match phys_cols {
-                    Some(cols) if raw_bounds != TextBounds::default() => transform_bounds(raw_bounds, cols),
+                    Some(cols) if raw_bounds != TextBounds::default() => {
+                        transform_bounds(raw_bounds, cols)
+                    }
                     _ => raw_bounds,
                 };
                 let idx = match phys_cols {
@@ -222,7 +250,10 @@ impl TextEntryList {
 
             match entry {
                 TextEntry::Stable { pos, .. } => {
-                    if let TextEntry::Stable { resolved_glyphs, .. } = entry {
+                    if let TextEntry::Stable {
+                        resolved_glyphs, ..
+                    } = entry
+                    {
                         for glyph in resolved_glyphs.iter() {
                             metas.push(AreaMeta {
                                 buf: MetaBuf::Resolved(glyph.clone()),
@@ -237,7 +268,9 @@ impl TextEntryList {
                         }
                     }
                 }
-                TextEntry::Parts { pos, def, parts, .. } => {
+                TextEntry::Parts {
+                    pos, def, parts, ..
+                } => {
                     // HUD 多段：逻辑 x 横拼，再 * scale；每段可用 resolve_def 覆盖字号等
                     let mut cursor_x = pos.x;
                     for part in parts {
@@ -276,16 +309,19 @@ impl TextEntryList {
                                     Some(si) => {
                                         text_ctx.touch_slot(si);
                                         let w = text_ctx.slot_line_width(si);
-                                        (AreaMeta {
-                                            buf: MetaBuf::Slot(si),
-                                            left: cursor_x * scale,
-                                            top,
-                                            color,
-                                            bounds,
-                                            transform_index: phys_idx,
-                                            base_uv_rect: batch_base_uv,
-                                            texture_state: texture_state.clone(),
-                                        }, w)
+                                        (
+                                            AreaMeta {
+                                                buf: MetaBuf::Slot(si),
+                                                left: cursor_x * scale,
+                                                top,
+                                                color,
+                                                bounds,
+                                                transform_index: phys_idx,
+                                                base_uv_rect: batch_base_uv,
+                                                texture_state: texture_state.clone(),
+                                            },
+                                            w,
+                                        )
                                     }
                                     None => {
                                         let metrics =
@@ -301,18 +337,23 @@ impl TextEntryList {
                                         buffer.shape_until_scroll(&mut text_ctx.font_system, false);
                                         let lw = buffer
                                             .line_layout(&mut text_ctx.font_system, 0)
-                                            .map(|layout| layout.iter().map(|run| run.w).sum::<f32>())
+                                            .map(|layout| {
+                                                layout.iter().map(|run| run.w).sum::<f32>()
+                                            })
                                             .unwrap_or(0.0);
-                                        (AreaMeta {
-                                            buf: MetaBuf::Stable(Arc::new(buffer)),
-                                            left: cursor_x * scale,
-                                            top,
-                                            color,
-                                            bounds,
-                                            transform_index: phys_idx,
-                                            base_uv_rect: batch_base_uv,
-                                            texture_state: texture_state.clone(),
-                                        }, lw)
+                                        (
+                                            AreaMeta {
+                                                buf: MetaBuf::Stable(Arc::new(buffer)),
+                                                left: cursor_x * scale,
+                                                top,
+                                                color,
+                                                bounds,
+                                                transform_index: phys_idx,
+                                                base_uv_rect: batch_base_uv,
+                                                texture_state: texture_state.clone(),
+                                            },
+                                            lw,
+                                        )
                                     }
                                 };
                                 metas.push(area_meta);
@@ -321,7 +362,7 @@ impl TextEntryList {
                             TextPart::Stable(h) => {
                                 for glyph in h.resolved_glyphs.iter() {
                                     metas.push(AreaMeta {
-                                            buf: MetaBuf::Resolved(glyph.clone()),
+                                        buf: MetaBuf::Resolved(glyph.clone()),
                                         left: cursor_x * scale,
                                         top,
                                         color,
@@ -410,7 +451,9 @@ impl TextEntryList {
                         let mut attempt = 0;
                         loop {
                             let glyphs = metas[run_start..run_end].iter().filter_map(|meta| {
-                                let MetaBuf::Resolved(resolved) = &meta.buf else { return None };
+                                let MetaBuf::Resolved(resolved) = &meta.buf else {
+                                    return None;
+                                };
                                 Some(crate::glyphon::ResolvedGlyphArea {
                                     glyph: &resolved.glyph,
                                     line_y: resolved.line_y,
@@ -461,7 +504,7 @@ impl TextEntryList {
                                     MetaBuf::Stable(arc) => arc,
                                     MetaBuf::Slot(si) => {
                                         debug_assert!((*si as usize) < shape_slots.len());
-                                        &*shape_slots[*si as usize].buffer
+                                        &shape_slots[*si as usize].buffer
                                     }
                                     MetaBuf::Resolved(_) => return None,
                                 };

@@ -16,7 +16,12 @@ fn time_ms(f: impl FnOnce()) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawBatch), frames: u32) {
+fn measure_scene(
+    name: &str,
+    canvas: &OffscreenCanvas,
+    build: impl Fn(&mut DrawBatch),
+    frames: u32,
+) {
     // warmup
     for _ in 0..10 {
         let mut b = DrawBatch::new();
@@ -25,7 +30,13 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     }
 
     let mut times = Vec::with_capacity(frames as usize);
-    let mut stats = vireo::render::ShapeStats { mesh_vertices: 0, sdf_instances: 0, geo_instances: 0, geo_templates: 0, geo_template_vertices: 0 };
+    let mut stats = vireo::render::ShapeStats {
+        mesh_vertices: 0,
+        sdf_instances: 0,
+        geo_instances: 0,
+        geo_templates: 0,
+        geo_template_vertices: 0,
+    };
     let mut draw_calls: u32 = 0;
     for _ in 0..frames {
         let mut b = DrawBatch::new();
@@ -52,7 +63,18 @@ fn measure_scene(name: &str, canvas: &OffscreenCanvas, build: impl Fn(&mut DrawB
     let fps = 1000.0 / avg;
     println!(
         "  {:<32} avg {:>7.3} ms  p50 {:>7.3}  min {:>7.3}  max {:>7.3}  ~{:>6.1} FPS  meshV {:>6}  sdfInst {:>6}  geoInst {:>6}  geoTmpl {:>4}  geoTmplV {:>6}  drawCalls {:>4}",
-        name, avg, p50, min, max, fps, stats.mesh_vertices, stats.sdf_instances, stats.geo_instances, stats.geo_templates, stats.geo_template_vertices, draw_calls
+        name,
+        avg,
+        p50,
+        min,
+        max,
+        fps,
+        stats.mesh_vertices,
+        stats.sdf_instances,
+        stats.geo_instances,
+        stats.geo_templates,
+        stats.geo_template_vertices,
+        draw_calls
     );
 }
 
@@ -113,7 +135,8 @@ fn scene_polygons(b: &mut DrawBatch) {
         let r = 16.0;
         let mut pts: Vec<(f32, f32)> = Vec::with_capacity(sides);
         for j in 0..sides {
-            let angle = std::f32::consts::TAU * j as f32 / sides as f32 - std::f32::consts::FRAC_PI_2;
+            let angle =
+                std::f32::consts::TAU * j as f32 / sides as f32 - std::f32::consts::FRAC_PI_2;
             pts.push((r * angle.cos(), r * angle.sin()));
         }
         draw_polygon(b, &pts, Some(Color::new(0.5, 0.4, 0.8, 1.0)));
@@ -131,7 +154,12 @@ fn scene_text_hud(b: &mut DrawBatch) {
     for row in 0..10 {
         let s = format!(
             "FPS: {:.1}  Frame time: {:6.2}ms  avg {:5.2}  / p50 {:5.2}  / p99 {:5.2}  GPU: {:6.2}",
-            60.0 + row as f64, 16.6 + row as f64, 16.6, 16.6, 16.6, 1.5
+            60.0 + row as f64,
+            16.6 + row as f64,
+            16.6,
+            16.6,
+            16.6,
+            1.5
         );
         draw_text(
             &mut b.texts,
@@ -147,45 +175,95 @@ fn scene_text_hud(b: &mut DrawBatch) {
 fn scene_text_hud_glyphs(b: &mut DrawBatch) {
     let def = TextDef::default().font_size(12.0);
     let rows: [(&[TextPart], f32); 8] = [
-        (&[TextPart::normal("FPS: "), TextPart::glyphs(format!("{:.1}", 60.0))], 12.0),
-        (&[
-            TextPart::normal("Frame time: "), TextPart::glyphs(format!("{:6.2}", 16.6)),
-            TextPart::normal("ms  avg "), TextPart::glyphs(format!("{:5.2}", 16.6)),
-            TextPart::normal(" / p50 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
-            TextPart::normal(" / p95 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
-            TextPart::normal(" / p99 "), TextPart::glyphs(format!("{:5.2}", 16.6)),
-        ], 26.0),
-        (&[
-            TextPart::normal("GPU queue: "),
-            TextPart::glyphs(format!("{:6.2}", 1.5)),
-            TextPart::normal("ms (previous completed submission)"),
-        ], 40.0),
-        (&[
-            TextPart::normal("min "), TextPart::glyphs(format!("{:5.2}", 1.0)),
-            TextPart::normal(" / max "), TextPart::glyphs(format!("{:5.2}", 40.0)),
-            TextPart::normal(" / stddev "), TextPart::glyphs(format!("{:4.2}", 3.0)),
-            TextPart::normal("  (n="), TextPart::glyphs(300u32.to_string()), TextPart::normal(")"),
-        ], 54.0),
-        (&[
-            TextPart::normal("Spikes (>"), TextPart::glyphs(format!("{:.0}", 50.0)),
-            TextPart::normal("ms): "), TextPart::glyphs(0u32.to_string()),
-            TextPart::normal(" / "), TextPart::glyphs(300u32.to_string()),
-        ], 68.0),
-        (&[
-            TextPart::normal("AA: "), TextPart::dynamic("None".to_string()),
-            TextPart::normal("  |  Present: "), TextPart::dynamic("AutoVsync".to_string()),
-            TextPart::normal("  |  Cap: "), TextPart::dynamic("240".to_string()),
-            TextPart::normal("  |  Latency: "), TextPart::dynamic("2".to_string()),
-            TextPart::normal("  |  Text: "), TextPart::dynamic("on".to_string()),
-        ], 82.0),
-        (&[
-            TextPart::normal("Focus: "), TextPart::dynamic("yes".to_string()),
-            TextPart::normal("  |  Frames: "), TextPart::glyphs(100u32.to_string()),
-        ], 96.0),
-        (&[
-            TextPart::normal("Init: app "), TextPart::glyphs(format!("{:.0}", 10.0)),
-            TextPart::normal("ms + win "), TextPart::glyphs(format!("{:.0}", 20.0)), TextPart::normal("ms"),
-        ], 110.0),
+        (
+            &[
+                TextPart::normal("FPS: "),
+                TextPart::glyphs(format!("{:.1}", 60.0)),
+            ],
+            12.0,
+        ),
+        (
+            &[
+                TextPart::normal("Frame time: "),
+                TextPart::glyphs(format!("{:6.2}", 16.6)),
+                TextPart::normal("ms  avg "),
+                TextPart::glyphs(format!("{:5.2}", 16.6)),
+                TextPart::normal(" / p50 "),
+                TextPart::glyphs(format!("{:5.2}", 16.6)),
+                TextPart::normal(" / p95 "),
+                TextPart::glyphs(format!("{:5.2}", 16.6)),
+                TextPart::normal(" / p99 "),
+                TextPart::glyphs(format!("{:5.2}", 16.6)),
+            ],
+            26.0,
+        ),
+        (
+            &[
+                TextPart::normal("GPU queue: "),
+                TextPart::glyphs(format!("{:6.2}", 1.5)),
+                TextPart::normal("ms (previous completed submission)"),
+            ],
+            40.0,
+        ),
+        (
+            &[
+                TextPart::normal("min "),
+                TextPart::glyphs(format!("{:5.2}", 1.0)),
+                TextPart::normal(" / max "),
+                TextPart::glyphs(format!("{:5.2}", 40.0)),
+                TextPart::normal(" / stddev "),
+                TextPart::glyphs(format!("{:4.2}", 3.0)),
+                TextPart::normal("  (n="),
+                TextPart::glyphs(300u32.to_string()),
+                TextPart::normal(")"),
+            ],
+            54.0,
+        ),
+        (
+            &[
+                TextPart::normal("Spikes (>"),
+                TextPart::glyphs(format!("{:.0}", 50.0)),
+                TextPart::normal("ms): "),
+                TextPart::glyphs(0u32.to_string()),
+                TextPart::normal(" / "),
+                TextPart::glyphs(300u32.to_string()),
+            ],
+            68.0,
+        ),
+        (
+            &[
+                TextPart::normal("AA: "),
+                TextPart::dynamic("None".to_string()),
+                TextPart::normal("  |  Present: "),
+                TextPart::dynamic("AutoVsync".to_string()),
+                TextPart::normal("  |  Cap: "),
+                TextPart::dynamic("240".to_string()),
+                TextPart::normal("  |  Latency: "),
+                TextPart::dynamic("2".to_string()),
+                TextPart::normal("  |  Text: "),
+                TextPart::dynamic("on".to_string()),
+            ],
+            82.0,
+        ),
+        (
+            &[
+                TextPart::normal("Focus: "),
+                TextPart::dynamic("yes".to_string()),
+                TextPart::normal("  |  Frames: "),
+                TextPart::glyphs(100u32.to_string()),
+            ],
+            96.0,
+        ),
+        (
+            &[
+                TextPart::normal("Init: app "),
+                TextPart::glyphs(format!("{:.0}", 10.0)),
+                TextPart::normal("ms + win "),
+                TextPart::glyphs(format!("{:.0}", 20.0)),
+                TextPart::normal("ms"),
+            ],
+            110.0,
+        ),
     ];
     for (row, y) in rows.iter() {
         b.text_parts(
@@ -228,7 +306,8 @@ fn scene_mixed(b: &mut DrawBatch) {
 fn gpu_bench_scenes() {
     println!("\n=== GPU Offscreen Benchmark (900x700, 60 frames/scene) ===");
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
@@ -240,23 +319,43 @@ fn gpu_bench_scenes() {
     measure_scene("Full SDF+xform", &canvas, scene_full, FRAMES);
     measure_scene("Text HUD x10 rows", &canvas, scene_text_hud, FRAMES);
     measure_scene("Graph 300 bars", &canvas, scene_graph_300, FRAMES);
-    measure_scene("Graph 300 + Text", &canvas, |b| {
-        scene_graph_300(b);
-        scene_text_hud(b);
-    }, FRAMES);
-    measure_scene("Text glyphs x8 rows", &canvas, scene_text_hud_glyphs, FRAMES);
-    measure_scene("Graph 300 + Glyphs", &canvas, |b| {
-        scene_graph_300(b);
-        scene_text_hud_glyphs(b);
-    }, FRAMES);
-    measure_scene("Graph 300 SDF + Glyphs", &canvas, |b| {
-        b.set_sdf_feather(Some(1.0));
-        for i in 0..300 {
-            let h = ((i as f64 * 0.31).sin().abs() * 90.0 + 1.0) as f32;
-            draw_rectangle(b, Pos::new(16.0 + i as f32 * 7.0, 250.0), 6.0, h, Some(RED));
-        }
-        scene_text_hud_glyphs(b);
-    }, FRAMES);
+    measure_scene(
+        "Graph 300 + Text",
+        &canvas,
+        |b| {
+            scene_graph_300(b);
+            scene_text_hud(b);
+        },
+        FRAMES,
+    );
+    measure_scene(
+        "Text glyphs x8 rows",
+        &canvas,
+        scene_text_hud_glyphs,
+        FRAMES,
+    );
+    measure_scene(
+        "Graph 300 + Glyphs",
+        &canvas,
+        |b| {
+            scene_graph_300(b);
+            scene_text_hud_glyphs(b);
+        },
+        FRAMES,
+    );
+    measure_scene(
+        "Graph 300 SDF + Glyphs",
+        &canvas,
+        |b| {
+            b.set_sdf_feather(Some(1.0));
+            for i in 0..300 {
+                let h = ((i as f64 * 0.31).sin().abs() * 90.0 + 1.0) as f32;
+                draw_rectangle(b, Pos::new(16.0 + i as f32 * 7.0, 250.0), 6.0, h, Some(RED));
+            }
+            scene_text_hud_glyphs(b);
+        },
+        FRAMES,
+    );
 }
 
 #[test]
@@ -264,7 +363,8 @@ fn gpu_bench_scenes() {
 fn geo_instance_template_dedup_and_draw_calls() {
     println!("\n=== geo-instance 模板去重 + draw call (同参数几何 ×1000) ===");
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
@@ -277,7 +377,10 @@ fn geo_instance_template_dedup_and_draw_calls() {
         draw_circle(&mut b, Pos::new(8.0, 8.0), 7.0, Some(RED));
     }
     let stats = b.shape_stats();
-    assert_eq!(stats.geo_instances, 1000, "同参数圆应为 1000 个 geo instance");
+    assert_eq!(
+        stats.geo_instances, 1000,
+        "同参数圆应为 1000 个 geo instance"
+    );
     assert_eq!(stats.geo_templates, 1, "同参数圆应共享 1 个模板");
     assert!(
         b.shape_vertex_count() < 1000 * 258,
@@ -318,7 +421,8 @@ fn geo_instance_template_dedup_and_draw_calls() {
 #[ignore = "requires GPU; run with --ignored"]
 fn merge_geo_templates_groups_interleaved_instances() {
     println!("\n=== merge_geo_templates 交替实例按模板分组合并 ===");
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
@@ -362,7 +466,8 @@ fn merge_geo_templates_groups_interleaved_instances() {
 #[ignore = "requires GPU; run with --ignored"]
 fn merge_geo_templates_with_texture_segments() {
     println!("\n=== merge_geo_templates + 多纹理段 ===");
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
     let tex_blue = Texture::from_rgba(16, 16, &solid_rgba(16, 16, 40, 80, 220), &gpu);
@@ -406,7 +511,8 @@ fn merge_geo_templates_with_texture_segments() {
 fn preserve_order_reduces_draw_calls() {
     println!("\n=== preserve_order draw call 对比 (Mixed x1000) ===");
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
@@ -443,21 +549,34 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let source = OffscreenCanvas::with_aa(
         &gpu,
         320,
         180,
-        AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: false },
+        AntiAliasing::Ssaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
         0.0,
     );
-    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipelines");
 
     let mut batch = DrawBatch::new();
     batch.set_custom_material(Some(material.clone()));
     batch.set_sdf_feather(Some(1.0));
-    draw_rounded_rect(&mut batch, Pos::new(20.0, 20.0), 280.0, 140.0, 20.0, Some(WHITE));
+    draw_rounded_rect(
+        &mut batch,
+        Pos::new(20.0, 20.0),
+        280.0,
+        140.0,
+        20.0,
+        Some(WHITE),
+    );
     draw_text(
         &mut batch.texts,
         "shape + text + SSAA",
@@ -472,7 +591,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn instanced_shape_and_stencil_paths() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
 
@@ -493,16 +613,51 @@ fn instanced_shape_and_stencil_paths() {
     child.instance_rounded_rect(Pos::new(220.0, 24.0), 64.0, 30.0, 8.0, Some(WHITE));
     child.instance_line(210.0, 72.0, 292.0, 98.0, 3.0, Some(RED));
     child.instance_triangle(220.0, 110.0, 280.0, 110.0, 250.0, 150.0, Some(GREEN));
-    child.instance_arc(Pos::new(250.0, 142.0), 22.0, 0.0, std::f32::consts::PI, Some(BLUE));
-    child.instance_polygon(&[(210.0, 112.0), (232.0, 102.0), (246.0, 118.0), (230.0, 132.0)], Some(WHITE));
-    child.instance_line_chain(&[(262.0, 108.0), (280.0, 118.0), (266.0, 132.0), (286.0, 146.0)], 3.0, Some(RED));
+    child.instance_arc(
+        Pos::new(250.0, 142.0),
+        22.0,
+        0.0,
+        std::f32::consts::PI,
+        Some(BLUE),
+    );
+    child.instance_polygon(
+        &[
+            (210.0, 112.0),
+            (232.0, 102.0),
+            (246.0, 118.0),
+            (230.0, 132.0),
+        ],
+        Some(WHITE),
+    );
+    child.instance_line_chain(
+        &[
+            (262.0, 108.0),
+            (280.0, 118.0),
+            (266.0, 132.0),
+            (286.0, 146.0),
+        ],
+        3.0,
+        Some(RED),
+    );
     child.instance_rect_outline(Pos::new(200.0, 4.0), 30.0, 14.0, 2.0, Some(WHITE));
     child.instance_circle_outline(Pos::new(244.0, 12.0), 8.0, 2.0, Some(RED), 12);
     child.instance_ellipse_outline(Pos::new(274.0, 12.0), 11.0, 6.0, 2.0, Some(GREEN), 16);
     child.instance_rounded_rect_outline(Pos::new(200.0, 42.0), 30.0, 16.0, 4.0, 2.0, Some(BLUE), 4);
     child.instance_triangle_outline(244.0, 42.0, 264.0, 58.0, 276.0, 42.0, 2.0, Some(WHITE));
-    child.instance_polygon_outline(&[(282.0, 42.0), (300.0, 42.0), (291.0, 58.0)], 2.0, Some(RED));
-    child.instance_arc_outline(Pos::new(290.0, 76.0), 12.0, 0.0, std::f32::consts::PI, 2.0, Some(GREEN), 8);
+    child.instance_polygon_outline(
+        &[(282.0, 42.0), (300.0, 42.0), (291.0, 58.0)],
+        2.0,
+        Some(RED),
+    );
+    child.instance_arc_outline(
+        Pos::new(290.0, 76.0),
+        12.0,
+        0.0,
+        std::f32::consts::PI,
+        2.0,
+        Some(GREEN),
+        8,
+    );
     parent.push_child(child);
     canvas.draw(Some(BLACK), &[&parent]);
 }
@@ -510,7 +665,8 @@ fn instanced_shape_and_stencil_paths() {
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn ordered_instance_mesh_instance_path() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 160, 120);
 
@@ -541,10 +697,13 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     return in.color;
 }
 "#;
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 160, 120);
-    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipeline");
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipeline");
 
     let mut first = DrawBatch::new();
     draw_polygon(
@@ -583,9 +742,12 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
-    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipelines");
     let tex_red = Texture::from_rgba(32, 32, &solid_rgba(32, 32, 220, 40, 40), &gpu);
     let tex_blue = Texture::from_rgba(32, 32, &solid_rgba(32, 32, 40, 80, 220), &gpu);
 
@@ -613,7 +775,14 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         batch.set_custom_material(Some(material.clone()));
         batch.set_texture(Some(&tex_red));
         batch.set_sdf_feather(Some(1.0));
-        draw_rounded_rect(&mut batch, Pos::new(16.0, 16.0), 200.0, 80.0, 12.0, Some(WHITE));
+        draw_rounded_rect(
+            &mut batch,
+            Pos::new(16.0, 16.0),
+            200.0,
+            80.0,
+            12.0,
+            Some(WHITE),
+        );
         draw_text(
             &mut batch.texts,
             "base sample",
@@ -690,7 +859,14 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         let mut parent = DrawBatch::new();
         parent.clips_children = true;
         parent.set_sdf_feather(Some(1.0));
-        draw_rounded_rect(&mut parent, Pos::new(20.0, 20.0), 200.0, 120.0, 16.0, Some(WHITE));
+        draw_rounded_rect(
+            &mut parent,
+            Pos::new(20.0, 20.0),
+            200.0,
+            120.0,
+            16.0,
+            Some(WHITE),
+        );
 
         let mut child = DrawBatch::new();
         child.set_custom_material(Some(material.clone()));
@@ -739,10 +915,13 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
-    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipelines");
 
     let mut b = DrawBatch::new();
     b.set_custom_material(Some(material));
@@ -760,17 +939,29 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         }
     }
     let stats = b.shape_stats();
-    assert_eq!(stats.sdf_instances, 2000, "fragment-only material 应仍走 SDF instance 路径");
-    assert_eq!(stats.mesh_vertices, 0, "fragment-only material 不应 mesh 展开");
+    assert_eq!(
+        stats.sdf_instances, 2000,
+        "fragment-only material 应仍走 SDF instance 路径"
+    );
+    assert_eq!(
+        stats.mesh_vertices, 0,
+        "fragment-only material 不应 mesh 展开"
+    );
 
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let draw_calls = canvas.last_draw_calls();
     println!("  fragment-only Material + SDF x2000 draw calls = {draw_calls}");
-    assert_eq!(draw_calls, 1, "fragment-only Material 应走 SDF instance pipeline，1 dc");
+    assert_eq!(
+        draw_calls, 1,
+        "fragment-only Material 应走 SDF instance pipeline，1 dc"
+    );
 
     // 像素回读：第一个矩形位置 (10, 10) ~ (24, 24) 应有 material 修改后的非背景色
     let pixels = canvas.read_pixels();
-    assert!(region_has_color(&pixels, 900, 12, 12, 22, 22), "SDF instance material 像素应可见");
+    assert!(
+        region_has_color(&pixels, 900, 12, 12, 22, 22),
+        "SDF instance material 像素应可见"
+    );
 }
 
 /// Fragment-only Custom Material + Geo instance path：
@@ -785,10 +976,13 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
-    let material = gpu.create_material(MATERIAL_WGSL).expect("material pipelines");
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipelines");
 
     let mut b = DrawBatch::new();
     b.set_custom_material(Some(material));
@@ -806,11 +1000,17 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let draw_calls = canvas.last_draw_calls();
     println!("  fragment-only Material + Geo x500 draw calls = {draw_calls}");
-    assert_eq!(draw_calls, 1, "fragment-only Material 应走 Geo instance pipeline，1 dc");
+    assert_eq!(
+        draw_calls, 1,
+        "fragment-only Material 应走 Geo instance pipeline，1 dc"
+    );
 
     let pixels = canvas.read_pixels();
     // 第一个圆位置 (15, 15) ~ (39, 39)
-    assert!(region_has_color(&pixels, 900, 17, 17, 37, 37), "Geo instance material 像素应可见");
+    assert!(
+        region_has_color(&pixels, 900, 17, 17, 37, 37),
+        "Geo instance material 像素应可见"
+    );
 }
 
 /// 带 custom vertex shader 的 Material + SDF instance：
@@ -871,7 +1071,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
     let material = gpu
@@ -892,11 +1093,17 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let draw_calls = canvas.last_draw_calls();
     println!("  custom VS Material + SDF x20 draw calls = {draw_calls}");
     // custom VS 必须 mesh 路径 → 全部 mesh 段在 ordered path 合并为 1 个 draw call
-    assert_eq!(draw_calls, 1, "custom VS Material 应 mesh fallback（ordered 合并为 1 dc）");
+    assert_eq!(
+        draw_calls, 1,
+        "custom VS Material 应 mesh fallback（ordered 合并为 1 dc）"
+    );
 
     let pixels = canvas.read_pixels();
     // 第一个矩形 (20, 20) ~ (60, 60)
-    assert!(region_has_color(&pixels, 320, 22, 22, 58, 58), "custom VS Material mesh fallback 像素应可见");
+    assert!(
+        region_has_color(&pixels, 320, 22, 22, 58, 58),
+        "custom VS Material mesh fallback 像素应可见"
+    );
 }
 
 /// 带 custom vertex shader 的 Material + Geo（sdf_feather=None）：
@@ -956,7 +1163,8 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
     let material = gpu
@@ -975,34 +1183,55 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let stats = b.shape_stats();
     println!("  custom VS Material + Geo stats = {stats:?}");
-    assert_eq!(stats.geo_instances, 0, "custom VS Material 不应走 geo instance 路径");
-    assert!(stats.mesh_vertices > 0, "custom VS Material 应 mesh 展开（geo 网格顶点）");
+    assert_eq!(
+        stats.geo_instances, 0,
+        "custom VS Material 不应走 geo instance 路径"
+    );
+    assert!(
+        stats.mesh_vertices > 0,
+        "custom VS Material 应 mesh 展开（geo 网格顶点）"
+    );
 
     let draw_calls = canvas.last_draw_calls();
     println!("  custom VS Material + Geo x20 draw calls = {draw_calls}");
-    assert_eq!(draw_calls, 1, "custom VS Material geo 应 mesh fallback（ordered 合并为 1 dc）");
+    assert_eq!(
+        draw_calls, 1,
+        "custom VS Material geo 应 mesh fallback（ordered 合并为 1 dc）"
+    );
 
     let pixels = canvas.read_pixels();
-    assert!(region_has_color(&pixels, 320, 42, 42, 78, 78), "custom VS Material geo mesh fallback 像素应可见");
+    assert!(
+        region_has_color(&pixels, 320, 42, 42, 78, 78),
+        "custom VS Material geo mesh fallback 像素应可见"
+    );
 }
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn device_lost_flag_is_shared_and_clear_by_default() {
     println!("\n=== device-lost 标志：默认 false，App/GpuContext 共享同一 Arc ===");
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     assert!(!gpu.is_device_lost(), "新设备不应处于 lost 状态");
     let flag = gpu.device_lost();
     flag.store(true, std::sync::atomic::Ordering::Release);
-    assert!(gpu.is_device_lost(), "设置返回的 Arc 后 GpuContext 应观测到 lost");
-    assert!(flag.load(std::sync::atomic::Ordering::Acquire), "同一 Arc 应被置位");
+    assert!(
+        gpu.is_device_lost(),
+        "设置返回的 Arc 后 GpuContext 应观测到 lost"
+    );
+    assert!(
+        flag.load(std::sync::atomic::Ordering::Acquire),
+        "同一 Arc 应被置位"
+    );
 }
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn material_non_default_texture_kind_creates_lazily() {
-    println!("\n=== 非默认 texture kind（D2 Sint + NonFiltering）材质创建不再 panic（懒构建初始 bind group）===");
+    println!(
+        "\n=== 非默认 texture kind（D2 Sint + NonFiltering）材质创建不再 panic（懒构建初始 bind group）==="
+    );
     const WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
     let v = textureLoad(tex, vec2<i32>(0, 0), 0);
@@ -1011,18 +1240,17 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
 
-    let resources = vireo::material::MaterialResources(&[
-        vireo::material::MaterialResource {
-            name: "tex",
-            kind: vireo::material::MaterialResourceKind::Texture {
-                view: vireo::material::TexKind::D2(vireo::material::TexSample::Sint),
-                sampler: vireo::material::SampKind::NonFiltering,
-            },
+    let resources = vireo::material::MaterialResources(&[vireo::material::MaterialResource {
+        name: "tex",
+        kind: vireo::material::MaterialResourceKind::Texture {
+            view: vireo::material::TexKind::D2(vireo::material::TexSample::Sint),
+            sampler: vireo::material::SampKind::NonFiltering,
         },
-    ]);
+    }]);
     // 修复前：build_auto_defaults 用 white_view（Rgba8UnormSrgb float）绑 Sint 槽，
     // create_bind_group 在创建期校验 sample type 不匹配 → validation panic。
     // 修复后：placeholder_ok=false → 初始 bind group 懒构建，创建成功。
@@ -1032,7 +1260,11 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sint tex"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1048,8 +1280,16 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
             aspect: wgpu::TextureAspect::All,
         },
         &200_i32.to_le_bytes(),
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1076,7 +1316,10 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let red = red / (16 * 16);
     println!("  region red channel (linear 200 / 255; sRGB surface 输出应 ~229) = {red}");
     assert!(region_has_color(&pixels, 64, 8, 8, 24, 24), "区域应有内容");
-    assert!((red as i32 - 229).abs() < 24, "Sint 纹理 200 经 sRGB 编码应显示为红 ~229，实际 {red}");
+    assert!(
+        (red as i32 - 229).abs() < 24,
+        "Sint 纹理 200 经 sRGB 编码应显示为红 ~229，实际 {red}"
+    );
 }
 
 /// 移除材质纹理槽白色兜底后的回归：
@@ -1093,18 +1336,17 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 "#;
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
 
-    let resources = vireo::material::MaterialResources(&[
-        vireo::material::MaterialResource {
-            name: "tex",
-            kind: vireo::material::MaterialResourceKind::Texture {
-                view: vireo::material::TexKind::D2(vireo::material::TexSample::Float),
-                sampler: vireo::material::SampKind::NonFiltering,
-            },
+    let resources = vireo::material::MaterialResources(&[vireo::material::MaterialResource {
+        name: "tex",
+        kind: vireo::material::MaterialResourceKind::Texture {
+            view: vireo::material::TexKind::D2(vireo::material::TexSample::Float),
+            sampler: vireo::material::SampKind::NonFiltering,
         },
-    ]);
+    }]);
     let material = gpu
         .create_material_with_resources(WGSL, resources)
         .expect("材质创建不应 panic（纹理槽未填时不再用 white fallback 绑组）");
@@ -1125,7 +1367,11 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     // 2) 填齐纹理后：整批正常绘制，区域有色
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("float tex"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1141,8 +1387,16 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
             aspect: wgpu::TextureAspect::All,
         },
         &[255_u8, 0, 0, 255],
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {

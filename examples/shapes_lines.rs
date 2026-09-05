@@ -44,7 +44,15 @@ async fn main() {
         let thicknesses = [1.0, 2.0, 4.0, 8.0, 16.0];
         for (i, &th) in thicknesses.iter().enumerate() {
             let y = 70.0 + i as f32 * 36.0;
-            draw_line(&mut batch, 40.0, y, 280.0, y, th, Some(Color::new(0.3, 0.7, 1.0, 1.0)));
+            draw_line(
+                &mut batch,
+                40.0,
+                y,
+                280.0,
+                y,
+                th,
+                Some(Color::new(0.3, 0.7, 1.0, 1.0)),
+            );
             draw_text(
                 &mut batch.texts,
                 &format!("{th:.0}px"),
@@ -104,11 +112,21 @@ async fn main() {
         let cy = 320.0;
         for i in 0..8 {
             let a = t + i as f32 * TAU / 8.0;
-            draw_line(&mut batch, cx, cy, cx + a.cos() * 90.0, cy + a.sin() * 90.0, 2.0 + (i as f32), Some(Color::new(1.0, 0.5 + i as f32 * 0.05, 0.3, 1.0)));
+            draw_line(
+                &mut batch,
+                cx,
+                cy,
+                cx + a.cos() * 90.0,
+                cy + a.sin() * 90.0,
+                2.0 + (i as f32),
+                Some(Color::new(1.0, 0.5 + i as f32 * 0.05, 0.3, 1.0)),
+            );
         }
         draw_circle(&mut batch, Pos::new(cx, cy), 6.0, Some(WHITE));
 
         win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

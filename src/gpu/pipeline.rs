@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::material::Material;
 
-use super::{GpuContext, GeoInstance, GeoVertex, QuadVertex, ShapeInstance, Vertex};
+use super::{GeoInstance, GeoVertex, GpuContext, QuadVertex, ShapeInstance, Vertex};
 
 // ---------------------------------------------------------------------------
 // WGSL constants and helper functions
@@ -51,14 +51,21 @@ pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool) -> String {
     let source = include_str!("../shader_geo_instance.wgsl");
     if ssaa {
         // geo VS 当前用 `@interpolate(linear)`（per-pixel），提升为 per-sample 与 FS 对齐
-        source.replace("@interpolate(linear) local_pos", "@interpolate(linear, sample) local_pos")
+        source.replace(
+            "@interpolate(linear) local_pos",
+            "@interpolate(linear, sample) local_pos",
+        )
     } else {
         source.to_owned()
     }
 }
 
 /// 返回 (final_source, user_source_line_offset) 其中 offset 是用户代码起始行号（1-indexed）。
-pub(crate) fn material_fragment_source(source: &str, target: MaterialTarget, ssaa: bool) -> (String, u32) {
+pub(crate) fn material_fragment_source(
+    source: &str,
+    target: MaterialTarget,
+    ssaa: bool,
+) -> (String, u32) {
     let line_count = |s: &str| s.split('\n').count() as u32;
     match target {
         MaterialTarget::Shape => {
@@ -70,11 +77,15 @@ pub(crate) fn material_fragment_source(source: &str, target: MaterialTarget, ssa
             } else {
                 SHAPE_VERTEX_OUTPUT_WGSL.to_owned()
             };
-            let offset = line_count(&vertex_out) + line_count(MATERIAL_INPUT_WGSL) + line_count(SHAPE_FRAGMENT_SUPPORT_WGSL);
+            let offset = line_count(&vertex_out)
+                + line_count(MATERIAL_INPUT_WGSL)
+                + line_count(SHAPE_FRAGMENT_SUPPORT_WGSL);
             (
                 format!(
                     "{}\n{}\n{}\n{}\n{}",
-                    vertex_out, MATERIAL_INPUT_WGSL, SHAPE_FRAGMENT_SUPPORT_WGSL,
+                    vertex_out,
+                    MATERIAL_INPUT_WGSL,
+                    SHAPE_FRAGMENT_SUPPORT_WGSL,
                     source,
                     r#"
 @fragment
@@ -118,14 +129,12 @@ fn vireo_has_sdf_data() -> bool { return false; }
                 + line_count(text_support);
             (
                 format!(
-                    "{}\n{}\n{}{}",
+                    "{}\n{}\n{}\n{}\n{}",
                     TEXT_VERTEX_OUTPUT_WGSL,
                     MATERIAL_INPUT_WGSL,
                     text_support,
-                    format!(
-                        "{}\n{}",
-                        source,
-                        r#"
+                    source,
+                    r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base: vec4<f32>;
@@ -144,7 +153,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return out_color;
 }
 "#
-                    )
                 ),
                 offset,
             )
@@ -463,7 +471,13 @@ pub(crate) fn material_pipeline_key(
 impl GpuContext {
     /// 无 DS attachment 的热路径管线（无 `clips_children` 时使用）。
     /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 ssaa 参数。
-    pub fn ensure_pipeline(&self, sample_count: u32, alpha_to_coverage: bool, ssaa: bool, geometry: bool) -> wgpu::RenderPipeline {
+    pub fn ensure_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        ssaa: bool,
+        geometry: bool,
+    ) -> wgpu::RenderPipeline {
         // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突。
         // bits4-15 = surface format（macOS Metal 为 Bgra8UnormSrgb），格式不同
         // 的管线键不同，避免复用首窗口同步前的默认 Rgba8 管线。
@@ -483,47 +497,51 @@ impl GpuContext {
         } else {
             &self.shader
         };
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vireo pipeline layout"),
-            bind_group_layouts: &[
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
-        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vireo pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(Vertex::desc())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                alpha_to_coverage_enabled: alpha_to_coverage,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+        let p = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vireo pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(Vertex::desc())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            });
         pipes.insert(key, p.clone());
         p
     }
@@ -560,15 +578,17 @@ impl GpuContext {
         } else {
             &self.shader
         };
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vireo pipeline layout"),
-            bind_group_layouts: &[
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
         // op3/4 不写颜色，但仍走 fs_main，以便 SDF discard 裁出正确轮廓
         //（fs_stencil_only 无 SDF，圆/圆角会落成 AABB）。
         let no_color = op == 3 || op == 4;
@@ -633,34 +653,36 @@ impl GpuContext {
             bias: wgpu::DepthBiasState::default(),
         });
 
-        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vireo stencil pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(Vertex::desc())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some(frag_entry),
-                targets: &[color_target],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil,
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                alpha_to_coverage_enabled: alpha_to_coverage,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let p = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vireo stencil pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(Vertex::desc())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some(frag_entry),
+                    targets: &[color_target],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            });
         pipes.insert(key, p.clone());
         p
     }
@@ -690,15 +712,17 @@ impl GpuContext {
         } else {
             &self.shader_instance
         };
-        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vireo instance pipeline layout"),
-            bind_group_layouts: &[
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo instance pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
         let depth_stencil = if use_stencil {
             let face = match op {
                 1 => wgpu::StencilFaceState {
@@ -730,38 +754,40 @@ impl GpuContext {
         } else {
             None
         };
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vireo instance pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil,
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                alpha_to_coverage_enabled: alpha_to_coverage,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vireo instance pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            });
         pipes.insert(key, pipeline.clone());
         pipeline
     }
@@ -789,15 +815,17 @@ impl GpuContext {
             return p.clone();
         }
         let module = &self.shader_geo_instance;
-        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vireo geo instance pipeline layout"),
-            bind_group_layouts: &[
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo geo instance pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
         let depth_stencil = if use_stencil {
             let face = match op {
                 1 => wgpu::StencilFaceState {
@@ -829,38 +857,40 @@ impl GpuContext {
         } else {
             None
         };
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vireo geo instance pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(GeoVertex::desc()), Some(GeoInstance::desc())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil,
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                alpha_to_coverage_enabled: alpha_to_coverage,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vireo geo instance pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(GeoVertex::desc()), Some(GeoInstance::desc())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            });
         pipes.insert(key, pipeline.clone());
         pipeline
     }
@@ -880,9 +910,8 @@ impl GpuContext {
         stencil_op: u32,
         shape_layout: ShapeVertexLayout,
     ) -> Arc<wgpu::RenderPipeline> {
-        let ssaa = ssaa
-            && target == MaterialTarget::Shape
-            && material.shape_vertex_source.is_none();
+        let ssaa =
+            ssaa && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
         let key = material_pipeline_key(
             target,
             sample_count,
@@ -897,18 +926,20 @@ impl GpuContext {
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
-        let pipeline = self.create_material_pipeline_raw(
-            &material.source,
-            material.shape_vertex_source.as_deref(),
-            target,
-            sample_count,
-            alpha_to_coverage,
-            ssaa,
-            stencil_mode,
-            stencil_op,
-            material.bgl(),
-            shape_layout,
-        ).expect("material WGSL was validated by create_material");
+        let pipeline = self
+            .create_material_pipeline_raw(
+                &material.source,
+                material.shape_vertex_source.as_deref(),
+                target,
+                sample_count,
+                alpha_to_coverage,
+                ssaa,
+                stencil_mode,
+                stencil_op,
+                material.bgl(),
+                shape_layout,
+            )
+            .expect("material WGSL was validated by create_material");
         let arc = Arc::new(pipeline);
         pipes.entry(key).or_insert(arc).clone()
     }
@@ -926,55 +957,62 @@ impl GpuContext {
         material_bgl: Option<&wgpu::BindGroupLayout>,
         shape_layout: ShapeVertexLayout,
     ) -> Result<wgpu::RenderPipeline, String> {
-        let ssaa = ssaa
-            && target == MaterialTarget::Shape
-            && shape_vertex_source.is_none();
+        let ssaa = ssaa && target == MaterialTarget::Shape && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let (fragment_source_str, user_offset) = material_fragment_source(source, target, ssaa);
         let user_line_count = source.split('\n').count() as u32;
         let depth_stencil = if !stencil_mode {
             None
         } else if target == MaterialTarget::Text {
-            if stencil_op == 2 { crate::text::stencil_text_ds_test() } else { crate::text::stencil_text_ds_pass() }
+            if stencil_op == 2 {
+                crate::text::stencil_text_ds_test()
+            } else {
+                crate::text::stencil_text_ds_pass()
+            }
         } else {
             let (face, read_mask, write_mask) = match stencil_op {
-            0 => (wgpu::StencilFaceState::IGNORE, 0u32, 0u32),
-            1 | 4 => (
-                wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::IncrementClamp,
-                },
-                0xff,
-                0xff,
-            ),
-            2 => (
-                wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::Keep,
-                },
-                0xff,
-                0xff,
-            ),
-            _ => (
-                wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::DecrementClamp,
-                },
-                0xff,
-                0xff,
-            ),
+                0 => (wgpu::StencilFaceState::IGNORE, 0u32, 0u32),
+                1 | 4 => (
+                    wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Equal,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::IncrementClamp,
+                    },
+                    0xff,
+                    0xff,
+                ),
+                2 => (
+                    wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Equal,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    0xff,
+                    0xff,
+                ),
+                _ => (
+                    wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Equal,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::DecrementClamp,
+                    },
+                    0xff,
+                    0xff,
+                ),
             };
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24PlusStencil8,
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState { front: face, back: face, read_mask, write_mask },
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask,
+                    write_mask,
+                },
                 bias: wgpu::DepthBiasState::default(),
             })
         };
@@ -993,9 +1031,9 @@ impl GpuContext {
                     ShapeVertexLayout::GeoInstance => default_geo_instance_vertex_wgsl(ssaa),
                 };
                 let vs_source = match shape_layout {
-                    ShapeVertexLayout::Mesh => shape_vertex_source
-                        .map(str::to_owned)
-                        .unwrap_or(default_vs),
+                    ShapeVertexLayout::Mesh => {
+                        shape_vertex_source.map(str::to_owned).unwrap_or(default_vs)
+                    }
                     ShapeVertexLayout::SdfInstance | ShapeVertexLayout::GeoInstance => {
                         if shape_vertex_source.is_some() {
                             return Err(format!(
@@ -1017,19 +1055,27 @@ impl GpuContext {
                     shape_layout,
                 )
             }
-            MaterialTarget::Text => self.text_ctx.lock().unwrap().text_atlas.create_material_pipeline(
-                &self.device,
-                material_bgl,
-                &fragment_source_str,
-                multisample,
-                depth_stencil,
-            ),
+            MaterialTarget::Text => self
+                .text_ctx
+                .lock()
+                .unwrap()
+                .text_atlas
+                .create_material_pipeline(
+                    &self.device,
+                    material_bgl,
+                    &fragment_source_str,
+                    multisample,
+                    depth_stencil,
+                ),
         };
 
         let err = pollster::block_on(_scope.pop());
         if let Some(e) = err {
             let adjusted = offset_naga_error(&e.to_string(), user_offset, user_line_count);
-            return Err(format!("material {:?} pipeline error: {}", target, adjusted));
+            return Err(format!(
+                "material {:?} pipeline error: {}",
+                target, adjusted
+            ));
         }
         Ok(pipeline)
     }
@@ -1044,40 +1090,81 @@ impl GpuContext {
         material_bgl: Option<&wgpu::BindGroupLayout>,
         shape_layout: ShapeVertexLayout,
     ) -> wgpu::RenderPipeline {
-        let vertex = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("material shape vertex"), source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
-        });
-        let fragment = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("material shape fragment"), source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
-        });
+        let vertex = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("material shape vertex"),
+                source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
+            });
+        let fragment = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("material shape fragment"),
+                source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
+            });
         let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if material_bgl.is_some() {
-            vec![Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
-                 Some(&self.engine_storage_bind_group_layout), material_bgl]
+            vec![
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
+                material_bgl,
+            ]
         } else {
-            vec![Some(&self.camera_bind_group_layout), Some(&self.texture_bind_group_layout),
-                 Some(&self.engine_storage_bind_group_layout)]
+            vec![
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
+            ]
         };
-        let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("material shape layout"),
-            bind_group_layouts: &bgls,
-            immediate_size: 0,
-        });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("material shape layout"),
+                bind_group_layouts: &bgls,
+                immediate_size: 0,
+            });
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> = match shape_layout {
             ShapeVertexLayout::Mesh => vec![Some(Vertex::desc())],
-            ShapeVertexLayout::SdfInstance => vec![Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
-            ShapeVertexLayout::GeoInstance => vec![Some(GeoVertex::desc()), Some(GeoInstance::desc())],
+            ShapeVertexLayout::SdfInstance => {
+                vec![Some(QuadVertex::desc()), Some(ShapeInstance::desc())]
+            }
+            ShapeVertexLayout::GeoInstance => {
+                vec![Some(GeoVertex::desc()), Some(GeoInstance::desc())]
+            }
         };
-        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("material shape pipeline"), layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &vertex, entry_point: Some("vs_main"), buffers: &buffers, compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &fragment, entry_point: Some("fs_main"), targets: &[Some(wgpu::ColorTargetState {
-                format: self.surface_format(),
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: if stencil_op == 3 || stencil_op == 4 { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL },
-            })], compilation_options: Default::default() }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
-            depth_stencil, multisample, multiview_mask: None, cache: None,
-        })
+        self.device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("material shape pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &vertex,
+                    entry_point: Some("vs_main"),
+                    buffers: &buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &fragment,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: if stencil_op == 3 || stencil_op == 4 {
+                            wgpu::ColorWrites::empty()
+                        } else {
+                            wgpu::ColorWrites::ALL
+                        },
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample,
+                multiview_mask: None,
+                cache: None,
+            })
     }
 }
 
@@ -1087,8 +1174,26 @@ mod custom_material_tests {
 
     #[test]
     fn target_pipeline_keys_are_distinct() {
-        let shape = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let text = material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let shape = material_pipeline_key(
+            MaterialTarget::Shape,
+            4,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let text = material_pipeline_key(
+            MaterialTarget::Text,
+            4,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
         assert_ne!(shape, text);
     }
 
@@ -1096,60 +1201,249 @@ mod custom_material_tests {
     fn material_stencil_key_ignores_unused_flags() {
         // 同 sample/atc/op 必须同 key
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Shape, 4, true, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                true,
+                false,
+                true,
+                2,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                true,
+                false,
+                true,
+                2,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 2, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                false,
+                true,
+                1,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                false,
+                true,
+                2,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
         );
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 1, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                1,
+                false,
+                false,
+                true,
+                1,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                false,
+                true,
+                1,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
         );
         // 不同 target 必须不同 key
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, true, 1, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb)
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                false,
+                true,
+                1,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Text,
+                4,
+                false,
+                false,
+                true,
+                1,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
         );
     }
 
     #[test]
     fn material_shape_ssaa_pipeline_key_is_distinct() {
         assert_ne!(
-            material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Shape, 4, false, true, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                false,
+                false,
+                0,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Shape,
+                4,
+                false,
+                true,
+                false,
+                0,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
         );
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Text, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Text, 4, false, true, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(
+                MaterialTarget::Text,
+                4,
+                false,
+                false,
+                false,
+                0,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Text,
+                4,
+                false,
+                true,
+                false,
+                0,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
         );
     }
 
     #[test]
     fn material_shape_layout_pipeline_keys_are_distinct() {
         // Mesh / SdfInstance / GeoInstance 必须产生不同 key（shape target）
-        let mesh = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let sdf = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let geo = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::GeoInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mesh = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let sdf = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::SdfInstance,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let geo = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::GeoInstance,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
         assert_ne!(mesh, sdf);
         assert_ne!(mesh, geo);
         assert_ne!(sdf, geo);
         // Text target 不受 layout 影响
         assert_eq!(
-            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb),
-            material_pipeline_key(MaterialTarget::Text, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb),
+            material_pipeline_key(
+                MaterialTarget::Text,
+                1,
+                false,
+                false,
+                false,
+                0,
+                ShapeVertexLayout::Mesh,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
+            material_pipeline_key(
+                MaterialTarget::Text,
+                1,
+                false,
+                false,
+                false,
+                0,
+                ShapeVertexLayout::SdfInstance,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            ),
         );
     }
 
     #[test]
     fn material_pipeline_key_no_overlap_sample_and_layout() {
         // 旧 bug: layout<<6 与 sample<<4 重叠，sample=4/Mesh 键 == sample=1/Sdf
-        let mesh4 = material_pipeline_key(MaterialTarget::Shape, 4, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let sdf1 = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::SdfInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mesh4 = material_pipeline_key(
+            MaterialTarget::Shape,
+            4,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let sdf1 = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::SdfInstance,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
         assert_ne!(mesh4, sdf1);
-        let geo8 = material_pipeline_key(MaterialTarget::Shape, 8, false, false, false, 0, ShapeVertexLayout::GeoInstance, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let mesh1 = material_pipeline_key(MaterialTarget::Shape, 1, false, false, false, 0, ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let geo8 = material_pipeline_key(
+            MaterialTarget::Shape,
+            8,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::GeoInstance,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let mesh1 = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
         assert_ne!(geo8, mesh1);
     }
 
@@ -1164,12 +1458,24 @@ mod custom_material_tests {
         // 不同 surface format（macOS Bgra8 vs 默认 Rgba8）必须产生不同 key，
         // 否则首窗同步后可能复用旧格式管线导致 Validation panic。
         let rgba = material_pipeline_key(
-            MaterialTarget::Shape, 1, false, false, false, 0,
-            ShapeVertexLayout::Mesh, wgpu::TextureFormat::Rgba8UnormSrgb,
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
         );
         let bgra = material_pipeline_key(
-            MaterialTarget::Shape, 1, false, false, false, 0,
-            ShapeVertexLayout::Mesh, wgpu::TextureFormat::Bgra8UnormSrgb,
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Mesh,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
         );
         assert_ne!(rgba, bgra);
         assert_eq!(rgba, rgba);
@@ -1178,15 +1484,22 @@ mod custom_material_tests {
     #[test]
     fn material_shape_fragment_matches_ssaa_interpolation() {
         let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
-        assert!(material_fragment_source(shader, MaterialTarget::Shape, true).0
-            .contains("@interpolate(linear, sample) local_pos"));
-        assert!(!material_fragment_source(shader, MaterialTarget::Shape, false).0
-            .contains("@interpolate(linear, sample) local_pos"));
+        assert!(
+            material_fragment_source(shader, MaterialTarget::Shape, true)
+                .0
+                .contains("@interpolate(linear, sample) local_pos")
+        );
+        assert!(
+            !material_fragment_source(shader, MaterialTarget::Shape, false)
+                .0
+                .contains("@interpolate(linear, sample) local_pos")
+        );
     }
 
     #[test]
     fn material_helpers_exist_for_both_targets() {
-        let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return vireo_base_color(in); }";
+        let shader =
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vireo_base_color(in); }";
         let shape = material_fragment_source(shader, MaterialTarget::Shape, false).0;
         let text = material_fragment_source(shader, MaterialTarget::Text, false).0;
         for src in [shape, text] {

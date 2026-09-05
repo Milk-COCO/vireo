@@ -2,10 +2,11 @@
 //!
 //! 交互：
 //! - 空格：触发一组延迟任务
-//!     · `after_ticks(0)` → 本帧（注册帧）末尾把方块变红
-//!     · `after_ticks(1)` → 下一帧末尾把方块变绿
-//!     · `after_secs(1.0)`  → 1 秒墙钟后把方块变回白
-//!   HUD 打印每个回调触发时记录的 frame 编号，可见 `0` 比 `1` 早一帧。
+//!   - `after_ticks(0)` → 本帧（注册帧）末尾把方块变红
+//!   - `after_ticks(1)` → 下一帧末尾把方块变绿
+//!   - `after_secs(1.0)`  → 1 秒墙钟后把方块变回白
+//!
+//! HUD 打印每个回调触发时记录的 frame 编号，可见 `0` 比 `1` 早一帧。
 //!
 //! 语义（`src/thread.rs`）：`after_ticks(k)` 在「注册帧 + k」的帧末执行，即调用 `after_ticks` 的那一帧 `on_tick` 末尾再过 k 帧；`after_secs` 按墙钟时间触发。
 
@@ -101,7 +102,13 @@ async fn main() {
 
         // 背景
         let mut bg = DrawBatch::new();
-        draw_rectangle(&mut bg, Pos::new(0.0, 0.0), 640.0, 420.0, Some(Color::new(0.05, 0.06, 0.1, 1.0)));
+        draw_rectangle(
+            &mut bg,
+            Pos::new(0.0, 0.0),
+            640.0,
+            420.0,
+            Some(Color::new(0.05, 0.06, 0.1, 1.0)),
+        );
 
         // 居中方块（颜色由延迟任务控制）
         let mut shape = DrawBatch::new();
@@ -129,7 +136,11 @@ async fn main() {
         };
         line(&mut hud, &format!("frame: {fc}"), y);
         y += 24.0;
-        line(&mut hud, "SPACE: after_ticks(0) red / (1) green / after_secs(1.0) white", y);
+        line(
+            &mut hud,
+            "SPACE: after_ticks(0) red / (1) green / after_secs(1.0) white",
+            y,
+        );
         y += 28.0;
         for (f, msg) in log.iter().rev() {
             line(&mut hud, &format!("  f{f}  {msg}"), y);
@@ -139,5 +150,7 @@ async fn main() {
         win.draw(Color::new(0.05, 0.06, 0.1, 1.0), &[&bg, &shape, &hud]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

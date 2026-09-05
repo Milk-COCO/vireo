@@ -3,11 +3,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-
-    let idx = app.window(
-        WindowDesc::new("Text Stress Test", 800, 600),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Text Stress Test", 800, 600), None::<fn()>);
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -141,26 +137,59 @@ async fn main() {
         let x_center = x_left + align_w + gap;
         let x_right = x_center + align_w + gap;
 
-        draw_text(&mut batch.texts, "Left", Pos::new(x_left + 80.0, align_y - 18.0),
-                  TextDef::default().font_size(13.0),
-                  TextOverride::from_color(Color::new(1.0, 0.4, 0.4, 1.0)));
-        draw_text(&mut batch.texts, "Hello world!", Pos::new(x_left, align_y),
-                  TextDef::default().font_size(16.0).max_width(align_w).align(TextAlign::Left),
-                  TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)));
+        draw_text(
+            &mut batch.texts,
+            "Left",
+            Pos::new(x_left + 80.0, align_y - 18.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(1.0, 0.4, 0.4, 1.0)),
+        );
+        draw_text(
+            &mut batch.texts,
+            "Hello world!",
+            Pos::new(x_left, align_y),
+            TextDef::default()
+                .font_size(16.0)
+                .max_width(align_w)
+                .align(TextAlign::Left),
+            TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)),
+        );
 
-        draw_text(&mut batch.texts, "Center", Pos::new(x_center + 70.0, align_y - 18.0),
-                  TextDef::default().font_size(13.0),
-                  TextOverride::from_color(Color::new(0.4, 1.0, 0.4, 1.0)));
-        draw_text(&mut batch.texts, "Hello world!", Pos::new(x_center, align_y),
-                  TextDef::default().font_size(16.0).max_width(align_w).align(TextAlign::Center),
-                  TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)));
+        draw_text(
+            &mut batch.texts,
+            "Center",
+            Pos::new(x_center + 70.0, align_y - 18.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.4, 1.0, 0.4, 1.0)),
+        );
+        draw_text(
+            &mut batch.texts,
+            "Hello world!",
+            Pos::new(x_center, align_y),
+            TextDef::default()
+                .font_size(16.0)
+                .max_width(align_w)
+                .align(TextAlign::Center),
+            TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)),
+        );
 
-        draw_text(&mut batch.texts, "Right", Pos::new(x_right + 80.0, align_y - 18.0),
-                  TextDef::default().font_size(13.0),
-                  TextOverride::from_color(Color::new(0.4, 0.4, 1.0, 1.0)));
-        draw_text(&mut batch.texts, "Hello world!", Pos::new(x_right, align_y),
-                  TextDef::default().font_size(16.0).max_width(align_w).align(TextAlign::Right),
-                  TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)));
+        draw_text(
+            &mut batch.texts,
+            "Right",
+            Pos::new(x_right + 80.0, align_y - 18.0),
+            TextDef::default().font_size(13.0),
+            TextOverride::from_color(Color::new(0.4, 0.4, 1.0, 1.0)),
+        );
+        draw_text(
+            &mut batch.texts,
+            "Hello world!",
+            Pos::new(x_right, align_y),
+            TextDef::default()
+                .font_size(16.0)
+                .max_width(align_w)
+                .align(TextAlign::Right),
+            TextOverride::from_color(Color::new(1.0, 1.0, 1.0, 1.0)),
+        );
 
         // 用竖线标记每个框的左右边界
         for (bx, color) in [
@@ -168,18 +197,68 @@ async fn main() {
             (x_center, Color::new(0.3, 1.0, 0.3, 0.5)),
             (x_right, Color::new(0.3, 0.3, 1.0, 0.5)),
         ] {
-            draw_line(&mut batch, bx, align_y - 5.0, bx, align_y + 22.0, 1.0, Some(color));
-            draw_line(&mut batch, bx + align_w, align_y - 5.0, bx + align_w, align_y + 22.0, 1.0, Some(color));
+            draw_line(
+                &mut batch,
+                bx,
+                align_y - 5.0,
+                bx,
+                align_y + 22.0,
+                1.0,
+                Some(color),
+            );
+            draw_line(
+                &mut batch,
+                bx + align_w,
+                align_y - 5.0,
+                bx + align_w,
+                align_y + 22.0,
+                1.0,
+                Some(color),
+            );
         }
 
         // 背景参考线（帮助判断文字位置）
-        draw_line(&mut batch, 0.0, 0.0, w, 0.0, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
-        draw_line(&mut batch, 0.0, 0.0, 0.0, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
-        draw_line(&mut batch, 0.0, h, w, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
-        draw_line(&mut batch, w, 0.0, w, h, 1.0, Some(Color::new(0.3, 0.3, 0.3, 1.0)));
+        draw_line(
+            &mut batch,
+            0.0,
+            0.0,
+            w,
+            0.0,
+            1.0,
+            Some(Color::new(0.3, 0.3, 0.3, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            0.0,
+            0.0,
+            0.0,
+            h,
+            1.0,
+            Some(Color::new(0.3, 0.3, 0.3, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            0.0,
+            h,
+            w,
+            h,
+            1.0,
+            Some(Color::new(0.3, 0.3, 0.3, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            w,
+            0.0,
+            w,
+            h,
+            1.0,
+            Some(Color::new(0.3, 0.3, 0.3, 1.0)),
+        );
 
         win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

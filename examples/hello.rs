@@ -1,7 +1,7 @@
 //! ciallo — 炸裂开场
 
-use vireo::prelude::*;
 use std::f32::consts::TAU;
+use vireo::prelude::*;
 
 fn hue(h: f32) -> Color {
     // h in [0, 1] → rainbow RGB
@@ -43,7 +43,12 @@ async fn main() {
         for i in 0..16 {
             let a = t + i as f32 * TAU / 16.0;
             let r = 150.0 + (t * 2.5 + i as f32).sin() * 45.0;
-            draw_circle(&mut ring, Pos::new(cx + a.cos() * r, cy + a.sin() * r), 10.0, Some(hue(i as f32 / 16.0 + t * 0.05)));
+            draw_circle(
+                &mut ring,
+                Pos::new(cx + a.cos() * r, cy + a.sin() * r),
+                10.0,
+                Some(hue(i as f32 / 16.0 + t * 0.05)),
+            );
         }
 
         // Logo 贴图
@@ -51,21 +56,40 @@ async fn main() {
         if let Some(logo) = logo_idx.and_then(|i| ctx.app().texture(i).ok()) {
             let s = 250.0 + (t * 1.5).sin() * 20.0;
             logo_batch.set_texture(Some(&logo));
-            draw_rectangle(&mut logo_batch, Pos::new(cx - s / 2.0, cy - s / 2.0), s, s, Some(WHITE));
+            draw_rectangle(
+                &mut logo_batch,
+                Pos::new(cx - s / 2.0, cy - s / 2.0),
+                s,
+                s,
+                Some(WHITE),
+            );
         }
 
         // 文字
         let mut text = DrawBatch::new();
         let wb = (t * 4.0).sin() * 4.0;
-        draw_text(&mut text.texts, "Ciallo, Vireo!",
-                  Pos::new(cx - 115.0 + wb, cy - 55.0), TextDef::default().font_size(42.0),
-                  TextOverride::from_color(Color::new(1.0, 0.95, 0.65, 1.0)));
-        draw_text(&mut text.texts, "\u{2014} Just a genus of bird!",
-                  Pos::new(cx - 50., cy + 0.0), TextDef::default().font_size(16.0),
-                  TextOverride::from_color(Color::new(0.5, 0.65, 0.85, 1.0)));
+        draw_text(
+            &mut text.texts,
+            "Ciallo, Vireo!",
+            Pos::new(cx - 115.0 + wb, cy - 55.0),
+            TextDef::default().font_size(42.0),
+            TextOverride::from_color(Color::new(1.0, 0.95, 0.65, 1.0)),
+        );
+        draw_text(
+            &mut text.texts,
+            "\u{2014} Just a genus of bird!",
+            Pos::new(cx - 50., cy + 0.0),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(Color::new(0.5, 0.65, 0.85, 1.0)),
+        );
 
-        win.draw(Color::new(0.04, 0.06, 0.1, 1.0), &[&ring, &logo_batch, &text]);
+        win.draw(
+            Color::new(0.04, 0.06, 0.1, 1.0),
+            &[&ring, &logo_batch, &text],
+        );
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

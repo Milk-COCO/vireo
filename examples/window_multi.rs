@@ -3,7 +3,6 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-
     let idx_a = app.window(
         WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
         Some(|| println!("窗口 A 已关闭")),
@@ -37,14 +36,31 @@ async fn main() {
         let cy = my * h / hb as f32;
         if has_mouse {
             draw_circle(&mut batch, Pos::new(cx, cy), 20.0, Some(RED));
-            draw_line(&mut batch, cx, 0.0, cx, h, 1.0, Some(Color::new(0.25, 0.25, 0.35, 0.4)));
-            draw_line(&mut batch, 0.0, cy, w, cy, 1.0, Some(Color::new(0.25, 0.25, 0.35, 0.4)));
+            draw_line(
+                &mut batch,
+                cx,
+                0.0,
+                cx,
+                h,
+                1.0,
+                Some(Color::new(0.25, 0.25, 0.35, 0.4)),
+            );
+            draw_line(
+                &mut batch,
+                0.0,
+                cy,
+                w,
+                cy,
+                1.0,
+                Some(Color::new(0.25, 0.25, 0.35, 0.4)),
+            );
 
             // 文本显示坐标
             draw_text(
                 &mut batch.texts,
                 &format!("({:.0}, {:.0})", cx, cy),
-                Pos::new(cx + 24.0, cy - 20.0), TextDef::default().font_size(14.0),
+                Pos::new(cx + 24.0, cy - 20.0),
+                TextDef::default().font_size(14.0),
                 TextOverride::default(),
             );
         }
@@ -53,8 +69,20 @@ async fn main() {
         // B
         let mut batch = DrawBatch::new();
         if has_mouse {
-            draw_rectangle(&mut batch, Pos::new(mx - 16.0, my - 1.0), 32.0, 2.0, Some(WHITE));
-            draw_rectangle(&mut batch, Pos::new(mx - 1.0, my - 16.0), 2.0, 32.0, Some(WHITE));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(mx - 16.0, my - 1.0),
+                32.0,
+                2.0,
+                Some(WHITE),
+            );
+            draw_rectangle(
+                &mut batch,
+                Pos::new(mx - 1.0, my - 16.0),
+                2.0,
+                32.0,
+                Some(WHITE),
+            );
             draw_circle(&mut batch, Pos::new(mx, my), 8.0, Some(RED));
         }
 
@@ -62,7 +90,8 @@ async fn main() {
         draw_text(
             &mut batch.texts,
             "Vireo 文本渲染! Hello World!",
-            Pos::new(10.0, 10.0), TextDef::default().font_size(20.0),
+            Pos::new(10.0, 10.0),
+            TextDef::default().font_size(20.0),
             TextOverride::from_color(Color::new(0.9, 0.9, 1.0, 1.0)),
         );
 
@@ -70,14 +99,16 @@ async fn main() {
             draw_text(
                 &mut batch.texts,
                 &format!("鼠标: ({:.0}, {:.0})", mx, my),
-                Pos::new(10.0, 40.0), TextDef::default().font_size(14.0),
+                Pos::new(10.0, 40.0),
+                TextDef::default().font_size(14.0),
                 TextOverride::from_color(Color::new(0.7, 0.7, 0.7, 1.0)),
             );
         } else {
             draw_text(
                 &mut batch.texts,
                 "移动鼠标到本窗口...",
-                Pos::new(10.0, 40.0), TextDef::default().font_size(14.0),
+                Pos::new(10.0, 40.0),
+                TextDef::default().font_size(14.0),
                 TextOverride::from_color(Color::new(0.5, 0.5, 0.5, 1.0)),
             );
         }
@@ -85,5 +116,7 @@ async fn main() {
         win_b.draw(Color::new(0.12, 0.12, 0.18, 1.0), &[&batch]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::color::colors::{WHITE, RED, BLUE, GREEN};
+use crate::color::colors::{BLUE, GREEN, RED, WHITE};
 
 fn test_batch() -> DrawBatch {
     let mut batch = DrawBatch::new();
@@ -12,7 +12,10 @@ fn none_color_uses_batch_color() {
     let mut batch = test_batch();
     batch.set_color(GREEN);
     draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 10.0, 10.0, None);
-    assert_eq!(batch.geo_instances[0].color, [GREEN.r, GREEN.g, GREEN.b, GREEN.a]);
+    assert_eq!(
+        batch.geo_instances[0].color,
+        [GREEN.r, GREEN.g, GREEN.b, GREEN.a]
+    );
     assert_eq!(batch.color, GREEN);
 }
 
@@ -33,10 +36,11 @@ fn opts_sdf_and_transform_restore_batch_state() {
     batch.set_position(10.0, 20.0);
     draw_shape(
         &mut batch,
-        &Shape::Circle { pos: Pos::new(100.0, 200.0), r: 5.0 },
-        ShapeOverride::new()
-            .color(RED)
-            .sdf(1.0),
+        &Shape::Circle {
+            pos: Pos::new(100.0, 200.0),
+            r: 5.0,
+        },
+        ShapeOverride::new().color(RED).sdf(1.0),
     );
     assert_eq!(batch.sdf_feather, None);
     assert_eq!(batch.color, WHITE);
@@ -58,7 +62,10 @@ fn draw_shape_matches_draw_circle_sdf() {
     b.sdf_feather = Some(1.0);
     draw_shape(
         &mut b,
-        &Shape::Circle { pos: Pos::new(50.0, 60.0), r: 20.0 },
+        &Shape::Circle {
+            pos: Pos::new(50.0, 60.0),
+            r: 20.0,
+        },
         ShapeOverride::from_color(Some(RED)),
     );
     assert_eq!(a.instances.len(), b.instances.len());
@@ -78,7 +85,13 @@ fn rect_zero_size_skipped() {
 #[test]
 fn rect_transparent_skipped() {
     let mut batch = test_batch();
-    draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 100.0, 100.0, Some(Color::new(1.0, 0.0, 0.0, 0.0)));
+    draw_rectangle(
+        &mut batch,
+        Pos::new(0.0, 0.0),
+        100.0,
+        100.0,
+        Some(Color::new(1.0, 0.0, 0.0, 0.0)),
+    );
     assert!(batch.geo_instances.is_empty());
 }
 
@@ -164,7 +177,14 @@ fn ellipse_zero_radius_skipped() {
 #[test]
 fn rounded_rect_geometry_produces_triangles() {
     let mut batch = test_batch();
-    draw_rounded_rect(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, 10.0, Some(GREEN));
+    draw_rounded_rect(
+        &mut batch,
+        Pos::new(10.0, 10.0),
+        100.0,
+        60.0,
+        10.0,
+        Some(GREEN),
+    );
     assert!(batch.geo_template_vertices.len() > 4);
     assert!(batch.geo_template_indices.len() > 6);
 }
@@ -173,7 +193,14 @@ fn rounded_rect_geometry_produces_triangles() {
 fn rounded_rect_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
-    draw_rounded_rect(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, 10.0, Some(GREEN));
+    draw_rounded_rect(
+        &mut batch,
+        Pos::new(10.0, 10.0),
+        100.0,
+        60.0,
+        10.0,
+        Some(GREEN),
+    );
     assert_eq!(batch.instances.len(), 1);
     assert_eq!(batch.instances[0].sdf_type, 2);
 }
@@ -240,7 +267,14 @@ fn polygon_too_few_points_skipped() {
 #[test]
 fn arc_geometry_produces_fan() {
     let mut batch = test_batch();
-    draw_arc(&mut batch, Pos::new(0.0, 0.0), 50.0, 0.0, std::f32::consts::PI, Some(RED));
+    draw_arc(
+        &mut batch,
+        Pos::new(0.0, 0.0),
+        50.0,
+        0.0,
+        std::f32::consts::PI,
+        Some(RED),
+    );
     assert!(batch.geo_template_vertices.len() > 4);
     assert!(batch.geo_template_indices.len() > 6);
 }
@@ -249,7 +283,14 @@ fn arc_geometry_produces_fan() {
 fn arc_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
-    draw_arc(&mut batch, Pos::new(0.0, 0.0), 50.0, 0.0, std::f32::consts::PI, Some(RED));
+    draw_arc(
+        &mut batch,
+        Pos::new(0.0, 0.0),
+        50.0,
+        0.0,
+        std::f32::consts::PI,
+        Some(RED),
+    );
     assert_eq!(batch.instances.len(), 1);
     assert_eq!(batch.instances[0].sdf_type, 5);
 }
@@ -354,8 +395,7 @@ fn line_chain_duplicate_endpoint_has_finite_vertices() {
     );
     assert!(!batch.geo_template_vertices.is_empty());
     assert!(batch.geo_template_vertices.iter().all(|v| {
-        v.position.iter().all(|x| x.is_finite())
-            && v.uv.iter().all(|x| x.is_finite())
+        v.position.iter().all(|x| x.is_finite()) && v.uv.iter().all(|x| x.is_finite())
     }));
 }
 

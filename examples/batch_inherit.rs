@@ -75,7 +75,12 @@ async fn main() {
         // ---- 列 1：TRANSFORM + 全裁 ----
         // ---- 列 2：同父 双·子 clipped + unclipped（局部坐标，不继承 transform）----
         // ---- 列 3：同父 双·子 ALL.clipped + ALL.unclipped（跟父转）----
-        let centers = [(110.0, 250.0), (340.0, 250.0), (580.0, 250.0), (820.0, 250.0)];
+        let centers = [
+            (110.0, 250.0),
+            (340.0, 250.0),
+            (580.0, 250.0),
+            (820.0, 250.0),
+        ];
         let titles = [
             "NONE 全裁",
             "TRANSFORM 全裁",
@@ -254,5 +259,7 @@ async fn main() {
         }
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &refs);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

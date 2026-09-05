@@ -70,32 +70,38 @@ async fn main() {
         mapped_at_creation: false,
     });
 
-    let bgl = app.gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("pulse_bgl"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(
-                    std::mem::size_of::<PulseParams>() as u64,
-                ),
-            },
-            count: None,
-        }],
-    });
+    let bgl = app
+        .gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pulse_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<PulseParams>() as u64
+                    ),
+                },
+                count: None,
+            }],
+        });
 
     let mat = app.material_manual(WGSL, &bgl).expect("WGSL compile");
 
-    let bind_group = app.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("pulse_bg"),
-        layout: &bgl,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buf.as_entire_binding(),
-        }],
-    });
+    let bind_group = app
+        .gpu
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pulse_bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf.as_entire_binding(),
+            }],
+        });
 
     // provider 每帧被调用 — 返回缓存的 bind group（它只被引擎借来用一下）
     mat.set_bind_group_provider(move |_, _| bind_group.clone());
@@ -144,5 +150,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

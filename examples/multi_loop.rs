@@ -13,7 +13,6 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-
     let w1 = app.window(
         WindowDesc::new("loop A", 360, 240).position(120, 120),
         None::<fn()>,
@@ -26,7 +25,6 @@ async fn main() {
     // 演示 Thread 显式容器 + push/extend：单 Thread 包含两循环，顺序执行（同线程无竞争，占用锁保证同窗口不并发）
     let mut t = Thread::new().with_name("loop-demo");
     t.push(Loop::new({
-        let w1 = w1;
         move |ctx| {
             let win = match ctx.app().window_ref(&w1) {
                 Ok(w) => w,
@@ -36,14 +34,18 @@ async fn main() {
             let t = (fc as f64 % 240.0) / 240.0;
             let x = 40.0 + t * 280.0;
             let mut b = DrawBatch::new();
-            b.rectangle(Pos::new(x as f32, 100.0), 40.0, 40.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
+            b.rectangle(
+                Pos::new(x as f32, 100.0),
+                40.0,
+                40.0,
+                Some(Color::new(0.2, 0.6, 1.0, 1.0)),
+            );
             win.draw(Color::new(0.05, 0.06, 0.08, 1.0), &[&b]);
             true
         }
     }));
     // 用 extend 一次性推入第二循环（演示 extend），约 3 秒后自行结束
     t.extend(vec![Loop::new({
-        let w2 = w2;
         move |ctx| {
             let win = match ctx.app().window_ref(&w2) {
                 Ok(w) => w,
@@ -52,7 +54,11 @@ async fn main() {
             let fc = ctx.tick_count();
             let t = (fc as f64 % 240.0) / 240.0;
             let mut b = DrawBatch::new();
-            b.circle(Pos::new(180.0, 120.0), (30.0 + t * 30.0) as f32, Some(Color::new(1.0, 0.5, 0.2, 1.0)));
+            b.circle(
+                Pos::new(180.0, 120.0),
+                (30.0 + t * 30.0) as f32,
+                Some(Color::new(1.0, 0.5, 0.2, 1.0)),
+            );
             win.draw(Color::new(0.08, 0.05, 0.05, 1.0), &[&b]);
             if fc < 180 {
                 true
@@ -69,5 +75,3 @@ async fn main() {
     // vireo 不依赖异步运行时：ThreadHandle 实现了 Future，用 std 轮询直到就绪。
     let _ = h.await;
 }
-
-

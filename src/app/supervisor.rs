@@ -55,16 +55,12 @@ pub(crate) fn apply_winit_event_one(
                 frame_style,
                 pending_show,
                 event_tx.clone(),
-                app.inner
-                    .cb_tx
-                    .lock()
-                    .clone()
-                    .unwrap_or_else(|| {
-                        unreachable!(
-                            "vireo: cb_tx is always Some after run_entry/init_run_channels; \
+                app.inner.cb_tx.lock().clone().unwrap_or_else(|| {
+                    unreachable!(
+                        "vireo: cb_tx is always Some after run_entry/init_run_channels; \
                              App::window is only reachable with cb_tx set"
-                        )
-                    }),
+                    )
+                }),
                 nc_tx.clone(),
                 close_tx.clone(),
                 app.event_loop_proxy.get().cloned(),
@@ -76,19 +72,24 @@ pub(crate) fn apply_winit_event_one(
                 app.windows.lock().push(None);
             }
             app.windows.lock()[handle] = Some(Arc::new(vw));
-            app.alive_window_count
-                .fetch_add(1, Ordering::AcqRel);
-            app.created_window_count
-                .fetch_add(1, Ordering::AcqRel);
+            app.alive_window_count.fetch_add(1, Ordering::AcqRel);
+            app.created_window_count.fetch_add(1, Ordering::AcqRel);
         }
 
-        WinitEvent::Resized { handle, width, height } => {
+        WinitEvent::Resized {
+            handle,
+            width,
+            height,
+        } => {
             if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone()) {
                 win.resize(width, height);
             }
         }
 
-        WinitEvent::ScaleFactorChanged { handle, scale: _scale } => {
+        WinitEvent::ScaleFactorChanged {
+            handle,
+            scale: _scale,
+        } => {
             if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone()) {
                 let size = win.inner.inner_size();
                 win.resize(size.width, size.height);
@@ -111,11 +112,17 @@ pub(crate) fn apply_winit_event_one(
             }
         }
 
-        WinitEvent::MouseInput { handle, button, pressed } => {
+        WinitEvent::MouseInput {
+            handle,
+            button,
+            pressed,
+        } => {
             if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone()) {
-                win.pending_input
-                    .lock()
-                    .push(WinitEvent::MouseInput { handle, button, pressed });
+                win.pending_input.lock().push(WinitEvent::MouseInput {
+                    handle,
+                    button,
+                    pressed,
+                });
             }
         }
 
@@ -180,8 +187,7 @@ pub(crate) fn apply_winit_event_one(
             }
             if let Some(w) = app.windows.lock().get_mut(handle) {
                 *w = None;
-                app.alive_window_count
-                    .fetch_sub(1, Ordering::AcqRel);
+                app.alive_window_count.fetch_sub(1, Ordering::AcqRel);
             }
         }
 
@@ -246,11 +252,11 @@ pub(crate) fn apply_winit_event_one(
             }
         }
         WinitEvent::SetAspectRatio { handle, ratio } => {
-            if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone()) {
-                if let Some(hwnd) = windows::win_hwnd(&win.inner) {
-                    let _ = aspect_ratio_tx.send((hwnd, ratio));
-                    app.wake_event_loop();
-                }
+            if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone())
+                && let Some(hwnd) = windows::win_hwnd(&win.inner)
+            {
+                let _ = aspect_ratio_tx.send((hwnd, ratio));
+                app.wake_event_loop();
             }
         }
         WinitEvent::SetIcon { handle, icon } => {
@@ -290,12 +296,17 @@ pub(crate) fn supervisor_loop(
                 Ok(ev) => {
                     let is_created = matches!(ev, WinitEvent::WindowCreated { .. });
                     apply_winit_event_one(
-                        &app, ev, &event_tx, &frame_style_tx, &aspect_ratio_tx, &nc_tx, &close_tx,
+                        &app,
+                        ev,
+                        &event_tx,
+                        &frame_style_tx,
+                        &aspect_ratio_tx,
+                        &nc_tx,
+                        &close_tx,
                     );
                     if is_created {
                         created_windows += 1;
-                        app.pending_window_creates
-                            .fetch_sub(1, Ordering::AcqRel);
+                        app.pending_window_creates.fetch_sub(1, Ordering::AcqRel);
                         app.inner.loop_wake.1.notify_all();
                     }
                     processed = true;
@@ -305,19 +316,14 @@ pub(crate) fn supervisor_loop(
             }
         }
         if created_windows >= expected_windows {
-            app.windows_ready
-                .store(true, Ordering::Release);
+            app.windows_ready.store(true, Ordering::Release);
             app.inner.loop_wake.1.notify_all();
         }
         let all_loops_done = {
-            let loops_requested =
-                app.loops_ever_requested.load(Ordering::Acquire);
+            let loops_requested = app.loops_ever_requested.load(Ordering::Acquire);
             if loops_requested {
                 let states = app.loop_states.lock();
-                !states.is_empty()
-                    && states
-                        .iter()
-                        .all(|s| s.done.load(Ordering::Acquire))
+                !states.is_empty() && states.iter().all(|s| s.done.load(Ordering::Acquire))
             } else {
                 true
             }
@@ -325,13 +331,10 @@ pub(crate) fn supervisor_loop(
         let windows_settled = created_windows >= expected_windows
             && app.window_count() == 0
             && app.pending_window_creates.load(Ordering::Acquire) == 0;
-        let all_windows_closed =
-            created_windows > 0 && app.window_count() == 0 && app.pending_window_creates.load(Ordering::Acquire) == 0;
-        if (app.inner
-            .main_done
-            .load(Ordering::Acquire)
-            && all_loops_done
-            && windows_settled)
+        let all_windows_closed = created_windows > 0
+            && app.window_count() == 0
+            && app.pending_window_creates.load(Ordering::Acquire) == 0;
+        if (app.inner.main_done.load(Ordering::Acquire) && all_loops_done && windows_settled)
             || all_windows_closed
             || device_lost.load(Ordering::Acquire)
         {
@@ -344,12 +347,17 @@ pub(crate) fn supervisor_loop(
                 Ok(ev) => {
                     let is_created = matches!(ev, WinitEvent::WindowCreated { .. });
                     apply_winit_event_one(
-                        &app, ev, &event_tx, &frame_style_tx, &aspect_ratio_tx, &nc_tx, &close_tx,
+                        &app,
+                        ev,
+                        &event_tx,
+                        &frame_style_tx,
+                        &aspect_ratio_tx,
+                        &nc_tx,
+                        &close_tx,
                     );
                     if is_created {
                         created_windows += 1;
-                        app.pending_window_creates
-                            .fetch_sub(1, Ordering::AcqRel);
+                        app.pending_window_creates.fetch_sub(1, Ordering::AcqRel);
                         app.inner.loop_wake.1.notify_all();
                     }
                 }

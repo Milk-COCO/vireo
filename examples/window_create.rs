@@ -41,9 +41,9 @@
 //!   按钮位置逻辑：`metrics().width` 变化时重设，缓存上一帧宽度避免每帧
 //!   spam `nc_tx`。hover 由 `mouse_pos()` 驱动（普通按钮淡灰、关闭按钮红）。
 
-use vireo::prelude::*;
 #[cfg(target_os = "windows")]
 use vireo::platform::windows::WindowExtWindows;
+use vireo::prelude::*;
 
 #[cfg(target_os = "windows")]
 const TITLE_H: f32 = 32.0;
@@ -52,7 +52,6 @@ const BTN_W: f32 = 46.0;
 
 #[vireo::main]
 async fn main() {
-
     // ---- W1：默认逻辑尺寸 + vireo 全自持像素 ----
     let w1 = app.window(
         WindowDesc::new("Vireo Window 1 — 逻辑像素 + dpi_override", 640, 480)
@@ -87,7 +86,10 @@ async fn main() {
         WindowDesc::new("Vireo Window 3 — present_mode + MSAA + theme", 480, 300)
             .present_mode(PresentMode::AutoVsync)
             .frame_latency(2)
-            .anti_aliasing(AntiAliasing::Msaa { samples: 4, alpha_to_coverage: false })
+            .anti_aliasing(AntiAliasing::Msaa {
+                samples: 4,
+                alpha_to_coverage: false,
+            })
             .theme(Theme::Dark)
             .maximized(true),
         Some(|| println!("W3 已关闭")),
@@ -169,42 +171,48 @@ async fn main() {
         b_was_down = b_down;
 
         // popup：每帧画内容；满 1 秒后 close()（程序化关窗，走完整路径）。
-        if let Some((idx, born)) = popup {
-            if let Ok(win) = ctx.app().window_ref(&idx) {
-                let mut pb = DrawBatch::new();
-                draw_rectangle(
-                    &mut pb,
-                    Pos::new(0.0, 0.0),
-                    220.0,
-                    120.0,
-                    Some(Color::new(0.12, 0.25, 0.45, 1.0)),
-                );
-                draw_text(
-                    &mut pb.texts,
-                    "popup · Frameless",
-                    Pos::new(8.0, 10.0),
-                    TextDef::default().font_size(14.0),
-                    TextOverride::from_color(Color::new(0.9, 0.95, 1.0, 1.0)),
-                );
-                let left = (1.0 - born.elapsed().as_secs_f64()).max(0.0);
-                draw_text(
-                    &mut pb.texts,
-                    &format!("closing in {:.1}s", left),
-                    Pos::new(8.0, 34.0),
-                    TextDef::default().font_size(12.0),
-                    TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),
-                );
-                win.draw(Color::new(0.04, 0.05, 0.08, 1.0), &[&pb]);
-                if born.elapsed() >= std::time::Duration::from_secs(1) {
-                    win.close();
-                    popup = None;
-                }
+        if let Some((idx, born)) = popup
+            && let Ok(win) = ctx.app().window_ref(&idx)
+        {
+            let mut pb = DrawBatch::new();
+            draw_rectangle(
+                &mut pb,
+                Pos::new(0.0, 0.0),
+                220.0,
+                120.0,
+                Some(Color::new(0.12, 0.25, 0.45, 1.0)),
+            );
+            draw_text(
+                &mut pb.texts,
+                "popup · Frameless",
+                Pos::new(8.0, 10.0),
+                TextDef::default().font_size(14.0),
+                TextOverride::from_color(Color::new(0.9, 0.95, 1.0, 1.0)),
+            );
+            let left = (1.0 - born.elapsed().as_secs_f64()).max(0.0);
+            draw_text(
+                &mut pb.texts,
+                &format!("closing in {:.1}s", left),
+                Pos::new(8.0, 34.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(Color::new(0.6, 0.7, 0.8, 1.0)),
+            );
+            win.draw(Color::new(0.04, 0.05, 0.08, 1.0), &[&pb]);
+            if born.elapsed() >= std::time::Duration::from_secs(1) {
+                win.close();
+                popup = None;
             }
         }
 
         // W2 标题栏画在客户端 y=0..32（DrawBatch 自绘），WM_NCHITTEST 返回 HT* 让
         // Windows 自动接管交互（拖动 / 双击 / 右键 / snap layout / 按钮点击）。
-        draw_window(&win1, 1, "W1", "dpi_override(Some(1.0)) · min/max · 裸数=逻辑", 0.0);
+        draw_window(
+            &win1,
+            1,
+            "W1",
+            "dpi_override(Some(1.0)) · min/max · 裸数=逻辑",
+            0.0,
+        );
         draw_window(
             &win2,
             2,
@@ -214,16 +222,12 @@ async fn main() {
         );
         draw_window(&win3, 3, "W3", "AutoVsync · Msaa · Dark · maximized", 0.0);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
-fn draw_window(
-    win: &vireo::window::VireoWindow,
-    id: u8,
-    name: &str,
-    cfg: &str,
-    content_top: f32,
-) {
+fn draw_window(win: &vireo::window::VireoWindow, id: u8, name: &str, cfg: &str, content_top: f32) {
     let (lw, lh) = win.layout_size().logical();
     let (pw, ph) = win.layout_size().physical();
     let w = lw as f32;
@@ -245,18 +249,36 @@ fn draw_window(
         let (mx, my) = win.mouse_pos().logical();
         let (mx, my) = (mx as f32, my as f32);
         let maxed = win.is_maximized();
-        let hover = |bx: f32| my >= 0.0 && my < TITLE_H && mx >= bx && mx < bx + BTN_W;
+        let hover = |bx: f32| (0.0..TITLE_H).contains(&my) && mx >= bx && mx < bx + BTN_W;
         // hover 背景（Win11 风格：普通按钮淡灰、关闭按钮红）
         let normal_hover = Color::new(0.22, 0.22, 0.25, 1.0);
         let close_hover = Color::new(0.70, 0.11, 0.11, 1.0);
         if hover(min_x) {
-            draw_rectangle(&mut b, Pos::new(min_x, 0.0), BTN_W, TITLE_H, Some(normal_hover));
+            draw_rectangle(
+                &mut b,
+                Pos::new(min_x, 0.0),
+                BTN_W,
+                TITLE_H,
+                Some(normal_hover),
+            );
         }
         if hover(max_x) {
-            draw_rectangle(&mut b, Pos::new(max_x, 0.0), BTN_W, TITLE_H, Some(normal_hover));
+            draw_rectangle(
+                &mut b,
+                Pos::new(max_x, 0.0),
+                BTN_W,
+                TITLE_H,
+                Some(normal_hover),
+            );
         }
         if hover(close_x) {
-            draw_rectangle(&mut b, Pos::new(close_x, 0.0), BTN_W, TITLE_H, Some(close_hover));
+            draw_rectangle(
+                &mut b,
+                Pos::new(close_x, 0.0),
+                BTN_W,
+                TITLE_H,
+                Some(close_hover),
+            );
         }
         // 符号颜色：hover 关闭按钮时用白色，其余用浅灰
         let sym_white = Color::new(1.0, 1.0, 1.0, 1.0);
@@ -268,14 +290,29 @@ fn draw_window(
         // 最小化：一条短横线
         let cy = TITLE_H / 2.0;
         let cx = |bx: f32| bx + BTN_W / 2.0;
-        draw_line(&mut b, cx(min_x) - 5.0, cy, cx(min_x) + 5.0, cy, 1.2, Some(min_col));
+        draw_line(
+            &mut b,
+            cx(min_x) - 5.0,
+            cy,
+            cx(min_x) + 5.0,
+            cy,
+            1.2,
+            Some(min_col),
+        );
         // 最大化/还原：空心方框（还原 = 前后两个错位方框）
         let box_sz = 10.0;
         if maxed {
             let bx = cx(max_x) - box_sz / 2.0 + 2.0;
             let by = cy - box_sz / 2.0 - 1.0;
             draw_rect_outline(&mut b, Pos::new(bx, by), box_sz, box_sz, 1.0, Some(max_col));
-            draw_rect_outline(&mut b, Pos::new(bx - 2.0, by + 2.0), box_sz, box_sz, 1.0, Some(max_col));
+            draw_rect_outline(
+                &mut b,
+                Pos::new(bx - 2.0, by + 2.0),
+                box_sz,
+                box_sz,
+                1.0,
+                Some(max_col),
+            );
         } else {
             let bx = cx(max_x) - box_sz / 2.0;
             let by = cy - box_sz / 2.0;
@@ -283,8 +320,24 @@ fn draw_window(
         }
         // 关闭：两条交叉斜线（X）
         let d = 5.0;
-        draw_line(&mut b, cx(close_x) - d, cy - d, cx(close_x) + d, cy + d, 1.2, Some(close_col));
-        draw_line(&mut b, cx(close_x) + d, cy - d, cx(close_x) - d, cy + d, 1.2, Some(close_col));
+        draw_line(
+            &mut b,
+            cx(close_x) - d,
+            cy - d,
+            cx(close_x) + d,
+            cy + d,
+            1.2,
+            Some(close_col),
+        );
+        draw_line(
+            &mut b,
+            cx(close_x) + d,
+            cy - d,
+            cx(close_x) - d,
+            cy + d,
+            1.2,
+            Some(close_col),
+        );
     }
 
     // ---- 文本区：依次三行 ----
@@ -309,7 +362,11 @@ fn draw_window(
         &mut b.texts,
         &format!(
             "layout: logical {}x{}  physical {}x{}  sf {:.2}",
-            lw as u32, lh as u32, pw as u32, ph as u32, win.layout_scale()
+            lw as u32,
+            lh as u32,
+            pw as u32,
+            ph as u32,
+            win.layout_scale()
         ),
         Pos::new(16.0, ty),
         TextDef::default().font_size(13.0),
@@ -325,7 +382,13 @@ fn draw_window(
     let band_top = ty + 14.0;
     let band_h = (h - band_top - 8.0).max(0.0);
     if band_h > 0.0 {
-        draw_rectangle(&mut b, Pos::new(w * 0.2, band_top), w * 0.6, band_h, Some(c));
+        draw_rectangle(
+            &mut b,
+            Pos::new(w * 0.2, band_top),
+            w * 0.6,
+            band_h,
+            Some(c),
+        );
     }
 
     win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&b]);

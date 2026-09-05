@@ -1,13 +1,13 @@
-use std::sync::Arc;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
-use crate::area::{effective_area, Area, AreaGeom};
+use crate::area::{Area, AreaGeom, effective_area};
 use crate::gpu::{GeoInstance, GeoVertex, ShapeInstance, Vertex};
-use crate::math::{
-    affine_rect_bounds, mul_affine_cols, seed_identity_transform_table, transform_key, Pos,
-    Rect, Transform, UvRect,
-};
 use crate::material::Material;
+use crate::math::{
+    Pos, Rect, Transform, UvRect, affine_rect_bounds, mul_affine_cols,
+    seed_identity_transform_table, transform_key,
+};
 use crate::text::{TextDef, TextEntryList};
 
 use super::{BatchOverride, DrawEvent, GeoTemplate, ShapeStats};
@@ -424,6 +424,12 @@ pub struct DrawBatch {
     pub merge_geo_templates: bool,
 }
 
+impl Default for DrawBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DrawBatch {
     pub fn new() -> Self {
         let mut transform_table = Vec::with_capacity(48);
@@ -536,7 +542,12 @@ impl DrawBatch {
                     y,
                     u,
                     v,
-                    crate::color::Color::new(instance.color[0], instance.color[1], instance.color[2], instance.color[3]),
+                    crate::color::Color::new(
+                        instance.color[0],
+                        instance.color[1],
+                        instance.color[2],
+                        instance.color[3],
+                    ),
                     instance.transform_index,
                 );
                 vertex.sdf_params = instance.sdf_params;
@@ -556,7 +567,10 @@ impl DrawBatch {
                 let base = vertices.len() as u32;
                 let tvs = template.vertex_start as usize;
                 let color = crate::color::Color::new(
-                    instance.color[0], instance.color[1], instance.color[2], instance.color[3],
+                    instance.color[0],
+                    instance.color[1],
+                    instance.color[2],
+                    instance.color[3],
                 );
                 for gv in &self.geo_template_vertices[tvs..tvs + template.vertex_count as usize] {
                     vertices.push(Vertex::new_uv_xform(
@@ -619,11 +633,24 @@ impl DrawBatch {
         let mut w_min_y = f32::INFINITY;
         let mut w_max_y = f32::NEG_INFINITY;
         let mut any = false;
-        let expand = |w_min_x: &mut f32, w_max_x: &mut f32, w_min_y: &mut f32, w_max_y: &mut f32, wx: f32, wy: f32| {
-            if wx < *w_min_x { *w_min_x = wx; }
-            if wx > *w_max_x { *w_max_x = wx; }
-            if wy < *w_min_y { *w_min_y = wy; }
-            if wy > *w_max_y { *w_max_y = wy; }
+        let expand = |w_min_x: &mut f32,
+                      w_max_x: &mut f32,
+                      w_min_y: &mut f32,
+                      w_max_y: &mut f32,
+                      wx: f32,
+                      wy: f32| {
+            if wx < *w_min_x {
+                *w_min_x = wx;
+            }
+            if wx > *w_max_x {
+                *w_max_x = wx;
+            }
+            if wy < *w_min_y {
+                *w_min_y = wy;
+            }
+            if wy > *w_max_y {
+                *w_max_y = wy;
+            }
         };
         for v in &self.vertices {
             any = true;
@@ -633,14 +660,29 @@ impl DrawBatch {
                 v.position[0],
                 v.position[1],
             );
-            expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+            expand(
+                &mut w_min_x,
+                &mut w_max_x,
+                &mut w_min_y,
+                &mut w_max_y,
+                wx,
+                wy,
+            );
         }
         for instance in &self.instances {
             any = true;
             let [x0, y0, x1, y1] = instance.bounds;
             for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
-                let (wx, wy) = Self::world_xy(&self.transform_table, instance.transform_index, x, y);
-                expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+                let (wx, wy) =
+                    Self::world_xy(&self.transform_table, instance.transform_index, x, y);
+                expand(
+                    &mut w_min_x,
+                    &mut w_max_x,
+                    &mut w_min_y,
+                    &mut w_max_y,
+                    wx,
+                    wy,
+                );
             }
         }
         for instance in &self.geo_instances {
@@ -652,8 +694,20 @@ impl DrawBatch {
                 any = true;
                 let tvs = template.vertex_start as usize;
                 for gv in &self.geo_template_vertices[tvs..tvs + template.vertex_count as usize] {
-                    let (wx, wy) = Self::world_xy(&self.transform_table, instance.transform_index, gv.position[0], gv.position[1]);
-                    expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+                    let (wx, wy) = Self::world_xy(
+                        &self.transform_table,
+                        instance.transform_index,
+                        gv.position[0],
+                        gv.position[1],
+                    );
+                    expand(
+                        &mut w_min_x,
+                        &mut w_max_x,
+                        &mut w_min_y,
+                        &mut w_max_y,
+                        wx,
+                        wy,
+                    );
                 }
             }
         }
@@ -683,16 +737,33 @@ impl DrawBatch {
                 }
                 None => Self::table_cols_at(&self.transform_table, ti),
             };
-            for (lx, ly) in [(p.x, p.y), (p.x + tw, p.y), (p.x, p.y + th), (p.x + tw, p.y + th)] {
+            for (lx, ly) in [
+                (p.x, p.y),
+                (p.x + tw, p.y),
+                (p.x, p.y + th),
+                (p.x + tw, p.y + th),
+            ] {
                 let wx = mc0[0] * lx + mc1[0] * ly + mc2[0];
                 let wy = mc0[1] * lx + mc1[1] * ly + mc2[1];
-                expand(&mut w_min_x, &mut w_max_x, &mut w_min_y, &mut w_max_y, wx, wy);
+                expand(
+                    &mut w_min_x,
+                    &mut w_max_x,
+                    &mut w_min_y,
+                    &mut w_max_y,
+                    wx,
+                    wy,
+                );
             }
         }
         if !any || w_min_x > w_max_x {
             return None;
         }
-        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
+        Some(Rect::new(
+            w_min_x,
+            w_min_y,
+            w_max_x - w_min_x,
+            w_max_y - w_min_y,
+        ))
     }
 
     /// flatten / draw 共用：是否走 scissor 代替本层 stencil Push。
@@ -734,12 +805,7 @@ impl DrawBatch {
         }
         let mut worlds: [(f32, f32); 4] = [(0.0, 0.0); 4];
         for (i, v) in self.vertices.iter().enumerate() {
-            worlds[i] = Self::world_xy(
-                &self.transform_table,
-                ti,
-                v.position[0],
-                v.position[1],
-            );
+            worlds[i] = Self::world_xy(&self.transform_table, ti, v.position[0], v.position[1]);
         }
         let w_min_x = worlds.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
         let w_max_x = worlds.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
@@ -754,9 +820,9 @@ impl DrawBatch {
         ];
         let mut found = [false; 4];
         for &(wx, wy) in &worlds {
-            let matched = corners.iter().position(|&(cx, cy)| {
-                (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4
-            });
+            let matched = corners
+                .iter()
+                .position(|&(cx, cy)| (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4);
             match matched {
                 Some(i) => found[i] = true,
                 None => return None,
@@ -765,7 +831,12 @@ impl DrawBatch {
         if !found.iter().all(|&x| x) {
             return None;
         }
-        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
+        Some(Rect::new(
+            w_min_x,
+            w_min_y,
+            w_max_x - w_min_x,
+            w_max_y - w_min_y,
+        ))
     }
 
     /// geo-instance 模板路径的 auto-scissor：单个实例 + 4v/6i 矩形模板 + 无旋转。
@@ -803,9 +874,9 @@ impl DrawBatch {
         ];
         let mut found = [false; 4];
         for &(wx, wy) in &worlds {
-            let matched = corners.iter().position(|&(cx, cy)| {
-                (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4
-            });
+            let matched = corners
+                .iter()
+                .position(|&(cx, cy)| (wx - cx).abs() < 1e-4 && (wy - cy).abs() < 1e-4);
             match matched {
                 Some(i) => found[i] = true,
                 None => return None,
@@ -814,7 +885,12 @@ impl DrawBatch {
         if !found.iter().all(|&x| x) {
             return None;
         }
-        Some(Rect::new(w_min_x, w_min_y, w_max_x - w_min_x, w_max_y - w_min_y))
+        Some(Rect::new(
+            w_min_x,
+            w_min_y,
+            w_max_x - w_min_x,
+            w_max_y - w_min_y,
+        ))
     }
 
     /// 追加子 batch。若 `child.inherit` 有标志，先把父属性写入子（transform 作用于整棵子树）。
@@ -1001,17 +1077,17 @@ impl DrawBatch {
                     let key = self as *const DrawBatch as *const () as usize;
                     match aabb_map.get(&key).copied().flatten() {
                         Some(b) => Some(b),
-                        None => self.compute_own_world_aabb().map(|b| {
-                            affine_rect_bounds(&b, v0, v1, v2)
-                        }),
+                        None => self
+                            .compute_own_world_aabb()
+                            .map(|b| affine_rect_bounds(&b, v0, v1, v2)),
                     }
                 }
                 Some(Some(b)) => Some(affine_rect_bounds(&b, v0, v1, v2)),
             };
-            if let Some(b) = effective {
-                if !vp.intersects(&b) {
-                    return;
-                }
+            if let Some(b) = effective
+                && !vp.intersects(&b)
+            {
+                return;
             }
         }
 
@@ -1023,13 +1099,13 @@ impl DrawBatch {
         } else {
             None
         };
-        if let Some(a) = &area {
-            if !a.is_empty() {
-                let mut ops = Vec::new();
-                a.compile_cover(level, &mut ops);
-                for op in ops {
-                    out.push(DrawEvent::AreaOp { op, is_setup: true });
-                }
+        if let Some(a) = &area
+            && !a.is_empty()
+        {
+            let mut ops = Vec::new();
+            a.compile_cover(level, &mut ops);
+            for op in ops {
+                out.push(DrawEvent::AreaOp { op, is_setup: true });
             }
         }
         out.push(DrawEvent::Batch(self));
@@ -1049,10 +1125,11 @@ impl DrawBatch {
                 0
             };
         // scissor 仅包住子节点；无子则不发 Push/Pop
-        if use_scissor && !self.children.is_empty() {
-            if let Some(r) = effective_clip {
-                out.push(DrawEvent::ScissorPush(r));
-            }
+        if use_scissor
+            && !self.children.is_empty()
+            && let Some(r) = effective_clip
+        {
+            out.push(DrawEvent::ScissorPush(r));
         }
         for child in &self.children {
             child.flatten_events(out, child_level, viewport, aabb_map, &eff_view, view_map);
@@ -1063,16 +1140,18 @@ impl DrawBatch {
             // 与 draw Push 成对：即使子全被 cull 也要 Pop，避免 clip_depth 泄漏
             out.push(DrawEvent::StencilPop);
         }
-        if has_area {
-            if let Some(a) = area {
-                if !a.is_empty() {
-                    let mut ops = Vec::new();
-                    // cover 把 level 抬到 level+1；erase 在 level+1 上 Dec 回 level。
-                    a.compile_erase(level + 1, &mut ops);
-                    for op in ops {
-                        out.push(DrawEvent::AreaOp { op, is_setup: false });
-                    }
-                }
+        if has_area
+            && let Some(a) = area
+            && !a.is_empty()
+        {
+            let mut ops = Vec::new();
+            // cover 把 level 抬到 level+1；erase 在 level+1 上 Dec 回 level。
+            a.compile_erase(level + 1, &mut ops);
+            for op in ops {
+                out.push(DrawEvent::AreaOp {
+                    op,
+                    is_setup: false,
+                });
             }
         }
     }
@@ -1219,10 +1298,12 @@ impl DrawBatch {
             self.bind_group = saved_bind_group;
             self.texts.texture_state = saved_text_state.clone();
             // 恢复后需 bump generation 以分离后续文字段
-            self.texts.texture_state.generation = self.texts.texture_state.generation.wrapping_add(1);
+            self.texts.texture_state.generation =
+                self.texts.texture_state.generation.wrapping_add(1);
         } else if uv_overridden {
             self.texts.texture_state = saved_text_state.clone();
-            self.texts.texture_state.generation = self.texts.texture_state.generation.wrapping_add(1);
+            self.texts.texture_state.generation =
+                self.texts.texture_state.generation.wrapping_add(1);
         }
         self.color = saved_color;
         self.sdf_feather = saved_feather;
@@ -1293,11 +1374,7 @@ impl DrawBatch {
             t.d *= ky;
         } else {
             // 从 (a,b,c,d) 推角度；零缩放时角度=0
-            let angle = if old_sx > 0.0 {
-                (-t.b).atan2(t.a)
-            } else {
-                0.0
-            };
+            let angle = if old_sx > 0.0 { (-t.b).atan2(t.a) } else { 0.0 };
             let (c, s) = (angle.cos(), angle.sin());
             t.a = sx * c;
             t.b = -sx * s;
@@ -1322,8 +1399,16 @@ impl DrawBatch {
 
     /// 公转变换：绕轨道中心 `(cx, cy)` 的圆周上运动，同时绕自身 pivot `(px, py)` 自转。
     pub fn orbit_transform(
-        &mut self, cx: f32, cy: f32, orbit_radius: f32, orbit_angle: f32,
-        px: f32, py: f32, self_rotation: f32, sx: f32, sy: f32,
+        &mut self,
+        cx: f32,
+        cy: f32,
+        orbit_radius: f32,
+        orbit_angle: f32,
+        px: f32,
+        py: f32,
+        self_rotation: f32,
+        sx: f32,
+        sy: f32,
     ) {
         let x = cx + orbit_angle.cos() * orbit_radius;
         let y = cy + orbit_angle.sin() * orbit_radius;
@@ -1452,12 +1537,23 @@ impl DrawBatch {
     /// 添加单个顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex(&mut self, x: f32, y: f32, color: crate::color::Color) {
         let idx = self.current_transform_index();
-        self.vertices.push(Vertex::new_uv_xform(x, y, 0.0, 0.0, color, idx));
+        self.vertices
+            .push(Vertex::new_uv_xform(x, y, 0.0, 0.0, color, idx));
     }
 
     /// 添加 SDF 顶点（自动应用当前 transform，索引查表）。
     /// 坐标和 SDF 参数应处于同一局部空间。
-    pub fn push_sdf_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color, params: [f32;4], ty: u32, feather: f32) {
+    pub fn push_sdf_vertex(
+        &mut self,
+        x: f32,
+        y: f32,
+        u: f32,
+        v: f32,
+        color: crate::color::Color,
+        params: [f32; 4],
+        ty: u32,
+        feather: f32,
+    ) {
         let idx = self.current_transform_index();
         let mut vert = Vertex::new_uv_xform(x, y, u, v, color, idx);
         vert.sdf_params = params;
@@ -1470,7 +1566,8 @@ impl DrawBatch {
     /// 添加带 UV 的顶点（自动应用当前 transform，索引查表）。
     pub fn push_vertex_uv(&mut self, x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) {
         let idx = self.current_transform_index();
-        self.vertices.push(Vertex::new_uv_xform(x, y, u, v, color, idx));
+        self.vertices
+            .push(Vertex::new_uv_xform(x, y, u, v, color, idx));
     }
 
     pub(crate) fn record_mesh_command(&mut self, start: u32, geometry: bool) {
@@ -1497,17 +1594,15 @@ impl DrawBatch {
             material: last_material,
             ..
         }) = self.shape_commands.last_mut()
+            && *texture_generation == self.shape_texture_generation
+            && *last_geometry == geometry
+            && *ndx_start + *ndx_count == start
+            && last_material.as_ref().map(Arc::as_ptr)
+                == self.custom_material.as_ref().map(Arc::as_ptr)
         {
-            if *texture_generation == self.shape_texture_generation
-                && *last_geometry == geometry
-                && *ndx_start + *ndx_count == start
-                && last_material.as_ref().map(Arc::as_ptr)
-                    == self.custom_material.as_ref().map(Arc::as_ptr)
-            {
-                *ndx_count += end - start;
-                self.shape_mesh_end = end;
-                return;
-            }
+            *ndx_count += end - start;
+            self.shape_mesh_end = end;
+            return;
         }
         self.shape_commands.push(BatchShapeCommand::Mesh {
             ndx_start: start,
@@ -1533,7 +1628,11 @@ impl DrawBatch {
     fn mesh_range_is_geometry(&self, start: u32, end: u32) -> bool {
         self.indices[start as usize..end as usize]
             .iter()
-            .all(|&index| self.vertices.get(index as usize).is_some_and(|v| v.sdf_type == 0))
+            .all(|&index| {
+                self.vertices
+                    .get(index as usize)
+                    .is_some_and(|v| v.sdf_type == 0)
+            })
     }
 
     pub(crate) fn shape_commands_valid(&self) -> bool {
@@ -1541,19 +1640,28 @@ impl DrawBatch {
             return false;
         }
         self.shape_commands.iter().all(|command| match command {
-            BatchShapeCommand::Mesh { ndx_start, ndx_count, .. } => {
+            BatchShapeCommand::Mesh {
+                ndx_start,
+                ndx_count,
+                ..
+            } => {
                 let end = ndx_start.saturating_add(*ndx_count);
                 end <= self.indices.len() as u32
                     && self.indices[*ndx_start as usize..end as usize]
                         .iter()
                         .all(|&index| index < self.vertices.len() as u32)
             }
-            BatchShapeCommand::Instances { instance_start, instance_count, .. } => {
+            BatchShapeCommand::Instances {
+                instance_start,
+                instance_count,
+                ..
+            } => {
                 if instance_start.saturating_add(*instance_count) > self.instances.len() as u32 {
                     return false;
                 }
                 let edge_count = self.polygon_edges.len() / 4;
-                self.instances[*instance_start as usize..(*instance_start + *instance_count) as usize]
+                self.instances
+                    [*instance_start as usize..(*instance_start + *instance_count) as usize]
                     .iter()
                     .all(|inst| {
                         if inst.sdf_type == 6 || inst.sdf_type == 7 {
@@ -1565,8 +1673,14 @@ impl DrawBatch {
                         }
                     })
             }
-            BatchShapeCommand::GeoInstances { geo_instance_start, geo_instance_count, .. } => {
-                if geo_instance_start.saturating_add(*geo_instance_count) > self.geo_instances.len() as u32 {
+            BatchShapeCommand::GeoInstances {
+                geo_instance_start,
+                geo_instance_count,
+                ..
+            } => {
+                if geo_instance_start.saturating_add(*geo_instance_count)
+                    > self.geo_instances.len() as u32
+                {
                     return false;
                 }
                 // 校验引用的模板索引仍在 geo_template_indices 内
@@ -1594,15 +1708,13 @@ impl DrawBatch {
             material: last_material,
             ..
         }) = self.shape_commands.last_mut()
+            && *texture_generation == self.shape_texture_generation
+            && *instance_start + *instance_count == start
+            && last_material.as_ref().map(Arc::as_ptr)
+                == self.custom_material.as_ref().map(Arc::as_ptr)
         {
-            if *texture_generation == self.shape_texture_generation
-                && *instance_start + *instance_count == start
-                && last_material.as_ref().map(Arc::as_ptr)
-                    == self.custom_material.as_ref().map(Arc::as_ptr)
-            {
-                *instance_count += end - start;
-                return;
-            }
+            *instance_count += end - start;
+            return;
         }
         self.shape_commands.push(BatchShapeCommand::Instances {
             instance_start: start,
@@ -1630,7 +1742,12 @@ impl DrawBatch {
         let vertex_count = vertices.len() as u32;
         self.geo_template_vertices.extend_from_slice(&vertices);
         self.geo_template_indices.extend_from_slice(&indices);
-        let template = GeoTemplate { vertex_start, index_start, index_count, vertex_count };
+        let template = GeoTemplate {
+            vertex_start,
+            index_start,
+            index_count,
+            vertex_count,
+        };
         let slot = self.geo_templates.len() as u32;
         self.geo_templates.push(template);
         self.geo_template_map.insert(key, slot);
@@ -1638,7 +1755,12 @@ impl DrawBatch {
     }
 
     /// 追加几何实例：引用模板 + 每实例 color/transform。
-    pub(crate) fn push_geo_instance(&mut self, template: GeoTemplate, color: crate::color::Color, transform_index: u32) {
+    pub(crate) fn push_geo_instance(
+        &mut self,
+        template: GeoTemplate,
+        color: crate::color::Color,
+        transform_index: u32,
+    ) {
         let start = self.geo_instances.len() as u32;
         self.geo_instances.push(GeoInstance {
             template_vertex_start: template.vertex_start,
@@ -1682,7 +1804,10 @@ impl DrawBatch {
         let transform_index = self.current_transform_index();
         let mut geo_vertices = Vec::with_capacity(captured_vertices.len());
         for v in captured_vertices {
-            geo_vertices.push(GeoVertex { position: v.position, uv: v.uv });
+            geo_vertices.push(GeoVertex {
+                position: v.position,
+                uv: v.uv,
+            });
         }
         let template = self.ensure_geo_template(key, geo_vertices, captured_indices);
         self.push_geo_instance(template, color, transform_index);
@@ -1750,7 +1875,11 @@ impl DrawBatch {
         hash ^ points.len() as u64
     }
 
-    fn edge_template_matches(template: &EdgeTemplate, kind: EdgeTemplateKind, points: &[(f32, f32)]) -> bool {
+    fn edge_template_matches(
+        template: &EdgeTemplate,
+        kind: EdgeTemplateKind,
+        points: &[(f32, f32)],
+    ) -> bool {
         template.kind == kind
             && template.point_bits.len() == points.len() * 2
             && template
@@ -1807,12 +1936,15 @@ impl DrawBatch {
             .flat_map(|&(x, y)| [x.to_bits(), y.to_bits()])
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        self.edge_templates.entry(hash).or_default().push(EdgeTemplate {
-            kind,
-            point_bits,
-            edges: edges.into_boxed_slice(),
-            start,
-        });
+        self.edge_templates
+            .entry(hash)
+            .or_default()
+            .push(EdgeTemplate {
+                kind,
+                point_bits,
+                edges: edges.into_boxed_slice(),
+                start,
+            });
         (start, count)
     }
 
@@ -1849,8 +1981,16 @@ impl DrawBatch {
         let closed = points.len() > 2
             && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
             && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
-        let vertex_count = if closed { points.len() - 1 } else { points.len() };
-        let segment_count = if closed { vertex_count } else { vertex_count.saturating_sub(1) };
+        let vertex_count = if closed {
+            points.len() - 1
+        } else {
+            points.len()
+        };
+        let segment_count = if closed {
+            vertex_count
+        } else {
+            vertex_count.saturating_sub(1)
+        };
         let mut edges = Vec::with_capacity(segment_count * 4);
         for i in 0..segment_count {
             let a = points[i];
@@ -1961,7 +2101,10 @@ impl DrawBatch {
 
     /// 记录纹理段：自上次段以来的新索引归入此 bind group（`None` = 白纹理路径）。
     pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
-        let start = self.texture_segments.last().map_or(0, |s| s.ndx_start + s.ndx_count);
+        let start = self
+            .texture_segments
+            .last()
+            .map_or(0, |s| s.ndx_start + s.ndx_count);
         let end = self.indices.len() as u32;
         if end > start {
             self.texture_segments.push(TextureSegment {
@@ -1994,11 +2137,12 @@ impl DrawBatch {
             .map_or(0, |s| s.instance_start + s.instance_count);
         let end = self.geo_instances.len() as u32;
         if end > start {
-            self.geo_instance_texture_segments.push(InstanceTextureSegment {
-                instance_start: start,
-                instance_count: end - start,
-                bind_group: bg,
-            });
+            self.geo_instance_texture_segments
+                .push(InstanceTextureSegment {
+                    instance_start: start,
+                    instance_count: end - start,
+                    bind_group: bg,
+                });
         }
     }
 
@@ -2068,22 +2212,33 @@ impl DrawBatch {
         color: Option<crate::color::Color>,
     ) {
         let feather = self.sdf_feather.unwrap_or(0.0);
-        if !self.push_sdf_instance(pos, [-feather, -feather, w + feather, h + feather], [0.0, 0.0, w, h], [w * 0.5, h * 0.5, w * 0.5, h * 0.5], 2, [0.0, 0.0], color) {
+        if !self.push_sdf_instance(
+            pos,
+            [-feather, -feather, w + feather, h + feather],
+            [0.0, 0.0, w, h],
+            [w * 0.5, h * 0.5, w * 0.5, h * 0.5],
+            2,
+            [0.0, 0.0],
+            color,
+        ) {
             self.rectangle(pos, w, h, color);
         }
     }
 
     /// Add an instanced SDF circle. See [`Self::instance_rectangle`] for ordering.
-    pub fn instance_circle(
-        &mut self,
-        pos: Pos,
-        r: f32,
-        color: Option<crate::color::Color>,
-    ) {
+    pub fn instance_circle(&mut self, pos: Pos, r: f32, color: Option<crate::color::Color>) {
         if r == 0.0 {
             return;
         }
-        if !self.push_sdf_instance(pos, [-r, -r, r, r], [-r, -r, r, r], [0.0, 0.0, r, r], 1, [0.0, 0.0], color) {
+        if !self.push_sdf_instance(
+            pos,
+            [-r, -r, r, r],
+            [-r, -r, r, r],
+            [0.0, 0.0, r, r],
+            1,
+            [0.0, 0.0],
+            color,
+        ) {
             self.circle(pos, r, color);
         }
     }
@@ -2099,7 +2254,15 @@ impl DrawBatch {
         if rx == 0.0 || ry == 0.0 {
             return;
         }
-        if !self.push_sdf_instance(pos, [-rx, -ry, rx, ry], [-rx, -ry, rx, ry], [0.0, 0.0, rx, ry], 1, [0.0, 0.0], color) {
+        if !self.push_sdf_instance(
+            pos,
+            [-rx, -ry, rx, ry],
+            [-rx, -ry, rx, ry],
+            [0.0, 0.0, rx, ry],
+            1,
+            [0.0, 0.0],
+            color,
+        ) {
             self.ellipse(pos, rx, ry, color);
         }
     }
@@ -2161,8 +2324,18 @@ impl DrawBatch {
         let pad = half + feather;
         if !self.push_sdf_instance(
             Pos::ZERO,
-            [x1.min(x2) - pad, y1.min(y2) - pad, x1.max(x2) + pad, y1.max(y2) + pad],
-            [x1.min(x2) - half, y1.min(y2) - half, x1.max(x2) + half, y1.max(y2) + half],
+            [
+                x1.min(x2) - pad,
+                y1.min(y2) - pad,
+                x1.max(x2) + pad,
+                y1.max(y2) + pad,
+            ],
+            [
+                x1.min(x2) - half,
+                y1.min(y2) - half,
+                x1.max(x2) + half,
+                y1.max(y2) + half,
+            ],
             [x1, y1, x2, y2],
             3,
             [half, 0.0],
@@ -2199,8 +2372,18 @@ impl DrawBatch {
         let feather = self.sdf_feather.unwrap_or(0.0);
         if !self.push_sdf_instance(
             Pos::ZERO,
-            [x1.min(x2).min(x3) - feather, y1.min(y2).min(y3) - feather, x1.max(x2).max(x3) + feather, y1.max(y2).max(y3) + feather],
-            [x1.min(x2).min(x3), y1.min(y2).min(y3), x1.max(x2).max(x3), y1.max(y2).max(y3)],
+            [
+                x1.min(x2).min(x3) - feather,
+                y1.min(y2).min(y3) - feather,
+                x1.max(x2).max(x3) + feather,
+                y1.max(y2).max(y3) + feather,
+            ],
+            [
+                x1.min(x2).min(x3),
+                y1.min(y2).min(y3),
+                x1.max(x2).max(x3),
+                y1.max(y2).max(y3),
+            ],
             [x1, y1, x2, y2],
             4,
             [x3, y3],
@@ -2238,11 +2421,7 @@ impl DrawBatch {
     }
 
     /// Add an instanced convex SDF polygon. Points must be counter-clockwise.
-    pub fn instance_polygon(
-        &mut self,
-        points: &[(f32, f32)],
-        color: Option<crate::color::Color>,
-    ) {
+    pub fn instance_polygon(&mut self, points: &[(f32, f32)], color: Option<crate::color::Color>) {
         if self.sdf_feather.is_none()
             || self
                 .custom_material
@@ -2273,7 +2452,12 @@ impl DrawBatch {
         let feather = self.sdf_feather.unwrap();
         if !self.push_sdf_instance(
             Pos::ZERO,
-            [min_x - feather, min_y - feather, max_x + feather, max_y + feather],
+            [
+                min_x - feather,
+                min_y - feather,
+                max_x + feather,
+                max_y + feather,
+            ],
             [min_x, min_y, max_x, max_y],
             [start as f32, count as f32, 0.0, 0.0],
             6,
@@ -2309,23 +2493,34 @@ impl DrawBatch {
         let closed = points.len() > 2
             && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
             && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
-        let vertex_count = if closed { points.len() - 1 } else { points.len() };
+        let vertex_count = if closed {
+            points.len() - 1
+        } else {
+            points.len()
+        };
         let mut min_x = f32::INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
-        for i in 0..vertex_count {
-            min_x = min_x.min(points[i].0);
-            min_y = min_y.min(points[i].1);
-            max_x = max_x.max(points[i].0);
-            max_y = max_y.max(points[i].1);
+        for &(x, y) in &points[..vertex_count] {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
         }
-        let Some((start, count)) = self.intern_line_chain_edges(points) else { return; };
+        let Some((start, count)) = self.intern_line_chain_edges(points) else {
+            return;
+        };
         let half = thickness * 0.5;
         let feather = self.sdf_feather.unwrap();
         if !self.push_sdf_instance(
             Pos::ZERO,
-            [min_x - half - feather, min_y - half - feather, max_x + half + feather, max_y + half + feather],
+            [
+                min_x - half - feather,
+                min_y - half - feather,
+                max_x + half + feather,
+                max_y + half + feather,
+            ],
             [min_x - half, min_y - half, max_x + half, max_y + half],
             [start as f32, count as f32, half, 0.0],
             7,
@@ -2479,7 +2674,10 @@ impl DrawBatch {
             if inner_radius > 0.0 {
                 for i in 0..=segments {
                     let angle = start + (end - start) * i as f32 / segments as f32;
-                    points.push((cx + inner_radius * angle.cos(), cy + inner_radius * angle.sin()));
+                    points.push((
+                        cx + inner_radius * angle.cos(),
+                        cy + inner_radius * angle.sin(),
+                    ));
                 }
             } else {
                 points.push((cx, cy));
@@ -2543,11 +2741,19 @@ impl DrawBatch {
         let saved_transform = self.transform;
         let saved_cache = self.cached_transform_index;
         let saved_bg = self.bind_group.clone();
-        if let Some(color) = opts.color { self.color = color; }
-        if let Some(feather) = opts.sdf_feather { self.sdf_feather = feather; }
-        if let Some(uv) = opts.uv { self.uv = uv; }
+        if let Some(color) = opts.color {
+            self.color = color;
+        }
+        if let Some(feather) = opts.sdf_feather {
+            self.sdf_feather = feather;
+        }
+        if let Some(uv) = opts.uv {
+            self.uv = uv;
+        }
 
-        let base = shape.position().map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        let base = shape
+            .position()
+            .map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
         if shape.position().is_some() || opts.transform.is_some() {
             let current = self.transform.take();
             self.transform = Some(match (current, opts.transform) {
@@ -2568,22 +2774,92 @@ impl DrawBatch {
 
         let color = Some(self.color);
         match shape {
-            crate::shapes::Shape::Rect { w, h, .. } => self.instance_rectangle(Pos::ZERO, *w, *h, color),
-            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => self.instance_rounded_rect(Pos::ZERO, *w, *h, *radius, color),
+            crate::shapes::Shape::Rect { w, h, .. } => {
+                self.instance_rectangle(Pos::ZERO, *w, *h, color)
+            }
+            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => {
+                self.instance_rounded_rect(Pos::ZERO, *w, *h, *radius, color)
+            }
             crate::shapes::Shape::Circle { r, .. } => self.instance_circle(Pos::ZERO, *r, color),
-            crate::shapes::Shape::Ellipse { rx, ry, .. } => self.instance_ellipse(Pos::ZERO, *rx, *ry, color),
-            crate::shapes::Shape::Line { x1, y1, x2, y2, thickness } => self.instance_line(*x1, *y1, *x2, *y2, *thickness, color),
-            crate::shapes::Shape::LineChain { points, thickness } => self.instance_line_chain(points, *thickness, color),
-            crate::shapes::Shape::Triangle { x1, y1, x2, y2, x3, y3 } => self.instance_triangle(*x1, *y1, *x2, *y2, *x3, *y3, color),
+            crate::shapes::Shape::Ellipse { rx, ry, .. } => {
+                self.instance_ellipse(Pos::ZERO, *rx, *ry, color)
+            }
+            crate::shapes::Shape::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                thickness,
+            } => self.instance_line(*x1, *y1, *x2, *y2, *thickness, color),
+            crate::shapes::Shape::LineChain { points, thickness } => {
+                self.instance_line_chain(points, *thickness, color)
+            }
+            crate::shapes::Shape::Triangle {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => self.instance_triangle(*x1, *y1, *x2, *y2, *x3, *y3, color),
             crate::shapes::Shape::Polygon { points } => self.instance_polygon(points, color),
-            crate::shapes::Shape::Arc { r, start, end, .. } => self.instance_arc(Pos::ZERO, *r, *start, *end, color),
-            crate::shapes::Shape::RectOutline { w, h, thickness, .. } => self.instance_rect_outline(Pos::ZERO, *w, *h, *thickness, color),
-            crate::shapes::Shape::CircleOutline { r, thickness, segments, .. } => self.instance_circle_outline(Pos::ZERO, *r, *thickness, color, *segments),
-            crate::shapes::Shape::EllipseOutline { rx, ry, thickness, segments, .. } => self.instance_ellipse_outline(Pos::ZERO, *rx, *ry, *thickness, color, *segments),
-            crate::shapes::Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => self.instance_rounded_rect_outline(Pos::ZERO, *w, *h, *radius, *thickness, color, *corner_segments),
-            crate::shapes::Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness } => self.instance_triangle_outline(*x1, *y1, *x2, *y2, *x3, *y3, *thickness, color),
-            crate::shapes::Shape::PolygonOutline { points, thickness } => self.instance_polygon_outline(points, *thickness, color),
-            crate::shapes::Shape::ArcOutline { r, start, end, thickness, segments, .. } => self.instance_arc_outline(Pos::ZERO, *r, *start, *end, *thickness, color, *segments),
+            crate::shapes::Shape::Arc { r, start, end, .. } => {
+                self.instance_arc(Pos::ZERO, *r, *start, *end, color)
+            }
+            crate::shapes::Shape::RectOutline {
+                w, h, thickness, ..
+            } => self.instance_rect_outline(Pos::ZERO, *w, *h, *thickness, color),
+            crate::shapes::Shape::CircleOutline {
+                r,
+                thickness,
+                segments,
+                ..
+            } => self.instance_circle_outline(Pos::ZERO, *r, *thickness, color, *segments),
+            crate::shapes::Shape::EllipseOutline {
+                rx,
+                ry,
+                thickness,
+                segments,
+                ..
+            } => self.instance_ellipse_outline(Pos::ZERO, *rx, *ry, *thickness, color, *segments),
+            crate::shapes::Shape::RoundedRectOutline {
+                w,
+                h,
+                radius,
+                thickness,
+                corner_segments,
+                ..
+            } => self.instance_rounded_rect_outline(
+                Pos::ZERO,
+                *w,
+                *h,
+                *radius,
+                *thickness,
+                color,
+                *corner_segments,
+            ),
+            crate::shapes::Shape::TriangleOutline {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+                thickness,
+            } => self.instance_triangle_outline(*x1, *y1, *x2, *y2, *x3, *y3, *thickness, color),
+            crate::shapes::Shape::PolygonOutline { points, thickness } => {
+                self.instance_polygon_outline(points, *thickness, color)
+            }
+            crate::shapes::Shape::ArcOutline {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => {
+                self.instance_arc_outline(Pos::ZERO, *r, *start, *end, *thickness, color, *segments)
+            }
         }
 
         if texture_overridden {
@@ -2616,11 +2892,19 @@ impl DrawBatch {
         let saved_transform = self.transform;
         let saved_cache = self.cached_transform_index;
         let saved_bg = self.bind_group.clone();
-        if let Some(color) = opts.color { self.color = color; }
-        if let Some(feather) = opts.sdf_feather { self.sdf_feather = feather; }
-        if let Some(uv) = opts.uv { self.uv = uv; }
+        if let Some(color) = opts.color {
+            self.color = color;
+        }
+        if let Some(feather) = opts.sdf_feather {
+            self.sdf_feather = feather;
+        }
+        if let Some(uv) = opts.uv {
+            self.uv = uv;
+        }
 
-        let base = shape.position().map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        let base = shape
+            .position()
+            .map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
         if shape.position().is_some() || opts.transform.is_some() {
             let current = self.transform.take();
             self.transform = Some(match (current, opts.transform) {
@@ -2641,22 +2925,100 @@ impl DrawBatch {
 
         let color = self.color;
         match shape {
-            crate::shapes::Shape::Rect { w, h, .. } => crate::shapes::geo_emit_rectangle(self, *w, *h, color),
-            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => crate::shapes::geo_emit_rounded_rect(self, *w, *h, *radius, color),
-            crate::shapes::Shape::Circle { r, .. } => crate::shapes::geo_emit_circle(self, *r, color),
-            crate::shapes::Shape::Ellipse { rx, ry, .. } => crate::shapes::geo_emit_ellipse(self, *rx, *ry, color),
-            crate::shapes::Shape::Line { x1, y1, x2, y2, thickness } => crate::shapes::geo_emit_line(self, *x1, *y1, *x2, *y2, *thickness, color),
-            crate::shapes::Shape::LineChain { points, thickness } => crate::shapes::geo_emit_line_chain(self, points, *thickness, color),
-            crate::shapes::Shape::Triangle { x1, y1, x2, y2, x3, y3 } => crate::shapes::geo_emit_triangle(self, *x1, *y1, *x2, *y2, *x3, *y3, color),
-            crate::shapes::Shape::Polygon { points } => crate::shapes::geo_emit_polygon(self, points, color),
-            crate::shapes::Shape::Arc { r, start, end, .. } => crate::shapes::geo_emit_arc(self, *r, *start, *end, color),
-            crate::shapes::Shape::RectOutline { w, h, thickness, .. } => crate::shapes::geo_emit_rect_outline(self, *w, *h, *thickness, color),
-            crate::shapes::Shape::CircleOutline { r, thickness, segments, .. } => crate::shapes::geo_emit_circle_outline(self, *r, *thickness, color, *segments),
-            crate::shapes::Shape::EllipseOutline { rx, ry, thickness, segments, .. } => crate::shapes::geo_emit_ellipse_outline(self, *rx, *ry, *thickness, color, *segments),
-            crate::shapes::Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => crate::shapes::geo_emit_rounded_rect_outline(self, *w, *h, *radius, *thickness, color, *corner_segments),
-            crate::shapes::Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness } => crate::shapes::geo_emit_triangle_outline(self, *x1, *y1, *x2, *y2, *x3, *y3, *thickness, color),
-            crate::shapes::Shape::PolygonOutline { points, thickness } => crate::shapes::geo_emit_polygon_outline(self, points, *thickness, color),
-            crate::shapes::Shape::ArcOutline { r, start, end, thickness, segments, .. } => crate::shapes::geo_emit_arc_outline(self, *r, *start, *end, *thickness, color, *segments),
+            crate::shapes::Shape::Rect { w, h, .. } => {
+                crate::shapes::geo_emit_rectangle(self, *w, *h, color)
+            }
+            crate::shapes::Shape::RoundedRect { w, h, radius, .. } => {
+                crate::shapes::geo_emit_rounded_rect(self, *w, *h, *radius, color)
+            }
+            crate::shapes::Shape::Circle { r, .. } => {
+                crate::shapes::geo_emit_circle(self, *r, color)
+            }
+            crate::shapes::Shape::Ellipse { rx, ry, .. } => {
+                crate::shapes::geo_emit_ellipse(self, *rx, *ry, color)
+            }
+            crate::shapes::Shape::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                thickness,
+            } => crate::shapes::geo_emit_line(self, *x1, *y1, *x2, *y2, *thickness, color),
+            crate::shapes::Shape::LineChain { points, thickness } => {
+                crate::shapes::geo_emit_line_chain(self, points, *thickness, color)
+            }
+            crate::shapes::Shape::Triangle {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => crate::shapes::geo_emit_triangle(self, *x1, *y1, *x2, *y2, *x3, *y3, color),
+            crate::shapes::Shape::Polygon { points } => {
+                crate::shapes::geo_emit_polygon(self, points, color)
+            }
+            crate::shapes::Shape::Arc { r, start, end, .. } => {
+                crate::shapes::geo_emit_arc(self, *r, *start, *end, color)
+            }
+            crate::shapes::Shape::RectOutline {
+                w, h, thickness, ..
+            } => crate::shapes::geo_emit_rect_outline(self, *w, *h, *thickness, color),
+            crate::shapes::Shape::CircleOutline {
+                r,
+                thickness,
+                segments,
+                ..
+            } => crate::shapes::geo_emit_circle_outline(self, *r, *thickness, color, *segments),
+            crate::shapes::Shape::EllipseOutline {
+                rx,
+                ry,
+                thickness,
+                segments,
+                ..
+            } => crate::shapes::geo_emit_ellipse_outline(
+                self, *rx, *ry, *thickness, color, *segments,
+            ),
+            crate::shapes::Shape::RoundedRectOutline {
+                w,
+                h,
+                radius,
+                thickness,
+                corner_segments,
+                ..
+            } => crate::shapes::geo_emit_rounded_rect_outline(
+                self,
+                *w,
+                *h,
+                *radius,
+                *thickness,
+                color,
+                *corner_segments,
+            ),
+            crate::shapes::Shape::TriangleOutline {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+                thickness,
+            } => crate::shapes::geo_emit_triangle_outline(
+                self, *x1, *y1, *x2, *y2, *x3, *y3, *thickness, color,
+            ),
+            crate::shapes::Shape::PolygonOutline { points, thickness } => {
+                crate::shapes::geo_emit_polygon_outline(self, points, *thickness, color)
+            }
+            crate::shapes::Shape::ArcOutline {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => crate::shapes::geo_emit_arc_outline(
+                self, *r, *start, *end, *thickness, color, *segments,
+            ),
         }
 
         if texture_overridden {
@@ -2674,22 +3036,128 @@ impl DrawBatch {
 
     // ---- 形状委托（去 draw_ 前缀） ----
 
-    pub fn rectangle(&mut self, pos: Pos, w: f32, h: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rectangle(self, pos, w, h, c); }
-    pub fn circle(&mut self, pos: Pos, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_circle(self, pos, r, c); }
-    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line(self, x1, y1, x2, y2, t, c); }
-    pub fn ellipse(&mut self, pos: Pos, rx: f32, ry: f32, c: Option<crate::color::Color>) { crate::shapes::draw_ellipse(self, pos, rx, ry, c); }
-    pub fn rounded_rect(&mut self, pos: Pos, w: f32, h: f32, r: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rounded_rect(self, pos, w, h, r, c); }
-    pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c); }
-    pub fn polygon(&mut self, pts: &[(f32, f32)], c: Option<crate::color::Color>) { crate::shapes::draw_polygon(self, pts, c); }
-    pub fn arc(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) { crate::shapes::draw_arc(self, pos, r, sa, ea, c); }
-    pub fn rect_outline(&mut self, pos: Pos, w: f32, h: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_rect_outline(self, pos, w, h, t, c); }
-    pub fn circle_outline(&mut self, pos: Pos, r: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_circle_outline(self, pos, r, t, c, seg); }
-    pub fn ellipse_outline(&mut self, pos: Pos, rx: f32, ry: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_ellipse_outline(self, pos, rx, ry, t, c, seg); }
-    pub fn rounded_rect_outline(&mut self, pos: Pos, w: f32, h: f32, r: f32, t: f32, c: Option<crate::color::Color>, cs: u32) { crate::shapes::draw_rounded_rect_outline(self, pos, w, h, r, t, c, cs); }
-    pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_line_chain(self, pts, t, c); }
-    pub fn triangle_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c); }
-    pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) { crate::shapes::draw_polygon_outline(self, pts, t, c); }
-    pub fn arc_outline(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, t: f32, c: Option<crate::color::Color>, seg: u32) { crate::shapes::draw_arc_outline(self, pos, r, sa, ea, t, c, seg); }
+    pub fn rectangle(&mut self, pos: Pos, w: f32, h: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_rectangle(self, pos, w, h, c);
+    }
+    pub fn circle(&mut self, pos: Pos, r: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_circle(self, pos, r, c);
+    }
+    pub fn line(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+    ) {
+        crate::shapes::draw_line(self, x1, y1, x2, y2, t, c);
+    }
+    pub fn ellipse(&mut self, pos: Pos, rx: f32, ry: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_ellipse(self, pos, rx, ry, c);
+    }
+    pub fn rounded_rect(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        r: f32,
+        c: Option<crate::color::Color>,
+    ) {
+        crate::shapes::draw_rounded_rect(self, pos, w, h, r, c);
+    }
+    pub fn triangle(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+        c: Option<crate::color::Color>,
+    ) {
+        crate::shapes::draw_triangle(self, x1, y1, x2, y2, x3, y3, c);
+    }
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: Option<crate::color::Color>) {
+        crate::shapes::draw_polygon(self, pts, c);
+    }
+    pub fn arc(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_arc(self, pos, r, sa, ea, c);
+    }
+    pub fn rect_outline(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+    ) {
+        crate::shapes::draw_rect_outline(self, pos, w, h, t, c);
+    }
+    pub fn circle_outline(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+        seg: u32,
+    ) {
+        crate::shapes::draw_circle_outline(self, pos, r, t, c, seg);
+    }
+    pub fn ellipse_outline(
+        &mut self,
+        pos: Pos,
+        rx: f32,
+        ry: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+        seg: u32,
+    ) {
+        crate::shapes::draw_ellipse_outline(self, pos, rx, ry, t, c, seg);
+    }
+    pub fn rounded_rect_outline(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        r: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+        cs: u32,
+    ) {
+        crate::shapes::draw_rounded_rect_outline(self, pos, w, h, r, t, c, cs);
+    }
+    pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_line_chain(self, pts, t, c);
+    }
+    pub fn triangle_outline(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+    ) {
+        crate::shapes::draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, t, c);
+    }
+    pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_polygon_outline(self, pts, t, c);
+    }
+    pub fn arc_outline(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        sa: f32,
+        ea: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+        seg: u32,
+    ) {
+        crate::shapes::draw_arc_outline(self, pos, r, sa, ea, t, c, seg);
+    }
     pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOverride) {
         crate::shapes::draw_shape(self, shape, opts);
     }

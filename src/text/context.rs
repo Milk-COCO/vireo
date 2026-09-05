@@ -3,15 +3,15 @@ use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 
-use crate::glyphon::{
-    Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
-};
 pub use crate::glyphon::Attrs;
 pub use crate::glyphon::ColorMode;
+use crate::glyphon::{
+    Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
+    TextRenderer, Viewport,
+};
 use wgpu::{Device, MultisampleState, Queue, Sampler, TextureFormat, TextureView};
 
-use super::{GlyphKey, ShapeCacheSlot, ShapeKey, ShapeCacheStats};
+use super::{GlyphKey, ShapeCacheSlot, ShapeCacheStats, ShapeKey};
 use super::{TextAlign, TextDef, TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
 
 /// 默认硬顶（可 `set_shape_cache_max_entries` 修改；`None` = 不限制条数）。
@@ -138,7 +138,13 @@ impl TextContext {
     /// 预热文字管线：强制 swash cache / atlas / 上传 lazy 初始化。
     /// 用单字符 "A" 跑一次 prepare，触发首帧 33ms 的 text shape 成本。
     /// 调用前 `ensure_sample_count` 必须已跑过。
-    pub fn preheat(&mut self, device: &Device, queue: &Queue, physical_width: u32, physical_height: u32) {
+    pub fn preheat(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        physical_width: u32,
+        physical_height: u32,
+    ) {
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 20.0));
         let attrs = Attrs::new();
         buf.set_text("A", &attrs, Shaping::Advanced, None);
@@ -232,7 +238,10 @@ impl TextContext {
     fn remove_slot(&mut self, slot_i: usize) {
         let removed = self.shape_slots.swap_remove(slot_i);
         debug_assert!(
-            removed.liveness.as_ref().map_or(true, |a| Arc::strong_count(a) <= 1),
+            removed
+                .liveness
+                .as_ref()
+                .is_none_or(|a| Arc::strong_count(a) <= 1),
             "remove_slot called on actively held slot"
         );
         self.shape_map.remove(&removed.key);
@@ -299,7 +308,7 @@ impl TextContext {
 
     fn soft_cap(&self) -> usize {
         match self.shape_max_entries {
-            Some(hard) => hard.min(DEFAULT_SHAPE_SOFT_CAP).max(1),
+            Some(hard) => hard.clamp(1, DEFAULT_SHAPE_SOFT_CAP),
             None => DEFAULT_SHAPE_SOFT_CAP,
         }
     }
@@ -372,12 +381,12 @@ impl TextContext {
         self.scavenge_dead_liveness();
         let pinned = |i: usize| self.frame_pinned.iter().any(|&p| p as usize == i);
         let held = |i: usize| self.shape_slots[i].liveness.is_some();
-        if let Some(ttl) = self.shape_ttl {
-            if let Some(i) = self.shape_slots.iter().enumerate().position(|(i, s)| {
+        if let Some(ttl) = self.shape_ttl
+            && let Some(i) = self.shape_slots.iter().enumerate().position(|(i, s)| {
                 !pinned(i) && !held(i) && now.saturating_duration_since(s.last_used) > ttl
-            }) {
-                return Some(i);
-            }
+            })
+        {
+            return Some(i);
         }
         let mut oldest_i = None;
         let mut oldest_t = Instant::now();
@@ -393,7 +402,14 @@ impl TextContext {
         oldest_i
     }
 
-    fn replace_slot_rc(&mut self, slot_i: usize, key: ShapeKey, buffer: Arc<Buffer>, line_width: f32, now: Instant) -> u32 {
+    fn replace_slot_rc(
+        &mut self,
+        slot_i: usize,
+        key: ShapeKey,
+        buffer: Arc<Buffer>,
+        line_width: f32,
+        now: Instant,
+    ) -> u32 {
         let old_key = self.shape_slots[slot_i].key.clone();
         self.shape_map.remove(&old_key);
         let old_buf = std::mem::replace(&mut self.shape_slots[slot_i].buffer, buffer);
@@ -500,10 +516,10 @@ impl TextContext {
     /// 扫描全槽，清理已死的 liveness 标记。
     pub(crate) fn scavenge_dead_liveness(&mut self) {
         for slot in &mut self.shape_slots {
-            if let Some(arc) = &slot.liveness {
-                if Arc::strong_count(arc) <= 1 {
-                    slot.liveness = None;
-                }
+            if let Some(arc) = &slot.liveness
+                && Arc::strong_count(arc) <= 1
+            {
+                slot.liveness = None;
             }
         }
     }
@@ -511,15 +527,16 @@ impl TextContext {
     /// 将槽标为 live，返回供 [`StableText`] 持有的 `Arc<()>`。
     pub(crate) fn mark_slot_live(&mut self, slot: u32) -> Arc<()> {
         let s = &mut self.shape_slots[slot as usize];
-        s.liveness
-            .get_or_insert_with(|| Arc::new(()))
-            .clone()
+        s.liveness.get_or_insert_with(|| Arc::new(())).clone()
     }
 
     /// 当前活跃 held 槽数。
     pub fn shape_cache_held_count(&mut self) -> usize {
         self.scavenge_dead_liveness();
-        self.shape_slots.iter().filter(|s| s.liveness.is_some()).count()
+        self.shape_slots
+            .iter()
+            .filter(|s| s.liveness.is_some())
+            .count()
     }
 
     /// 从文本创建 [`StableText`](super::StableText)。
@@ -570,7 +587,11 @@ impl TextContext {
     }
 
     /// 按需 shape 单个字符并缓存完整 resolved glyph cluster。
-    pub(crate) fn resolve_glyph(&mut self, ch: char, options: &TextDef) -> Arc<ResolvedGlyphCluster> {
+    pub(crate) fn resolve_glyph(
+        &mut self,
+        ch: char,
+        options: &TextDef,
+    ) -> Arc<ResolvedGlyphCluster> {
         let key = GlyphKey::from_char(ch, options);
         if let Some(glyph) = self.glyph_cache.get(&key) {
             return glyph.clone();
@@ -584,12 +605,14 @@ impl TextContext {
         let buffer = &self.shape_slots[idx as usize].buffer;
         let mut glyphs = Vec::new();
         for run in buffer.layout_runs() {
-            glyphs.extend(run.glyphs.iter().cloned().map(|glyph| Arc::new(ResolvedTextGlyph {
-                glyph,
-                line_y: run.line_y,
-                line_top: run.line_top,
-                line_height: run.line_height,
-            })));
+            glyphs.extend(run.glyphs.iter().cloned().map(|glyph| {
+                Arc::new(ResolvedTextGlyph {
+                    glyph,
+                    line_y: run.line_y,
+                    line_top: run.line_top,
+                    line_height: run.line_height,
+                })
+            }));
         }
         let resolved = Arc::new(ResolvedGlyphCluster {
             glyphs: Arc::from(glyphs),
@@ -634,12 +657,8 @@ impl TextContext {
             default_base_texture,
             default_base_sampler,
         );
-        let text_renderer = TextRenderer::new(
-            &mut text_atlas,
-            device,
-            MultisampleState::default(),
-            None,
-        );
+        let text_renderer =
+            TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
         let viewport = Viewport::new(device, &cache);
 
         Self {

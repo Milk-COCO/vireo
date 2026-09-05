@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use crate::color::Color;
 use crate::glyphon::Buffer;
-use crate::render::Pos;
 use crate::gpu::GpuContext;
+use crate::render::Pos;
 
-use crate::text::{
-    TextDef, TextOverride, TextPart, TextTextureState, StableText, ResolvedTextGlyph,
-};
 use super::split_hud;
+use crate::text::{
+    ResolvedTextGlyph, StableText, TextDef, TextOverride, TextPart, TextTextureState,
+};
 
 /// 文本条目——三种变体，互斥字段不混存。
 ///
@@ -60,9 +60,15 @@ impl TextEntry {
     }
     pub fn transform_index(&self) -> u32 {
         match self {
-            TextEntry::Normal { transform_index, .. }
-            | TextEntry::Parts { transform_index, .. }
-            | TextEntry::Stable { transform_index, .. } => *transform_index,
+            TextEntry::Normal {
+                transform_index, ..
+            }
+            | TextEntry::Parts {
+                transform_index, ..
+            }
+            | TextEntry::Stable {
+                transform_index, ..
+            } => *transform_index,
         }
     }
     pub fn pos(&self) -> Pos {
@@ -117,7 +123,9 @@ impl TextEntry {
                 let mut w = 0.0f32;
                 for p in parts {
                     match p {
-                        TextPart::Normal(s, d) | TextPart::Dynamic(s, d) | TextPart::Glyphs(s, d) => {
+                        TextPart::Normal(s, d)
+                        | TextPart::Dynamic(s, d)
+                        | TextPart::Glyphs(s, d) => {
                             let fs = d.as_ref().map(|x| x.font_size).unwrap_or(def.font_size);
                             w += s.chars().count() as f32 * fs * 0.6;
                         }
@@ -162,6 +170,12 @@ impl TextEntry {
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
     pub(crate) texture_state: TextTextureState,
+}
+
+impl Default for TextEntryList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextEntryList {
@@ -342,15 +356,12 @@ impl TextEntryList {
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
         let text_ctx = gpu.text_ctx.lock().unwrap();
-        if let Err(e) = text_ctx
-            .text_renderer
-            .render(
-                &text_ctx.text_atlas,
-                &text_ctx.viewport,
-                render_pass,
-                &gpu.engine_storage_dummy_bind_group,
-            )
-        {
+        if let Err(e) = text_ctx.text_renderer.render(
+            &text_ctx.text_atlas,
+            &text_ctx.viewport,
+            render_pass,
+            &gpu.engine_storage_dummy_bind_group,
+        ) {
             log::warn!("glyphon text render failed (skipped this frame): {:?}", e);
         }
     }

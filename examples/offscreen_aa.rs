@@ -10,25 +10,64 @@ fn draw_off(batch: &mut DrawBatch, sdf: f32) {
     if sdf > 0.0 {
         batch.set_sdf_feather(Some(sdf));
     }
-    draw_circle(batch, Pos::new(150.0, 150.0), 90.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
+    draw_circle(
+        batch,
+        Pos::new(150.0, 150.0),
+        90.0,
+        Some(Color::new(0.2, 0.6, 1.0, 1.0)),
+    );
     draw_triangle(batch, 150.0, 260.0, 60.0, 70.0, 240.0, 70.0, Some(ORANGE));
-    draw_line(batch, 30.0, 150.0, 270.0, 150.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
+    draw_line(
+        batch,
+        30.0,
+        150.0,
+        270.0,
+        150.0,
+        3.0,
+        Some(Color::new(0.4, 0.7, 0.4, 1.0)),
+    );
 }
 
 #[vireo::main]
 async fn main() {
-    let off_ssaa = app.offscreen(300, 300, AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: true });
-    let off_msaa = app.offscreen(300, 300, AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true });
-    let off_sdf  = app.offscreen(300, 300, AntiAliasing::None);
+    let off_ssaa = app.offscreen(
+        300,
+        300,
+        AntiAliasing::Ssaa {
+            samples: 4,
+            alpha_to_coverage: true,
+        },
+    );
+    let off_msaa = app.offscreen(
+        300,
+        300,
+        AntiAliasing::Msaa {
+            samples: 4,
+            alpha_to_coverage: true,
+        },
+    );
+    let off_sdf = app.offscreen(300, 300, AntiAliasing::None);
     let win = app.window(
         WindowDesc::new("Offscreen AA: SSAA vs MSAA vs SDF", 1000, 380).dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
     app.run(move |ctx| {
-        if let Ok(c) = ctx.app().offscreen_ref(&off_ssaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Ok(c) = ctx.app().offscreen_ref(&off_msaa) { let mut b = DrawBatch::new(); draw_off(&mut b, 0.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
-        if let Ok(c) = ctx.app().offscreen_ref(&off_sdf) { let mut b = DrawBatch::new(); draw_off(&mut b, 1.0); c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]); }
+        if let Ok(c) = ctx.app().offscreen_ref(&off_ssaa) {
+            let mut b = DrawBatch::new();
+            draw_off(&mut b, 1.0);
+            c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
+        }
+        if let Ok(c) = ctx.app().offscreen_ref(&off_msaa) {
+            let mut b = DrawBatch::new();
+            draw_off(&mut b, 0.0);
+            c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
+        }
+        if let Ok(c) = ctx.app().offscreen_ref(&off_sdf) {
+            let mut b = DrawBatch::new();
+            draw_off(&mut b, 1.0);
+            c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
+        }
         if let (Ok(w), Ok(c1), Ok(c2), Ok(c3)) = (
             ctx.app().window_ref(&win),
             ctx.app().offscreen_ref(&off_ssaa),
@@ -36,17 +75,37 @@ async fn main() {
             ctx.app().offscreen_ref(&off_sdf),
         ) {
             let mut b = DrawBatch::new();
-            b.set_texture(Some(&c1.texture)); draw_rectangle(&mut b, Pos::new(15.0, 30.0), 300.0, 300.0, Some(WHITE));
-            b.set_texture(Some(&c2.texture)); draw_rectangle(&mut b, Pos::new(350.0, 30.0), 300.0, 300.0, Some(WHITE));
-            b.set_texture(Some(&c3.texture)); draw_rectangle(&mut b, Pos::new(685.0, 30.0), 300.0, 300.0, Some(WHITE));
-            draw_text(&mut b.texts, "SSAA x4 + SDF 1px", Pos::new(75.0, 345.0),
-                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
-            draw_text(&mut b.texts, "MSAA x4 (geometry)", Pos::new(415.0, 345.0),
-                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
-            draw_text(&mut b.texts, "SDF 1px only", Pos::new(785.0, 345.0),
-                      TextDef::default().font_size(14.0), TextOverride::from_color(WHITE));
+            b.set_texture(Some(&c1.texture));
+            draw_rectangle(&mut b, Pos::new(15.0, 30.0), 300.0, 300.0, Some(WHITE));
+            b.set_texture(Some(&c2.texture));
+            draw_rectangle(&mut b, Pos::new(350.0, 30.0), 300.0, 300.0, Some(WHITE));
+            b.set_texture(Some(&c3.texture));
+            draw_rectangle(&mut b, Pos::new(685.0, 30.0), 300.0, 300.0, Some(WHITE));
+            draw_text(
+                &mut b.texts,
+                "SSAA x4 + SDF 1px",
+                Pos::new(75.0, 345.0),
+                TextDef::default().font_size(14.0),
+                TextOverride::from_color(WHITE),
+            );
+            draw_text(
+                &mut b.texts,
+                "MSAA x4 (geometry)",
+                Pos::new(415.0, 345.0),
+                TextDef::default().font_size(14.0),
+                TextOverride::from_color(WHITE),
+            );
+            draw_text(
+                &mut b.texts,
+                "SDF 1px only",
+                Pos::new(785.0, 345.0),
+                TextDef::default().font_size(14.0),
+                TextOverride::from_color(WHITE),
+            );
             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

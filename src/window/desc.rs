@@ -1,15 +1,21 @@
 use winit::window::{Cursor, Fullscreen, Icon, WindowLevel};
 
-use crate::dpi::{dp, Pp};
+use crate::dpi::{Pp, dp};
 
 /// 抗锯齿模式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AntiAliasing {
     None,
     /// 多重采样：per-pixel 着色，硬件解析采样点覆盖。
-    Msaa { samples: u32, alpha_to_coverage: bool },
+    Msaa {
+        samples: u32,
+        alpha_to_coverage: bool,
+    },
     /// 超采样：per-sample 着色（`@interpolate(linear, sample)`），每个采样点独立计算 SDF。
-    Ssaa { samples: u32, alpha_to_coverage: bool },
+    Ssaa {
+        samples: u32,
+        alpha_to_coverage: bool,
+    },
 }
 
 impl AntiAliasing {
@@ -23,7 +29,12 @@ impl AntiAliasing {
     pub fn alpha_to_coverage(&self) -> bool {
         match self {
             AntiAliasing::None => false,
-            AntiAliasing::Msaa { alpha_to_coverage, .. } | AntiAliasing::Ssaa { alpha_to_coverage, .. } => *alpha_to_coverage,
+            AntiAliasing::Msaa {
+                alpha_to_coverage, ..
+            }
+            | AntiAliasing::Ssaa {
+                alpha_to_coverage, ..
+            } => *alpha_to_coverage,
         }
     }
 
@@ -109,11 +120,17 @@ pub(crate) fn clamp_aa(aa: AntiAliasing, supported: &[u32]) -> AntiAliasing {
     };
     match aa {
         AntiAliasing::None => AntiAliasing::None,
-        AntiAliasing::Msaa { samples, alpha_to_coverage } => AntiAliasing::Msaa {
+        AntiAliasing::Msaa {
+            samples,
+            alpha_to_coverage,
+        } => AntiAliasing::Msaa {
             samples: snap(samples),
             alpha_to_coverage,
         },
-        AntiAliasing::Ssaa { samples, alpha_to_coverage } => AntiAliasing::Ssaa {
+        AntiAliasing::Ssaa {
+            samples,
+            alpha_to_coverage,
+        } => AntiAliasing::Ssaa {
             samples: snap(samples),
             alpha_to_coverage,
         },
@@ -227,7 +244,10 @@ impl WindowDesc {
     /// `metrics().scale_factor`，以及本 desc 尺寸族字段的物理化。运行时可用
     /// [`VireoWindow::set_dpi_override`] 切换（保持 vireo 逻辑尺寸、resize 物理窗口）。
     pub fn dpi_override(mut self, dpi: Option<f64>) -> Self {
-        debug_assert!(dpi.map_or(true, |d| d.is_finite() && d > 0.0), "dpi_override must be None or finite >0");
+        debug_assert!(
+            dpi.is_none_or(|d| d.is_finite() && d > 0.0),
+            "dpi_override must be None or finite >0"
+        );
         self.dpi_override = dpi;
         self
     }
@@ -266,7 +286,10 @@ impl WindowDesc {
     /// - **Windows**：子窗口带 `WS_CHILD`，被限制在父窗口客户区内。
     /// - **X11**：子窗口被限制在父窗口客户区内。
     /// - **Android / iOS / Wayland / Web**：不支持。
-    pub unsafe fn parent_window(mut self, handle: winit::raw_window_handle::RawWindowHandle) -> Self {
+    pub unsafe fn parent_window(
+        mut self,
+        handle: winit::raw_window_handle::RawWindowHandle,
+    ) -> Self {
         self.parent_window = Some(SendRawWindowHandle(handle));
         self
     }
@@ -322,13 +345,13 @@ impl WindowDesc {
 
     /// 从图片文件加载窗口图标（PNG/JPG/BMP）
     pub fn icon_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
-        if let Ok(data) = std::fs::read(path.as_ref()) {
-            if let Ok(img) = image::load_from_memory(&data) {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), w, h) {
-                    self.window_icon = Some(icon);
-                }
+        if let Ok(data) = std::fs::read(path.as_ref())
+            && let Ok(img) = image::load_from_memory(&data)
+        {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), w, h) {
+                self.window_icon = Some(icon);
             }
         }
         self

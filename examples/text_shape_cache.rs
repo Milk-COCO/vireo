@@ -138,11 +138,7 @@ async fn main() {
             } else {
                 0.0
             };
-            let avg_gc = if stats.gc_runs > 0 {
-                stats.total_gc_us / stats.gc_runs
-            } else {
-                0
-            };
+            let avg_gc = stats.total_gc_us.checked_div(stats.gc_runs).unwrap_or(0);
             eprintln!(
                 "[text_shape_cache] FPS={:.1} frame={:.2}ms | entries={n} hit={hit_pct:.1}% (h={} m={}) | gc_runs={} last_gc={}us avg_gc={}us | {}",
                 ctx.fps(),

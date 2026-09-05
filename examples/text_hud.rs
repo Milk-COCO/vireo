@@ -18,7 +18,10 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("text/hud — Normal · Dynamic · Glyphs", 720, 360), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("text/hud — Normal · Dynamic · Glyphs", 720, 360),
+        None::<fn()>,
+    );
 
     // 跨帧 HUD 行（Bevy span 思路）：标签 Normal，分数 Glyphs
     let mut score_line = HudLine::new().text("分数: ").glyphs("0");
@@ -41,7 +44,7 @@ async fn main() {
         }
 
         tick = tick.wrapping_add(1);
-        if tick % 8 == 0 {
+        if tick.is_multiple_of(8) {
             score = score.wrapping_add(1);
         }
         score_s.clear();
@@ -75,15 +78,17 @@ async fn main() {
 
         // 1) HudLine：只改 Glyphs 槽
         score_line.draw(&mut batch.texts, Pos::new(16.0, 48.0), def(22.0), ov(white));
-        mode_line.draw(&mut batch.texts, Pos::new(16.0, 84.0), def(16.0), ov(Color::new(0.75, 0.85, 1.0, 1.0)));
+        mode_line.draw(
+            &mut batch.texts,
+            Pos::new(16.0, 84.0),
+            def(16.0),
+            ov(Color::new(0.75, 0.85, 1.0, 1.0)),
+        );
 
         // 2) 手写 parts：Normal + Glyphs（FPS）
         draw_text_parts(
             &mut batch.texts,
-            &[
-                TextPart::normal("FPS "),
-                TextPart::glyphs(fps_s.clone()),
-            ],
+            &[TextPart::normal("FPS "), TextPart::glyphs(fps_s.clone())],
             Pos::new(16.0, 120.0),
             def(16.0),
             ov(Color::new(0.9, 0.9, 0.5, 1.0)),
@@ -155,5 +160,7 @@ async fn main() {
 
         win.draw(bg, &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

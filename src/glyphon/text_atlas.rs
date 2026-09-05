@@ -1,14 +1,14 @@
 use super::{
-    text_render::GlyphonCacheKey, Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus,
-    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, State, SwashCache,
+    Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus, RasterizeCustomGlyphRequest,
+    RasterizedCustomGlyph, State, SwashCache, text_render::GlyphonCacheKey,
 };
-use etagere::{size2, Allocation, BucketedAtlasAllocator};
+use etagere::{Allocation, BucketedAtlasAllocator, size2};
 use lru::LruCache;
 use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use wgpu::{
-    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue, Sampler,
-    RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
+    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
+    RenderPipeline, Sampler, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
 };
@@ -172,7 +172,10 @@ impl InnerAtlas {
                     };
 
                     let Some(rasterized_glyph) = (rasterize_custom_glyph)(input) else {
-                        panic!("Custom glyph rasterizer returned `None` when it previously returned `Some` for the same input {:?}", &input);
+                        panic!(
+                            "Custom glyph rasterizer returned `None` when it previously returned `Some` for the same input {:?}",
+                            &input
+                        );
                     };
 
                     // Sanity checks on the rasterizer output

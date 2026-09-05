@@ -29,9 +29,7 @@ where
                 };
                 eprintln!("[vireo] user main closure panicked: {}", msg);
             }
-            app_inner_for_flag
-                .main_done
-                .store(true, Ordering::Release);
+            app_inner_for_flag.main_done.store(true, Ordering::Release);
             if let Some(tx) = app_inner_for_flag.event_tx.lock().clone() {
                 let _ = tx.send(WinitEvent::Wake);
             }

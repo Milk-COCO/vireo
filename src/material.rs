@@ -1,4 +1,3 @@
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +28,9 @@ fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
     return rgb;
 }
 "#);
-    m.insert("vireo_noise.wgsl", r#"
+    m.insert(
+        "vireo_noise.wgsl",
+        r#"
 fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
@@ -39,8 +40,11 @@ fn smooth_noise(p: vec2<f32>) -> f32 {
     return mix(mix(hash21(i + vec2<f32>(0.0,0.0)), hash21(i + vec2<f32>(1.0,0.0)), u.x),
                mix(hash21(i + vec2<f32>(0.0,1.0)), hash21(i + vec2<f32>(1.0,1.0)), u.x), u.y);
 }
-"#);
-    m.insert("vireo_sdf_helper.wgsl", r#"
+"#,
+    );
+    m.insert(
+        "vireo_sdf_helper.wgsl",
+        r#"
 fn sdf_circle(p: vec2<f32>, r: f32) -> f32 { return length(p) - r; }
 fn sdf_box(p: vec2<f32>, b: vec2<f32>) -> f32 {
     let d = abs(p) - b;
@@ -50,7 +54,8 @@ fn sdf_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let d = abs(p) - b + vec2<f32>(r);
     return min(max(d.x, d.y), 0.0) + length(max(d, vec2<f32>(0.0))) - r;
 }
-"#);
+"#,
+    );
     m
 }
 
@@ -89,7 +94,9 @@ pub(crate) struct BindGroupPool {
 
 impl BindGroupPool {
     pub(crate) fn new() -> Self {
-        Self { inner: std::sync::Mutex::new(FxHashMap::default()) }
+        Self {
+            inner: std::sync::Mutex::new(FxHashMap::default()),
+        }
     }
 
     pub(crate) fn resolve(
@@ -99,7 +106,8 @@ impl BindGroupPool {
         build: impl FnOnce() -> wgpu::BindGroup,
     ) -> wgpu::BindGroup {
         let bgl_id = std::ptr::from_ref(bgl) as u64;
-        let mut fps: Vec<(u32, u64)> = slots.values()
+        let mut fps: Vec<(u32, u64)> = slots
+            .values()
             .map(|s| (s.binding, slot_fingerprint(&s.kind)))
             .collect();
         fps.sort_by_key(|&(b, _)| b);
@@ -184,9 +192,21 @@ pub struct MaterialResource<'a> {
 /// - `size`/`min_size`：buffer 最小容量（wgpu 要求），单位字节。
 #[derive(Clone, Debug)]
 pub enum MaterialResourceKind<'a> {
-    Texture { view: TexKind, sampler: SampKind },
-    Storage { read_only: bool, size: u64, type_name: &'a str, dynamic: bool },
-    Uniform { min_size: u64, type_name: &'a str, dynamic: bool },
+    Texture {
+        view: TexKind,
+        sampler: SampKind,
+    },
+    Storage {
+        read_only: bool,
+        size: u64,
+        type_name: &'a str,
+        dynamic: bool,
+    },
+    Uniform {
+        min_size: u64,
+        type_name: &'a str,
+        dynamic: bool,
+    },
 }
 
 /// 描述符切片。
@@ -263,7 +283,8 @@ pub(crate) enum MaterialState {
     },
     B {
         bgl: wgpu::BindGroupLayout,
-        provider: Mutex<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
+        provider:
+            Mutex<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
         bind_group: Mutex<Option<wgpu::BindGroup>>,
     },
 }
@@ -414,9 +435,9 @@ impl Material {
                     || bg_guard.is_none()
                 {
                     let slots_guard = slots.lock().unwrap();
-                    let has_unset = slots_guard.values().any(
-                        |s| matches!(s.kind, SlotKind::Texture { view: None, .. }),
-                    );
+                    let has_unset = slots_guard
+                        .values()
+                        .any(|s| matches!(s.kind, SlotKind::Texture { view: None, .. }));
                     if has_unset {
                         drop(slots_guard);
                         if !notified_unset.swap(true, Ordering::AcqRel) {
@@ -472,35 +493,66 @@ impl Material {
     /// 写入 uniform buffer（按名字查找）。
     pub fn set_uniform_bytes(&self, queue: &wgpu::Queue, name: &str, data: &[u8]) {
         match &self.state {
-            MaterialState::A { slots, dirty, device, .. } => {
+            MaterialState::A {
+                slots,
+                dirty,
+                device,
+                ..
+            } => {
                 let mut slots_guard = slots.lock().unwrap();
-                let slot = slots_guard.get_mut(name).expect("set_uniform_bytes: unknown resource name");
+                let slot = slots_guard
+                    .get_mut(name)
+                    .expect("set_uniform_bytes: unknown resource name");
                 match &mut slot.kind {
-                    SlotKind::Uniform { buffer, min_size, dynamic: is_dynamic, .. } => {
+                    SlotKind::Uniform {
+                        buffer,
+                        min_size,
+                        dynamic: is_dynamic,
+                        ..
+                    } => {
                         if *is_dynamic && data.len() as u64 > buffer.size() {
-                            *buffer = create_dynamic_uniform_buffer(device, data, wgpu::BufferUsages::UNIFORM);
+                            *buffer = create_dynamic_uniform_buffer(
+                                device,
+                                data,
+                                wgpu::BufferUsages::UNIFORM,
+                            );
                         } else if !*is_dynamic {
                             assert!(
                                 data.len() as u64 <= *min_size,
                                 "uniform '{}': data {} bytes exceeds min_size {}",
-                                name, data.len(), min_size
+                                name,
+                                data.len(),
+                                min_size
                             );
                         }
                         queue.write_buffer(buffer, 0, data);
                     }
-                    SlotKind::Storage { buffer, dynamic: is_dynamic, .. } => {
+                    SlotKind::Storage {
+                        buffer,
+                        dynamic: is_dynamic,
+                        ..
+                    } => {
                         if *is_dynamic && data.len() as u64 > buffer.size() {
-                            *buffer = create_dynamic_uniform_buffer(device, data, wgpu::BufferUsages::STORAGE);
+                            *buffer = create_dynamic_uniform_buffer(
+                                device,
+                                data,
+                                wgpu::BufferUsages::STORAGE,
+                            );
                         } else if !*is_dynamic {
                             assert!(
                                 data.len() as u64 <= buffer.size(),
                                 "storage '{}': data {} bytes exceeds buffer size {}",
-                                name, data.len(), buffer.size()
+                                name,
+                                data.len(),
+                                buffer.size()
                             );
                         }
                         queue.write_buffer(buffer, 0, data);
                     }
-                    _ => panic!("set_uniform_bytes: '{}' is not a Uniform or Storage resource", name),
+                    _ => panic!(
+                        "set_uniform_bytes: '{}' is not a Uniform or Storage resource",
+                        name
+                    ),
                 }
                 drop(slots_guard);
                 dirty.store(true, Ordering::Release);
@@ -514,12 +566,20 @@ impl Material {
 
     /// 写入 bytemuck Pod 到 uniform 或 storage（按名字查找）。
     pub fn set_uniform<T: bytemuck::Pod>(&self, queue: &wgpu::Queue, name: &str, data: &T) {
-        self.set_uniform_bytes(queue, name, bytemuck::cast_slice(std::slice::from_ref(data)));
+        self.set_uniform_bytes(
+            queue,
+            name,
+            bytemuck::cast_slice(std::slice::from_ref(data)),
+        );
     }
 
     /// 写入 bytemuck Pod 到 storage buffer。
     pub fn set_storage<T: bytemuck::Pod>(&self, queue: &wgpu::Queue, name: &str, data: &T) {
-        self.set_uniform_bytes(queue, name, bytemuck::cast_slice(std::slice::from_ref(data)));
+        self.set_uniform_bytes(
+            queue,
+            name,
+            bytemuck::cast_slice(std::slice::from_ref(data)),
+        );
     }
 
     /// 设置纹理 + sampler（按名字查找）。
@@ -532,9 +592,15 @@ impl Material {
     ) {
         let (slots, dirty) = self.a_state();
         let mut slots_guard = slots.lock().unwrap();
-        let slot = slots_guard.get_mut(name).expect("set_texture: unknown resource name");
+        let slot = slots_guard
+            .get_mut(name)
+            .expect("set_texture: unknown resource name");
         match &mut slot.kind {
-            SlotKind::Texture { view: tex_view, sampler: samp_ref, .. } => {
+            SlotKind::Texture {
+                view: tex_view,
+                sampler: samp_ref,
+                ..
+            } => {
                 *tex_view = Some(view.clone());
                 *samp_ref = samp.clone();
             }
@@ -548,9 +614,13 @@ impl Material {
     pub fn set_sampler(&self, _device: &wgpu::Device, name: &str, samp: &wgpu::Sampler) {
         let (slots, dirty) = self.a_state();
         let mut slots_guard = slots.lock().unwrap();
-        let slot = slots_guard.get_mut(name).expect("set_sampler: unknown resource name");
+        let slot = slots_guard
+            .get_mut(name)
+            .expect("set_sampler: unknown resource name");
         match &mut slot.kind {
-            SlotKind::Texture { sampler: samp_ref, .. } => {
+            SlotKind::Texture {
+                sampler: samp_ref, ..
+            } => {
                 *samp_ref = samp.clone();
             }
             _ => panic!("set_sampler: '{}' is not a Texture resource", name),
@@ -695,8 +765,13 @@ pub fn build_bgl_from_resources(
                 });
                 binding += 1;
             }
-            MaterialResourceKind::Storage { read_only, size, dynamic, .. } => {
-                let min_size = wgpu::BufferSize::new(*size as u64);
+            MaterialResourceKind::Storage {
+                read_only,
+                size,
+                dynamic,
+                ..
+            } => {
+                let min_size = wgpu::BufferSize::new(*size);
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -711,8 +786,10 @@ pub fn build_bgl_from_resources(
                 });
                 binding += 1;
             }
-            MaterialResourceKind::Uniform { min_size, dynamic, .. } => {
-                let min_bind = wgpu::BufferSize::new(*min_size as u64);
+            MaterialResourceKind::Uniform {
+                min_size, dynamic, ..
+            } => {
+                let min_bind = wgpu::BufferSize::new(*min_size);
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -738,7 +815,11 @@ pub fn build_bgl_from_resources(
 /// 运行时校验纹理/采样器组合合法性。
 pub fn validate_tex_samp_combo(view: TexKind, sampler: SampKind) -> Result<(), String> {
     let sample = match view {
-        TexKind::D2(s) | TexKind::Cube(s) | TexKind::D2Array(s) | TexKind::D3(s) | TexKind::D2Multi(s) => Some(s),
+        TexKind::D2(s)
+        | TexKind::Cube(s)
+        | TexKind::D2Array(s)
+        | TexKind::D3(s)
+        | TexKind::D2Multi(s) => Some(s),
         TexKind::D2Depth | TexKind::D2DepthArray => None,
     };
     let is_depth = matches!(view, TexKind::D2Depth | TexKind::D2DepthArray);
@@ -753,26 +834,39 @@ pub fn validate_tex_samp_combo(view: TexKind, sampler: SampKind) -> Result<(), S
         }
         (SampKind::Filtering, Some(TexSample::Sint), _, _)
         | (SampKind::Filtering, Some(TexSample::Uint), _, _) => {
-            return Err("integer texture + Filtering: integer textures cannot use filtering sampler".into());
+            return Err(
+                "integer texture + Filtering: integer textures cannot use filtering sampler".into(),
+            );
         }
         (SampKind::Comparison, Some(TexSample::Sint), _, _)
         | (SampKind::Comparison, Some(TexSample::Uint), _, _) => {
-            return Err("integer texture + Comparison: integer textures cannot use comparison sampler".into());
+            return Err(
+                "integer texture + Comparison: integer textures cannot use comparison sampler"
+                    .into(),
+            );
         }
         (SampKind::Filtering, Some(TexSample::Unfilterable), _, _) => {
-            return Err("unfilterable texture + Filtering: use NonFiltering sampler instead".into());
+            return Err(
+                "unfilterable texture + Filtering: use NonFiltering sampler instead".into(),
+            );
         }
         (SampKind::Comparison, Some(TexSample::Unfilterable), _, _) => {
-            return Err("unfilterable texture + Comparison: use NonFiltering sampler instead".into());
+            return Err(
+                "unfilterable texture + Comparison: use NonFiltering sampler instead".into(),
+            );
         }
         (SampKind::Comparison, _, false, _) => {
             return Err("Comparison sampler on non-depth texture: only D2Depth/D2DepthArray support Comparison".into());
         }
         (SampKind::Filtering, _, true, _) if !is_msaa => {
-            return Err("Filtering sampler on depth texture: use Comparison or NonFiltering sampler".into());
+            return Err(
+                "Filtering sampler on depth texture: use Comparison or NonFiltering sampler".into(),
+            );
         }
-        (SampKind::NonFiltering, _, _, false) | (SampKind::Filtering, _, _, false) | (SampKind::Comparison, _, true, false) => {},
-        (SampKind::NonFiltering, _, _, true) => {},
+        (SampKind::NonFiltering, _, _, false)
+        | (SampKind::Filtering, _, _, false)
+        | (SampKind::Comparison, _, true, false) => {}
+        (SampKind::NonFiltering, _, _, true) => {}
     }
     Ok(())
 }
@@ -808,7 +902,11 @@ pub fn inject_wgsl_resources(source: &str, resources: &[MaterialResource<'_>]) -
                 ));
                 binding += 1;
             }
-            MaterialResourceKind::Storage { read_only, type_name, .. } => {
+            MaterialResourceKind::Storage {
+                read_only,
+                type_name,
+                ..
+            } => {
                 let access = if *read_only { "" } else { ", read_write" };
                 out.push_str(&format!(
                     "@group(3) @binding({}) var<storage{}> {}: {};\n",
@@ -877,11 +975,20 @@ pub(crate) fn build_auto_defaults(
                     name,
                     ResourceSlot {
                         binding: tex_binding,
-                        kind: SlotKind::Texture { view: None, sampler: samp, tex_kind },
+                        kind: SlotKind::Texture {
+                            view: None,
+                            sampler: samp,
+                            tex_kind,
+                        },
                     },
                 );
             }
-            MaterialResourceKind::Storage { read_only, size, dynamic, .. } => {
+            MaterialResourceKind::Storage {
+                read_only,
+                size,
+                dynamic,
+                ..
+            } => {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("material storage '{}'", res.name)),
                     size: *size,
@@ -896,13 +1003,19 @@ pub(crate) fn build_auto_defaults(
                             buffer,
                             read_only: *read_only,
                             dynamic: *dynamic,
-                            min_bind: if *dynamic { wgpu::BufferSize::new(*size) } else { None },
+                            min_bind: if *dynamic {
+                                wgpu::BufferSize::new(*size)
+                            } else {
+                                None
+                            },
                         },
                     },
                 );
                 binding += 1;
             }
-            MaterialResourceKind::Uniform { min_size, dynamic, .. } => {
+            MaterialResourceKind::Uniform {
+                min_size, dynamic, ..
+            } => {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("material uniform '{}'", res.name)),
                     size: *min_size,
@@ -917,7 +1030,11 @@ pub(crate) fn build_auto_defaults(
                             buffer,
                             min_size: *min_size,
                             dynamic: *dynamic,
-                            min_bind: if *dynamic { wgpu::BufferSize::new(*min_size) } else { None },
+                            min_bind: if *dynamic {
+                                wgpu::BufferSize::new(*min_size)
+                            } else {
+                                None
+                            },
                         },
                     },
                 );
@@ -927,11 +1044,15 @@ pub(crate) fn build_auto_defaults(
     }
 
     let bg_entries: Vec<wgpu::BindGroupEntry> = slots
-        .iter()
-        .flat_map(|(_name, slot)| {
+        .values()
+        .flat_map(|slot| {
             let mut entries: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(2);
             match &slot.kind {
-                SlotKind::Texture { view: Some(view), sampler, .. } => {
+                SlotKind::Texture {
+                    view: Some(view),
+                    sampler,
+                    ..
+                } => {
                     entries.push(wgpu::BindGroupEntry {
                         binding: slot.binding,
                         resource: wgpu::BindingResource::TextureView(view),
@@ -982,29 +1103,43 @@ fn build_bind_group_from_slots(
     let mut entries: Vec<(u32, wgpu::BindingResource)> = Vec::with_capacity(slots.len() * 2);
     for slot in slots.values() {
         match &slot.kind {
-            SlotKind::Texture { view: Some(view), sampler, .. } => {
+            SlotKind::Texture {
+                view: Some(view),
+                sampler,
+                ..
+            } => {
                 entries.push((slot.binding, wgpu::BindingResource::TextureView(view)));
                 entries.push((slot.binding + 1, wgpu::BindingResource::Sampler(sampler)));
             }
             SlotKind::Texture { view: None, .. } => return None,
-            SlotKind::Uniform { buffer, min_bind, .. } => {
+            SlotKind::Uniform {
+                buffer, min_bind, ..
+            } => {
                 if let Some(mb) = min_bind {
-                    entries.push((slot.binding, wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer,
-                        offset: 0,
-                        size: Some(*mb),
-                    })));
+                    entries.push((
+                        slot.binding,
+                        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: Some(*mb),
+                        }),
+                    ));
                 } else {
                     entries.push((slot.binding, buffer.as_entire_binding()));
                 }
             }
-            SlotKind::Storage { buffer, min_bind, .. } => {
+            SlotKind::Storage {
+                buffer, min_bind, ..
+            } => {
                 if let Some(mb) = min_bind {
-                    entries.push((slot.binding, wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer,
-                        offset: 0,
-                        size: Some(*mb),
-                    })));
+                    entries.push((
+                        slot.binding,
+                        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: Some(*mb),
+                        }),
+                    ));
                 } else {
                     entries.push((slot.binding, buffer.as_entire_binding()));
                 }
@@ -1068,10 +1203,14 @@ fn tex_kind_to_wgsl(k: TexKind) -> &'static str {
         TexKind::D2(TexSample::Float) | TexKind::D2(TexSample::Unfilterable) => "texture_2d<f32>",
         TexKind::D2(TexSample::Sint) => "texture_2d<i32>",
         TexKind::D2(TexSample::Uint) => "texture_2d<u32>",
-        TexKind::Cube(TexSample::Float) | TexKind::Cube(TexSample::Unfilterable) => "texture_cube<f32>",
+        TexKind::Cube(TexSample::Float) | TexKind::Cube(TexSample::Unfilterable) => {
+            "texture_cube<f32>"
+        }
         TexKind::Cube(TexSample::Sint) => "texture_cube<i32>",
         TexKind::Cube(TexSample::Uint) => "texture_cube<u32>",
-        TexKind::D2Array(TexSample::Float) | TexKind::D2Array(TexSample::Unfilterable) => "texture_2d_array<f32>",
+        TexKind::D2Array(TexSample::Float) | TexKind::D2Array(TexSample::Unfilterable) => {
+            "texture_2d_array<f32>"
+        }
         TexKind::D2Array(TexSample::Sint) => "texture_2d_array<i32>",
         TexKind::D2Array(TexSample::Uint) => "texture_2d_array<u32>",
         TexKind::D3(TexSample::Float) | TexKind::D3(TexSample::Unfilterable) => "texture_3d<f32>",
@@ -1079,7 +1218,9 @@ fn tex_kind_to_wgsl(k: TexKind) -> &'static str {
         TexKind::D3(TexSample::Uint) => "texture_3d<u32>",
         TexKind::D2Depth => "texture_depth_2d",
         TexKind::D2DepthArray => "texture_depth_2d_array",
-        TexKind::D2Multi(TexSample::Float) | TexKind::D2Multi(TexSample::Unfilterable) => "texture_multisampled_2d<f32>",
+        TexKind::D2Multi(TexSample::Float) | TexKind::D2Multi(TexSample::Unfilterable) => {
+            "texture_multisampled_2d<f32>"
+        }
         TexKind::D2Multi(TexSample::Sint) => "texture_multisampled_2d<i32>",
         TexKind::D2Multi(TexSample::Uint) => "texture_multisampled_2d<u32>",
     }

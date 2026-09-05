@@ -69,7 +69,11 @@ impl RasterizedCustomGlyph {
         expected_type: Option<ContentType>,
     ) {
         if let Some(expected_type) = expected_type {
-            assert_eq!(self.content_type, expected_type, "Custom glyph rasterizer must always produce the same content type for a given input. Expected {:?}, got {:?}. Input: {:?}", expected_type, self.content_type, input);
+            assert_eq!(
+                self.content_type, expected_type,
+                "Custom glyph rasterizer must always produce the same content type for a given input. Expected {:?}, got {:?}. Input: {:?}",
+                expected_type, self.content_type, input
+            );
         }
 
         assert_eq!(

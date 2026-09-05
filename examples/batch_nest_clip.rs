@@ -54,22 +54,15 @@ async fn main() {
         let left = three_level(220.0, 270.0, t, true, true);
         let right = three_level(680.0, 270.0, t + 1.0, false, true);
 
-        win.draw(
-            Color::new(0.05, 0.06, 0.09, 1.0),
-            &[&ui, &left, &right],
-        );
+        win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&ui, &left, &right]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 /// root → mid → leaf（与 `nested_clips_*` 单测同构）
-fn three_level(
-    cx: f32,
-    cy: f32,
-    t: f32,
-    root_clip: bool,
-    mid_clip: bool,
-) -> DrawBatch {
+fn three_level(cx: f32, cy: f32, t: f32, root_clip: bool, mid_clip: bool) -> DrawBatch {
     // ---- root：外圆 mask ----
     let mut root = DrawBatch::new();
     root.set_sdf_feather(Some(1.5));

@@ -5,9 +5,7 @@
 //! - 本模块是 vireo 用户坐标系的像素语义：裸数值默认按逻辑像素（`Dp` 语义），`Px` 显式
 //!   物理；由调用点声明意图，不随 `dpi_override` 翻转。
 
-use winit::dpi::{
-    LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size,
-};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 
 /// 物理像素（一维标量，f64）。见 [`ToPx`]。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -246,14 +244,12 @@ pub(crate) fn pp_to_phys(v: Pp, dpi_override: Option<f64>, os_scale: f64) -> f64
 ///   否则 → winit Logical（OS DPI 参与）。
 /// - 任一轴为 [`Pp::Px`]：强制 winit **Physical**，各轴按 [`pp_to_phys`] 独立换算，
 ///   宽/高意图可以混用。
-pub(crate) fn dim_to_winit_size(
-    w: Pp,
-    h: Pp,
-    dpi_override: Option<f64>,
-    os_scale: f64,
-) -> Size {
+pub(crate) fn dim_to_winit_size(w: Pp, h: Pp, dpi_override: Option<f64>, os_scale: f64) -> Size {
     let phys = |w: f64, h: f64| {
-        debug_assert!(w.is_finite() && h.is_finite(), "dim_to_winit_size: size must be finite");
+        debug_assert!(
+            w.is_finite() && h.is_finite(),
+            "dim_to_winit_size: size must be finite"
+        );
         Size::Physical(PhysicalSize::new(
             (w).round().max(1.0) as u32,
             (h).round().max(1.0) as u32,
@@ -305,10 +301,16 @@ pub(crate) fn pixel_of(v: f64, scale: f64) -> Pixel {
 
 /// 物理像素坐标 → [`PixelPos`] 双表示。
 pub(crate) fn to_pixel_pos(x: f64, y: f64, scale: f64) -> PixelPos {
-    PixelPos { x: pixel_of(x, scale), y: pixel_of(y, scale) }
+    PixelPos {
+        x: pixel_of(x, scale),
+        y: pixel_of(y, scale),
+    }
 }
 
 /// 物理像素尺寸 → [`PixelSize`] 双表示。
 pub(crate) fn to_pixel_size(w: f64, h: f64, scale: f64) -> PixelSize {
-    PixelSize { width: pixel_of(w, scale), height: pixel_of(h, scale) }
+    PixelSize {
+        width: pixel_of(w, scale),
+        height: pixel_of(h, scale),
+    }
 }

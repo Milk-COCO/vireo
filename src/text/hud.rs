@@ -3,15 +3,34 @@ use std::sync::Arc;
 use crate::glyphon::Buffer;
 use crate::render::Pos;
 
-use super::{TextDef, TextEntryList, TextOverride, ResolvedTextGlyph};
+use super::{ResolvedTextGlyph, TextDef, TextEntryList, TextOverride};
 
 #[inline]
 pub(crate) fn is_hud_digit_char(ch: char) -> bool {
     ch.is_ascii_digit()
         || matches!(
             ch,
-            '.' | ',' | '+' | '-' | '*' | '/' | '%' | '=' | ':' | '(' | ')' | '[' | ']' | '{'
-                | '}' | '±' | '×' | '÷' | '°' | '−' | 'e' | 'E'
+            '.' | ','
+                | '+'
+                | '-'
+                | '*'
+                | '/'
+                | '%'
+                | '='
+                | ':'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '±'
+                | '×'
+                | '÷'
+                | '°'
+                | '−'
+                | 'e'
+                | 'E'
         )
 }
 
@@ -230,21 +249,24 @@ impl HudLine {
 
     pub fn set_text(&mut self, index: usize, s: impl Into<String>) {
         if index >= self.parts.len() {
-            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+            self.parts
+                .resize_with(index + 1, || TextPart::normal(String::new()));
         }
         self.parts[index] = TextPart::normal(s);
     }
 
     pub fn set_dynamic(&mut self, index: usize, s: impl Into<String>) {
         if index >= self.parts.len() {
-            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+            self.parts
+                .resize_with(index + 1, || TextPart::normal(String::new()));
         }
         self.parts[index] = TextPart::dynamic(s);
     }
 
     pub fn set_glyphs(&mut self, index: usize, s: impl Into<String>) {
         if index >= self.parts.len() {
-            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+            self.parts
+                .resize_with(index + 1, || TextPart::normal(String::new()));
         }
         self.parts[index] = TextPart::glyphs(s);
     }
@@ -252,7 +274,8 @@ impl HudLine {
     /// 原地改 Normal/Dynamic/Glyphs 槽的字符串。
     pub fn write_slot(&mut self, index: usize, s: &str) {
         if index >= self.parts.len() {
-            self.parts.resize_with(index + 1, || TextPart::normal(String::new()));
+            self.parts
+                .resize_with(index + 1, || TextPart::normal(String::new()));
         }
         match &mut self.parts[index] {
             TextPart::Normal(buf, _) | TextPart::Dynamic(buf, _) | TextPart::Glyphs(buf, _) => {
@@ -336,5 +359,3 @@ pub fn draw_hud_line(
 ) {
     line.draw(list, pos, def, ov);
 }
-
-

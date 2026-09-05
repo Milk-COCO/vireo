@@ -9,13 +9,13 @@
 //! 就绪（`windows_ready`）后开始；`panic` 经 `LoopHandleState` 转成 `Err` 对外暴露。
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::Mutex;
 use crate::app::App;
-use crate::app::{panic_payload_to_string, DeferredTask, DeferredTaskKind};
+use crate::app::{DeferredTask, DeferredTaskKind, panic_payload_to_string};
 use crate::window::WinitEvent;
+use parking_lot::Mutex;
 
 /// FPS 采样滑动窗口容量（per-thread）。
 pub(crate) const FPS_SAMPLE_CAP: usize = 30;
@@ -167,8 +167,7 @@ pub(crate) fn drive_loops(
     fps_stats: &Arc<Mutex<FpsStats>>,
 ) -> Result<bool, Box<dyn std::any::Any + Send>> {
     let mut any = false;
-    for i in 0..runtimes.len() {
-        let rt = &mut runtimes[i];
+    for (i, rt) in runtimes.iter_mut().enumerate() {
         if rt.finished {
             continue;
         }
@@ -181,7 +180,8 @@ pub(crate) fn drive_loops(
         };
         // 单个 Loop 的 `on_tick` panic：标记本 loop 结束并把 panic 上抛给 `run_thread_loop`，
         // 由其经 `ThreadHandle` 交付错误并停止整条线程（同线程其他 Loop 一并停止）。
-        let keep = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (rt.f)(&mut ctx))) {
+        let keep = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (rt.f)(&mut ctx)))
+        {
             Ok(keep) => keep,
             Err(payload) => {
                 let msg = if let Some(s) = payload.downcast_ref::<String>() {
@@ -191,15 +191,12 @@ pub(crate) fn drive_loops(
                 } else {
                     "<non-string panic payload>".to_string()
                 };
-                eprintln!(
-                    "[vireo] loop on_tick panicked (loop {}): {}",
-                    i, msg
-                );
+                eprintln!("[vireo] loop on_tick panicked (loop {}): {}", i, msg);
                 rt.finished = true;
                 return Err(payload);
             }
         };
-        rt.deferred.extend(ctx.deferred.drain(..));
+        rt.deferred.append(&mut ctx.deferred);
         rt.tick_count = ctx.tick_count;
         // 执行到期延迟任务（帧末，on_tick 之后）。
         let mut j = 0;
@@ -224,7 +221,8 @@ pub(crate) fn drive_loops(
 /// `LoopHandleState` 由 `spawn` 持有，跨线程共享；渲染线程结束时置位唤醒 `await`。
 pub(crate) struct LoopHandleState {
     pub(crate) done: std::sync::atomic::AtomicBool,
-    pub(crate) result: std::sync::Mutex<Option<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+    pub(crate) result:
+        std::sync::Mutex<Option<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
     pub(crate) waker: std::sync::Mutex<Option<std::task::Waker>>,
 }
 
@@ -254,6 +252,12 @@ pub struct Thread {
     /// （未显式设置时取 `app.max_fps()`，运行期改 `App::max_fps` 不影响已 spawn 的 Thread），
     /// 之后由本字段独立决定，App 不再直接控制。
     pub max_tps: Option<u32>,
+}
+
+impl Default for Thread {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Thread {
@@ -323,7 +327,10 @@ impl ThreadHandle {
 
 impl std::future::Future for ThreadHandle {
     type Output = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
         // `done` 检查与 waker 登记必须在同一把锁内，避免与渲染线程 `done.store(true)+wake()`
         // 交错导致丢失唤醒：`wake()` 在锁内取走 waker，若此处先读 `done` 再在锁内存 waker，
@@ -335,7 +342,13 @@ impl std::future::Future for ThreadHandle {
             if let Some(t) = this.thread.take() {
                 let _ = t.join();
             }
-            let r = this.state.result.lock().unwrap().take().unwrap_or_else(|| Ok(()));
+            let r = this
+                .state
+                .result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Ok(()));
             std::task::Poll::Ready(r)
         } else {
             *g = Some(cx.waker().clone());
@@ -367,8 +380,6 @@ fn wake(state: &Arc<LoopHandleState>) {
 /// - 由 [`crate::app::App::spawn`] 在独立 OS 线程上调用，对应一条 `ThreadHandle`。
 /// - `App` 内部的跨线程字段经 `Lock` / `Atomic*` 包裹，可安全从多线程访问；窗口事件已由
 ///   supervisor 线程集中应用到 `App`（见 `crate::app::supervisor_loop`），故此处只读 `app.windows`。
-
-
 /// - `panic` 被捕获并经由 `LoopHandleState.result` 转成 `Err`，使 `ThreadHandle::await` 返回错误，
 ///   而非向上炸毁进程。
 pub(crate) fn run_thread_loop(
@@ -502,14 +513,8 @@ pub(crate) fn run_thread_loop(
     // 渲染线程退出（正常或 panic）→ 不再有任何 draw，所有窗口的 `draw_idle` 永久为真；
     // 唤醒正在等待关闭的 supervisor 路径，否则其 Condvar 等待会因本线程已死而永不唤醒
     // （最坏情况下渲染线程崩溃、当前帧未置 idle，关窗路径也据此安全放行）。
-    for win in app
-        .windows
-        .lock()
-        .iter()
-        .filter_map(|o| o.clone())
-    {
+    for win in app.windows.lock().iter().filter_map(|o| o.clone()) {
         win.draw_idle.store(true, Ordering::Release);
         win.draw_idle_cv.1.notify_all();
     }
 }
-

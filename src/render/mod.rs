@@ -1,23 +1,23 @@
 //! 渲染核心：批量绘制、渲染目标和渲染器。
 
 use parking_lot::Mutex;
-use std::sync::Arc;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 use wgpu::util::DeviceExt;
 
-pub use crate::gpu::Vertex;
-pub use crate::math::{Pos, Rect, Transform, UvRect};
-use crate::gpu::{GpuContext, GeoInstance, GeoVertex, ShapeInstance};
-use crate::material::Material;
 use crate::area::AreaStencilOp;
+pub use crate::gpu::Vertex;
+use crate::gpu::{GeoInstance, GeoVertex, GpuContext, ShapeInstance};
+use crate::material::Material;
+pub use crate::math::{Pos, Rect, Transform, UvRect};
 
 mod batch;
 mod cull;
 mod draw;
-pub use batch::{DrawBatch, InheritFromParent};
 pub(crate) use batch::BatchShapeCommand;
-pub(crate) use cull::{prepare_culling, AabbMap, ViewMap};
+pub use batch::{DrawBatch, InheritFromParent};
+pub(crate) use cull::{AabbMap, ViewMap, prepare_culling};
 
 /// CPU 真实数据分布（诊断用）。
 ///
@@ -206,9 +206,11 @@ impl OrderedShapeSegment {
     #[inline]
     fn sort_key(&self) -> (u8, u8, u64) {
         match self {
-            OrderedShapeSegment::Mesh { bind_group, geometry, .. } => {
-                (0, *geometry as u8, bind_group_id(bind_group))
-            }
+            OrderedShapeSegment::Mesh {
+                bind_group,
+                geometry,
+                ..
+            } => (0, *geometry as u8, bind_group_id(bind_group)),
             OrderedShapeSegment::Instances(s) => (1, 0, bind_group_id(&s.bind_group)),
             OrderedShapeSegment::GeoInstances(s) => (2, 0, bind_group_id(&s.bind_group)),
         }
@@ -220,7 +222,13 @@ impl OrderedShapeSegment {
     fn try_merge(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (
-                OrderedShapeSegment::Mesh { ndx_start, ndx_count, bind_group, geometry, material },
+                OrderedShapeSegment::Mesh {
+                    ndx_start,
+                    ndx_count,
+                    bind_group,
+                    geometry,
+                    material,
+                },
                 OrderedShapeSegment::Mesh {
                     ndx_start: n2,
                     ndx_count: n2_count,
@@ -230,7 +238,8 @@ impl OrderedShapeSegment {
                 },
             ) => {
                 let merged = merge_decision(
-                    geometry == g2 && bind_group == b2
+                    geometry == g2
+                        && bind_group == b2
                         && material.as_ref().map(Arc::as_ptr) == m2.as_ref().map(Arc::as_ptr),
                     *ndx_start,
                     *ndx_count,
@@ -262,10 +271,7 @@ impl OrderedShapeSegment {
                     material: s.material.clone(),
                 }))
             }
-            (
-                OrderedShapeSegment::GeoInstances(s),
-                OrderedShapeSegment::GeoInstances(s2),
-            ) => {
+            (OrderedShapeSegment::GeoInstances(s), OrderedShapeSegment::GeoInstances(s2)) => {
                 let merged = merge_decision(
                     s.bind_group == s2.bind_group
                         && s.template_vertex_start == s2.template_vertex_start
@@ -312,10 +318,9 @@ fn merge_decision(
 /// wgpu `BindGroup` 的稳定身份。`BindGroup` 实现 `Eq`/`Hash` 但无 `Ord`，
 /// 排序键需要标量；用 `FxHasher` 折叠 hash 得到 u64 即可（同 bind group 恒同值）。
 fn bind_group_id(bg: &wgpu::BindGroup) -> u64 {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    let mut hasher = rustc_hash::FxBuildHasher::default().build_hasher();
-    bg.hash(&mut hasher);
-    hasher.finish()
+    use std::hash::BuildHasher;
+
+    rustc_hash::FxBuildHasher.hash_one(bg)
 }
 
 struct ShapeInfo {
@@ -369,7 +374,6 @@ impl RenderTarget {
     ) -> wgpu::CommandBuffer {
         renderer.draw(self, clear_color, batches)
     }
-
 }
 
 /// 渲染器 —— 管理 vertex/index buffer 复用，执行单 pass 渲染。
@@ -447,16 +451,25 @@ impl Renderer {
         aa: crate::window::AntiAliasing,
         dpi_scale: f32,
     ) -> Self {
-        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
+        let proj = glam::camera::rh::proj::opengl::orthographic(
+            0.0,
+            logical_width,
+            logical_height,
+            0.0,
+            -1.0,
+            1.0,
+        );
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
         camera_raw[64..68].copy_from_slice(&dpi_scale.to_le_bytes());
-        let camera_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("camera buffer"),
-            contents: &camera_raw,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let camera_buf = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("camera buffer"),
+                contents: &camera_raw,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("camera bind group"),
             layout: &gpu.camera_bind_group_layout,
@@ -530,11 +543,11 @@ impl Renderer {
         *self.ds_tex.lock() = None;
     }
 
-    /// 获取匹配当前 sample_count 的 pipeline
-
     /// 获取 multisampled 视图（必要时创建），无 MSAA 返回 None
     fn msaa_view(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
-        if self.sample_count <= 1 { return None; }
+        if self.sample_count <= 1 {
+            return None;
+        }
         let mut mt = self.msaa_tex.lock();
         if mt.is_none()
             || mt.as_ref().unwrap().0.width() != self.physical_width
@@ -543,9 +556,15 @@ impl Renderer {
         {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("msaa"),
-                size: wgpu::Extent3d { width: self.physical_width, height: self.physical_height, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: self.sample_count,
-                dimension: wgpu::TextureDimension::D2, format,
+                size: wgpu::Extent3d {
+                    width: self.physical_width,
+                    height: self.physical_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
@@ -558,8 +577,9 @@ impl Renderer {
     /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。sample_count 与 color 一致。
     fn ds_view(&self) -> wgpu::TextureView {
         let mut dt = self.ds_tex.lock();
-        let ok = dt.as_ref()
-            .map(|(t,_)| {
+        let ok = dt
+            .as_ref()
+            .map(|(t, _)| {
                 t.width() == self.physical_width
                     && t.height() == self.physical_height
                     && t.sample_count() == self.sample_count
@@ -568,8 +588,13 @@ impl Renderer {
         if !ok {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("depth_stencil"),
-                size: wgpu::Extent3d { width: self.physical_width, height: self.physical_height, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: self.sample_count,
+                size: wgpu::Extent3d {
+                    width: self.physical_width,
+                    height: self.physical_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.sample_count,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth24PlusStencil8,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -598,12 +623,21 @@ impl Renderer {
         scale: f32,
         dpi_scale: f32,
     ) {
-        let proj = glam::camera::rh::proj::opengl::orthographic(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
+        let proj = glam::camera::rh::proj::opengl::orthographic(
+            0.0,
+            logical_width,
+            logical_height,
+            0.0,
+            -1.0,
+            1.0,
+        );
         let camera_data: [[f32; 4]; 4] = proj.to_cols_array_2d();
         let mut camera_raw = [0u8; 80];
         camera_raw[..64].copy_from_slice(bytemuck::cast_slice(&camera_data));
         camera_raw[64..68].copy_from_slice(&dpi_scale.to_le_bytes());
-        self.gpu.queue.write_buffer(&self.camera_buf, 0, &camera_raw);
+        self.gpu
+            .queue
+            .write_buffer(&self.camera_buf, 0, &camera_raw);
         self.logical_width = logical_width;
         self.logical_height = logical_height;
         self.scale = scale;
@@ -635,7 +669,6 @@ impl Renderer {
         *self.msaa_tex.lock() = None;
         *self.ds_tex.lock() = None;
     }
-
 
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。在 `resumed()` 创建窗口后调用。
     /// 用 SDF + geo 管线各画一个 dummy 三角形，触发 PSO 编译；
@@ -675,11 +708,19 @@ impl Renderer {
     }
 
     fn ensure_vertex_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.vertex_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertex buffer"),
             size: new_cap,
@@ -690,11 +731,19 @@ impl Renderer {
     }
 
     fn ensure_instance_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.instance_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo shape instance buffer"),
             size: new_cap,
@@ -705,11 +754,19 @@ impl Renderer {
     }
 
     fn ensure_geo_instance_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.geo_instance_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo instance buffer"),
             size: new_cap,
@@ -720,11 +777,19 @@ impl Renderer {
     }
 
     fn ensure_geo_template_vertex_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.geo_template_vertex_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo template vertex buffer"),
             size: new_cap,
@@ -735,11 +800,19 @@ impl Renderer {
     }
 
     fn ensure_geo_template_index_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.geo_template_index_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo template index buffer"),
             size: new_cap,
@@ -750,11 +823,19 @@ impl Renderer {
     }
 
     fn ensure_index_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.index_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two() } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("index buffer"),
             size: new_cap,
@@ -765,11 +846,19 @@ impl Renderer {
     }
 
     fn ensure_polygon_edge_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.polygon_edge_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two().max(64) } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two().max(64)
+        } else {
+            (cur * 2).max(size)
+        };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("polygon edge buffer"),
             size: new_cap,
@@ -781,11 +870,19 @@ impl Renderer {
     }
 
     fn ensure_transform_buffer(&self, size: u64) {
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
         let mut slot = self.transform_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
-        if cur >= size { return; }
-        let new_cap = if cur == 0 { size.next_power_of_two().max(48) } else { (cur * 2).max(size) };
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two().max(48)
+        } else {
+            (cur * 2).max(size)
+        };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("transform buffer"),
             size: new_cap,
@@ -796,7 +893,6 @@ impl Renderer {
         *self.engine_storage_bind_group_cache.lock() = None;
     }
 }
-
 
 #[cfg(test)]
 mod tests;

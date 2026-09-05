@@ -48,7 +48,13 @@ async fn main() {
         let mut batch = DrawBatch::new();
         for i in 0..60 {
             let h = 10.0 + (i as f32) * 0.5;
-            draw_rectangle(&mut batch, Pos::new(20.0 + i as f32 * 10.0, 250.0 - h), 8.0, h, Some(GREEN));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(20.0 + i as f32 * 10.0, 250.0 - h),
+                8.0,
+                h,
+                Some(GREEN),
+            );
         }
         if !no_text {
             let info = format!(
@@ -61,19 +67,22 @@ async fn main() {
                 &mut batch.texts,
                 &info,
                 Pos::new(20.0, 20.0),
-                TextDef::default().font_size(16.0), TextOverride::from_color(WHITE),
+                TextDef::default().font_size(16.0),
+                TextOverride::from_color(WHITE),
             );
             draw_text(
                 &mut batch.texts,
                 "static line two",
                 Pos::new(20.0, 100.0),
-                TextDef::default().font_size(12.0), TextOverride::from_color(WHITE),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(WHITE),
             );
             draw_text(
                 &mut batch.texts,
                 "static line three",
                 Pos::new(20.0, 130.0),
-                TextDef::default().font_size(12.0), TextOverride::from_color(WHITE),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(WHITE),
             );
         }
 
@@ -97,5 +106,7 @@ async fn main() {
         } else {
             true
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -16,6 +16,7 @@
 //!     });
 //! });
 //! ```
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod area;
 
 #[doc(hidden)]
@@ -24,22 +25,21 @@ pub use vireo_macro::main;
 #[doc(hidden)]
 pub use crate::app::App;
 #[doc(hidden)]
-
 pub mod app;
 pub mod thread;
 
 pub mod color;
+pub mod dpi;
 pub mod error;
-pub mod render;
-pub mod material;
 pub mod glyphon;
 pub mod gpu;
 pub mod input;
-pub mod nc;
-pub mod dpi;
+pub mod material;
 pub mod math;
+pub mod nc;
 pub mod offscreen;
 pub mod platform;
+pub mod render;
 pub mod shapes;
 pub mod text;
 pub mod texture;
@@ -54,10 +54,29 @@ pub fn init_logger() {
 pub mod prelude {
     pub use crate::area::Area;
     pub use crate::area::AreaGeom;
-    pub use crate::color::colors::*;
     pub use crate::color::Color;
+    pub use crate::color::colors::*;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
+    pub use crate::draw_text_hud;
+    pub use crate::gpu::GpuContext;
+    pub use crate::gpu::ShapeInstance;
+    pub use crate::gpu::VIREO_TARGET_SHAPE;
+    pub use crate::gpu::VIREO_TARGET_TEXT;
+    pub use crate::gpu::Vertex;
+    pub use crate::hud_format;
+    pub use crate::material::CachePolicy;
+    pub use crate::material::MATERIAL_TEX_SLOTS;
+    pub use crate::material::MATERIAL_UNIFORM_SIZE;
+    pub use crate::material::Material;
+    pub use crate::material::MaterialResource;
+    pub use crate::material::MaterialResourceKind;
+    pub use crate::material::MaterialResources;
+    pub use crate::material::SampKind;
+    pub use crate::material::TexKind;
+    pub use crate::material::TexSample;
+    pub use crate::material::expand_includes;
+    pub use crate::material::wgsl_snippets;
     pub use crate::render::BatchOverride;
     pub use crate::render::DrawBatch;
     pub use crate::render::InheritFromParent;
@@ -68,48 +87,29 @@ pub mod prelude {
     pub use crate::render::ShapeStats;
     pub use crate::render::Transform;
     pub use crate::render::UvRect;
-    pub use crate::texture::Texture;
-    pub use crate::material::Material;
-    pub use crate::material::MATERIAL_TEX_SLOTS;
-    pub use crate::material::MATERIAL_UNIFORM_SIZE;
-    pub use crate::material::MaterialResource;
-    pub use crate::material::MaterialResourceKind;
-    pub use crate::material::MaterialResources;
-    pub use crate::material::TexKind;
-    pub use crate::material::TexSample;
-    pub use crate::material::SampKind;
-    pub use crate::material::CachePolicy;
-    pub use crate::material::wgsl_snippets;
-    pub use crate::material::expand_includes;
-    pub use crate::gpu::GpuContext;
-    pub use crate::gpu::Vertex;
-    pub use crate::gpu::ShapeInstance;
-    pub use crate::gpu::VIREO_TARGET_SHAPE;
-    pub use crate::gpu::VIREO_TARGET_TEXT;
     pub use crate::shapes::*;
     pub use crate::text::Attrs;
     pub use crate::text::AttrsOwned;
     pub use crate::text::ColorMode;
     pub use crate::text::Family;
     pub use crate::text::FeatureTag;
+    pub use crate::text::HudLine;
+    pub use crate::text::StableText;
     pub use crate::text::Style;
     pub use crate::text::TextAlign;
     pub use crate::text::TextDef;
-    pub use crate::text::TextOverride;
-    pub use crate::text::Weight;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
-    pub use crate::text::TextTextureState;
-    pub use crate::text::HudLine;
-    pub use crate::text::StableText;
+    pub use crate::text::TextOverride;
     pub use crate::text::TextPart;
+    pub use crate::text::TextTextureState;
+    pub use crate::text::Weight;
     pub use crate::text::draw_hud_line;
     pub use crate::text::draw_text;
     pub use crate::text::draw_text_hud;
     pub use crate::text::draw_text_parts;
     pub use crate::text::split_hud;
-    pub use crate::draw_text_hud;
-    pub use crate::hud_format;
+    pub use crate::texture::Texture;
     // 输入系统
     pub use crate::input::ElementState;
     pub use crate::input::Ime;
@@ -124,18 +124,17 @@ pub mod prelude {
     pub use crate::input::TouchEvent;
     pub use crate::input::TouchPhase;
 
-    pub use crate::window::ResizeRefreshPolicy;
-    pub use crate::window::FollowAmount;
-    pub use crate::window::FollowFramesOrTime;
-    pub use crate::window::AntiAliasing;
-    pub use crate::window::FrameStyle;
     pub use crate::app::App;
+    pub use crate::window::AntiAliasing;
+    pub use crate::window::CursorGrabMode;
     pub use crate::window::DrawOutcome;
     pub use crate::window::DrawReport;
     pub use crate::window::DrawSkipReason;
     pub use crate::window::DrawTimings;
-    pub use crate::window::CursorGrabMode;
     pub use crate::window::ExternalError;
+    pub use crate::window::FollowAmount;
+    pub use crate::window::FollowFramesOrTime;
+    pub use crate::window::FrameStyle;
     pub use crate::window::Fullscreen;
     pub use crate::window::Icon;
     pub use crate::window::ImePurpose;
@@ -145,9 +144,10 @@ pub mod prelude {
     pub use crate::window::NotSupportedError;
     pub use crate::window::PhysicalPosition;
     pub use crate::window::PhysicalSize;
-    pub use crate::window::ResizeDirection;
-    pub use crate::window::Size;
     pub use crate::window::Position;
+    pub use crate::window::ResizeDirection;
+    pub use crate::window::ResizeRefreshPolicy;
+    pub use crate::window::Size;
     pub use crate::window::Theme;
     pub use crate::window::UserAttentionType;
     pub use crate::window::VideoModeHandle;
@@ -157,28 +157,27 @@ pub mod prelude {
     pub use crate::window::WindowIndex;
     pub use crate::window::WindowLevel;
     // 非客户区管理（§7.6）
+    pub use crate::dpi::Dp;
+    pub use crate::dpi::Pixel;
+    pub use crate::dpi::PixelPos;
+    pub use crate::dpi::PixelSize;
+    pub use crate::dpi::Pp;
+    pub use crate::dpi::Px;
+    pub use crate::dpi::ToPx;
+    pub use crate::dpi::dp;
+    pub use crate::dpi::px;
+    pub use crate::error::VireoError;
     pub use crate::nc::HitTestInput;
     pub use crate::nc::NonClientHit;
     pub use crate::nc::NonClientRegion;
     pub use crate::nc::WindowState;
-    pub use crate::dpi::Dp;
-    pub use crate::dpi::Pp;
-    pub use crate::dpi::Px;
-    pub use crate::dpi::px;
-    pub use crate::dpi::dp;
-    pub use crate::dpi::ToPx;
-    pub use crate::dpi::Pixel;
-    pub use crate::dpi::PixelPos;
-    pub use crate::dpi::PixelSize;
-    pub use crate::error::VireoError;
+    pub use crate::offscreen::OffscreenCanvas;
     pub use crate::thread::Loop;
     pub use crate::thread::LoopContext;
     pub use crate::thread::Thread;
     pub use crate::thread::ThreadHandle;
-    pub use crate::offscreen::OffscreenCanvas;
     pub use crate::window::OffscreenIndex;
     pub use wgpu::PresentMode;
     // `#[vireo::main]` 过程宏：把 `async fn main` 改写为在主线程跑 winit 的入口。
     pub use vireo_macro::main;
 }
-

@@ -18,8 +18,12 @@ impl Texture {
 
     /// 创建可渲染的纹理（离屏渲染目标）。
     pub fn new(
-        device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat,
-        bg_layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        bg_layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
     ) -> Self {
         assert!(
             width > 0 && height > 0,
@@ -29,10 +33,18 @@ impl Texture {
         );
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vireo texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
-            dimension: wgpu::TextureDimension::D2, format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -40,11 +52,23 @@ impl Texture {
             label: Some("texture bind group"),
             layout: bg_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
             ],
         });
-        Self { texture, view, bind_group, width, height }
+        Self {
+            texture,
+            view,
+            bind_group,
+            width,
+            height,
+        }
     }
 
     /// 获取 RenderTarget 用于离屏渲染。
@@ -86,30 +110,52 @@ impl Texture {
     /// 非法输入（宽高为0或数据长度不足）时打印错误并返回 ffcc00/6699ff 棋盘 missing 纹理。
     pub fn from_rgba(width: u32, height: u32, pixels: &[u8], gpu: &GpuContext) -> Self {
         if width == 0 || height == 0 {
-            log::error!("Texture::from_rgba: width/height must be > 0 (got {}x{})", width, height);
+            log::error!(
+                "Texture::from_rgba: width/height must be > 0 (got {}x{})",
+                width,
+                height
+            );
             return create_missing_checker(gpu);
         }
         let needed = (width as usize) * (height as usize) * 4;
         if pixels.len() < needed {
             log::error!(
                 "Texture::from_rgba: pixel buffer too short (need {} bytes for {}x{} RGBA, got {})",
-                needed, width, height, pixels.len()
+                needed,
+                width,
+                height,
+                pixels.len()
             );
             return create_missing_checker(gpu);
         }
-        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vireo texture"),
-            size, mip_level_count: 1, sample_count: 1,
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             pixels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
             size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -117,18 +163,35 @@ impl Texture {
             label: Some("texture bind group"),
             layout: &gpu.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&gpu.default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.default_sampler),
+                },
             ],
         });
-        Self { texture, view, bind_group, width, height }
+        Self {
+            texture,
+            view,
+            bind_group,
+            width,
+            height,
+        }
     }
 
     /// 像素区域转换为归一化 UV 坐标 (u0, v0, u1, v1)。
     pub fn uv(&self, px: u32, py: u32, pw: u32, ph: u32) -> (f32, f32, f32, f32) {
         let w = self.width as f32;
         let h = self.height as f32;
-        (px as f32 / w, py as f32 / h, (px + pw) as f32 / w, (py + ph) as f32 / h)
+        (
+            px as f32 / w,
+            py as f32 / h,
+            (px + pw) as f32 / w,
+            (py + ph) as f32 / h,
+        )
     }
 }
 

@@ -167,5 +167,4 @@ mod tests {
         assert_eq!(NonClientHit::from_win32(2), NonClientHit::Caption);
         assert_eq!(NonClientHit::from_win32(100), NonClientHit::Custom(100));
     }
-
 }

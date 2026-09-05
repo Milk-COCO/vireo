@@ -6,7 +6,8 @@ pub(crate) const PRESENT_SAMPLE_CAP: usize = 30;
 /// （Vulkan 后端（wgpu 默认）上每次 `surface.configure` 阻塞较重——wgpu-hal Vulkan 会等
 /// present queue 排空，DWM 停消费时无限等 → 旧实现拖动即冻屏；DX12 同操作阻塞显著更低）。
 /// 用户可经 `VireoWindow::set_resize_debounce` 覆盖。
-pub(crate) const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const DEFAULT_RESIZE_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 /// resize 尺寸漂移容差（物理像素，每轴）。
 ///
@@ -89,7 +90,9 @@ pub enum FollowAmount {
 impl Default for FollowAmount {
     /// 默认 `Average(Time(16ms))`：小幅平滑，既不每帧硬追（免抖）也不明显滞后。
     fn default() -> Self {
-        FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(16)))
+        FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(
+            16,
+        )))
     }
 }
 
@@ -109,10 +112,10 @@ pub(crate) fn resize_refresh(
     if !size_changed {
         return ResizeRefresh::None;
     }
-    if let Some(t) = stable_since {
-        if now.saturating_duration_since(t) >= debounce {
-            return ResizeRefresh::Stable;
-        }
+    if let Some(t) = stable_since
+        && now.saturating_duration_since(t) >= debounce
+    {
+        return ResizeRefresh::Stable;
     }
     match policy {
         // OnRelease：拖动期尺寸持续变化 → 不轮询重配（留待 acquire 的 Outdated 路径处理，
@@ -308,7 +311,11 @@ pub(crate) fn drag_effective_cap(user: Option<u32>, drag_refresh_mhz: u32) -> Op
 
 /// 拖动期帧率上限的最终决策：`drag_cap` 开启（默认）→ 压到显示器刷新率
 /// （`user=None` 也压，与 `set_max_fps` 解耦）；关闭 → 原样返回 `user`。
-pub(crate) fn drag_cap_effective(user: Option<u32>, drag_cap: bool, drag_refresh_mhz: u32) -> Option<u32> {
+pub(crate) fn drag_cap_effective(
+    user: Option<u32>,
+    drag_cap: bool,
+    drag_refresh_mhz: u32,
+) -> Option<u32> {
     if drag_cap {
         drag_effective_cap(user, drag_refresh_mhz)
     } else {

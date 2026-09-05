@@ -172,8 +172,8 @@ impl Cache {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             bind_group_layouts: &[
-                Some(&atlas_layout),   // group 0: color/mask atlas + sampler + batch base texture
-                Some(&uniforms_layout),// group 1: screen resolution
+                Some(&atlas_layout), // group 0: color/mask atlas + sampler + batch base texture
+                Some(&uniforms_layout), // group 1: screen resolution
                 Some(engine_storage_bgl), // group 2: transforms + polygon dummy
             ],
             ..Default::default()

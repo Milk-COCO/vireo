@@ -3,7 +3,9 @@
 
 use vireo::prelude::*;
 
-const SCENES: &[(&str, fn(&mut DrawBatch))] = &[
+type SceneEntry = (&'static str, fn(&mut DrawBatch));
+
+const SCENES: &[SceneEntry] = &[
     ("1: SDF feather shapes x2000", scene_sdf_shapes),
     ("2: Geometry shapes x500", scene_geo_shapes),
     ("3: Mixed SDF+Geo x1000", scene_mixed),
@@ -35,15 +37,25 @@ async fn main() {
         let mut batch = DrawBatch::new();
 
         // ---- 场景切换 ----
-        let next = if win.key_down(KeyCode::Digit1) { Some(0) }
-        else if win.key_down(KeyCode::Digit2) { Some(1) }
-        else if win.key_down(KeyCode::Digit3) { Some(2) }
-        else if win.key_down(KeyCode::Digit4) { Some(3) }
-        else if win.key_down(KeyCode::Digit5) { Some(4) }
-        else if win.key_down(KeyCode::Digit6) { Some(5) }
-        else if win.key_down(KeyCode::Digit7) { Some(6) }
-        else if win.key_down(KeyCode::Digit8) { Some(7) }
-        else { None };
+        let next = if win.key_down(KeyCode::Digit1) {
+            Some(0)
+        } else if win.key_down(KeyCode::Digit2) {
+            Some(1)
+        } else if win.key_down(KeyCode::Digit3) {
+            Some(2)
+        } else if win.key_down(KeyCode::Digit4) {
+            Some(3)
+        } else if win.key_down(KeyCode::Digit5) {
+            Some(4)
+        } else if win.key_down(KeyCode::Digit6) {
+            Some(5)
+        } else if win.key_down(KeyCode::Digit7) {
+            Some(6)
+        } else if win.key_down(KeyCode::Digit8) {
+            Some(7)
+        } else {
+            None
+        };
         if win.key_down(KeyCode::KeyP) {
             preserve_order = !preserve_order;
         }
@@ -63,10 +75,14 @@ async fn main() {
         // ---- 帧时间统计 ----
         let ft_ms = ctx.frame_time() * 1000.0;
         frame_times.push(ft_ms);
-        if frame_times.len() > 300 { frame_times.remove(0); }
+        if frame_times.len() > 300 {
+            frame_times.remove(0);
+        }
         min_frame = min_frame.min(ft_ms);
         max_frame = max_frame.max(ft_ms);
-        let avg = if frame_times.is_empty() { 0.0 } else {
+        let avg = if frame_times.is_empty() {
+            0.0
+        } else {
             frame_times.iter().sum::<f64>() / frame_times.len() as f64
         };
 
@@ -101,13 +117,18 @@ async fn main() {
             stats.geo_templates,
             stats.geo_template_vertices,
             win.last_draw_calls(),
-            if preserve_order { "preserve" } else { "reorder" },
+            if preserve_order {
+                "preserve"
+            } else {
+                "reorder"
+            },
         );
         draw_text(
             &mut batch.texts,
             &overlay,
             Pos::new(12.0, 8.0),
-            TextDef::default().font_size(16.0), TextOverride::from_color(WHITE),
+            TextDef::default().font_size(16.0),
+            TextOverride::from_color(WHITE),
         );
 
         // 场景切换提示
@@ -115,17 +136,22 @@ async fn main() {
             &mut batch.texts,
             "Press 1-8 switch scene | P toggle preserve_order",
             Pos::new(12.0, 670.0),
-            TextDef::default().font_size(12.0), TextOverride::from_color(Color::new(0.4, 0.4, 0.5, 1.0)),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.4, 0.4, 0.5, 1.0)),
         );
 
         win.draw(Color::new(0.08, 0.08, 0.12, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 // ─── 场景定义 ─────────────────────────────────────────────
 
-const COLORS: &[Color] = &[RED, GREEN, BLUE, YELLOW, SKYBLUE, MAGENTA, WHITE, ORANGE, PINK, GOLD];
+const COLORS: &[Color] = &[
+    RED, GREEN, BLUE, YELLOW, SKYBLUE, MAGENTA, WHITE, ORANGE, PINK, GOLD,
+];
 
 /// SDF 柔边形状 ×2000（纯 SDF 最轻量路径）
 fn scene_sdf_shapes(b: &mut DrawBatch) {
@@ -202,7 +228,8 @@ fn scene_text_dynamic(b: &mut DrawBatch) {
             &mut b.texts,
             &msg,
             Pos::new(x, y),
-            TextDef::default().font_size(sz), TextOverride::from_color(WHITE),
+            TextDef::default().font_size(sz),
+            TextOverride::from_color(WHITE),
         );
     }
 }
@@ -219,7 +246,8 @@ fn scene_text_static(b: &mut DrawBatch) {
             &mut b.texts,
             msg,
             Pos::new(x, y),
-            TextDef::default().font_size(sz), TextOverride::from_color(WHITE),
+            TextDef::default().font_size(sz),
+            TextOverride::from_color(WHITE),
         );
     }
 }
@@ -250,11 +278,17 @@ fn scene_polygons(b: &mut DrawBatch) {
         let r = 16.0;
         let mut pts: Vec<(f32, f32)> = Vec::with_capacity(sides);
         for j in 0..sides {
-            let angle = std::f32::consts::TAU * j as f32 / sides as f32 - std::f32::consts::FRAC_PI_2;
+            let angle =
+                std::f32::consts::TAU * j as f32 / sides as f32 - std::f32::consts::FRAC_PI_2;
             pts.push((r * angle.cos(), r * angle.sin()));
         }
         let t = i as f32 / 200.0;
-        let color = Color::new(0.3 + t * 0.7, 0.2 + (1.0 - t) * 0.6, 0.5 + (t * 2.0 % 0.5), 1.0);
+        let color = Color::new(
+            0.3 + t * 0.7,
+            0.2 + (1.0 - t) * 0.6,
+            0.5 + (t * 2.0 % 0.5),
+            1.0,
+        );
         draw_polygon(b, &pts, Some(color));
     }
 }

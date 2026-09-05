@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use crate::render::{DrawBatch, Renderer};
 use crate::gpu::GpuContext;
+use crate::render::{DrawBatch, Renderer};
 use crate::texture::Texture;
 use crate::window::{AntiAliasing, OffscreenIndex};
 
@@ -23,17 +23,43 @@ impl OffscreenCanvas {
     }
 
     /// 构造时由 `App::offscreen()` 传入 AA 预热耗时；外部直接调用时通常传 0。
-    pub fn with_aa(gpu: &Arc<GpuContext>, width: u32, height: u32, aa: AntiAliasing, init_duration: f64) -> Self {
+    pub fn with_aa(
+        gpu: &Arc<GpuContext>,
+        width: u32,
+        height: u32,
+        aa: AntiAliasing,
+        init_duration: f64,
+    ) -> Self {
         assert!(
             width > 0 && height > 0,
             "OffscreenCanvas dimensions must be non-zero, got {}x{}",
             width,
             height
         );
-        let texture = Texture::new(&gpu.device, width, height, gpu.surface_format(),
-            &gpu.texture_bind_group_layout, &gpu.default_sampler);
-        let renderer = Renderer::new(gpu.clone(), width as f32, height as f32, width, height, 1.0, aa, 1.0);
-        Self { texture, renderer, init_duration, index: OffscreenIndex(0) }
+        let texture = Texture::new(
+            &gpu.device,
+            width,
+            height,
+            gpu.surface_format(),
+            &gpu.texture_bind_group_layout,
+            &gpu.default_sampler,
+        );
+        let renderer = Renderer::new(
+            gpu.clone(),
+            width as f32,
+            height as f32,
+            width,
+            height,
+            1.0,
+            aa,
+            1.0,
+        );
+        Self {
+            texture,
+            renderer,
+            init_duration,
+            index: OffscreenIndex(0),
+        }
     }
 
     /// 本画布在 `App.offscreens` 中的索引。
@@ -89,9 +115,11 @@ impl OffscreenCanvas {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("offscreen readback encoder"),
-        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("offscreen readback encoder"),
+            });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture.texture,
@@ -107,7 +135,11 @@ impl OffscreenCanvas {
                     rows_per_image: None,
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         gpu.queue.submit(Some(encoder.finish()));
         let slice = buf.slice(..);
@@ -127,10 +159,11 @@ impl OffscreenCanvas {
         } else {
             let mut out = Vec::with_capacity((bytes_per_row * h) as usize);
             for y in 0..h as usize {
-                out.extend_from_slice(&data[y * padded as usize..y * padded as usize + bytes_per_row as usize]);
+                out.extend_from_slice(
+                    &data[y * padded as usize..y * padded as usize + bytes_per_row as usize],
+                );
             }
             out
         }
     }
-
 }

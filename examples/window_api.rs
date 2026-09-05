@@ -34,9 +34,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use vireo::prelude::*;
 #[cfg(target_os = "windows")]
 use vireo::platform::windows::WindowExtWindows;
+use vireo::prelude::*;
 
 struct WinState {
     moved: Option<(i32, i32)>,
@@ -253,7 +253,7 @@ async fn main() {
         }
         if edge(KeyCode::KeyF) {
             fullsc = !fullsc;
-            let _ = win.set_fullscreen(if fullsc {
+            win.set_fullscreen(if fullsc {
                 Some(Fullscreen::Borderless(None))
             } else {
                 None
@@ -275,20 +275,18 @@ async fn main() {
         if edge(KeyCode::KeyN) {
             win.set_minimized(true);
         }
-        if edge(KeyCode::KeyH) {
-            if visible {
+        if edge(KeyCode::KeyH)
+            && visible {
                 visible = false;
                 win.set_visible(false);
                 hidden_at = Some(std::time::Instant::now());
             }
-        }
-        if let Some(h) = hidden_at {
-            if h.elapsed().as_secs_f64() >= 3.0 {
+        if let Some(h) = hidden_at
+            && h.elapsed().as_secs_f64() >= 3.0 {
                 hidden_at = None;
                 visible = true;
                 win.set_visible(true);
             }
-        }
         if edge(KeyCode::KeyO) {
             dpi_override = match dpi_override {
                 None => Some(1.0),
@@ -380,7 +378,7 @@ async fn main() {
                 0 => (230, 60, 60),
                 _ => (60, 200, 110),
             };
-            let rgba = vec![r, g, bl, 255].repeat(16 * 16);
+            let rgba = [r, g, bl, 255].repeat(16 * 16);
             if let Ok(icon) = winit::window::Icon::from_rgba(rgba, 16, 16) {
                 win.set_icon(icon);
             }
@@ -416,7 +414,7 @@ async fn main() {
                 win_taskbar_icon = !win_taskbar_icon;
                 if win_taskbar_icon {
                     // 8×8 纯红方块，演示 set_taskbar_icon
-                    let rgba = vec![255u8, 0, 0, 255].repeat(8 * 8);
+                    let rgba = [255u8, 0, 0, 255].repeat(8 * 8);
                     if let Ok(icon) = winit::window::Icon::from_rgba(rgba, 8, 8) {
                         win.set_taskbar_icon(Some(icon));
                     }
@@ -487,7 +485,7 @@ async fn main() {
                 if thumbar_on {
                     use vireo::platform::windows::{TaskbarIcon, ThumbarButton};
                     let make_icon = |r: u8, g: u8, b: u8| TaskbarIcon {
-                        rgba: vec![r, g, b, 255].repeat(32 * 32),
+                        rgba: [r, g, b, 255].repeat(32 * 32),
                         width: 32,
                         height: 32,
                     };

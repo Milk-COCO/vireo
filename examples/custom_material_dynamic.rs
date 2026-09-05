@@ -51,16 +51,36 @@ async fn main() {
         .expect("WGSL compile");
 
     let params = [
-        RectParams { r: 0.8, g: 0.2, b: 0.2, _pad0: 0.0, _pad: [0u8; 240] },
-        RectParams { r: 0.2, g: 0.8, b: 0.2, _pad0: 0.0, _pad: [0u8; 240] },
-        RectParams { r: 0.2, g: 0.2, b: 0.8, _pad0: 0.0, _pad: [0u8; 240] },
-        RectParams { r: 0.8, g: 0.8, b: 0.2, _pad0: 0.0, _pad: [0u8; 240] },
+        RectParams {
+            r: 0.8,
+            g: 0.2,
+            b: 0.2,
+            _pad0: 0.0,
+            _pad: [0u8; 240],
+        },
+        RectParams {
+            r: 0.2,
+            g: 0.8,
+            b: 0.2,
+            _pad0: 0.0,
+            _pad: [0u8; 240],
+        },
+        RectParams {
+            r: 0.2,
+            g: 0.2,
+            b: 0.8,
+            _pad0: 0.0,
+            _pad: [0u8; 240],
+        },
+        RectParams {
+            r: 0.8,
+            g: 0.8,
+            b: 0.2,
+            _pad0: 0.0,
+            _pad: [0u8; 240],
+        },
     ];
-    mat.set_uniform_bytes(
-        &app.gpu.queue,
-        "u_params",
-        bytemuck::cast_slice(&params),
-    );
+    mat.set_uniform_bytes(&app.gpu.queue, "u_params", bytemuck::cast_slice(&params));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -91,5 +111,7 @@ async fn main() {
         let refs: Vec<&DrawBatch> = batches.iter().chain(std::iter::once(&title)).collect();
         win.draw(Color::new(0.05, 0.07, 0.11, 1.0), &refs);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

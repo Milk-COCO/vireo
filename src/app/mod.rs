@@ -4,15 +4,15 @@ use std::sync::{Arc, OnceLock, mpsc};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use winit::window::WindowId;
 use winit::window::Icon;
+use winit::window::WindowId;
 
 use crate::error::VireoError;
 use crate::gpu::GpuContext;
 use crate::offscreen::OffscreenCanvas;
 use crate::texture::Texture;
 use crate::window::{
-    AntiAliasing, FrameStyle, OffscreenIndex, VireoWindow, WinitEvent, WindowDesc, WindowIndex,
+    AntiAliasing, FrameStyle, OffscreenIndex, VireoWindow, WindowDesc, WindowIndex, WinitEvent,
 };
 
 /// 渲染线程 → winit 线程的运行期窗口创建请求（`App::window` 在 on_tick 里调用时）。
@@ -75,7 +75,9 @@ pub struct App {
 
 impl Clone for App {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -125,13 +127,16 @@ pub(crate) enum DeferredTaskKind {
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl App {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new<F, Fut>(main: F)
     where
         F: FnOnce(App) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        App::from_instance_descriptor(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
-            .run_entry(main)
+        App::from_instance_descriptor(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        )
+        .run_entry(main)
     }
 
     pub fn with_descriptor<F, Fut>(desc: wgpu::InstanceDescriptor, main: F)
@@ -194,14 +199,14 @@ impl App {
         let default_icon = std::fs::read("logo.png")
             .ok()
             .and_then(|data| image::load_from_memory(&data).ok())
-            .map(|img| {
+            .and_then(|img| {
                 let rgba = img.to_rgba8();
                 let (w, h) = rgba.dimensions();
                 Icon::from_rgba(rgba.into_raw(), w, h).ok()
-            })
-            .flatten();
+            });
         let init_duration = init_start.elapsed().as_secs_f64();
-        let app = Self {
+
+        Self {
             inner: Arc::new(AppInner {
                 windows: Mutex::new(Vec::new()),
                 alive_window_count: AtomicUsize::new(0),
@@ -228,8 +233,7 @@ impl App {
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
             }),
-        };
-        app
+        }
     }
 
     pub fn offscreen(&self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
@@ -277,7 +281,11 @@ impl App {
         }
     }
 
-    pub fn window(&self, mut desc: WindowDesc, on_close: Option<impl FnOnce() + Send + 'static>) -> WindowIndex {
+    pub fn window(
+        &self,
+        mut desc: WindowDesc,
+        on_close: Option<impl FnOnce() + Send + 'static>,
+    ) -> WindowIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(desc.anti_aliasing, self.gpu.supported_sample_counts());
         desc.anti_aliasing = aa;
@@ -298,8 +306,7 @@ impl App {
                     init_duration,
                     on_close,
                 });
-                self.pending_window_creates
-                    .fetch_add(1, Ordering::AcqRel);
+                self.pending_window_creates.fetch_add(1, Ordering::AcqRel);
                 self.wake_event_loop();
             }
             None => unreachable!(
@@ -345,8 +352,7 @@ impl App {
         let shared = Arc::new(Mutex::new(Vec::<crate::thread::Loop>::new()));
         let fps_stats = Arc::new(Mutex::new(crate::thread::FpsStats::new()));
         let state = Arc::new(crate::thread::LoopHandleState::new());
-        self.loops_ever_requested
-            .store(true, Ordering::Release);
+        self.loops_ever_requested.store(true, Ordering::Release);
         self.loop_states.lock().push(state.clone());
         let app = self.clone();
         let device_lost = self.device_lost.clone();
@@ -373,10 +379,18 @@ impl App {
                 );
             })
             .expect("failed to spawn vireo thread");
-        crate::thread::ThreadHandle { state, thread: Some(join), shared, fps_stats }
+        crate::thread::ThreadHandle {
+            state,
+            thread: Some(join),
+            shared,
+            fps_stats,
+        }
     }
 
-    pub fn loops(&self, loops: impl IntoIterator<Item = crate::thread::Loop>) -> crate::thread::ThreadHandle {
+    pub fn loops(
+        &self,
+        loops: impl IntoIterator<Item = crate::thread::Loop>,
+    ) -> crate::thread::ThreadHandle {
         self.spawn(crate::thread::Thread::new().with_loops(loops))
     }
 
@@ -389,7 +403,8 @@ impl App {
         source: &str,
         vertex_source: &str,
     ) -> Result<Arc<crate::material::Material>, String> {
-        self.gpu.create_material_with_vertex_shader(source, vertex_source)
+        self.gpu
+            .create_material_with_vertex_shader(source, vertex_source)
     }
 
     pub fn material_with_resources(
@@ -406,7 +421,8 @@ impl App {
         vertex_source: &str,
         resources: crate::material::MaterialResources<'_>,
     ) -> Result<Arc<crate::material::Material>, String> {
-        self.gpu.create_material_with_resources_and_vertex_shader(source, vertex_source, resources)
+        self.gpu
+            .create_material_with_resources_and_vertex_shader(source, vertex_source, resources)
     }
 
     pub fn material_manual(
@@ -423,24 +439,28 @@ impl App {
         vertex_source: &str,
         bgl: &wgpu::BindGroupLayout,
     ) -> Result<Arc<crate::material::Material>, String> {
-        self.gpu.create_material_manual_with_vertex_shader(source, vertex_source, bgl)
+        self.gpu
+            .create_material_manual_with_vertex_shader(source, vertex_source, bgl)
     }
 
     pub fn window_ref(&self, idx: &WindowIndex) -> Result<Arc<VireoWindow>, VireoError> {
-        match self.windows.lock().get(idx.0 as usize).and_then(|w| w.clone()) {
+        match self
+            .windows
+            .lock()
+            .get(idx.0 as usize)
+            .and_then(|w| w.clone())
+        {
             Some(w) => Ok(w),
             None => Err(VireoError::WindowNotFound(idx.0)),
         }
     }
 
     pub fn window_count(&self) -> usize {
-        self.alive_window_count
-            .load(Ordering::Acquire)
+        self.alive_window_count.load(Ordering::Acquire)
     }
 
     pub(crate) fn created_window_count(&self) -> usize {
-        self.created_window_count
-            .load(Ordering::Acquire)
+        self.created_window_count.load(Ordering::Acquire)
     }
 
     pub fn init_duration(&self) -> f64 {
@@ -464,19 +484,26 @@ impl App {
     }
 
     pub fn windows(&self) -> Vec<Arc<VireoWindow>> {
-        self.windows.lock().iter().filter_map(|w| w.clone()).collect()
+        self.windows
+            .lock()
+            .iter()
+            .filter_map(|w| w.clone())
+            .collect()
     }
 
     pub fn window_indices(&self) -> Vec<WindowIndex> {
-        self.windows.lock().iter().enumerate()
+        self.windows
+            .lock()
+            .iter()
+            .enumerate()
             .filter(|(_, w)| w.is_some())
             .map(|(i, _)| WindowIndex::new(i as u64))
             .collect()
     }
 }
 
-mod main;
 mod host;
+mod main;
 mod supervisor;
 
-pub(crate) use crate::app::supervisor::{supervisor_loop, panic_payload_to_string};
+pub(crate) use crate::app::supervisor::{panic_payload_to_string, supervisor_loop};

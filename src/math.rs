@@ -16,20 +16,29 @@ impl Rect {
         Self { x, y, w, h }
     }
 
-    pub fn left(&self) -> f32 { self.x }
-    pub fn right(&self) -> f32 { self.x + self.w }
-    pub fn top(&self) -> f32 { self.y }
-    pub fn bottom(&self) -> f32 { self.y + self.h }
+    pub fn left(&self) -> f32 {
+        self.x
+    }
+    pub fn right(&self) -> f32 {
+        self.x + self.w
+    }
+    pub fn top(&self) -> f32 {
+        self.y
+    }
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
 
     pub fn contains(&self, p: [f32; 2]) -> bool {
-        p[0] >= self.x && p[0] <= self.x + self.w
-            && p[1] >= self.y && p[1] <= self.y + self.h
+        p[0] >= self.x && p[0] <= self.x + self.w && p[1] >= self.y && p[1] <= self.y + self.h
     }
 
     pub fn intersects(&self, other: &Rect) -> bool {
         let l = self.x.max(other.x);
         let r = (self.x + self.w).min(other.x + other.w);
-        if r < l { return false; }
+        if r < l {
+            return false;
+        }
         let t = self.y.max(other.y);
         let b = (self.y + self.h).min(other.y + other.h);
         b >= t
@@ -137,6 +146,7 @@ impl Transform {
 
     /// 返回 3x3 仿射变换矩阵的 3 个列（WGSL 列主序）。
     /// 变换顺序：T(x,y) * [a b; c d] * T(-pivot)，即 pivot → 线性 → 平移。
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_cols(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let tx = self.x - self.px * self.a - self.py * self.b;
         let ty = self.y - self.px * self.c - self.py * self.d;
@@ -179,8 +189,24 @@ pub(crate) fn mul_affine_cols(
 
 /// 对矩形的 4 个角应用 2D 仿射列矩阵，返回外接 AABB（保守，含旋转/缩放）。
 pub(crate) fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> Rect {
-    debug_assert!(r.w >= 0.0 && r.h >= 0.0 && r.w.is_finite() && r.h.is_finite() && r.x.is_finite() && r.y.is_finite(), "affine_rect_bounds: rect must be finite non-negative");
-    debug_assert!(c0[0].is_finite() && c0[1].is_finite() && c1[0].is_finite() && c1[1].is_finite() && c2[0].is_finite() && c2[1].is_finite(), "affine_rect_bounds: cols must be finite");
+    debug_assert!(
+        r.w >= 0.0
+            && r.h >= 0.0
+            && r.w.is_finite()
+            && r.h.is_finite()
+            && r.x.is_finite()
+            && r.y.is_finite(),
+        "affine_rect_bounds: rect must be finite non-negative"
+    );
+    debug_assert!(
+        c0[0].is_finite()
+            && c0[1].is_finite()
+            && c1[0].is_finite()
+            && c1[1].is_finite()
+            && c2[0].is_finite()
+            && c2[1].is_finite(),
+        "affine_rect_bounds: cols must be finite"
+    );
     let tx = |x: f32, y: f32| c0[0] * x + c1[0] * y + c2[0];
     let ty = |x: f32, y: f32| c0[1] * x + c1[1] * y + c2[1];
     let (xs, ys) = ([r.x, r.x + r.w], [r.y, r.y + r.h]);
@@ -191,10 +217,18 @@ pub(crate) fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32;
     for &x in &xs {
         for &y in &ys {
             let (wx, wy) = (tx(x, y), ty(x, y));
-            if wx < minx { minx = wx; }
-            if wx > maxx { maxx = wx; }
-            if wy < miny { miny = wy; }
-            if wy > maxy { maxy = wy; }
+            if wx < minx {
+                minx = wx;
+            }
+            if wx > maxx {
+                maxx = wx;
+            }
+            if wy < miny {
+                miny = wy;
+            }
+            if wy > maxy {
+                maxy = wy;
+            }
         }
     }
     Rect::new(minx, miny, maxx - minx, maxy - miny)
@@ -203,7 +237,10 @@ pub(crate) fn affine_rect_bounds(r: &Rect, c0: [f32; 3], c1: [f32; 3], c2: [f32;
 /// 把 `view` 左乘到 `table` 每一行（12 f32 的列主序矩阵），写入 `out`。
 /// `view` 为单位阵时直接整表拷贝；否则逐行 `view.to_cols() * row`。
 pub(crate) fn left_mul_view_table(view: &Transform, table: &[f32], out: &mut Vec<f32>) {
-    debug_assert!(table.len() % 12 == 0, "transform_table must be 12-aligned");
+    debug_assert!(
+        table.len().is_multiple_of(12),
+        "transform_table must be 12-aligned"
+    );
     out.clear();
     if view.a == 1.0
         && view.b == 0.0
@@ -259,23 +296,28 @@ pub(crate) fn seed_identity_transform_table(table: &mut Vec<f32>, map: &mut FxHa
     table.clear();
     map.clear();
     table.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
-    let key = transform_key(
-        [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    );
+    let key = transform_key([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
     map.insert(key, 0);
 }
 
 /// 纹理坐标子区域，控制形状内部 UV 映射范围。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UvRect {
-    pub u0: f32, pub v0: f32,
-    pub u1: f32, pub v1: f32,
+    pub u0: f32,
+    pub v0: f32,
+    pub u1: f32,
+    pub v1: f32,
 }
 
 impl Default for UvRect {
-    fn default() -> Self { Self { u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0 } }
+    fn default() -> Self {
+        Self {
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+        }
+    }
 }
 
 impl UvRect {

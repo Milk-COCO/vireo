@@ -36,15 +36,21 @@ async fn main() {
     const PRESETS: &[(FollowAmount, &str)] = &[
         (FollowAmount::PerFrame, "PerFrame — 每帧追（最跟手，易抖）"),
         (
-            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(16))),
+            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(
+                16,
+            ))),
             "Average Time 16ms — 平均窗（默认）",
         ),
         (
-            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(66))),
+            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(
+                66,
+            ))),
             "Average Time 66ms — 平均窗（较平滑）",
         ),
         (
-            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(132))),
+            FollowAmount::Average(FollowFramesOrTime::Time(std::time::Duration::from_millis(
+                132,
+            ))),
             "Average Time 132ms — 平均窗（很平滑）",
         ),
         (
@@ -76,7 +82,11 @@ async fn main() {
             if keys[i] && !key_was[i] {
                 match i {
                     0 => {
-                        preset_i = if preset_i == 0 { PRESETS.len() - 1 } else { preset_i - 1 };
+                        preset_i = if preset_i == 0 {
+                            PRESETS.len() - 1
+                        } else {
+                            preset_i - 1
+                        };
                         win.set_layout_follow_smoothing(PRESETS[preset_i].0);
                     }
                     1 => {
@@ -115,7 +125,9 @@ async fn main() {
         draw_rounded_rect(
             &mut batch,
             Pos::new(bx, by),
-            120.0, 120.0, 16.0,
+            120.0,
+            120.0,
+            16.0,
             Some(Color::new(0.3, 0.6, 1.0, 0.85)),
         );
 
@@ -123,23 +135,49 @@ async fn main() {
         let step = 64.0f32;
         let mut y = step;
         while y < h {
-            draw_line(&mut batch, 0.0, y, w, y, 1.0, Some(Color::new(0.2, 0.2, 0.3, 0.6)));
+            draw_line(
+                &mut batch,
+                0.0,
+                y,
+                w,
+                y,
+                1.0,
+                Some(Color::new(0.2, 0.2, 0.3, 0.6)),
+            );
             y += step;
         }
         let mut x = step;
         while x < w {
-            draw_line(&mut batch, x, 0.0, x, h, 1.0, Some(Color::new(0.2, 0.2, 0.3, 0.6)));
+            draw_line(
+                &mut batch,
+                x,
+                0.0,
+                x,
+                h,
+                1.0,
+                Some(Color::new(0.2, 0.2, 0.3, 0.6)),
+            );
             x += step;
         }
 
-        let follow_label = if follow_enabled { "on" } else { "off (pure stretch)" };
+        let follow_label = if follow_enabled {
+            "on"
+        } else {
+            "off (pure stretch)"
+        };
         let lines = [
-            format!("Layout follow: {}   present: {:?}", follow_label, win.present_mode()),
+            format!(
+                "Layout follow: {}   present: {:?}",
+                follow_label,
+                win.present_mode()
+            ),
             format!("Smoothing: {}", PRESETS[preset_i].1),
             format!("current(): {:?}", current),
             format!(
                 "window: {}x{} (logical)   Update FPS: {:.1}",
-                lw as u32, lh as u32, ctx.fps()
+                lw as u32,
+                lh as u32,
+                ctx.fps()
             ),
             "[ ]=切预设  L=开/关跟随  V=present mode  — 拖动窗口边缘/标题栏观察".into(),
         ];
@@ -156,5 +194,7 @@ async fn main() {
         let report = win.draw(Color::new(0.06, 0.07, 0.10, 1.0), &[&batch]);
         let _ = report;
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -31,8 +31,14 @@ struct WinCfg {
 }
 
 const CONFIGS: [WinCfg; 2] = [
-    WinCfg { name: "W0", bg: Color::new(0.06, 0.09, 0.16, 1.0) },
-    WinCfg { name: "W1", bg: Color::new(0.05, 0.13, 0.09, 1.0) },
+    WinCfg {
+        name: "W0",
+        bg: Color::new(0.06, 0.09, 0.16, 1.0),
+    },
+    WinCfg {
+        name: "W1",
+        bg: Color::new(0.05, 0.13, 0.09, 1.0),
+    },
 ];
 
 #[vireo::main]

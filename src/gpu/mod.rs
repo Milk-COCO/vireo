@@ -1,16 +1,16 @@
-﻿//! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
+//! GPU 上下文和顶点定义。初始化时创建，多窗口共享。
 
 mod pipeline;
-pub use pipeline::{VIREO_TARGET_SHAPE, VIREO_TARGET_TEXT};
 pub(crate) use pipeline::*;
+pub use pipeline::{VIREO_TARGET_SHAPE, VIREO_TARGET_TEXT};
 
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
 
-use crate::material::Material;
 use crate::glyphon::ColorMode;
+use crate::material::Material;
 use crate::text::TextContext;
 
 /// 共享 GPU 资源 —— 多个窗口/离屏纹理共用同一套 device/queue/pipeline
@@ -43,9 +43,9 @@ pub struct GpuContext {
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
     pipelines: Mutex<FxHashMap<u32, wgpu::RenderPipeline>>,
-    shader: wgpu::ShaderModule,      // MSAA：per-pixel 着色
-    shader_ssaa: wgpu::ShaderModule, // SSAA：per-sample 着色
-    shader_geo: wgpu::ShaderModule,  // 几何光栅化：无 SDF 分支
+    shader: wgpu::ShaderModule,              // MSAA：per-pixel 着色
+    shader_ssaa: wgpu::ShaderModule,         // SSAA：per-sample 着色
+    shader_geo: wgpu::ShaderModule,          // 几何光栅化：无 SDF 分支
     shader_geo_instance: wgpu::ShaderModule, // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
     shader_instance_ssaa: wgpu::ShaderModule,
@@ -88,8 +88,16 @@ impl GeoVertex {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x2, shader_location: 0 },
-                wgpu::VertexAttribute { offset: 8, format: wgpu::VertexFormat::Float32x2, shader_location: 1 },
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 1,
+                },
             ],
         }
     }
@@ -114,8 +122,16 @@ impl GeoInstance {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                wgpu::VertexAttribute { offset: 12, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
-                wgpu::VertexAttribute { offset: 28, format: wgpu::VertexFormat::Uint32, shader_location: 3 },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 28,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 3,
+                },
             ],
         }
     }
@@ -150,19 +166,18 @@ impl GpuContext {
             required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         }
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("vireo device"),
-                required_features,
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                trace: wgpu::Trace::default(),
-            }))
-            .unwrap_or_else(|e| {
-                log::error!("vireo gpu: request_device failed: {e:?}");
-                panic!("vireo gpu: request_device failed");
-            });
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("vireo device"),
+            required_features,
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            trace: wgpu::Trace::default(),
+        }))
+        .unwrap_or_else(|e| {
+            log::error!("vireo gpu: request_device failed: {e:?}");
+            panic!("vireo gpu: request_device failed");
+        });
 
         // 设备丢失检测：回调置位共享标志。渲染循环每帧轮询并在丢失时终止；
         // `draw` 也据此返回 `DrawOutcome::Failed(DeviceLost)`。
@@ -397,20 +412,21 @@ impl GpuContext {
             contents: bytemuck::cast_slice(&identity),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let engine_storage_dummy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("engine storage dummy bind group"),
-            layout: &engine_storage_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: transform_dummy_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: polygon_dummy_buf.as_entire_binding(),
-                },
-            ],
-        });
+        let engine_storage_dummy_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("engine storage dummy bind group"),
+                layout: &engine_storage_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: transform_dummy_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: polygon_dummy_buf.as_entire_binding(),
+                    },
+                ],
+            });
 
         let shader_src = include_str!("../shader.wgsl");
         // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
@@ -419,10 +435,8 @@ impl GpuContext {
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
         // MSAA：去掉 `, sample` — 每像素执行一次片段着色器
-        let msaa_src: String = shader_src.replace(
-            "@interpolate(linear, sample)",
-            "@interpolate(linear)",
-        );
+        let msaa_src: String =
+            shader_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (MSAA)"),
             source: wgpu::ShaderSource::Wgsl(msaa_src.into()),
@@ -444,41 +458,49 @@ impl GpuContext {
             label: Some("vireo instance shader (SSAA)"),
             source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
         });
-        let shader_instance_src = shader_instance_src.replace(
-            "@interpolate(linear, sample)",
-            "@interpolate(linear)",
-        );
+        let shader_instance_src =
+            shader_instance_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo instance shader (MSAA)"),
             source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
         });
-        let instance_quad_vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vireo instance unit quad vertices"),
-            contents: bytemuck::cast_slice(&[
-                QuadVertex { corner: [-1.0, -1.0] },
-                QuadVertex { corner: [1.0, -1.0] },
-                QuadVertex { corner: [1.0, 1.0] },
-                QuadVertex { corner: [-1.0, 1.0] },
-            ]),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let instance_quad_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vireo instance unit quad indices"),
-            contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let instance_quad_vertex_buf =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vireo instance unit quad vertices"),
+                contents: bytemuck::cast_slice(&[
+                    QuadVertex {
+                        corner: [-1.0, -1.0],
+                    },
+                    QuadVertex {
+                        corner: [1.0, -1.0],
+                    },
+                    QuadVertex { corner: [1.0, 1.0] },
+                    QuadVertex {
+                        corner: [-1.0, 1.0],
+                    },
+                ]),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let instance_quad_index_buf =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vireo instance unit quad indices"),
+                contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vireo pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&camera_bind_group_layout),
-                    Some(&texture_bind_group_layout),
-                    Some(&engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("vireo pipeline layout"),
+                    bind_group_layouts: &[
+                        Some(&camera_bind_group_layout),
+                        Some(&texture_bind_group_layout),
+                        Some(&engine_storage_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                }),
+            ),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -516,7 +538,10 @@ impl GpuContext {
         ));
 
         let mut pipelines = FxHashMap::default();
-        pipelines.insert(1 | surface_format_bits(surface_format), render_pipeline.clone());
+        pipelines.insert(
+            1 | surface_format_bits(surface_format),
+            render_pipeline.clone(),
+        );
 
         // 查询 adapter 对 surface_format 的 sample_count；若未开
         // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES，pipeline 只接受 WebGPU 保底 [1, 4]。
@@ -614,7 +639,9 @@ impl GpuContext {
         let mut buffer = Buffer::new(&mut text_ctx.font_system, metrics);
         buffer.set_size(options.max_width, None);
 
-        let attrs = options.attrs.as_ref()
+        let attrs = options
+            .attrs
+            .as_ref()
             .map(|a| a.as_attrs())
             .unwrap_or_else(Attrs::new);
 
@@ -635,7 +662,8 @@ impl GpuContext {
 
     /// 从文件加载字体（TTF/OTF），使该字体可用于 TextOptions::with_family
     pub fn load_font_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
-        let data = std::fs::read(path.as_ref()).map_err(|e| format!("failed to read font file: {}", e))?;
+        let data =
+            std::fs::read(path.as_ref()).map_err(|e| format!("failed to read font file: {}", e))?;
         self.load_font(&data);
         Ok(())
     }
@@ -653,6 +681,7 @@ impl GpuContext {
     /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
     /// - `Some(d)`：超过 d 未使用则过期
     /// - `None`：永不按时间自动回收
+    ///
     /// 清空共享管线缓存表。`surface_format` 从默认值同步为窗口真实格式时调用，
     /// 丢弃同步前预置的默认格式管线（键含格式位，正常不会命中；清表是兜底）。
     pub(crate) fn clear_pipelines(&self) {
@@ -682,7 +711,10 @@ impl GpuContext {
     /// - `Some(n)`：最多 n 条不同文案键，满则 LRU
     /// - `None`：不限制条数
     pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
-        self.text_ctx.lock().unwrap().set_shape_cache_max_entries(max);
+        self.text_ctx
+            .lock()
+            .unwrap()
+            .set_shape_cache_max_entries(max);
     }
 
     /// 当前 shape 缓存最大条数（`None` = 不限制）。
@@ -734,15 +766,28 @@ impl GpuContext {
     /// **首帧性能提示**：首次 `make_stable_text` 会触发 `harfrust` shape 成本
     /// （典型 ~5–30ms / 字符串）。建议在加载/初始化阶段预创建常用 handle，
     /// 或先调 [`GpuContext::preheat_text`] 触发字体/atlas lazy init。
-    pub fn make_stable_text(&self, text: &str, options: &crate::text::TextDef) -> crate::text::StableText {
+    pub fn make_stable_text(
+        &self,
+        text: &str,
+        options: &crate::text::TextDef,
+    ) -> crate::text::StableText {
         self.text_ctx.lock().unwrap().make_stable(text, options)
     }
 
     /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
     /// 推荐在 `App` 启动后立即调用，避免首帧文字绘制卡顿。
     /// 调前需 `Renderer` 存在并已 `resize` 至少一次（让 `viewport` 知道物理尺寸）。
-    pub fn preheat_text(&self, device: &wgpu::Device, queue: &wgpu::Queue, physical_width: u32, physical_height: u32) {
-        self.text_ctx.lock().unwrap().preheat(device, queue, physical_width, physical_height);
+    pub fn preheat_text(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        physical_width: u32,
+        physical_height: u32,
+    ) {
+        self.text_ctx
+            .lock()
+            .unwrap()
+            .preheat(device, queue, physical_width, physical_height);
     }
 
     /// Creates a material with no group 3 resources.
@@ -812,9 +857,8 @@ impl GpuContext {
     ) -> Result<Arc<Material>, String> {
         let source = crate::material::expand_includes(source)?;
 
-        let raw_resources: Vec<crate::material::MaterialResource<'_>> = resources
-            .map(|r| r.0.to_vec())
-            .unwrap_or_default();
+        let raw_resources: Vec<crate::material::MaterialResource<'_>> =
+            resources.map(|r| r.0.to_vec()).unwrap_or_default();
 
         let has_resources = !raw_resources.is_empty();
 
@@ -853,7 +897,16 @@ impl GpuContext {
                 layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0, layout, self.surface_format()),
+                material_pipeline_key(
+                    target,
+                    1,
+                    false,
+                    false,
+                    false,
+                    0,
+                    layout,
+                    self.surface_format(),
+                ),
                 Arc::new(pipeline),
             );
         }
@@ -914,7 +967,16 @@ impl GpuContext {
                 layout,
             )?;
             pipelines.insert(
-                material_pipeline_key(target, 1, false, false, false, 0, layout, self.surface_format()),
+                material_pipeline_key(
+                    target,
+                    1,
+                    false,
+                    false,
+                    false,
+                    0,
+                    layout,
+                    self.surface_format(),
+                ),
                 Arc::new(pipeline),
             );
         }
@@ -985,15 +1047,51 @@ impl ShapeInstance {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x4, shader_location: 1 },
-                wgpu::VertexAttribute { offset: 16, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
-                wgpu::VertexAttribute { offset: 32, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
-                wgpu::VertexAttribute { offset: 48, format: wgpu::VertexFormat::Float32x4, shader_location: 4 },
-                wgpu::VertexAttribute { offset: 64, format: wgpu::VertexFormat::Float32x4, shader_location: 5 },
-                wgpu::VertexAttribute { offset: 80, format: wgpu::VertexFormat::Float32x2, shader_location: 6 },
-                wgpu::VertexAttribute { offset: 88, format: wgpu::VertexFormat::Uint32, shader_location: 7 },
-                wgpu::VertexAttribute { offset: 92, format: wgpu::VertexFormat::Float32, shader_location: 8 },
-                wgpu::VertexAttribute { offset: 96, format: wgpu::VertexFormat::Uint32, shader_location: 9 },
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 64,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    offset: 80,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 6,
+                },
+                wgpu::VertexAttribute {
+                    offset: 88,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 7,
+                },
+                wgpu::VertexAttribute {
+                    offset: 92,
+                    format: wgpu::VertexFormat::Float32,
+                    shader_location: 8,
+                },
+                wgpu::VertexAttribute {
+                    offset: 96,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 9,
+                },
             ],
         }
     }
@@ -1002,8 +1100,12 @@ impl ShapeInstance {
 impl Vertex {
     pub fn new(x: f32, y: f32, color: crate::color::Color) -> Self {
         Self {
-            position: [x, y], uv: [0.0; 2], color: [color.r, color.g, color.b, color.a],
-            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            position: [x, y],
+            uv: [0.0; 2],
+            color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4],
+            sdf_type: 0,
+            sdf_feather: 0.0,
             sdf_extra: [0.0; 2],
             transform_index: 0,
         }
@@ -1011,8 +1113,12 @@ impl Vertex {
 
     pub fn new_uv(x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) -> Self {
         Self {
-            position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a],
-            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            position: [x, y],
+            uv: [u, v],
+            color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4],
+            sdf_type: 0,
+            sdf_feather: 0.0,
             sdf_extra: [0.0; 2],
             transform_index: 0,
         }
@@ -1021,12 +1127,20 @@ impl Vertex {
     /// 带 transform 索引的 UV 顶点（热路径，避免二次赋值）。
     #[inline]
     pub fn new_uv_xform(
-        x: f32, y: f32, u: f32, v: f32,
-        color: crate::color::Color, transform_index: u32,
+        x: f32,
+        y: f32,
+        u: f32,
+        v: f32,
+        color: crate::color::Color,
+        transform_index: u32,
     ) -> Self {
         Self {
-            position: [x, y], uv: [u, v], color: [color.r, color.g, color.b, color.a],
-            sdf_params: [0.0; 4], sdf_type: 0, sdf_feather: 0.0,
+            position: [x, y],
+            uv: [u, v],
+            color: [color.r, color.g, color.b, color.a],
+            sdf_params: [0.0; 4],
+            sdf_type: 0,
+            sdf_feather: 0.0,
             sdf_extra: [0.0; 2],
             transform_index,
         }
@@ -1045,14 +1159,46 @@ impl Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, format: wgpu::VertexFormat::Float32x2, shader_location: 0 },
-                wgpu::VertexAttribute { offset: S2, format: wgpu::VertexFormat::Float32x2, shader_location: 1 },
-                wgpu::VertexAttribute { offset: S2 * 2, format: wgpu::VertexFormat::Float32x4, shader_location: 2 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4, format: wgpu::VertexFormat::Float32x4, shader_location: 3 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2, format: wgpu::VertexFormat::Uint32, shader_location: 4 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 4, format: wgpu::VertexFormat::Float32, shader_location: 5 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8, format: wgpu::VertexFormat::Float32x2, shader_location: 6 },
-                wgpu::VertexAttribute { offset: S2 * 2 + S4 * 2 + 8 + S2, format: wgpu::VertexFormat::Uint32, shader_location: 7 },
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2 + S4,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2 + S4 * 2,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2 + S4 * 2 + 4,
+                    format: wgpu::VertexFormat::Float32,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2 + S4 * 2 + 8,
+                    format: wgpu::VertexFormat::Float32x2,
+                    shader_location: 6,
+                },
+                wgpu::VertexAttribute {
+                    offset: S2 * 2 + S4 * 2 + 8 + S2,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 7,
+                },
             ],
         }
     }

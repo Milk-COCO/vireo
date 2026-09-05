@@ -46,17 +46,20 @@ async fn main() {
         WindowDesc::new("Custom Material + Stencil", 640, 480),
         None::<fn()>,
     );
-    let mat = app.material_with_resources(WGSL, MaterialResources(&[
-        MaterialResource {
-            name: "u_pulse",
-            kind: MaterialResourceKind::Storage {
-                read_only: true,
-                size: std::mem::size_of::<PulseParams>() as u64,
-                type_name: "Pulse",
-                dynamic: false,
-            },
-        },
-    ])).expect("WGSL compile");
+    let mat = app
+        .material_with_resources(
+            WGSL,
+            MaterialResources(&[MaterialResource {
+                name: "u_pulse",
+                kind: MaterialResourceKind::Storage {
+                    read_only: true,
+                    size: std::mem::size_of::<PulseParams>() as u64,
+                    type_name: "Pulse",
+                    dynamic: false,
+                },
+            }]),
+        )
+        .expect("WGSL compile");
     let start = std::time::Instant::now();
 
     app.run(move |ctx| {
@@ -121,10 +124,9 @@ async fn main() {
             TextDef::default().font_size(15.0),
             TextOverride::from_color(WHITE),
         );
-        win.draw(
-            Color::new(0.05, 0.07, 0.11, 1.0),
-            &[&parent, &free, &title],
-        );
+        win.draw(Color::new(0.05, 0.07, 0.11, 1.0), &[&parent, &free, &title]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

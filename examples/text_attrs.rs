@@ -20,7 +20,6 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-
     let idx = app.window(
         WindowDesc::new("Text Attributes", 700, 600).dpi_override(Some(1.0)),
         None::<fn()>,
@@ -111,9 +110,7 @@ async fn main() {
             &mut batch.texts,
             "Italic style — 意大利斜体",
             Pos::new(30.0, y),
-            TextDef::default()
-                .with_style(Style::Italic)
-                .font_size(18.0),
+            TextDef::default().with_style(Style::Italic).font_size(18.0),
             TextOverride::from_color(PINK),
         );
         y += 28.0;
@@ -199,13 +196,47 @@ async fn main() {
         );
 
         // 背景参考线
-        draw_line(&mut batch, 0.0, 0.0, w, 0.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
-        draw_line(&mut batch, 0.0, 0.0, 0.0, 600.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
-        draw_line(&mut batch, 0.0, 600.0, w, 600.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
-        draw_line(&mut batch, w, 0.0, w, 600.0, 1.0, Some(Color::new(0.2, 0.2, 0.25, 1.0)));
+        draw_line(
+            &mut batch,
+            0.0,
+            0.0,
+            w,
+            0.0,
+            1.0,
+            Some(Color::new(0.2, 0.2, 0.25, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            0.0,
+            0.0,
+            0.0,
+            600.0,
+            1.0,
+            Some(Color::new(0.2, 0.2, 0.25, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            0.0,
+            600.0,
+            w,
+            600.0,
+            1.0,
+            Some(Color::new(0.2, 0.2, 0.25, 1.0)),
+        );
+        draw_line(
+            &mut batch,
+            w,
+            0.0,
+            w,
+            600.0,
+            1.0,
+            Some(Color::new(0.2, 0.2, 0.25, 1.0)),
+        );
 
         win.draw(Color::new(0.08, 0.1, 0.14, 1.0), &[&batch]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

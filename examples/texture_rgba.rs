@@ -6,7 +6,7 @@ fn checkerboard(w: u32, h: u32, cell: u32) -> Vec<u8> {
     let mut px = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {
-            let on = ((x / cell) + (y / cell)) % 2 == 0;
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
             let i = ((y * w + x) * 4) as usize;
             if on {
                 px[i] = 40;
@@ -40,7 +40,6 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
 
 #[vireo::main]
 async fn main() {
-
     let check = Texture::from_rgba(64, 64, &checkerboard(64, 64, 8), &app.gpu);
     let grad = Texture::from_rgba(128, 64, &gradient(128, 64), &app.gpu);
 
@@ -50,7 +49,10 @@ async fn main() {
         Err(_) => None,
     };
 
-    let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)),
+        None::<fn()>,
+    );
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -90,7 +92,13 @@ async fn main() {
         if let Some(ref tex) = embedded {
             batch.set_texture(Some(tex));
             let s = 0.12;
-            draw_rectangle(&mut batch, Pos::new(480.0, 60.0), tex.width as f32 * s, tex.height as f32 * s, Some(WHITE));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(480.0, 60.0),
+                tex.width as f32 * s,
+                tex.height as f32 * s,
+                Some(WHITE),
+            );
             draw_text(
                 &mut batch.texts,
                 "from_bytes logo.png",
@@ -110,5 +118,7 @@ async fn main() {
 
         win.draw(Color::new(0.07, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -122,5 +122,7 @@ async fn main() {
             &[&ui, &clip_batch, &no_clip_batch],
         );
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -17,19 +17,18 @@ pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight
 use crate::color::Color;
 use crate::render::Pos;
 
-
 mod cache;
-pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
 pub use cache::ShapeCacheStats;
+pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
 mod context;
 mod entry;
 mod hud;
 mod prepare;
 mod stencil;
-pub use entry::{TextEntry, TextEntryList};
-pub use hud::{HudLine, StableText, TextPart, split_hud, draw_hud_line};
 pub(crate) use context::ResolvedTextGlyph;
 pub use context::{Attrs, ColorMode, TextContext};
+pub use entry::{TextEntry, TextEntryList};
+pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
 
 /// 文本水平对齐
@@ -79,7 +78,13 @@ impl TextOverride {
 
     /// 仅覆盖 color 的快捷构造。
     pub fn from_color(c: Color) -> Self {
-        Self { color: Some(c), clip: None, transform: None, uv: None, bind_group: None }
+        Self {
+            color: Some(c),
+            clip: None,
+            transform: None,
+            uv: None,
+            bind_group: None,
+        }
     }
 
     pub fn color(mut self, c: Color) -> Self {
@@ -89,7 +94,12 @@ impl TextOverride {
 
     /// 裁切矩形，**逻辑像素**（prepare 时 × scale → 物理，与 `pos` 一致）。
     pub fn clip(mut self, l: i32, t: i32, r: i32, b: i32) -> Self {
-        self.clip = Some(Some(crate::glyphon::TextBounds { left: l, top: t, right: r, bottom: b }));
+        self.clip = Some(Some(crate::glyphon::TextBounds {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }));
         self
     }
 
@@ -201,7 +211,7 @@ impl TextDef {
 ///
 /// 请用访问器读取；不要手改字段或自行构造后塞回引擎（引擎只认入队时快照，
 /// `generation` 仅由 `set_texture` / `set_uv` 递增）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TextTextureState {
     pub(crate) generation: u64,
     pub(crate) view: Option<wgpu::TextureView>,
@@ -220,17 +230,6 @@ pub(crate) struct PreparedTextSegment {
     pub bind_group: Option<wgpu::BindGroup>,
 }
 
-impl Default for TextTextureState {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            view: None,
-            uv: crate::render::UvRect::default(),
-            bind_group: None,
-        }
-    }
-}
-
 impl TextTextureState {
     /// 状态代数：`set_texture` / `set_uv` 各递增一次；同 generation 的条目合并渲染。
     pub fn generation(&self) -> u64 {
@@ -247,7 +246,6 @@ impl TextTextureState {
         self.uv
     }
 }
-
 
 /// 往 `batch.texts` 添加一条文本（`transform_index = 0` = 单位阵，见 `DrawBatch::transform_table`）。
 /// `pos` 为逻辑世界坐标。随 batch 变换请用 `DrawBatch::text`。
@@ -336,8 +334,8 @@ macro_rules! draw_text_hud {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::hud::is_hud_digit_char;
+    use super::*;
 
     fn plain_entry(text: &str, def: TextDef) -> TextEntry {
         TextEntry::Normal {
@@ -365,14 +363,8 @@ mod tests {
 
     #[test]
     fn shape_key_ignores_position_and_color() {
-        let e1 = plain_entry(
-            "Hello",
-            TextDef::default(),
-        );
-        let e2 = plain_entry(
-            "Hello",
-            TextDef::default(),
-        );
+        let e1 = plain_entry("Hello", TextDef::default());
+        let e2 = plain_entry("Hello", TextDef::default());
         assert_eq!(shape_key_from_entry(&e1), shape_key_from_entry(&e2));
     }
 
@@ -387,7 +379,7 @@ mod tests {
 
     #[test]
     fn parts_culling_font_size_uses_largest_part() {
-let entry = TextEntry::Parts {
+        let entry = TextEntry::Parts {
             pos: Pos::new(0.0, 0.0),
             def: TextDef::default().font_size(16.0),
             parts: vec![
@@ -539,7 +531,12 @@ let entry = TextEntry::Parts {
         assert_eq!(part_kind_str(&parts[2]), ("normal", "  mode="));
         assert_eq!(part_kind_str(&parts[3]), ("dynamic", "Parts"));
         let mut list = TextEntryList::new();
-        line.draw(&mut list, Pos::new(0.0, 0.0), TextDef::default(), TextOverride::default());
+        line.draw(
+            &mut list,
+            Pos::new(0.0, 0.0),
+            TextDef::default(),
+            TextOverride::default(),
+        );
         assert_eq!(list.entries.len(), 1);
         let parts = match &list.entries[0] {
             TextEntry::Parts { parts, .. } => parts,
@@ -569,15 +566,18 @@ let entry = TextEntry::Parts {
         for (a, b) in via_macro.iter().zip(via_fn.iter()) {
             assert_eq!(part_kind_str(a), part_kind_str(b));
         }
-        assert!(via_macro.iter().any(|p| matches!(p, TextPart::Glyphs(_, _))));
+        assert!(
+            via_macro
+                .iter()
+                .any(|p| matches!(p, TextPart::Glyphs(_, _)))
+        );
     }
 
     // ---- StableText cache tests (require GPU) ----
 
     fn make_test_gpu() -> std::sync::Arc<crate::gpu::GpuContext> {
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-        );
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         std::sync::Arc::new(crate::gpu::GpuContext::new(&instance))
     }
 
@@ -621,27 +621,16 @@ let entry = TextEntry::Parts {
     #[ignore = "requires GPU; run with --ignored"]
     fn stable_text_direct_prepare_emits_instances() {
         let gpu = make_test_gpu();
-        let stable = gpu.make_stable_text(
-            "Stable 123 中文",
-            &TextDef::default().font_size(20.0),
-        );
+        let stable = gpu.make_stable_text("Stable 123 中文", &TextDef::default().font_size(20.0));
         let mut list = TextEntryList::new();
-        list.push_stable(
-            &stable,
-            Pos::new(0.0, 0.0),
-            TextOverride::default(),
-        );
+        list.push_stable(&stable, Pos::new(0.0, 0.0), TextOverride::default());
         let segments = list.prepare_texts(
             &gpu,
             640,
             480,
             1.0,
             &[],
-            &mut vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-            ],
+            &mut vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             None,
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
@@ -653,10 +642,8 @@ let entry = TextEntry::Parts {
     #[ignore = "requires GPU; run with --ignored"]
     fn stable_text_part_direct_prepare_emits_instances() {
         let gpu = make_test_gpu();
-        let stable = gpu.make_stable_text(
-            "Parts 中文 العربية",
-            &TextDef::default().font_size(20.0),
-        );
+        let stable =
+            gpu.make_stable_text("Parts 中文 العربية", &TextDef::default().font_size(20.0));
         let mut list = TextEntryList::new();
         list.push_parts(
             &[TextPart::normal("prefix "), TextPart::stable(&stable)],
@@ -709,8 +696,22 @@ let entry = TextEntry::Parts {
 
         // 加一个非 held 槽（用 draw_text 路径制造）
         let mut list = TextEntryList::new();
-        list.push("nothandled", Pos::new(0.0, 0.0), TextDef::default().font_size(20.0), TextOverride::default());
-        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new(), None, Color::new(1.0, 1.0, 1.0, 1.0));
+        list.push(
+            "nothandled",
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::default(),
+        );
+        let _ = list.prepare_texts(
+            &gpu,
+            1,
+            1,
+            1.0,
+            &[],
+            &mut Vec::new(),
+            None,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+        );
         assert_eq!(gpu.shape_cache_len(), 3);
         assert_eq!(gpu.shape_cache_held_count(), 1);
 
@@ -728,8 +729,22 @@ let entry = TextEntry::Parts {
         let gpu = make_test_gpu();
         // draw_text 走 cache
         let mut list = TextEntryList::new();
-        list.push("shared", Pos::new(0.0, 0.0), TextDef::default().font_size(20.0), TextOverride::default());
-        let _ = list.prepare_texts(&gpu, 1, 1, 1.0, &[], &mut Vec::new(), None, Color::new(1.0, 1.0, 1.0, 1.0));
+        list.push(
+            "shared",
+            Pos::new(0.0, 0.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::default(),
+        );
+        let _ = list.prepare_texts(
+            &gpu,
+            1,
+            1,
+            1.0,
+            &[],
+            &mut Vec::new(),
+            None,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+        );
         // 此时 cache 已有 "shared"，无 liveness
         assert_eq!(gpu.shape_cache_held_count(), 0);
         assert_eq!(gpu.shape_cache_len(), 1);

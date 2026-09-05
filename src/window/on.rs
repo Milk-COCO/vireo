@@ -2,9 +2,10 @@
 //!
 //! 统计来源：`src/input.rs::InputCallbacks` 19 个 Vec 字段，映射 `on_*` 方法名 → 字段名 1:1。
 //! - FnMut: on_key_down, on_key_up, on_mouse_down, on_mouse_up, on_scroll, on_touch,
-//!         on_modifiers_changed, on_ime, on_file_dropped, on_file_hovered,
-//!         on_moved, on_theme_changed, on_resized, on_thumb_button(windows)
+//!   on_modifiers_changed, on_ime, on_file_dropped, on_file_hovered,
+//!   on_moved, on_theme_changed, on_resized, on_thumb_button(windows)
 //! - FnOnce: on_cursor_entered, on_cursor_left, on_focus_gained, on_focus_lost, on_file_hover_cancelled
+//!
 //! 保持原方法签名（handle/泛型/callback 类型）与可见性不变，仅搬家为宏展开。
 
 #[macro_export]

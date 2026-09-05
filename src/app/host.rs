@@ -1,5 +1,5 @@
-use std::sync::{Arc, mpsc};
 use rustc_hash::FxHashMap;
+use std::sync::{Arc, mpsc};
 
 use winit::{
     application::ApplicationHandler,
@@ -9,12 +9,12 @@ use winit::{
 };
 
 use crate::App;
-use crate::app::{CreateWindowRequest, RunChannels, supervisor_loop, panic_payload_to_string};
+use crate::app::{CreateWindowRequest, RunChannels, panic_payload_to_string, supervisor_loop};
 use crate::dpi::{dim_to_winit_position, dim_to_winit_size, to_pixel_size};
 use crate::gpu::GpuContext;
 use crate::platform::windows::win_hwnd;
 use crate::render::Renderer;
-use crate::window::{FrameStyle, WinitEvent, WindowDesc};
+use crate::window::{FrameStyle, WindowDesc, WinitEvent};
 
 /// winit 事件循环宿主（Runner）：运行在 OS 主线程上，负责创建窗口和转发事件。
 pub struct Runner {
@@ -48,25 +48,36 @@ impl Runner {
 
     /// 完整关窗路径：close_hooks / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
     fn request_close(&mut self, handle: usize) {
-        if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64)) {
-            if let Some(h) = hook_opt.take() { h(); }
+        if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64))
+            && let Some(h) = hook_opt.take()
+        {
+            h();
         }
-        if let Some(&hwnd) = self.hwnds.get(handle) {
-            if hwnd != 0 {
-                crate::platform::windows::nc_remove(hwnd);
-                crate::platform::windows::drop_thumbar_icons(hwnd);
-                crate::platform::windows::drop_overlay_icons(hwnd);
-                crate::platform::windows::clear_thumbar_callback(hwnd);
-                crate::platform::windows::remove_window_icons_entry(hwnd);
-            }
+        if let Some(&hwnd) = self.hwnds.get(handle)
+            && hwnd != 0
+        {
+            crate::platform::windows::nc_remove(hwnd);
+            crate::platform::windows::drop_thumbar_icons(hwnd);
+            crate::platform::windows::drop_overlay_icons(hwnd);
+            crate::platform::windows::clear_thumbar_callback(hwnd);
+            crate::platform::windows::remove_window_icons_entry(hwnd);
         }
         self.send(WinitEvent::CloseRequested { handle });
     }
 
-    fn create_attrs(desc: &WindowDesc, default_icon: &Option<Icon>, os_scale: f64) -> WindowAttributes {
+    fn create_attrs(
+        desc: &WindowDesc,
+        default_icon: &Option<Icon>,
+        os_scale: f64,
+    ) -> WindowAttributes {
         let mut attrs = WindowAttributes::default()
             .with_title(&desc.title)
-            .with_inner_size(dim_to_winit_size(desc.size.0, desc.size.1, desc.dpi_override, os_scale))
+            .with_inner_size(dim_to_winit_size(
+                desc.size.0,
+                desc.size.1,
+                desc.dpi_override,
+                os_scale,
+            ))
             .with_resizable(desc.resizable)
             .with_maximized(desc.maximized)
             .with_visible(desc.visible && !desc.preparable)
@@ -79,13 +90,16 @@ impl Runner {
             .with_cursor(desc.cursor.clone())
             .with_enabled_buttons(desc.enabled_buttons);
         if let Some(d) = desc.min_size {
-            attrs = attrs.with_min_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
+            attrs =
+                attrs.with_min_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
         }
         if let Some(d) = desc.max_size {
-            attrs = attrs.with_max_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
+            attrs =
+                attrs.with_max_inner_size(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
         }
         if let Some(d) = desc.position {
-            attrs = attrs.with_position(dim_to_winit_position(d.0, d.1, desc.dpi_override, os_scale));
+            attrs =
+                attrs.with_position(dim_to_winit_position(d.0, d.1, desc.dpi_override, os_scale));
         }
         if let Some(ref fs) = desc.fullscreen {
             attrs = attrs.with_fullscreen(Some(fs.clone()));
@@ -98,7 +112,12 @@ impl Runner {
             attrs = attrs.with_theme(Some(theme));
         }
         if let Some(d) = desc.resize_increments {
-            attrs = attrs.with_resize_increments(dim_to_winit_size(d.0, d.1, desc.dpi_override, os_scale));
+            attrs = attrs.with_resize_increments(dim_to_winit_size(
+                d.0,
+                d.1,
+                desc.dpi_override,
+                os_scale,
+            ));
         }
         if let Some(ph) = desc.parent_window {
             attrs = unsafe { attrs.with_parent_window(Some(ph.0)) };
@@ -125,16 +144,15 @@ impl Runner {
         on_close: Option<Box<dyn FnOnce() + Send>>,
     ) {
         if self.window_callbacks.len() <= handle {
-            self.window_callbacks.resize_with(handle + 1, crate::input::InputCallbacks::default);
+            self.window_callbacks
+                .resize_with(handle + 1, crate::input::InputCallbacks::default);
         }
         let os_scale = event_loop
             .primary_monitor()
             .map(|m| m.scale_factor())
             .unwrap_or(1.0);
         let attrs = Self::create_attrs(desc, &self.default_icon, os_scale);
-        let window = Arc::new(
-            event_loop.create_window(attrs).unwrap(),
-        );
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
         if let Some(hwnd) = win_hwnd(&window) {
             let fs = desc.frame_style;
             if !fs.has_titlebar() && fs.has_border() {
@@ -177,9 +195,15 @@ impl Runner {
 
         let caps = surface.get_capabilities(&self.gpu.adapter);
         let alpha_mode = if desc.transparent {
-            if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+            if caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+            {
                 wgpu::CompositeAlphaMode::PostMultiplied
-            } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            } else if caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            {
                 wgpu::CompositeAlphaMode::PreMultiplied
             } else {
                 wgpu::CompositeAlphaMode::Auto
@@ -231,7 +255,9 @@ impl Runner {
 
 impl ApplicationHandler for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.created { return; }
+        if self.created {
+            return;
+        }
         self.created = true;
         self.resumed_fired = true;
         while let Ok(req) = self.create_rx.try_recv() {
@@ -263,30 +289,29 @@ impl ApplicationHandler for Runner {
         }
         while let Ok((handle, mut reg)) = self.cb_rx.try_recv() {
             if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                cbs.on_key_down.extend(reg.on_key_down.drain(..));
-                cbs.on_key_up.extend(reg.on_key_up.drain(..));
-                cbs.on_mouse_down.extend(reg.on_mouse_down.drain(..));
-                cbs.on_mouse_up.extend(reg.on_mouse_up.drain(..));
-                cbs.on_scroll.extend(reg.on_scroll.drain(..));
-                cbs.on_cursor_entered.extend(reg.on_cursor_entered.drain(..));
-                cbs.on_cursor_left.extend(reg.on_cursor_left.drain(..));
-                cbs.on_touch.extend(reg.on_touch.drain(..));
-                cbs.on_focus_gained.extend(reg.on_focus_gained.drain(..));
-                cbs.on_focus_lost.extend(reg.on_focus_lost.drain(..));
-                cbs.on_modifiers_changed.extend(reg.on_modifiers_changed.drain(..));
-                cbs.on_ime.extend(reg.on_ime.drain(..));
-                cbs.on_file_dropped.extend(reg.on_file_dropped.drain(..));
-                cbs.on_file_hovered.extend(reg.on_file_hovered.drain(..));
-                cbs.on_file_hover_cancelled.extend(reg.on_file_hover_cancelled.drain(..));
-                cbs.on_moved.extend(reg.on_moved.drain(..));
-                cbs.on_theme_changed.extend(reg.on_theme_changed.drain(..));
-                cbs.on_resized.extend(reg.on_resized.drain(..));
-                if (handle as usize) < self.hwnds.len() && self.hwnds[handle as usize] != 0 {
+                cbs.on_key_down.append(&mut reg.on_key_down);
+                cbs.on_key_up.append(&mut reg.on_key_up);
+                cbs.on_mouse_down.append(&mut reg.on_mouse_down);
+                cbs.on_mouse_up.append(&mut reg.on_mouse_up);
+                cbs.on_scroll.append(&mut reg.on_scroll);
+                cbs.on_cursor_entered.append(&mut reg.on_cursor_entered);
+                cbs.on_cursor_left.append(&mut reg.on_cursor_left);
+                cbs.on_touch.append(&mut reg.on_touch);
+                cbs.on_focus_gained.append(&mut reg.on_focus_gained);
+                cbs.on_focus_lost.append(&mut reg.on_focus_lost);
+                cbs.on_modifiers_changed
+                    .append(&mut reg.on_modifiers_changed);
+                cbs.on_ime.append(&mut reg.on_ime);
+                cbs.on_file_dropped.append(&mut reg.on_file_dropped);
+                cbs.on_file_hovered.append(&mut reg.on_file_hovered);
+                cbs.on_file_hover_cancelled
+                    .append(&mut reg.on_file_hover_cancelled);
+                cbs.on_moved.append(&mut reg.on_moved);
+                cbs.on_theme_changed.append(&mut reg.on_theme_changed);
+                cbs.on_resized.append(&mut reg.on_resized);
+                if handle < self.hwnds.len() && self.hwnds[handle] != 0 {
                     for cb in std::mem::take(&mut reg.on_thumb_button) {
-                        crate::platform::windows::set_thumbar_callback(
-                            self.hwnds[handle as usize],
-                            cb,
-                        );
+                        crate::platform::windows::set_thumbar_callback(self.hwnds[handle], cb);
                     }
                 }
             }
@@ -320,31 +345,57 @@ impl ApplicationHandler for Runner {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(handle) = self.handle_for(window_id) else { return; };
+        let Some(handle) = self.handle_for(window_id) else {
+            return;
+        };
         match event {
-            WindowEvent::CloseRequested => { self.request_close(handle); }
+            WindowEvent::CloseRequested => {
+                self.request_close(handle);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_resized { cb(size); }
+                    for cb in &mut cbs.on_resized {
+                        cb(size);
+                    }
                 }
-                self.send(WinitEvent::Resized { handle, width: size.width, height: size.height });
+                self.send(WinitEvent::Resized {
+                    handle,
+                    width: size.width,
+                    height: size.height,
+                });
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.send(WinitEvent::ScaleFactorChanged { handle, scale: scale_factor });
+                self.send(WinitEvent::ScaleFactorChanged {
+                    handle,
+                    scale: scale_factor,
+                });
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.send(WinitEvent::CursorMoved { handle, x: position.x, y: position.y });
+                self.send(WinitEvent::CursorMoved {
+                    handle,
+                    x: position.x,
+                    y: position.y,
+                });
             }
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 if let Some(mapped) = crate::input::map_key_event(&key_event) {
                     if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                         if mapped.state.is_pressed() {
-                            for cb in &mut cbs.on_key_down { cb(&mapped); }
+                            for cb in &mut cbs.on_key_down {
+                                cb(&mapped);
+                            }
                         } else {
-                            for cb in &mut cbs.on_key_up { cb(&mapped); }
+                            for cb in &mut cbs.on_key_up {
+                                cb(&mapped);
+                            }
                         }
                     }
-                    self.send(WinitEvent::KeyboardInput { handle, event: mapped });
+                    self.send(WinitEvent::KeyboardInput {
+                        handle,
+                        event: mapped,
+                    });
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -352,85 +403,122 @@ impl ApplicationHandler for Runner {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                     let evt = crate::input::MouseButtonEvent { button, state };
                     if pressed {
-                        for cb in &mut cbs.on_mouse_down { cb(&evt); }
+                        for cb in &mut cbs.on_mouse_down {
+                            cb(&evt);
+                        }
                     } else {
-                        for cb in &mut cbs.on_mouse_up { cb(&evt); }
+                        for cb in &mut cbs.on_mouse_up {
+                            cb(&evt);
+                        }
                     }
                 }
-                self.send(WinitEvent::MouseInput { handle, button, pressed });
+                self.send(WinitEvent::MouseInput {
+                    handle,
+                    button,
+                    pressed,
+                });
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = crate::input::map_scroll_delta(delta);
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                     let evt = crate::input::MouseScrollEvent { delta };
-                    for cb in &mut cbs.on_scroll { cb(&evt); }
+                    for cb in &mut cbs.on_scroll {
+                        cb(&evt);
+                    }
                 }
                 self.send(WinitEvent::MouseWheel { handle, delta });
             }
             WindowEvent::ModifiersChanged(state) => {
                 let modifiers = crate::input::map_modifiers(&state.state());
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_modifiers_changed { cb(modifiers); }
+                    for cb in &mut cbs.on_modifiers_changed {
+                        cb(modifiers);
+                    }
                 }
                 self.send(WinitEvent::ModifiersChanged { handle, modifiers });
             }
             WindowEvent::Focused(focused) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                     if focused {
-                        for c in cbs.on_focus_gained.drain(..) { c(); }
+                        for c in cbs.on_focus_gained.drain(..) {
+                            c();
+                        }
                     } else {
-                        for c in cbs.on_focus_lost.drain(..) { c(); }
+                        for c in cbs.on_focus_lost.drain(..) {
+                            c();
+                        }
                     }
                 }
                 self.send(WinitEvent::Focused { handle, focused });
             }
             WindowEvent::CursorEntered { .. } => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for c in cbs.on_cursor_entered.drain(..) { c(); }
+                    for c in cbs.on_cursor_entered.drain(..) {
+                        c();
+                    }
                 }
                 self.send(WinitEvent::CursorEntered { handle });
             }
             WindowEvent::CursorLeft { .. } => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for c in cbs.on_cursor_left.drain(..) { c(); }
+                    for c in cbs.on_cursor_left.drain(..) {
+                        c();
+                    }
                 }
                 self.send(WinitEvent::CursorLeft { handle });
             }
             WindowEvent::Touch(touch) => {
                 let mapped = crate::input::map_touch_event(&touch, 1.0);
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_touch { cb(&mapped); }
+                    for cb in &mut cbs.on_touch {
+                        cb(&mapped);
+                    }
                 }
-                self.send(WinitEvent::Touch { handle, event: mapped });
+                self.send(WinitEvent::Touch {
+                    handle,
+                    event: mapped,
+                });
             }
             WindowEvent::Ime(ime) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_ime { cb(&ime); }
+                    for cb in &mut cbs.on_ime {
+                        cb(&ime);
+                    }
                 }
             }
             WindowEvent::DroppedFile(path) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_file_dropped { cb(&path); }
+                    for cb in &mut cbs.on_file_dropped {
+                        cb(&path);
+                    }
                 }
             }
             WindowEvent::HoveredFile(path) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_file_hovered { cb(&path); }
+                    for cb in &mut cbs.on_file_hovered {
+                        cb(&path);
+                    }
                 }
             }
             WindowEvent::HoveredFileCancelled => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for c in cbs.on_file_hover_cancelled.drain(..) { c(); }
+                    for c in cbs.on_file_hover_cancelled.drain(..) {
+                        c();
+                    }
                 }
             }
             WindowEvent::Moved(position) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_moved { cb(position); }
+                    for cb in &mut cbs.on_moved {
+                        cb(position);
+                    }
                 }
             }
             WindowEvent::ThemeChanged(theme) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                    for cb in &mut cbs.on_theme_changed { cb(theme); }
+                    for cb in &mut cbs.on_theme_changed {
+                        cb(theme);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {}
@@ -474,25 +562,27 @@ pub(crate) fn run_blocking(
         })
         .expect("failed to spawn supervisor thread");
 
-    event_loop.run_app(&mut Runner {
-        event_tx: channels.event_tx,
-        cb_rx: channels.cb_rx,
-        exit_rx: channels.exit_rx,
-        frame_style_rx: channels.frame_style_rx,
-        aspect_ratio_rx: channels.aspect_ratio_rx,
-        nc_rx: channels.nc_rx,
-        create_rx: channels.create_rx,
-        close_rx: channels.close_rx,
-        hwnds: Vec::new(),
-        id_to_handle: FxHashMap::default(),
-        close_hooks: FxHashMap::default(),
-        window_callbacks: Vec::new(),
-        default_icon,
-        instance,
-        gpu: gpu_for_runner,
-        created: false,
-        resumed_fired: false,
-    }).unwrap();
+    event_loop
+        .run_app(&mut Runner {
+            event_tx: channels.event_tx,
+            cb_rx: channels.cb_rx,
+            exit_rx: channels.exit_rx,
+            frame_style_rx: channels.frame_style_rx,
+            aspect_ratio_rx: channels.aspect_ratio_rx,
+            nc_rx: channels.nc_rx,
+            create_rx: channels.create_rx,
+            close_rx: channels.close_rx,
+            hwnds: Vec::new(),
+            id_to_handle: FxHashMap::default(),
+            close_hooks: FxHashMap::default(),
+            window_callbacks: Vec::new(),
+            default_icon,
+            instance,
+            gpu: gpu_for_runner,
+            created: false,
+            resumed_fired: false,
+        })
+        .unwrap();
 
     match supervisor.join() {
         Ok(()) => Ok(()),

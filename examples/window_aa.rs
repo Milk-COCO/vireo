@@ -13,41 +13,100 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
     if sdf > 0.0 {
         batch.set_sdf_feather(Some(sdf));
     }
-    draw_rounded_rect(batch, Pos::new(160.0, 10.0), 140.0, 80.0, 20.0, Some(Color::new(0.15, 0.5, 0.3, 1.0)));
+    draw_rounded_rect(
+        batch,
+        Pos::new(160.0, 10.0),
+        140.0,
+        80.0,
+        20.0,
+        Some(Color::new(0.15, 0.5, 0.3, 1.0)),
+    );
     draw_triangle(batch, 80.0, 180.0, 30.0, 130.0, 150.0, 130.0, Some(YELLOW));
-    draw_triangle(batch, 170.0, 100.0, 210.0, 160.0, 130.0, 180.0, Some(ORANGE));
-    draw_circle(batch, Pos::new(260.0, 130.0), 50.0, Some(Color::new(0.2, 0.6, 1.0, 1.0)));
-    draw_line(batch, 10.0, 110.0, 310.0, 110.0, 3.0, Some(Color::new(0.4, 0.7, 0.4, 1.0)));
-    draw_line_chain(batch, &[(10.0, 30.0), (80.0, 20.0), (150.0, 50.0)], 3.0, Some(WHITE));
-    draw_text(&mut batch.texts, label, Pos::new(10.0, 215.0),
-              TextDef::default().font_size(14.0), TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)));
+    draw_triangle(
+        batch,
+        170.0,
+        100.0,
+        210.0,
+        160.0,
+        130.0,
+        180.0,
+        Some(ORANGE),
+    );
+    draw_circle(
+        batch,
+        Pos::new(260.0, 130.0),
+        50.0,
+        Some(Color::new(0.2, 0.6, 1.0, 1.0)),
+    );
+    draw_line(
+        batch,
+        10.0,
+        110.0,
+        310.0,
+        110.0,
+        3.0,
+        Some(Color::new(0.4, 0.7, 0.4, 1.0)),
+    );
+    draw_line_chain(
+        batch,
+        &[(10.0, 30.0), (80.0, 20.0), (150.0, 50.0)],
+        3.0,
+        Some(WHITE),
+    );
+    draw_text(
+        &mut batch.texts,
+        label,
+        Pos::new(10.0, 215.0),
+        TextDef::default().font_size(14.0),
+        TextOverride::from_color(Color::new(0.5, 0.5, 0.6, 1.0)),
+    );
 }
 
 #[vireo::main]
 async fn main() {
-
     let ssaa = app.window(
-        WindowDesc::new("SSAA x4", 320, 240)
-            .anti_aliasing(AntiAliasing::Ssaa { samples: 4, alpha_to_coverage: true }),
+        WindowDesc::new("SSAA x4", 320, 240).anti_aliasing(AntiAliasing::Ssaa {
+            samples: 4,
+            alpha_to_coverage: true,
+        }),
         None::<fn()>,
     );
     let msaa = app.window(
-        WindowDesc::new("MSAA x4", 320, 240)
-            .anti_aliasing(AntiAliasing::Msaa { samples: 4, alpha_to_coverage: true }),
+        WindowDesc::new("MSAA x4", 320, 240).anti_aliasing(AntiAliasing::Msaa {
+            samples: 4,
+            alpha_to_coverage: true,
+        }),
         None::<fn()>,
     );
     let sdf = app.window(
-        WindowDesc::new("SDF 1px", 320, 240)
-            .anti_aliasing(AntiAliasing::None),
+        WindowDesc::new("SDF 1px", 320, 240).anti_aliasing(AntiAliasing::None),
         None::<fn()>,
     );
     let raw = app.window(WindowDesc::new("No AA", 320, 240), None::<fn()>);
 
     app.run(move |ctx| {
-        if let Ok(w) = ctx.app().window_ref(&ssaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "SSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = ctx.app().window_ref(&msaa) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "MSAA x4"); w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = ctx.app().window_ref(&sdf) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 1.0, "SDF 1px");      w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
-        if let Ok(w) = ctx.app().window_ref(&raw) { let mut b = DrawBatch::new(); draw_shapes(&mut b, 0.0, "No AA");             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]); }
+        if let Ok(w) = ctx.app().window_ref(&ssaa) {
+            let mut b = DrawBatch::new();
+            draw_shapes(&mut b, 0.0, "SSAA x4");
+            w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
+        }
+        if let Ok(w) = ctx.app().window_ref(&msaa) {
+            let mut b = DrawBatch::new();
+            draw_shapes(&mut b, 0.0, "MSAA x4");
+            w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
+        }
+        if let Ok(w) = ctx.app().window_ref(&sdf) {
+            let mut b = DrawBatch::new();
+            draw_shapes(&mut b, 1.0, "SDF 1px");
+            w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
+        }
+        if let Ok(w) = ctx.app().window_ref(&raw) {
+            let mut b = DrawBatch::new();
+            draw_shapes(&mut b, 0.0, "No AA");
+            w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
+        }
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

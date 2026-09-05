@@ -1,12 +1,12 @@
 //! 形状绘制：`Shape` 描述几何，`draw_shape` / `draw_*` 追加顶点到 `DrawBatch`。
 
-mod emit_mesh;
 mod emit_geo;
+mod emit_mesh;
 #[cfg(test)]
 mod tests;
 
-use emit_mesh::*;
 pub(crate) use emit_geo::*;
+use emit_mesh::*;
 
 use crate::color::Color;
 use crate::render::{DrawBatch, Pos, Transform, UvRect};
@@ -18,17 +18,66 @@ use crate::render::{DrawBatch, Pos, Transform, UvRect};
 /// - `Line`/`Triangle`/`LineChain`/`Polygon` 的点本身就是纯几何，保留坐标
 #[derive(Clone, Debug)]
 pub enum Shape<'a> {
-    Rect { pos: Pos, w: f32, h: f32 },
-    RoundedRect { pos: Pos, w: f32, h: f32, radius: f32 },
-    Circle { pos: Pos, r: f32 },
-    Ellipse { pos: Pos, rx: f32, ry: f32 },
-    Line { x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32 },
-    LineChain { points: &'a [(f32, f32)], thickness: f32 },
-    Triangle { x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32 },
-    Polygon { points: &'a [(f32, f32)] },
-    Arc { pos: Pos, r: f32, start: f32, end: f32 },
-    RectOutline { pos: Pos, w: f32, h: f32, thickness: f32 },
-    CircleOutline { pos: Pos, r: f32, thickness: f32, segments: u32 },
+    Rect {
+        pos: Pos,
+        w: f32,
+        h: f32,
+    },
+    RoundedRect {
+        pos: Pos,
+        w: f32,
+        h: f32,
+        radius: f32,
+    },
+    Circle {
+        pos: Pos,
+        r: f32,
+    },
+    Ellipse {
+        pos: Pos,
+        rx: f32,
+        ry: f32,
+    },
+    Line {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        thickness: f32,
+    },
+    LineChain {
+        points: &'a [(f32, f32)],
+        thickness: f32,
+    },
+    Triangle {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+    },
+    Polygon {
+        points: &'a [(f32, f32)],
+    },
+    Arc {
+        pos: Pos,
+        r: f32,
+        start: f32,
+        end: f32,
+    },
+    RectOutline {
+        pos: Pos,
+        w: f32,
+        h: f32,
+        thickness: f32,
+    },
+    CircleOutline {
+        pos: Pos,
+        r: f32,
+        thickness: f32,
+        segments: u32,
+    },
     EllipseOutline {
         pos: Pos,
         rx: f32,
@@ -53,7 +102,10 @@ pub enum Shape<'a> {
         y3: f32,
         thickness: f32,
     },
-    PolygonOutline { points: &'a [(f32, f32)], thickness: f32 },
+    PolygonOutline {
+        points: &'a [(f32, f32)],
+        thickness: f32,
+    },
     ArcOutline {
         pos: Pos,
         r: f32,
@@ -188,37 +240,69 @@ impl<'a> Shape<'a> {
             Shape::Circle { r, .. } => emit_circle(batch, r, color),
             Shape::Ellipse { rx, ry, .. } => emit_ellipse(batch, rx, ry, color),
             Shape::Line {
-                x1, y1, x2, y2, thickness,
+                x1,
+                y1,
+                x2,
+                y2,
+                thickness,
             } => emit_line(batch, x1, y1, x2, y2, thickness, color),
             Shape::LineChain { points, thickness } => {
                 emit_line_chain(batch, points, thickness, color)
             }
             Shape::Triangle {
-                x1, y1, x2, y2, x3, y3,
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
             } => emit_triangle(batch, x1, y1, x2, y2, x3, y3, color),
             Shape::Polygon { points } => emit_polygon(batch, points, color),
             Shape::Arc { r, start, end, .. } => emit_arc(batch, r, start, end, color),
-            Shape::RectOutline { w, h, thickness, .. } => {
-                emit_rect_outline(batch, w, h, thickness, color)
-            }
-            Shape::CircleOutline { r, thickness, segments, .. } => {
-                emit_circle_outline(batch, r, thickness, color, segments)
-            }
-            Shape::EllipseOutline { rx, ry, thickness, segments, .. } => {
-                emit_ellipse_outline(batch, rx, ry, thickness, color, segments)
-            }
-            Shape::RoundedRectOutline { w, h, radius, thickness, corner_segments, .. } => {
-                emit_rounded_rect_outline(batch, w, h, radius, thickness, color, corner_segments)
-            }
+            Shape::RectOutline {
+                w, h, thickness, ..
+            } => emit_rect_outline(batch, w, h, thickness, color),
+            Shape::CircleOutline {
+                r,
+                thickness,
+                segments,
+                ..
+            } => emit_circle_outline(batch, r, thickness, color, segments),
+            Shape::EllipseOutline {
+                rx,
+                ry,
+                thickness,
+                segments,
+                ..
+            } => emit_ellipse_outline(batch, rx, ry, thickness, color, segments),
+            Shape::RoundedRectOutline {
+                w,
+                h,
+                radius,
+                thickness,
+                corner_segments,
+                ..
+            } => emit_rounded_rect_outline(batch, w, h, radius, thickness, color, corner_segments),
             Shape::TriangleOutline {
-                x1, y1, x2, y2, x3, y3, thickness,
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+                thickness,
             } => emit_triangle_outline(batch, x1, y1, x2, y2, x3, y3, thickness, color),
             Shape::PolygonOutline { points, thickness } => {
                 emit_polygon_outline(batch, points, thickness, color)
             }
-            Shape::ArcOutline { r, start, end, thickness, segments, .. } => {
-                emit_arc_outline(batch, r, start, end, thickness, color, segments)
-            }
+            Shape::ArcOutline {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => emit_arc_outline(batch, r, start, end, thickness, color, segments),
         }
     }
 }
@@ -320,12 +404,34 @@ pub fn draw_rectangle(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, color: Op
 
 /// 填充圆（shader SDF，完美边缘）。
 pub fn draw_circle(batch: &mut DrawBatch, pos: Pos, r: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Circle { pos, r }, ShapeOverride::from_color(color));
+    draw_shape(
+        batch,
+        &Shape::Circle { pos, r },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 绘制线段（shader SDF）。坐标即位置，不走 Pos 解耦。
-pub fn draw_line(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Line { x1, y1, x2, y2, thickness }, ShapeOverride::from_color(color));
+pub fn draw_line(
+    batch: &mut DrawBatch,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    thickness: f32,
+    color: Option<Color>,
+) {
+    draw_shape(
+        batch,
+        &Shape::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            thickness,
+        },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 填充椭圆（shader SDF）。
@@ -338,7 +444,14 @@ pub fn draw_ellipse(batch: &mut DrawBatch, pos: Pos, rx: f32, ry: f32, color: Op
 }
 
 /// 填充圆角矩形（shader SDF）。
-pub fn draw_rounded_rect(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, radius: f32, color: Option<Color>) {
+pub fn draw_rounded_rect(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    w: f32,
+    h: f32,
+    radius: f32,
+    color: Option<Color>,
+) {
     draw_shape(
         batch,
         &Shape::RoundedRect { pos, w, h, radius },
@@ -347,8 +460,28 @@ pub fn draw_rounded_rect(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, radius
 }
 
 /// 绘制三角形（shader SDF）。坐标即位置，不走 Pos 解耦。
-pub fn draw_triangle(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::Triangle { x1, y1, x2, y2, x3, y3 }, ShapeOverride::from_color(color));
+pub fn draw_triangle(
+    batch: &mut DrawBatch,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    color: Option<Color>,
+) {
+    draw_shape(
+        batch,
+        &Shape::Triangle {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+        },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 绘制多边形（shader SDF / geo 扇形三角化）。
@@ -358,75 +491,201 @@ pub fn draw_triangle(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, 
 /// 凹多边形会填充错误；geo 路径用 fan 三角化，凹多边形同样不正确。
 /// 自交多边形（bowtie）亦不支持。如需凹多边形，请自行用 stencil 或外部 mesh 工具。
 pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Option<Color>) {
-    draw_shape(batch, &Shape::Polygon { points }, ShapeOverride::from_color(color));
+    draw_shape(
+        batch,
+        &Shape::Polygon { points },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 绘制弧线/扇形（shader SDF）。
-pub fn draw_arc(batch: &mut DrawBatch, pos: Pos, r: f32, start_angle: f32, end_angle: f32, color: Option<Color>) {
+pub fn draw_arc(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    r: f32,
+    start_angle: f32,
+    end_angle: f32,
+    color: Option<Color>,
+) {
     draw_shape(
         batch,
-        &Shape::Arc { pos, r, start: start_angle, end: end_angle },
+        &Shape::Arc {
+            pos,
+            r,
+            start: start_angle,
+            end: end_angle,
+        },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边矩形
-pub fn draw_rect_outline(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, thickness: f32, color: Option<Color>) {
+pub fn draw_rect_outline(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    w: f32,
+    h: f32,
+    thickness: f32,
+    color: Option<Color>,
+) {
     draw_shape(
         batch,
-        &Shape::RectOutline { pos, w, h, thickness },
+        &Shape::RectOutline {
+            pos,
+            w,
+            h,
+            thickness,
+        },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边圆环
-pub fn draw_circle_outline(batch: &mut DrawBatch, pos: Pos, r: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_circle_outline(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    r: f32,
+    thickness: f32,
+    color: Option<Color>,
+    segments: u32,
+) {
     draw_shape(
         batch,
-        &Shape::CircleOutline { pos, r, thickness, segments },
+        &Shape::CircleOutline {
+            pos,
+            r,
+            thickness,
+            segments,
+        },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边椭圆环
-pub fn draw_ellipse_outline(batch: &mut DrawBatch, pos: Pos, rx: f32, ry: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_ellipse_outline(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    rx: f32,
+    ry: f32,
+    thickness: f32,
+    color: Option<Color>,
+    segments: u32,
+) {
     draw_shape(
         batch,
-        &Shape::EllipseOutline { pos, rx, ry, thickness, segments },
+        &Shape::EllipseOutline {
+            pos,
+            rx,
+            ry,
+            thickness,
+            segments,
+        },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 描边圆角矩形（line_chain SDF 沿中心线采样）。
-pub fn draw_rounded_rect_outline(batch: &mut DrawBatch, pos: Pos, w: f32, h: f32, radius: f32, thickness: f32, color: Option<Color>, corner_segments: u32) {
+pub fn draw_rounded_rect_outline(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    w: f32,
+    h: f32,
+    radius: f32,
+    thickness: f32,
+    color: Option<Color>,
+    corner_segments: u32,
+) {
     draw_shape(
         batch,
-        &Shape::RoundedRectOutline { pos, w, h, radius, thickness, corner_segments },
+        &Shape::RoundedRectOutline {
+            pos,
+            w,
+            h,
+            radius,
+            thickness,
+            corner_segments,
+        },
         ShapeOverride::from_color(color),
     );
 }
 
 /// 连续折线（shader SDF，segment 数据通过 storage buffer 传递）。
 /// 首尾坐标相近时自动闭合。
-pub fn draw_line_chain(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::LineChain { points, thickness }, ShapeOverride::from_color(color));
+pub fn draw_line_chain(
+    batch: &mut DrawBatch,
+    points: &[(f32, f32)],
+    thickness: f32,
+    color: Option<Color>,
+) {
+    draw_shape(
+        batch,
+        &Shape::LineChain { points, thickness },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 描边三角形
-pub fn draw_triangle_outline(batch: &mut DrawBatch, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, thickness: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::TriangleOutline { x1, y1, x2, y2, x3, y3, thickness }, ShapeOverride::from_color(color));
+pub fn draw_triangle_outline(
+    batch: &mut DrawBatch,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    thickness: f32,
+    color: Option<Color>,
+) {
+    draw_shape(
+        batch,
+        &Shape::TriangleOutline {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            thickness,
+        },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 描边多边形
-pub fn draw_polygon_outline(batch: &mut DrawBatch, points: &[(f32, f32)], thickness: f32, color: Option<Color>) {
-    draw_shape(batch, &Shape::PolygonOutline { points, thickness }, ShapeOverride::from_color(color));
+pub fn draw_polygon_outline(
+    batch: &mut DrawBatch,
+    points: &[(f32, f32)],
+    thickness: f32,
+    color: Option<Color>,
+) {
+    draw_shape(
+        batch,
+        &Shape::PolygonOutline { points, thickness },
+        ShapeOverride::from_color(color),
+    );
 }
 
 /// 描边扇形（弧线 + 圆心到两端的连线）
-pub fn draw_arc_outline(batch: &mut DrawBatch, pos: Pos, r: f32, start_angle: f32, end_angle: f32, thickness: f32, color: Option<Color>, segments: u32) {
+pub fn draw_arc_outline(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    r: f32,
+    start_angle: f32,
+    end_angle: f32,
+    thickness: f32,
+    color: Option<Color>,
+    segments: u32,
+) {
     draw_shape(
         batch,
-        &Shape::ArcOutline { pos, r, start: start_angle, end: end_angle, thickness, segments },
+        &Shape::ArcOutline {
+            pos,
+            r,
+            start: start_angle,
+            end: end_angle,
+            thickness,
+            segments,
+        },
         ShapeOverride::from_color(color),
     );
 }

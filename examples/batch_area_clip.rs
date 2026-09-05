@@ -54,13 +54,23 @@ async fn main() {
             let x = cx1 - 60.0 + (i % 6) as f32 * 24.0 + phase.sin() * 18.0;
             let y = cy1 - 60.0 + (i / 6) as f32 * 24.0 + phase.cos() * 14.0;
             let hue = (i as f32 / 30.0 + t * 0.05) % 1.0;
-            let c = Color::new(0.3 + hue * 0.6, 0.4 + (1.0 - hue) * 0.4, 0.5 + hue * 0.3, 0.95);
+            let c = Color::new(
+                0.3 + hue * 0.6,
+                0.4 + (1.0 - hue) * 0.4,
+                0.5 + hue * 0.3,
+                0.95,
+            );
             draw_rounded_rect(&mut p1, Pos::new(x, y), 18.0, 12.0, 3.0, Some(c));
         }
         // 大圆描边（画在 include 之外）
         let mut ring = DrawBatch::new();
         ring.set_sdf_feather(Some(1.0));
-        draw_circle(&mut ring, Pos::new(cx1, cy1), r, Some(Color::new(0.9, 0.9, 1.0, 0.7)));
+        draw_circle(
+            &mut ring,
+            Pos::new(cx1, cy1),
+            r,
+            Some(Color::new(0.9, 0.9, 1.0, 0.7)),
+        );
         p1.push_child(ring);
 
         // ===== Panel 2: exclude =====
@@ -78,14 +88,30 @@ async fn main() {
             let x = cx2 - 50.0 + (i % 8) as f32 * 14.0 + phase.sin() * 8.0;
             let y = cy2 - 40.0 + (i / 8) as f32 * 16.0 + phase.cos() * 6.0;
             let hue = (i as f32 / 40.0 + t * 0.04) % 1.0;
-            let c = Color::new(0.5 + hue * 0.4, 0.3 + hue * 0.5, 0.5 + (1.0 - hue) * 0.4, 0.95);
+            let c = Color::new(
+                0.5 + hue * 0.4,
+                0.3 + hue * 0.5,
+                0.5 + (1.0 - hue) * 0.4,
+                0.95,
+            );
             draw_circle(&mut p2, Pos::new(x, y), 6.0, Some(c));
         }
         // 描边矩形 + 挖空小圆
         let mut ring = DrawBatch::new();
         ring.set_sdf_feather(Some(1.0));
-        draw_rectangle(&mut ring, Pos::new(cx2 - rw * 0.5, cy2 - rh * 0.5), rw, rh, Some(Color::new(0.9, 0.9, 1.0, 0.5)));
-        draw_circle(&mut ring, Pos::new(cx2 + 16.0, cy2 - 8.0), er, Some(Color::new(0.9, 0.5, 0.5, 0.6)));
+        draw_rectangle(
+            &mut ring,
+            Pos::new(cx2 - rw * 0.5, cy2 - rh * 0.5),
+            rw,
+            rh,
+            Some(Color::new(0.9, 0.9, 1.0, 0.5)),
+        );
+        draw_circle(
+            &mut ring,
+            Pos::new(cx2 + 16.0, cy2 - 8.0),
+            er,
+            Some(Color::new(0.9, 0.5, 0.5, 0.6)),
+        );
         p2.push_child(ring);
 
         // ===== Panel 3: ∩ =====
@@ -101,14 +127,29 @@ async fn main() {
             let x = cx3 - 70.0 + (i % 6) as f32 * 28.0 + phase.sin() * 14.0;
             let y = cy3 - 50.0 + (i / 6) as f32 * 22.0 + phase.cos() * 10.0;
             let hue = (i as f32 / 30.0 + t * 0.06) % 1.0;
-            let c = Color::new(0.4 + hue * 0.5, 0.6 + (1.0 - hue) * 0.3, 0.5 + hue * 0.4, 0.95);
+            let c = Color::new(
+                0.4 + hue * 0.5,
+                0.6 + (1.0 - hue) * 0.3,
+                0.5 + hue * 0.4,
+                0.95,
+            );
             draw_rounded_rect(&mut p3, Pos::new(x, y), 18.0, 14.0, 3.0, Some(c));
         }
         // 两圆描边
         let mut ring = DrawBatch::new();
         ring.set_sdf_feather(Some(1.0));
-        draw_circle(&mut ring, Pos::new(cx3 - off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
-        draw_circle(&mut ring, Pos::new(cx3 + off3, cy3), r, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(
+            &mut ring,
+            Pos::new(cx3 - off3, cy3),
+            r,
+            Some(Color::new(0.9, 0.9, 1.0, 0.6)),
+        );
+        draw_circle(
+            &mut ring,
+            Pos::new(cx3 + off3, cy3),
+            r,
+            Some(Color::new(0.9, 0.9, 1.0, 0.6)),
+        );
         p3.push_child(ring);
 
         // ===== Panel 4: ∪ =====
@@ -124,14 +165,29 @@ async fn main() {
             let x = cx4 - 70.0 + (i % 7) as f32 * 22.0 + phase.sin() * 12.0;
             let y = cy4 - 50.0 + (i / 7) as f32 * 20.0 + phase.cos() * 8.0;
             let hue = (i as f32 / 32.0 + t * 0.05) % 1.0;
-            let c = Color::new(0.5 + hue * 0.4, 0.4 + hue * 0.4, 0.5 + (1.0 - hue) * 0.5, 0.95);
+            let c = Color::new(
+                0.5 + hue * 0.4,
+                0.4 + hue * 0.4,
+                0.5 + (1.0 - hue) * 0.5,
+                0.95,
+            );
             draw_circle(&mut p4, Pos::new(x, y), 7.0, Some(c));
         }
         // 描边
         let mut ring = DrawBatch::new();
         ring.set_sdf_feather(Some(1.0));
-        draw_circle(&mut ring, Pos::new(cx4 - off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
-        draw_circle(&mut ring, Pos::new(cx4 + off4, cy4), r * 0.85, Some(Color::new(0.9, 0.9, 1.0, 0.6)));
+        draw_circle(
+            &mut ring,
+            Pos::new(cx4 - off4, cy4),
+            r * 0.85,
+            Some(Color::new(0.9, 0.9, 1.0, 0.6)),
+        );
+        draw_circle(
+            &mut ring,
+            Pos::new(cx4 + off4, cy4),
+            r * 0.85,
+            Some(Color::new(0.9, 0.9, 1.0, 0.6)),
+        );
         p4.push_child(ring);
 
         win.draw(
@@ -139,7 +195,9 @@ async fn main() {
             &[&ui, &p1, &p2, &p3, &p4],
         );
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 fn panel_frame(cx: f32, cy: f32, w: f32, h: f32, title: &str) -> DrawBatch {

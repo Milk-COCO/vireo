@@ -35,8 +35,7 @@ fn scene_text_dynamic(b: &mut DrawBatch, frame: u32) {
             &mut b.texts,
             &msg,
             Pos::new(x, y),
-            TextDef::default()
-                .font_size(sz),
+            TextDef::default().font_size(sz),
             TextOverride::from_color(WHITE),
         );
     }
@@ -44,9 +43,7 @@ fn scene_text_dynamic(b: &mut DrawBatch, frame: u32) {
 
 /// 固定字符串集合，跨帧内容不变 → shape 缓存应几乎全命中。
 fn scene_text_static(b: &mut DrawBatch) {
-    const LABELS: &[&str] = &[
-        "ABC", "你好", "Test 测试", "Vireo", "wgpu 🎨", "SDF #",
-    ];
+    const LABELS: &[&str] = &["ABC", "你好", "Test 测试", "Vireo", "wgpu 🎨", "SDF #"];
     for i in 0..200 {
         let x = (i % 20) as f32 * 44.0 + 5.0;
         let y = (i / 20) as f32 * 28.0 + 5.0;
@@ -56,8 +53,7 @@ fn scene_text_static(b: &mut DrawBatch) {
             &mut b.texts,
             msg,
             Pos::new(x, y),
-            TextDef::default()
-                .font_size(sz),
+            TextDef::default().font_size(sz),
             TextOverride::from_color(WHITE),
         );
     }
@@ -72,7 +68,8 @@ async fn main() {
     let mode = std::env::var("VIREO_PROFILE_MODE").unwrap_or_else(|_| "static".into());
     let dynamic = mode.eq_ignore_ascii_case("dynamic");
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 

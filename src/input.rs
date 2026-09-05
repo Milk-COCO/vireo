@@ -129,6 +129,7 @@ pub struct TouchEvent {
 /// 输入事件回调集合（运行在 winit 线程，无需 +Send 约束）。
 /// `unsafe impl Send`：`App.callbacks` 在移到渲染线程前已被抽空，
 /// 不包含实际非 Send 数据。
+#[derive(Default)]
 pub struct InputCallbacks {
     pub on_key_down: Vec<Box<dyn FnMut(&KeyEvent)>>,
     pub on_key_up: Vec<Box<dyn FnMut(&KeyEvent)>>,
@@ -163,32 +164,6 @@ pub struct InputCallbacks {
 
 // SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。
 unsafe impl Send for InputCallbacks {}
-
-impl Default for InputCallbacks {
-    fn default() -> Self {
-        Self {
-            on_key_down: Vec::new(),
-            on_key_up: Vec::new(),
-            on_mouse_down: Vec::new(),
-            on_mouse_up: Vec::new(),
-            on_scroll: Vec::new(),
-            on_cursor_entered: Vec::new(),
-            on_cursor_left: Vec::new(),
-            on_touch: Vec::new(),
-            on_focus_gained: Vec::new(),
-            on_focus_lost: Vec::new(),
-            on_modifiers_changed: Vec::new(),
-            on_ime: Vec::new(),
-            on_file_dropped: Vec::new(),
-            on_file_hovered: Vec::new(),
-            on_file_hover_cancelled: Vec::new(),
-            on_moved: Vec::new(),
-            on_theme_changed: Vec::new(),
-            on_resized: Vec::new(),
-            on_thumb_button: Vec::new(),
-        }
-    }
-}
 
 // ------ InputState ------
 
@@ -252,12 +227,10 @@ pub(crate) fn map_key_event(winit_event: &winit::event::KeyEvent) -> Option<KeyE
 pub(crate) fn map_scroll_delta(delta: winit::event::MouseScrollDelta) -> ScrollDelta {
     match delta {
         winit::event::MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Line { x, y },
-        winit::event::MouseScrollDelta::PixelDelta(pos) => {
-            ScrollDelta::Pixel {
-                x: pos.x as f32,
-                y: pos.y as f32,
-            }
-        }
+        winit::event::MouseScrollDelta::PixelDelta(pos) => ScrollDelta::Pixel {
+            x: pos.x as f32,
+            y: pos.y as f32,
+        },
     }
 }
 
@@ -278,10 +251,7 @@ pub(crate) fn map_modifiers(mods: &winit::keyboard::ModifiersState) -> Modifiers
     m
 }
 
-pub(crate) fn map_touch_event(
-    touch: &winit::event::Touch,
-    scale_factor: f64,
-) -> TouchEvent {
+pub(crate) fn map_touch_event(touch: &winit::event::Touch, scale_factor: f64) -> TouchEvent {
     let phase = match touch.phase {
         winit::event::TouchPhase::Started => TouchPhase::Started,
         winit::event::TouchPhase::Moved => TouchPhase::Moved,

@@ -13,9 +13,19 @@ fn time_ms<T>(f: impl FnOnce() -> T) -> (T, f64) {
 }
 
 fn bench(name: &str, iterations: u32, mut f: impl FnMut()) {
-    for _ in 0..(iterations / 10).min(100) { f(); }
-    let (_, total) = time_ms(|| { for _ in 0..iterations { f(); } });
-    println!("  {:<40} {:>8.3} µs/op", name, total * 1000.0 / iterations as f64);
+    for _ in 0..(iterations / 10).min(100) {
+        f();
+    }
+    let (_, total) = time_ms(|| {
+        for _ in 0..iterations {
+            f();
+        }
+    });
+    println!(
+        "  {:<40} {:>8.3} µs/op",
+        name,
+        total * 1000.0 / iterations as f64
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -51,7 +61,14 @@ fn bench_shape_generation() {
     bench("SDF polygon (6 edges)", 10_000, || {
         let mut b = DrawBatch::new();
         b.set_sdf_feather(Some(1.0));
-        let pts = [(0.,0.),(10.,0.),(14.,5.),(10.,10.),(0.,10.),(-4.,5.)];
+        let pts = [
+            (0., 0.),
+            (10., 0.),
+            (14., 5.),
+            (10., 10.),
+            (0., 10.),
+            (-4., 5.),
+        ];
         draw_polygon(&mut b, &pts, Some(RED));
     });
 
@@ -158,8 +175,11 @@ fn bench_transform_dedup() {
         let mut b = DrawBatch::new();
         b.set_sdf_feather(Some(1.0));
         for i in 0..100 {
-            if i % 2 == 0 { b.set_position(10.0, 20.0); }
-            else { b.set_position(i as f32, i as f32); }
+            if i % 2 == 0 {
+                b.set_position(10.0, 20.0);
+            } else {
+                b.set_position(i as f32, i as f32);
+            }
             draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
         }
     });
@@ -171,17 +191,25 @@ fn bench_text_entries() {
 
     bench("draw_text single", 50_000, || {
         let mut list = vireo::text::TextEntryList::new();
-        draw_text(&mut list, "Hello Vireo!", Pos::new(10.0, 20.0),
+        draw_text(
+            &mut list,
+            "Hello Vireo!",
+            Pos::new(10.0, 20.0),
             TextDef::default().font_size(16.0),
-            TextOverride::default().color(WHITE));
+            TextOverride::default().color(WHITE),
+        );
     });
 
     bench("draw_text x100", 1_000, || {
         let mut list = vireo::text::TextEntryList::new();
         for i in 0..100 {
-            draw_text(&mut list, &format!("Line {}", i), Pos::new(10.0, i as f32 * 20.0),
+            draw_text(
+                &mut list,
+                &format!("Line {}", i),
+                Pos::new(10.0, i as f32 * 20.0),
                 TextDef::default().font_size(14.0),
-                TextOverride::default().color(WHITE));
+                TextOverride::default().color(WHITE),
+            );
         }
     });
 }
@@ -206,8 +234,10 @@ fn bench_typical_frames() {
             }
         }
     });
-    println!("  SDF 2000 shapes:           {:.3} ms  ({} instances)",
-        t1, 2000);
+    println!(
+        "  SDF 2000 shapes:           {:.3} ms  ({} instances)",
+        t1, 2000
+    );
 
     // Geo 500 shapes
     let (_, t2) = time_ms(|| {
@@ -227,21 +257,27 @@ fn bench_typical_frames() {
         for i in 0..1000 {
             b.set_position((i % 40) as f32 * 20., (i / 40) as f32 * 20.);
             b.set_deg((i as f32) * 7.0);
-            b.set_scale(1.0 + (i%3) as f32 * 0.3, 1.0);
+            b.set_scale(1.0 + (i % 3) as f32 * 0.3, 1.0);
             draw_rounded_rect(&mut b, Pos::new(-5., -5.), 5., 5., 2., Some(WHITE));
             b.clear_transform();
         }
     });
-    println!("  1000 unique transforms:    {:.3} ms  ({} dedup entries)", t3, 1000);
+    println!(
+        "  1000 unique transforms:    {:.3} ms  ({} dedup entries)",
+        t3, 1000
+    );
 
     // 200 text entries
     let (_, t4) = time_ms(|| {
         let mut list = vireo::text::TextEntryList::new();
         for i in 0..200 {
-            draw_text(&mut list, &format!("Text {i}"),
-                Pos::new((i%20) as f32 * 40., (i/20) as f32 * 25.),
+            draw_text(
+                &mut list,
+                &format!("Text {i}"),
+                Pos::new((i % 20) as f32 * 40., (i / 20) as f32 * 25.),
                 TextDef::default().font_size(14.0),
-                TextOverride::default().color(WHITE));
+                TextOverride::default().color(WHITE),
+            );
         }
     });
     println!("  200 text entries:          {:.3} ms", t4);
@@ -255,8 +291,14 @@ fn bench_outline_and_chain() {
         let mut b = DrawBatch::new();
         b.set_sdf_feather(Some(1.0));
         let pts = [
-            (0., 0.), (10., 2.), (18., 8.), (20., 16.),
-            (14., 22.), (6., 20.), (0., 12.), (0., 0.),
+            (0., 0.),
+            (10., 2.),
+            (18., 8.),
+            (20., 16.),
+            (14., 22.),
+            (6., 20.),
+            (0., 12.),
+            (0., 0.),
         ];
         draw_line_chain(&mut b, &pts, 2.0, Some(RED));
     });
@@ -265,8 +307,14 @@ fn bench_outline_and_chain() {
         let mut b = DrawBatch::new();
         b.clear_sdf_feather();
         let pts = [
-            (0., 0.), (10., 2.), (18., 8.), (20., 16.),
-            (14., 22.), (6., 20.), (0., 12.), (0., 0.),
+            (0., 0.),
+            (10., 2.),
+            (18., 8.),
+            (20., 16.),
+            (14., 22.),
+            (6., 20.),
+            (0., 12.),
+            (0., 0.),
         ];
         draw_line_chain(&mut b, &pts, 2.0, Some(RED));
     });
@@ -275,9 +323,9 @@ fn bench_outline_and_chain() {
         let mut b = DrawBatch::new();
         b.set_sdf_feather(Some(1.0));
         let mut pts = [(0f32, 0f32); 12];
-        for j in 0..12 {
+        for (j, slot) in pts.iter_mut().enumerate() {
             let a = std::f32::consts::TAU * j as f32 / 12.0;
-            pts[j] = (10.0 * a.cos(), 10.0 * a.sin());
+            *slot = (10.0 * a.cos(), 10.0 * a.sin());
         }
         draw_polygon(&mut b, &pts, Some(BLUE));
     });
@@ -291,7 +339,16 @@ fn bench_outline_and_chain() {
     bench("SDF rounded_rect_outline", 5_000, || {
         let mut b = DrawBatch::new();
         b.set_sdf_feather(Some(1.0));
-        draw_rounded_rect_outline(&mut b, Pos::new(0.0, 0.0), 30.0, 20.0, 6.0, 2.0, Some(WHITE), 8);
+        draw_rounded_rect_outline(
+            &mut b,
+            Pos::new(0.0, 0.0),
+            30.0,
+            20.0,
+            6.0,
+            2.0,
+            Some(WHITE),
+            8,
+        );
     });
 
     bench("instance polygon repeated x1000", 500, || {
@@ -359,7 +416,12 @@ fn bench_merge_path_cpu() {
                     }
                 }
             }
-            let max_idx = b.vertices.iter().map(|v| v.transform_index).max().unwrap_or(0);
+            let max_idx = b
+                .vertices
+                .iter()
+                .map(|v| v.transform_index)
+                .max()
+                .unwrap_or(0);
             xform_base += max_idx + 1;
             poly_base += b.polygon_edges.len() as f32 / 4.0;
         }

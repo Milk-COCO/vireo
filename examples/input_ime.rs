@@ -27,7 +27,10 @@ struct ImeState {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("IME Input + Drag Drop", 800, 560), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("IME Input + Drag Drop", 800, 560),
+        None::<fn()>,
+    );
 
     let st = Arc::new(Mutex::new(ImeState {
         committed: String::new(),
@@ -224,5 +227,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&ui, &b]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

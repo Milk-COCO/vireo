@@ -64,5 +64,7 @@ async fn main() {
 
         win.draw(BLACK, &[&present]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

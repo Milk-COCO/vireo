@@ -19,24 +19,59 @@ async fn main() {
         // 所有文字和矩形在同一 y 行(80)，x 逐渐右移
         // Layer 1: 红色矩形 + 白色文字（右半被 Layer 2 矩形遮盖）
         let mut b1 = DrawBatch::new();
-        draw_rectangle(&mut b1, Pos::new(20.0, 60.0), 140.0, 50.0, Some(Color::new(0.8, 0.15, 0.15, 0.9)));
-        draw_text(&mut b1.texts, "Layer 1 — RED", Pos::new(30.0, 68.0),
-                  TextDef::default().font_size(24.0), TextOverride::from_color(WHITE));
+        draw_rectangle(
+            &mut b1,
+            Pos::new(20.0, 60.0),
+            140.0,
+            50.0,
+            Some(Color::new(0.8, 0.15, 0.15, 0.9)),
+        );
+        draw_text(
+            &mut b1.texts,
+            "Layer 1 — RED",
+            Pos::new(30.0, 68.0),
+            TextDef::default().font_size(24.0),
+            TextOverride::from_color(WHITE),
+        );
 
         // Layer 2: 绿色矩形 + 白色文字（矩形盖 Layer 1 文字右半，自身文字右半被 Layer 3 盖）
         let mut b2 = DrawBatch::new();
-        draw_rectangle(&mut b2, Pos::new(130.0, 60.0), 170.0, 50.0, Some(Color::new(0.15, 0.7, 0.15, 0.95)));
-        draw_text(&mut b2.texts, "Layer 2 — GREEN", Pos::new(140.0, 68.0),
-                  TextDef::default().font_size(24.0), TextOverride::from_color(WHITE));
+        draw_rectangle(
+            &mut b2,
+            Pos::new(130.0, 60.0),
+            170.0,
+            50.0,
+            Some(Color::new(0.15, 0.7, 0.15, 0.95)),
+        );
+        draw_text(
+            &mut b2.texts,
+            "Layer 2 — GREEN",
+            Pos::new(140.0, 68.0),
+            TextDef::default().font_size(24.0),
+            TextOverride::from_color(WHITE),
+        );
 
         // Layer 3: 蓝色矩形 + 白色文字（矩形盖 Layer 2 文字右半）
         let mut b3 = DrawBatch::new();
-        draw_rectangle(&mut b3, Pos::new(270.0, 60.0), 180.0, 50.0, Some(Color::new(0.15, 0.25, 0.8, 0.95)));
-        draw_text(&mut b3.texts, "Layer 3 — BLUE", Pos::new(280.0, 68.0),
-                  TextDef::default().font_size(24.0), TextOverride::from_color(WHITE));
+        draw_rectangle(
+            &mut b3,
+            Pos::new(270.0, 60.0),
+            180.0,
+            50.0,
+            Some(Color::new(0.15, 0.25, 0.8, 0.95)),
+        );
+        draw_text(
+            &mut b3.texts,
+            "Layer 3 — BLUE",
+            Pos::new(280.0, 68.0),
+            TextDef::default().font_size(24.0),
+            TextOverride::from_color(WHITE),
+        );
 
         win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b1, &b2, &b3]);
 
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

@@ -52,12 +52,11 @@ async fn main() {
         let left = text_clip_panel(220.0, 260.0, t, true, long);
         let right = text_clip_panel(680.0, 260.0, t + 0.8, false, long);
 
-        win.draw(
-            Color::new(0.05, 0.06, 0.09, 1.0),
-            &[&ui, &left, &right],
-        );
+        win.draw(Color::new(0.05, 0.06, 0.09, 1.0), &[&ui, &left, &right]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 fn text_clip_panel(cx: f32, cy: f32, t: f32, clip: bool, long: &str) -> DrawBatch {

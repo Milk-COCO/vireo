@@ -146,12 +146,12 @@ async fn main() {
                     &mut batch,
                     &Shape::Rect {
                         pos: Pos::new(160.0, 360.0),
-                        w: w,
-                        h: h,
+                        w,
+                        h,
                     },
                     ShapeOverride::new()
                         .color(WHITE)
-                        .texture(&*tex)
+                        .texture(&tex)
                         .uv_rect(0.0, 0.0, 0.5, 0.5),
                 );
                 label(&mut batch, "opts.uv 半区", 160.0, 360.0 + h + 4.0);
@@ -170,11 +170,23 @@ async fn main() {
                 label(&mut batch, "clear_texture()", 290.0, 430.0);
 
                 // batch 仍有贴图
-                draw_rectangle(&mut batch, Pos::new(400.0, 360.0), w * 0.7, h * 0.7, Some(WHITE));
+                draw_rectangle(
+                    &mut batch,
+                    Pos::new(400.0, 360.0),
+                    w * 0.7,
+                    h * 0.7,
+                    Some(WHITE),
+                );
                 label(&mut batch, "仍 set_texture", 400.0, 360.0 + h * 0.7 + 4.0);
 
                 batch.set_texture(None);
-                draw_rectangle(&mut batch, Pos::new(520.0, 360.0), 70.0, 50.0, Some(SKYBLUE));
+                draw_rectangle(
+                    &mut batch,
+                    Pos::new(520.0, 360.0),
+                    70.0,
+                    50.0,
+                    Some(SKYBLUE),
+                );
                 label(&mut batch, "set_texture(None)", 500.0, 430.0);
             }
         } else {
@@ -209,5 +221,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

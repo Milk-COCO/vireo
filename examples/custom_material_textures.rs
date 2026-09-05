@@ -37,7 +37,7 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
     let mut v = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            let on = ((x / cell) + (y / cell)) % 2 == 0;
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
             let c = if on { c0 } else { c1 };
             v.extend_from_slice(&[c[0], c[1], c[2], 255]);
         }
@@ -52,31 +52,36 @@ async fn main() {
         None::<fn()>,
     );
 
-    let mat = app.material_with_resources(WGSL, MaterialResources(&[
-        MaterialResource {
-            name: "u_mix",
-            kind: MaterialResourceKind::Storage {
-                read_only: true,
-                size: std::mem::size_of::<MixParams>() as u64,
-                type_name: "Mix",
-                dynamic: false,
-            },
-        },
-        MaterialResource {
-            name: "tex0",
-            kind: MaterialResourceKind::Texture {
-                view: TexKind::D2(TexSample::Float),
-                sampler: SampKind::Filtering,
-            },
-        },
-        MaterialResource {
-            name: "tex1",
-            kind: MaterialResourceKind::Texture {
-                view: TexKind::D2(TexSample::Float),
-                sampler: SampKind::Filtering,
-            },
-        },
-    ])).expect("WGSL compile");
+    let mat = app
+        .material_with_resources(
+            WGSL,
+            MaterialResources(&[
+                MaterialResource {
+                    name: "u_mix",
+                    kind: MaterialResourceKind::Storage {
+                        read_only: true,
+                        size: std::mem::size_of::<MixParams>() as u64,
+                        type_name: "Mix",
+                        dynamic: false,
+                    },
+                },
+                MaterialResource {
+                    name: "tex0",
+                    kind: MaterialResourceKind::Texture {
+                        view: TexKind::D2(TexSample::Float),
+                        sampler: SampKind::Filtering,
+                    },
+                },
+                MaterialResource {
+                    name: "tex1",
+                    kind: MaterialResourceKind::Texture {
+                        view: TexKind::D2(TexSample::Float),
+                        sampler: SampKind::Filtering,
+                    },
+                },
+            ]),
+        )
+        .expect("WGSL compile");
 
     let tex0 = Texture::from_rgba(64, 64, &solid_rgba(64, 64, 40, 120, 255), &app.gpu);
     let tex1 = Texture::from_rgba(
@@ -85,8 +90,18 @@ async fn main() {
         &checker_rgba(64, 64, [255, 80, 40], [40, 200, 120], 8),
         &app.gpu,
     );
-    mat.set_texture(&app.gpu.device, "tex0", &tex0.view, &app.gpu.default_sampler);
-    mat.set_texture(&app.gpu.device, "tex1", &tex1.view, &app.gpu.default_sampler);
+    mat.set_texture(
+        &app.gpu.device,
+        "tex0",
+        &tex0.view,
+        &app.gpu.default_sampler,
+    );
+    mat.set_texture(
+        &app.gpu.device,
+        "tex1",
+        &tex1.view,
+        &app.gpu.default_sampler,
+    );
 
     let start = std::time::Instant::now();
 
@@ -124,10 +139,9 @@ async fn main() {
             TextOverride::from_color(WHITE),
         );
 
-        win.draw(
-            Color::new(0.06, 0.08, 0.12, 1.0),
-            &[&b, &title],
-        );
+        win.draw(Color::new(0.06, 0.08, 0.12, 1.0), &[&b, &title]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

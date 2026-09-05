@@ -4,7 +4,10 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Text Clip & Align", 720, 420).dpi_override(Some(1.0)), None::<fn()>);
+    let idx = app.window(
+        WindowDesc::new("Text Clip & Align", 720, 420).dpi_override(Some(1.0)),
+        None::<fn()>,
+    );
 
     let mut t: f32 = 0.0;
     let long = "The quick brown fox jumps over the lazy dog. 裁剪区外不可见 — clip(left,top,right,bottom).";
@@ -27,7 +30,14 @@ async fn main() {
 
         // 裁剪框 + 横向滚动文字
         let clip = (40i32, 60, 360, 120);
-        draw_rect_outline(&mut batch, Pos::new(clip.0 as f32, clip.1 as f32), (clip.2 - clip.0) as f32, (clip.3 - clip.1) as f32, 1.5, Some(Color::new(0.4, 0.5, 0.7, 1.0)));
+        draw_rect_outline(
+            &mut batch,
+            Pos::new(clip.0 as f32, clip.1 as f32),
+            (clip.2 - clip.0) as f32,
+            (clip.3 - clip.1) as f32,
+            1.5,
+            Some(Color::new(0.4, 0.5, 0.7, 1.0)),
+        );
         let scroll_x = 40.0 - (t % 400.0);
         draw_text(
             &mut batch.texts,
@@ -55,7 +65,14 @@ async fn main() {
             (TextAlign::End, "End", 320.0),
             (TextAlign::Justified, "Justified (needs wrap width)", 370.0),
         ];
-        draw_rect_outline(&mut batch, Pos::new(box_x, 160.0), box_w, 230.0, 1.0, Some(Color::new(0.3, 0.35, 0.45, 1.0)));
+        draw_rect_outline(
+            &mut batch,
+            Pos::new(box_x, 160.0),
+            box_w,
+            230.0,
+            1.0,
+            Some(Color::new(0.3, 0.35, 0.45, 1.0)),
+        );
 
         for (align, label, y) in aligns {
             draw_text(
@@ -79,5 +96,7 @@ async fn main() {
 
         win.draw(Color::new(0.06, 0.07, 0.1, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }

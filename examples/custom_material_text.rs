@@ -19,7 +19,7 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
     let mut v = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            let on = ((x / cell) + (y / cell)) % 2 == 0;
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
             let c = if on { c0 } else { c1 };
             v.extend_from_slice(&[c[0], c[1], c[2], 255]);
         }
@@ -69,5 +69,7 @@ async fn main() {
 
         win.draw(Color::new(0.035, 0.045, 0.075, 1.0), &[&batch]);
         true
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
