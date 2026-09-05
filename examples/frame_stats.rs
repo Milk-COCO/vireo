@@ -23,8 +23,6 @@ use vireo::prelude::*;
 
 const HISTORY_CAP: usize = 300;
 const SPIKE_THRESHOLD_MS: f64 = 20.0;
-/// 分段主因阈值：超过则优先归到该段。
-const SEGMENT_MS: f64 = 4.0;
 
 fn aa_label(aa: AntiAliasing) -> String {
     match aa {
@@ -106,7 +104,6 @@ async fn main() {
     let mut current_cap: Option<u32> = app.max_fps();
     let mut current_latency: u32 = 2;
     let mut was_focused = true;
-    let mut last_gpu_ms: Option<f64> = None;
     let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));
     let toggle_text: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let toggle_present: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -165,7 +162,6 @@ async fn main() {
             Ok(v) => v,
             Err(_) => return false,
         };
-        win.set_gpu_timing(true);
         let max_sc = win.gpu().max_sample_count();
         let win_init_ms = win.init_duration() * 1000.0;
 
@@ -235,10 +231,6 @@ async fn main() {
         let (lo, hi, avg, p50, p95, p99, stddev) = compute_stats(&history);
         let spike_count = history.iter().filter(|&&v| v > SPIKE_THRESHOLD_MS).count();
 
-        if !quiet && ctx.tick_count() % 60 == 0 {
-            eprintln!("[fps] text={} fps={:.1} ft={:.2}ms gpu={:.3}ms", show_text, ctx.fps(), ft_ms, last_gpu_ms.unwrap_or(0.0));
-        }
-
         let present_label = if present_immediate {
             "Immediate"
         } else {
@@ -255,14 +247,6 @@ async fn main() {
                     TextPart::normal(" / p95 "), TextPart::glyphs(format!("{:5.2}", p95)),
                     TextPart::normal(" / p99 "), TextPart::glyphs(format!("{:5.2}", p99)),
                 ], 26.0),
-                (vec![
-                    TextPart::normal("GPU queue: "),
-                    last_gpu_ms.map_or_else(
-                        || TextPart::dynamic("n/a"),
-                        |v| TextPart::glyphs(format!("{:6.2}", v)),
-                    ),
-                    TextPart::normal("ms (previous completed submission)"),
-                ], 40.0),
                 (vec![
                     TextPart::normal("min "), TextPart::glyphs(format!("{:5.2}", lo)),
                     TextPart::normal(" / max "), TextPart::glyphs(format!("{:5.2}", hi)),
@@ -358,35 +342,18 @@ async fn main() {
         let report = win.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&batch]);
         let acq_ms = report.timings.acquire_secs * 1000.0;
         let enc_ms = report.timings.encode_secs * 1000.0;
-        let gpu_ms = report.timings.gpu_secs.map(|v| v * 1000.0);
+        let pres_ms = report.timings.present_secs * 1000.0;
+        let conf_ms = report.timings.configure_secs * 1000.0;
 
-        if !quiet && ft_ms > SPIKE_THRESHOLD_MS {
-            // build/encode are CPU-side measurements. The remaining frame
-            // interval includes present, driver and scheduler waits.
-            let kind = if build_ms >= SEGMENT_MS {
-                "BUILD"
-            } else if gpu_ms.is_some_and(|v| v >= SEGMENT_MS) {
-                "GPU"
-            } else if enc_ms >= SEGMENT_MS {
-                "ENCODE"
-            } else {
-                "WAIT/OS"
-            };
+        if !quiet {
             eprintln!(
-                "[spike] F{} dt={:6.2}ms build={:5.2} wait={:5.2} encode={:5.2} gpu={:>5} kind={} focus={} text={} present={}",
-                ctx.tick_count(),
-                ft_ms,
-                build_ms,
-                acq_ms,
-                enc_ms,
-                gpu_ms.map_or_else(|| "  n/a".to_string(), |v| format!("{:5.2}", v)),
-                kind,
-                focused,
-                show_text,
-                present_label,
+                "[t] F{} fps={:5.1} ft={:6.2} conf={:5.2} acq={:6.2} build={:5.2} enc={:5.2} pres={:5.2} vsync={} text={}",
+                ctx.tick_count(), ctx.fps(), ft_ms, conf_ms, acq_ms, build_ms, enc_ms, pres_ms,
+                if report.vsync_throttled { "Y" } else { "N" },
+                if show_text { "Y" } else { "N" },
             );
         }
-        last_gpu_ms = gpu_ms;
+
         true
     }).await.unwrap();
 }

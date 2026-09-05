@@ -177,9 +177,6 @@ pub struct DrawTimings {
     pub encode_secs: f64,
     /// `queue.present`（不含 GPU 执行）。
     pub present_secs: f64,
-    /// 上一份已完成提交的 GPU queue latency（不含 CPU 构图）。
-    /// 该值包含驱动排队/GPU 竞争，不等于纯 shader 执行时间。
-    pub gpu_secs: Option<f64>,
 }
 
 /// 一次 [`VireoWindow::draw`] 的结果。
@@ -249,11 +246,11 @@ pub enum DrawFailure {
     DeviceLost,
 }
 
-/// 构造「本帧跳过」的 [`DrawReport`]（保留 gpu_secs）。
-pub(crate) fn skip_report(gpu_secs: Option<f64>, reason: DrawSkipReason) -> DrawReport {
+/// 构造「本帧跳过」的 [`DrawReport`]。
+pub(crate) fn skip_report(reason: DrawSkipReason) -> DrawReport {
     DrawReport {
         outcome: DrawOutcome::Skipped(reason),
-        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+        timings: DrawTimings::default(),
         vsync_throttled: false,
     }
 }

@@ -272,11 +272,6 @@ pub struct VireoWindow {
     /// 关窗路径等待 `draw_idle` 置位的 Condvar：渲染线程每帧绘制完成时唤醒，渲染线程
     /// 正常结束 / panic退出时对所有窗口置位并唤醒——事件驱动、无忙等、无魔法数字超时。
     pub(crate) draw_idle_cv: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
-    /// 是否启用 queue completion 计时（`DrawTimings::gpu_secs`）
-    gpu_timing_enabled: std::sync::atomic::AtomicBool,
-    /// 上一份已完成提交的 GPU queue latency（由 `on_submitted_work_done` 写回）
-    last_gpu_secs: Arc<Mutex<Option<f64>>>,
-    pending_gpu_starts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
     /// Outcome recorded by this window's draw call in the current update iteration.
     pub(crate) last_draw_outcome: Mutex<Option<DrawOutcome>>,
     /// 本窗口最近一次 draw 的完整报告（timings + outcome）。
@@ -375,9 +370,6 @@ impl VireoWindow {
             closing: Mutex::new(false),
             draw_idle: std::sync::atomic::AtomicBool::new(true),
             draw_idle_cv: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
-            gpu_timing_enabled: std::sync::atomic::AtomicBool::new(false),
-            last_gpu_secs: Arc::new(Mutex::new(None)),
-            pending_gpu_starts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             last_draw_outcome: Mutex::new(None),
             last_draw_report: Mutex::new(None),
             presented_frames: Mutex::new(0),
@@ -558,18 +550,17 @@ impl VireoWindow {
         clear_color: crate::color::Color,
         batches: &[&DrawBatch],
     ) -> DrawReport {
-        let gpu_secs = self.last_gpu_secs.lock().take();
         if *self.closing.lock() {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
-                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
         }
         if self.gpu.is_device_lost() {
             return DrawReport {
                 outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
-                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
         }
@@ -616,7 +607,7 @@ impl VireoWindow {
         if size.width == 0 || size.height == 0 {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
-                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
         }
@@ -758,14 +749,14 @@ impl VireoWindow {
         if *self.closing.lock() {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
-                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
         }
         if self.gpu.is_device_lost() {
             return DrawReport {
                 outcome: DrawOutcome::Failed(DrawFailure::DeviceLost),
-                timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
         }
@@ -774,22 +765,29 @@ impl VireoWindow {
             eprintln!("[draw] acq-start");
         }
         let acquired = self.surface.lock().get_current_texture();
+        let acq_elapsed = t1.elapsed();
+        let acq_us = acq_elapsed.as_micros();
         let (st, suboptimal) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(st) => {
+                if acq_us > 1000 {
+                    eprintln!("[acq] Success {:>6}us", acq_us);
+                }
                 self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
                 (st, false)
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
+                eprintln!("[acq] Suboptimal {:>6}us", acq_us);
                 self.draw_idle.store(false, std::sync::atomic::Ordering::Release);
                 (st, true)
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
+                eprintln!("[acq] Outdated {:>6}us", acq_us);
                 // 重配后再试；本帧跳过
                 let size = self.inner.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
-                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        timings: DrawTimings::default(),
                         vsync_throttled: false,
                     };
                 }
@@ -807,29 +805,31 @@ impl VireoWindow {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings {
                         configure_secs: t_conf.elapsed().as_secs_f64(),
-                        gpu_secs,
                         ..DrawTimings::default()
                     },
                     vsync_throttled: false,
                 };
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
+                eprintln!("[acq] Timeout {:>6}us", acq_us);
                 // `preparable` 兜底：首帧若持续走 skip，窗口会永远隐藏——显示它
                 // （宁可无内容一帧，不可永不出现）。
                 self.maybe_show_prepared_window();
-                return skip_report(gpu_secs, DrawSkipReason::Timeout);
+                return skip_report(DrawSkipReason::Timeout);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                eprintln!("[acq] Occluded {:>6}us", acq_us);
                 self.maybe_show_prepared_window();
-                return skip_report(gpu_secs, DrawSkipReason::Occluded);
+                return skip_report(DrawSkipReason::Occluded);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                eprintln!("[acq] Lost {:>6}us", acq_us);
                 // surface 丢失：用现有 instance+window 重建 surface 并重配，本帧跳过
                 let size = self.inner.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
-                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        timings: DrawTimings::default(),
                         vsync_throttled: false,
                     };
                 }
@@ -843,11 +843,12 @@ impl VireoWindow {
                 self.maybe_show_prepared_window();
                 return DrawReport {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
-                    timings: DrawTimings { configure_secs, gpu_secs, ..DrawTimings::default() },
+                    timings: DrawTimings { configure_secs, ..DrawTimings::default() },
                     vsync_throttled: false,
                 };
             }
             wgpu::CurrentSurfaceTexture::Validation => {
+                eprintln!("[acq] Validation {:>6}us", acq_us);
                 // get_current_texture 内部校验失败：surface 配置可能已失效。
                 // 按当前尺寸重配后本帧跳过（与 Outdated 一致），并记录告警——
                 // 不再伪装成「已重配」（旧实现只打 SurfaceReconfigured 不实际重配）。
@@ -856,7 +857,7 @@ impl VireoWindow {
                 if size.width == 0 || size.height == 0 {
                     return DrawReport {
                         outcome: DrawOutcome::Skipped(DrawSkipReason::ZeroSized),
-                        timings: DrawTimings { gpu_secs, ..DrawTimings::default() },
+                        timings: DrawTimings::default(),
                         vsync_throttled: false,
                     };
                 }
@@ -868,7 +869,6 @@ impl VireoWindow {
                     outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
                     timings: DrawTimings {
                         configure_secs: t_conf.elapsed().as_secs_f64(),
-                        gpu_secs,
                         ..DrawTimings::default()
                     },
                     vsync_throttled: false,
@@ -982,22 +982,8 @@ let dpi_override = *self.applied_dpi_override.lock();
         let batch_refs: Vec<&DrawBatch> = batches.iter().copied().collect();
         let t2 = std::time::Instant::now();
         let cmd_buf = self.renderer.lock().draw(&target, Some(clear_color), &batch_refs);
-        // 5) submit + 提交完成计时
-        let timing_enabled = self.gpu_timing_enabled.load(std::sync::atomic::Ordering::Acquire);
-        if timing_enabled {
-            self.pending_gpu_starts.lock().push_back(std::time::Instant::now());
-        }
+        // 5) submit
         self.gpu.queue.submit([cmd_buf]);
-        if timing_enabled {
-            let last_gpu_secs = self.last_gpu_secs.clone();
-            let pending_gpu_starts = self.pending_gpu_starts.clone();
-            self.gpu.queue.on_submitted_work_done(move || {
-                let start = pending_gpu_starts.lock().pop_front();
-                if let Some(start) = start {
-                    *last_gpu_secs.lock() = Some(start.elapsed().as_secs_f64());
-                }
-            });
-        }
         let encode_secs = t2.elapsed().as_secs_f64();
 
         // 6) present
@@ -1011,13 +997,12 @@ let dpi_override = *self.applied_dpi_override.lock();
         let present_secs = t3.elapsed().as_secs_f64();
 
         if trace {
-            eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us gpu={:?} suboptimal={}",
+            eprintln!("[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us suboptimal={}",
                 t_trace.elapsed().as_micros(),
                 configured_this_frame,
                 (acquire_secs * 1e6) as u64,
                 (encode_secs * 1e6) as u64,
                 (present_secs * 1e6) as u64,
-                gpu_secs.map(|v| v * 1e6),
                 suboptimal);
         }
 
@@ -1034,7 +1019,6 @@ let dpi_override = *self.applied_dpi_override.lock();
                 acquire_secs,
                 encode_secs,
                 present_secs,
-                gpu_secs,
             },
         }
     }
@@ -1072,12 +1056,6 @@ let dpi_override = *self.applied_dpi_override.lock();
     /// 用保留的 Instance + Window 重建 surface（`CurrentSurfaceTexture::Lost`）。
     fn recreate_surface(&self) -> Option<wgpu::Surface<'static>> {
         self.instance.create_surface(self.inner.clone()).ok()
-    }
-
-    /// 启用 queue completion 计时，用于诊断 GPU 竞争和提交排队。
-    /// 结果通过下一帧的 [`DrawTimings::gpu_secs`] 返回。
-    pub fn set_gpu_timing(&self, enabled: bool) {
-        self.gpu_timing_enabled.store(enabled, std::sync::atomic::Ordering::Release);
     }
 
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
@@ -2443,7 +2421,7 @@ mod aspect_ratio_and_focus_tests {
 mod metrics_tests {
     //! 第五十一轮纯函数测试：逻辑/物理尺寸换算与「跳过帧」report 构造。
 
-    use super::{skip_report, sliding_rate, DrawOutcome, DrawSkipReason};
+    use super::sliding_rate;
     use crate::dpi::to_pixel_size;
 
     #[test]
@@ -2515,21 +2493,6 @@ mod metrics_tests {
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (800.0, 600.0));
         let s = to_pixel_size(800.0, 600.0, -1.0);
         assert_eq!((s.width.dp.0 as f32, s.height.dp.0 as f32), (800.0, 600.0));
-    }
-
-    #[test]
-    fn skip_report_preserves_gpu_secs_and_reason() {
-        let r = skip_report(Some(0.123), DrawSkipReason::ZeroSized);
-        assert!(matches!(r.outcome, DrawOutcome::Skipped(DrawSkipReason::ZeroSized)));
-        assert_eq!(r.timings.gpu_secs, Some(0.123));
-    }
-
-    #[test]
-    fn skip_report_default_timings_are_zero() {
-        let r = skip_report(None, DrawSkipReason::Timeout);
-        let t = r.timings;
-        assert_eq!((t.acquire_secs, t.encode_secs, t.present_secs), (0.0, 0.0, 0.0));
-        assert!(t.gpu_secs.is_none());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! W0 / W1 的 PresentMode 与 frame_latency 可独立设置，每帧都调用两者的
 //! `win.draw`个窗口 HUD 显示自己的 Present / Latency、上一帧
-//! acquire/encode/gpu/present 耗时、presented_fps 与全局 app.fps.get()。
+//! acquire/encode/present 耗时、presented_fps 与全局 app.fps.get()。
 //! 初始差异化：W0 = AutoVsync + latency 2，W1 = Immediate + latency 1。
 //!
 //! 按键（任意窗口聚焦均可）：
@@ -69,8 +69,8 @@ async fn main() {
         });
     }
 
-    // 上一帧各窗口 report timings: (acquire, encode, gpu, present) ms
-    let mut prev: [Option<(f64, f64, Option<f64>, f64)>; 2] = [None; 2];
+    // 上一帧各窗口 report timings: (acquire, encode, present) ms
+    let mut prev: [Option<(f64, f64, f64)>; 2] = [None; 2];
     let mut disabled = [false; 2];
     let mut half_mode = false;
     let mut paused = false;
@@ -142,7 +142,6 @@ async fn main() {
                 Ok(w) => w,
                 Err(_) => continue,
             };
-            win.set_gpu_timing(true);
 
             // 应用该窗口自己的 present mode / latency —— 只在变化时设置一次
             //（每帧设会触发每帧 surface.configure，Vulkan 默认后端上每次 50-80ms 卡顿；DX12 阻塞显著更低）
@@ -205,14 +204,12 @@ async fn main() {
                 TextPart::glyphs(win.skipped_frames().to_string()),
             ], 54.0, 12.0);
             match prev[i] {
-                Some((acq, enc, gpu, pres)) => {
+                Some((acq, enc, pres)) => {
                     row(&mut batch, vec![
                         TextPart::normal("last acq: "),
                         TextPart::glyphs(format!("{:6.2}", acq)),
                         TextPart::normal("  enc: "),
                         TextPart::glyphs(format!("{:6.2}", enc)),
-                        TextPart::normal("  gpu: "),
-                        TextPart::glyphs(gpu.map_or(" n/a".into(), |g| format!("{:6.2}", g))),
                         TextPart::normal("  pres: "),
                         TextPart::glyphs(format!("{:6.2}", pres)),
                         TextPart::normal(" ms"),
@@ -234,7 +231,6 @@ async fn main() {
             prev[i] = Some((
                 t.acquire_secs * 1000.0,
                 t.encode_secs * 1000.0,
-                t.gpu_secs.map(|v| v * 1000.0),
                 t.present_secs * 1000.0,
             ));
         }
