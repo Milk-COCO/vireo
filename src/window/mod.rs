@@ -311,7 +311,7 @@ pub struct VireoWindow {
     /// 注意：多 loop 间的 pacing 抖动（某 loop 基于稍旧 deadline 少睡一帧）仍可能发生，那是
     /// 良性抖动，不是 bug。
     pacing_deadline: std::sync::atomic::AtomicI64,
-    /// 布局跟随开关（独立于 `ResizeRefreshPolicy`，默认开）：窗口尺寸已变但 surface
+    /// 布局跟随开关（独立于 `ResizeRefreshPolicy`，默认关）：窗口尺寸已变但 surface
     /// 未重配时，每帧把 camera/逻辑尺寸更新到新窗口（`Renderer::update_layout`），
     /// 内容**实时重排**而非停在旧布局——DXGI 把旧 surface 拉伸到新窗口时正好抵消
     /// 缩放：几何和文字都按 x/y 两轴的新尺寸映射，不因宽高比变化产生额外近似。
@@ -423,7 +423,7 @@ impl VireoWindow {
             drag_refresh_mhz: Mutex::new(None),
             resize_policy: Mutex::new(ResizeRefreshPolicy::OnRelease),
             resize_debounce: Mutex::new(DEFAULT_RESIZE_DEBOUNCE),
-            layout_follow: Mutex::new(true),
+            layout_follow: Mutex::new(false),
             follow_smoothing: Mutex::new(FollowAmount::default()),
             follow_samples: Mutex::new(std::collections::VecDeque::with_capacity(16)),
             follow_frame: Mutex::new(0),
@@ -782,7 +782,7 @@ impl VireoWindow {
                     eprintln!("[draw] conf-end {:?}us", t_conf.elapsed().as_micros());
                 }
             } else if size_drifted && *self.layout_follow.lock() {
-                // layout_follow（独立开关，默认开）：窗口已变但 surface 未重配——
+                // layout_follow（独立开关，默认关）：窗口已变但 surface 未重配——
                 // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
                 // （见下方 `follow-layout` 段）：acquire 可能等待 swapchain 空位，因此返回后
                 // re-poll 通常能取得更接近本帧 present 时刻的尺寸，但不保证前帧已上屏。
@@ -2337,7 +2337,7 @@ impl VireoWindow {
         *self.resize_debounce.lock()
     }
 
-    /// 布局跟随开关（独立于 [`ResizeRefreshPolicy`]，默认开）。
+    /// 布局跟随开关（独立于 [`ResizeRefreshPolicy`]，默认关）。
     ///
     /// 窗口尺寸已变但 surface 未重配时（拖动中），每帧把 camera/逻辑尺寸更新到
     /// 新窗口（`Renderer::update_layout`），让内容**实时重排**：DXGI 把旧 surface
@@ -2364,7 +2364,7 @@ impl VireoWindow {
         }
     }
 
-    /// 当前布局跟随开关（默认开）。见 [`VireoWindow::set_layout_follow`]。
+    /// 当前布局跟随开关（默认关）。见 [`VireoWindow::set_layout_follow`]。
     pub fn layout_follow(&self) -> bool {
         *self.layout_follow.lock()
     }

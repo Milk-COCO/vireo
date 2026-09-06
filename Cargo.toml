@@ -19,7 +19,7 @@ etagere = "0.3"
 lru = { version = "0.18", default-features = false }
 rustc-hash = "2"
 pollster = "1"
-vireo_macro = { path = "./vireo_macro" }
+vireo_macro = "0.1"
 wgpu = "30"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
