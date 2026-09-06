@@ -12,27 +12,34 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// 创建矩形（左上角 x,y + 宽高）。
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
 
+    /// 左边界 x。
     pub fn left(&self) -> f32 {
         self.x
     }
+    /// 右边界 x + w。
     pub fn right(&self) -> f32 {
         self.x + self.w
     }
+    /// 上边界 y。
     pub fn top(&self) -> f32 {
         self.y
     }
+    /// 下边界 y + h。
     pub fn bottom(&self) -> f32 {
         self.y + self.h
     }
 
+    /// 判断点是否在矩形内（含边界）。
     pub fn contains(&self, p: [f32; 2]) -> bool {
         p[0] >= self.x && p[0] <= self.x + self.w && p[1] >= self.y && p[1] <= self.y + self.h
     }
 
+    /// 判断与另一矩形是否相交（含边界接触）。
     pub fn intersects(&self, other: &Rect) -> bool {
         let l = self.x.max(other.x);
         let r = (self.x + self.w).min(other.x + other.w);
@@ -44,6 +51,7 @@ impl Rect {
         b >= t
     }
 
+    /// 并集：返回同时包含两矩形的最小外接矩形。
     pub fn union(&self, other: &Rect) -> Rect {
         let l = self.x.min(other.x);
         let r = (self.x + self.w).max(other.x + other.w);
@@ -63,6 +71,7 @@ pub struct Pos {
 impl Pos {
     pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
 
+    /// 创建坐标点。
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
@@ -106,7 +115,7 @@ impl Transform {
         py: 0.0,
     };
 
-    /// 仅平移。
+    /// 仅平移变换。
     pub fn translation(x: f32, y: f32) -> Self {
         Self {
             x,
@@ -115,7 +124,7 @@ impl Transform {
         }
     }
 
-    /// 从平移 / pivot / 旋转（弧度，顺时针）/ 缩放构建。
+    /// 从 平移 / pivot / 旋转（弧度，顺时针）/ 缩放 构建。
     pub fn trs(x: f32, y: f32, px: f32, py: f32, rotation: f32, sx: f32, sy: f32) -> Self {
         let (c, s) = (rotation.cos(), rotation.sin());
         Self {
@@ -130,7 +139,7 @@ impl Transform {
         }
     }
 
-    /// 原始 3×3 仿射 6 分量（列主序语义：`[a b tx; c d ty; 0 0 1]`），pivot 归零。
+    /// 从原始 3×3 仿射 6 分量构建（列主序：`[a b tx; c d ty; 0 0 1]`），pivot 归零。
     pub fn matrix(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> Self {
         Self {
             a,

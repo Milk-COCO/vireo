@@ -236,6 +236,7 @@ impl App {
         }
     }
 
+    /// 创建离屏画布（预热 AA 管线）。
     pub fn offscreen(&self, width: u32, height: u32, aa: AntiAliasing) -> OffscreenIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(aa, self.gpu.supported_sample_counts());
@@ -268,6 +269,7 @@ impl App {
         idx
     }
 
+    /// 获取贴图（`Err` = 索引越界/未加载完成）。
     pub fn texture(&self, index: usize) -> Result<Arc<Texture>, VireoError> {
         match self.textures.lock().get(index).cloned() {
             Some(t) => Ok(t),
@@ -281,6 +283,8 @@ impl App {
         }
     }
 
+    /// 创建窗口（`run` 前同步入队、`run` 中异步发送到 winit 线程）。
+    /// 返回 `WindowIndex`，后续可经 `window_ref` 拿到 `VireoWindow`。
     pub fn window(
         &self,
         mut desc: WindowDesc,
@@ -340,6 +344,7 @@ impl App {
         on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
 
+    /// 运行主循环（单线程，传入 `on_tick` 闭包，返回 `ThreadHandle` 可 `.await`）。
     pub fn run<F: FnMut(&mut crate::thread::LoopContext) -> bool + Send + 'static>(
         &self,
         on_tick: F,
@@ -347,6 +352,7 @@ impl App {
         self.spawn(crate::thread::Thread::new().with_loop(crate::thread::Loop::new(on_tick)))
     }
 
+    /// 在独立 OS 线程启动一组循环（真并行），返回 `ThreadHandle` 可 `.await` / `.push()` / `.extend()`。
     pub fn spawn(&self, thread: crate::thread::Thread) -> crate::thread::ThreadHandle {
         let loops = thread.loops;
         let shared = Arc::new(Mutex::new(Vec::<crate::thread::Loop>::new()));
@@ -394,10 +400,12 @@ impl App {
         self.spawn(crate::thread::Thread::new().with_loops(loops))
     }
 
+    /// 创建仅包含片段着色器的材质（内置 SDF/geo 实例化 vertex shader）。
     pub fn material(&self, source: &str) -> Result<Arc<crate::material::Material>, String> {
         self.gpu.create_material(source)
     }
 
+    /// 创建带自定义 vertex shader 的材质（需自行匹配 `VertexInput @0-7` 签名）。
     pub fn material_with_vertex_shader(
         &self,
         source: &str,
@@ -407,6 +415,7 @@ impl App {
             .create_material_with_vertex_shader(source, vertex_source)
     }
 
+    /// 创建材质并手动指定资源（uniform buffer / 贴图 / sampler）。
     pub fn material_with_resources(
         &self,
         source: &str,
@@ -425,6 +434,7 @@ impl App {
             .create_material_with_resources_and_vertex_shader(source, vertex_source, resources)
     }
 
+    /// 创建材质 + 手动指定 bind group layout（完全自管管线布局）。
     pub fn material_manual(
         &self,
         source: &str,
@@ -443,6 +453,7 @@ impl App {
             .create_material_manual_with_vertex_shader(source, vertex_source, bgl)
     }
 
+    /// 获取窗口（`Err` = 从未创建或已关闭）。
     pub fn window_ref(&self, idx: &WindowIndex) -> Result<Arc<VireoWindow>, VireoError> {
         match self
             .windows

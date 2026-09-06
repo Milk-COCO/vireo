@@ -698,6 +698,7 @@ impl GpuContext {
         *self.surface_format.lock().unwrap() = fmt;
     }
 
+    /// 设置 shape 缓存的 TTL（`None` = 不自动按时间回收）。
     pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
         self.text_ctx.lock().unwrap().set_shape_cache_ttl(ttl);
     }
@@ -1098,6 +1099,7 @@ impl ShapeInstance {
 }
 
 impl Vertex {
+    /// 创建一个位置 + 颜色的顶点，UV 和 SDF 字段置零。
     pub fn new(x: f32, y: f32, color: crate::color::Color) -> Self {
         Self {
             position: [x, y],
@@ -1111,6 +1113,7 @@ impl Vertex {
         }
     }
 
+    /// 创建一个位置 + UV + 颜色的顶点，SDF 字段置零。
     pub fn new_uv(x: f32, y: f32, u: f32, v: f32, color: crate::color::Color) -> Self {
         Self {
             position: [x, y],
@@ -1152,6 +1155,7 @@ impl Vertex {
         self
     }
 
+    /// 返回 `Vertex` 的 wgpu 顶点缓冲区布局描述。
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         const S2: wgpu::BufferAddress = std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress;
         const S4: wgpu::BufferAddress = std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress;

@@ -210,6 +210,7 @@ pub(crate) fn offset_naga_error(msg: &str, user_start: u32, user_len: u32) -> St
 
 /// Material target discriminators (injected into WGSL as constants).
 pub const VIREO_TARGET_SHAPE: u32 = 0;
+/// Material target discriminator: text.
 pub const VIREO_TARGET_TEXT: u32 = 1;
 
 pub(crate) const MATERIAL_INPUT_WGSL: &str = r#"

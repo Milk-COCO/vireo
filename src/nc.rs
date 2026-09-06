@@ -109,8 +109,11 @@ impl NonClientHit {
 /// 窗口状态（传给 hit-test 回调）。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowState {
+    /// 窗口是否处于最大化状态。
     pub maximized: bool,
+    /// 窗口是否处于全屏状态。
     pub fullscreen: bool,
+    /// 窗口是否处于激活状态。
     pub active: bool,
 }
 
@@ -119,6 +122,7 @@ pub struct WindowState {
 pub struct HitTestInput {
     /// 客户端逻辑像素坐标（已从屏幕物理坐标转换）。
     pub pos: crate::math::Pos,
+    /// 当前窗口状态。
     pub state: WindowState,
     /// 当前有效 dpi scale（与 `metrics().scale_factor` 一致）。
     pub dpi_scale: f64,
@@ -130,7 +134,9 @@ pub struct HitTestInput {
 /// 命中规则：**后声明的优先**（z 序在上）——允许按钮叠在标题栏上仍命中按钮。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonClientRegion {
+    /// 区域矩形（客户端逻辑像素坐标）。
     pub rect: Rect,
+    /// 命中该区域时返回的 hit-test 结果。
     pub hit_test: NonClientHit,
 }
 

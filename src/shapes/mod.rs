@@ -177,51 +177,61 @@ impl ShapeOverride {
         }
     }
 
+    /// 仅本次颜色（`None` = batch.color）。
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
         self
     }
 
+    /// 强制几何路径（`sdf_feather = None`）。
     pub fn geometry(mut self) -> Self {
         self.sdf_feather = Some(None);
         self
     }
 
+    /// 强制 SDF 路径并指定 feather。
     pub fn sdf(mut self, feather: f32) -> Self {
         self.sdf_feather = Some(Some(feather));
         self
     }
 
+    /// 仅本次 UV 子区域。
     pub fn uv(mut self, uv: UvRect) -> Self {
         self.uv = Some(uv);
         self
     }
 
+    /// 仅本次 UV 矩形（便捷）。
     pub fn uv_rect(mut self, u0: f32, v0: f32, u1: f32, v1: f32) -> Self {
         self.uv = Some(UvRect { u0, v0, u1, v1 });
         self
     }
 
+    /// 仅本次绝对变换（替换 batch.transform）。
     pub fn transform(mut self, t: Transform) -> Self {
         self.transform = Some(t);
         self
     }
 
+    /// 仅本次平移。
     pub fn position(mut self, x: f32, y: f32) -> Self {
         self.transform = Some(Transform::translation(x, y));
         self
     }
 
+    /// 仅本次绑定贴图。
     pub fn texture(mut self, tex: &crate::texture::Texture) -> Self {
         self.bind_group = Some(Some(tex.bind_group.clone()));
         self
     }
 
+    /// 仅本次清贴图（白纹理）。
     pub fn clear_texture(mut self) -> Self {
         self.bind_group = Some(None);
         self
     }
 
+    /// 仅本次 bind_group（`None` = 白纹理 / `Some(bg)` = 自定义）。
     pub fn bind_group(mut self, bg: Option<wgpu::BindGroup>) -> Self {
         self.bind_group = Some(bg);
         self
@@ -385,10 +395,7 @@ pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride)
     batch.color = saved_color;
 }
 
-/// 通过共享 unit quad + instance buffer 绘制 [`Shape`]。
-///
-/// 默认 SDF 模式下，所有填充和描边变体使用实例路径；几何模式与自定义材质
-/// 自动回退到普通 mesh 路径。普通 [`draw_shape`] 会自动选择相同路径。
+/// 通过共享 unit quad + instance buffer 绘制 [`Shape`]（手动强制 instance 路径）。
 pub fn draw_instance_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
     batch.instance_shape(shape, opts);
 }

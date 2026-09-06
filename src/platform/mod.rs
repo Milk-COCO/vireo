@@ -2,12 +2,15 @@
 //!
 //! 只放「无法跨平台 1:1、必须按 OS 特化」的能力。模块按 OS 门控：
 //! 非目标平台编译时模块**不存在**（非空壳），不进 prelude。
+//!
+//! 用法：`use vireo::platform::windows::WindowExtWindows;` 后在 `VireoWindow` 上调用扩展方法。
 
 #[cfg(target_os = "windows")]
+/// Windows 专用扩展（`WindowExtWindows` trait + NC API）。
 pub mod windows;
 #[cfg(not(target_os = "windows"))]
+/// Windows 存根（非 Windows 目标编译时的空实现，保持跨平台 API 兼容）。
 pub mod windows {
-    //! Windows 平台存根（非 Windows 目标编译时的空实现）。
     //! 提供与 `windows.rs` 相同的公开符号，使上层 `window/mod.rs`
     //! 无需 `#[cfg(windows)]` 即可调用，cfg 只在 `mod` 门控。
 
@@ -66,6 +69,8 @@ pub mod windows {
     pub(crate) fn apply_window_focusable(_hwnd: isize, _focusable: bool) {}
 }
 #[cfg(target_os = "macos")]
+/// macOS 专用扩展（窗口样式、事件等）。
 pub mod macos;
 #[cfg(not(target_os = "macos"))]
+/// macOS 存根（非 macOS 目标编译时的空实现）。
 pub mod macos {}

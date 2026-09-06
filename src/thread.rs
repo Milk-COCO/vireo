@@ -261,6 +261,7 @@ impl Default for Thread {
 }
 
 impl Thread {
+    /// 新建空 `Thread`（稍后用 [`with_loop`] / [`with_loops`] 添加循环）。
     pub fn new() -> Self {
         Self {
             loops: Vec::new(),
@@ -268,10 +269,12 @@ impl Thread {
             max_tps: None,
         }
     }
+    /// 向本 `Thread` 添加单个循环（链式调用）。
     pub fn with_loop(mut self, l: Loop) -> Self {
         self.loops.push(l);
         self
     }
+    /// 向本 `Thread` 添加多个循环（链式调用）。
     pub fn with_loops(mut self, loops: impl IntoIterator<Item = Loop>) -> Self {
         self.loops.extend(loops);
         self
@@ -281,9 +284,11 @@ impl Thread {
         self.max_tps = tps.into();
         self
     }
+    /// 向本 `Thread` 追加单个循环（运行期也可调用，跨线程安全）。
     pub fn push(&mut self, l: Loop) {
         self.loops.push(l);
     }
+    /// 向本 `Thread` 追加多个循环（运行期也可调用，跨线程安全）。
     pub fn extend(&mut self, loops: impl IntoIterator<Item = Loop>) {
         self.loops.extend(loops);
     }

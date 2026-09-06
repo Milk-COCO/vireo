@@ -59,7 +59,7 @@ pub struct MouseScrollEvent {
     pub delta: ScrollDelta,
 }
 
-/// 修饰键位标志
+/// 修饰键位标志（位掩码）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Modifiers(u8);
 

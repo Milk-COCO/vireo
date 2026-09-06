@@ -18,11 +18,13 @@ pub struct AreaGeom {
 }
 
 impl AreaGeom {
+    /// 判断几何是否为空（无顶点或无索引）。
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.vertices.is_empty() || self.indices.is_empty()
     }
 
+    /// 是否为几何路径（非 SDF、无 feather）。
     #[inline]
     pub fn geometry_mode(&self) -> bool {
         !self.has_sdf && self.sdf_feather.is_none()
@@ -41,16 +43,19 @@ pub enum Area {
 }
 
 impl Area {
+    /// 全集（覆盖整个客户区）。
     #[inline]
     pub fn full() -> Self {
         Area::Full
     }
 
+    /// 空集（无裁切）。
     #[inline]
     pub fn empty() -> Self {
         Area::Empty
     }
 
+    /// 由烘焙几何构建 Area（空几何自动化简为 Empty）。
     #[inline]
     pub fn geom(g: AreaGeom) -> Self {
         if g.is_empty() {
@@ -60,6 +65,7 @@ impl Area {
         }
     }
 
+    /// 是否为 Full。
     #[inline]
     pub fn is_full(&self) -> bool {
         matches!(self, Area::Full)
@@ -70,7 +76,7 @@ impl Area {
         matches!(self, Area::Empty)
     }
 
-    /// A ∪ B（带 Full/Empty 化简）。
+    /// 并集 A ∪ B（带 Full/Empty 化简）。
     pub fn union(self, other: Self) -> Self {
         match (self, other) {
             (Area::Full, _) | (_, Area::Full) => Area::Full,
@@ -80,7 +86,7 @@ impl Area {
         }
     }
 
-    /// A ∩ B。
+    /// 交集 A ∩ B。
     pub fn intersect(self, other: Self) -> Self {
         match (self, other) {
             (Area::Empty, _) | (_, Area::Empty) => Area::Empty,
@@ -90,7 +96,7 @@ impl Area {
         }
     }
 
-    /// A \ B。
+    /// 差集 A \ B。
     pub fn difference(self, other: Self) -> Self {
         match (self, other) {
             (Area::Empty, _) => Area::Empty,
@@ -100,7 +106,7 @@ impl Area {
         }
     }
 
-    /// 递归化简 Full/Empty。
+    /// 递归化简：展开 Full/Empty 规则（如 Full ∪ X = Full）。
     pub fn simplified(self) -> Self {
         match self {
             Area::Full | Area::Empty => self,
@@ -189,7 +195,7 @@ impl Area {
         }
     }
 
-    /// 掩码清理：全屏 Dec 掉 `mask_level`（通常 base+1）。
+    /// 掩码清理：全屏 Dec 掉 `mask_level`（通常为 base+1）。
     pub fn compile_cleanup(mask_level: u32, out: &mut Vec<AreaStencilOp>) {
         out.push(AreaStencilOp::EraseFull {
             stencil_ref: mask_level,
@@ -222,7 +228,7 @@ pub enum AreaStencilOp {
 }
 
 impl AreaStencilOp {
-    /// 4 = Equal+Inc 无色, 3 = Equal+Dec 无色（与 clips Pop 相同）。
+    /// 对应的 stencil 管线 op：4 = Cover (Equal+Inc)，3 = Erase (Equal+Dec)。
     #[inline]
     pub fn stencil_pipeline_op(&self) -> u32 {
         match self {
@@ -231,6 +237,7 @@ impl AreaStencilOp {
         }
     }
 
+    /// 当前 op 使用的 stencil_ref 值。
     #[inline]
     pub fn stencil_ref(&self) -> u32 {
         match self {
@@ -241,6 +248,7 @@ impl AreaStencilOp {
         }
     }
 
+    /// 若为 Geom 变体返回其引用，否则 None。
     #[inline]
     pub fn geom(&self) -> Option<&AreaGeom> {
         match self {
@@ -251,6 +259,7 @@ impl AreaStencilOp {
         }
     }
 
+    /// 是否为全屏操作（CoverFull/EraseFull，无 Geom）。
     #[inline]
     pub fn is_fullscreen(&self) -> bool {
         matches!(

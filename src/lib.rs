@@ -1,30 +1,100 @@
-//! # Vireo — 2D 渲染库
+//! # Vireo
 //!
-//! ```rust
+//! 2D 渲染库，基于 [wgpu](https://crates.io/crates/wgpu) + [winit](https://crates.io/crates/winit)。
+//!
+//! ## 特性
+//!
+//! - SDF 与几何双路径形状绘制（16 种内置形状）
+//! - 自定义 WGSL fragment 材质
+//! - [cosmic-text](https://crates.io/crates/cosmic-text) shaping + [glyphon](https://crates.io/crates/glyphon) 光栅化；整段 shape 缓存，HUD 分段文字（`TextPart::Glyphs` 按需单字 shape，等宽步进对齐）
+//! - 多窗口、多循环线程模型
+//! - DPI 感知与像素意图类型（`Px` / `Dp`）
+//! - Stencil 裁切（Area include / exclude / ∩ / ∪）
+//!
+//! ## 支持平台
+//!
+//! Windows（DX12 / Vulkan）、Linux（Vulkan）、macOS（Metal）。
+//! 目前仅在 Windows 上做过测试，其余平台未验证。
+//!
+//! ## 快速上手
+//!
+//! ```no_run
 //! use vireo::prelude::*;
-//! App::new(|app| async move {
-//!     let win = app.window(WindowDesc::new("Hello", 400, 300), None);
+//!
+//! #[vireo::main]
+//! fn main() {
+//!     init_logger();
+//!     let app = App::new();
+//!     let win = app.window(
+//!         WindowDesc::new("Hello Vireo", 800, 600),
+//!         None,
+//!     );
 //!     app.run(move |cx: &mut LoopContext| {
 //!         let mut batch = DrawBatch::new();
-//!         draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 80.0, Some(RED));
-//!         draw_text(&mut batch.texts, "Hello!", Pos::new(20.0, 20.0),
-//!             TextDef::default().font_size(16.0), TextOverride::from_color(WHITE));
-//!         if let Ok(w) = app.window_ref(&win) {
+//!         draw_rectangle(&mut batch, Pos::new(100.0, 100.0), 200.0, 120.0, RED);
+//!         draw_circle(&mut batch, Pos::new(400.0, 300.0), 60.0, BLUE);
+//!         draw_text(
+//!             &mut batch.texts,
+//!             "Hello Vireo!",
+//!             Pos::new(200.0, 400.0),
+//!             TextDef::default().font_size(32.0),
+//!             TextOverride::from_color(WHITE),
+//!         );
+//!         draw_text_parts(
+//!             &mut batch.texts,
+//!             &[
+//!                 TextPart::normal("Score: "),
+//!                 TextPart::glyphs("12345"),
+//!             ],
+//!             Pos::new(16.0, 16.0),
+//!             TextDef::default().font_size(20.0),
+//!             TextOverride::from_color(WHITE),
+//!         );
+//!         if let Ok(w) = cx.window_ref(&win) {
 //!             w.draw(BLACK, &[&batch]);
 //!         }
 //!         true
 //!     });
-//! });
+//! }
 //! ```
+//!
+//! ## 从哪开始
+//!
+//! - `examples/hello.rs` — 最小窗口 + 一个矩形
+//! - `examples/input.rs` — 键盘/鼠标/触摸输入
+//! - `examples/batch_view.rs` — transform 与坐标系
+//! - `examples/text_hud.rs` — 文字与 HUD 分段
+//! - `examples/frame_stats.rs` — 帧率与性能诊断
+//! - `examples/` 目录下还有 50+ 个示例，覆盖形状、材质、多窗口、resize 等场景
+//!
+//! ## 模块概览
+//!
+//! | 模块 | 说明 |
+//! |------|------|
+//! | [`app`] | 应用入口、窗口/材质/离屏管理 |
+//! | [`render`] | `DrawBatch` + `Renderer`，顶点合并、transform table、stencil 裁切 |
+//! | [`shapes`] | 16 种形状（SDF / 几何 / 实例三路径） |
+//! | [`text`] | 文字绘制、shape 缓存、HUD 分段、StableText |
+//! | [`material`] | 自定义 WGSL 材质、纹理/采样器/bind group |
+//! | [`gpu`] | `GpuContext`、`Vertex`、pipeline 缓存 |
+//! | [`window`] | `VireoWindow`、`WindowDesc`、resize 策略、present mode |
+//! | [`thread`] | 多循环线程模型 |
+//! | [`dpi`] | `Px` / `Dp` / `ToPx` 像素意图类型 |
+//! | [`color`] | RGBA 颜色 + 预定义常量 |
+//! | [`math`] | `Rect` / `Pos` / `Transform` / `UvRect` |
+//! | [`input`] | 键盘/鼠标/触摸/IME 输入 |
+//! | [`area`] | Area stencil 裁切（include / exclude / ∩ / ∪） |
+//! | [`offscreen`] | 离屏渲染 canvas |
+//! | [`texture`] | 贴图加载与管理 |
+//! | [`nc`] | 非客户区 hit-test 类型 |
+//! | [`platform`] | 平台特化 API（`windows` / `macos`） |
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod area;
 
 #[doc(hidden)]
 pub use vireo_macro::main;
 
-#[doc(hidden)]
 pub use crate::app::App;
-#[doc(hidden)]
 pub mod app;
 pub mod thread;
 

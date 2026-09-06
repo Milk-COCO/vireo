@@ -18,6 +18,7 @@ pub struct OffscreenCanvas {
 }
 
 impl OffscreenCanvas {
+    /// 创建一个不带抗锯齿的离屏画布。
     pub fn new(gpu: &Arc<GpuContext>, width: u32, height: u32) -> Self {
         Self::with_aa(gpu, width, height, AntiAliasing::None, 0.0)
     }

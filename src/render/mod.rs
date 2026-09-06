@@ -117,18 +117,22 @@ impl BatchOverride {
         self.sdf_feather = Some(f);
         self
     }
+    /// 设置颜色覆盖（形状与文字共享位）。
     pub fn color(mut self, c: crate::color::Color) -> Self {
         self.color = Some(c);
         self
     }
+    /// 设置变换覆盖（形状与文字共享位）。
     pub fn transform(mut self, t: Transform) -> Self {
         self.transform = Some(t);
         self
     }
+    /// 设置 UV 矩形覆盖（形状与文字共享位）。
     pub fn uv(mut self, uv: UvRect) -> Self {
         self.uv = Some(uv);
         self
     }
+    /// 设置 bind group 覆盖（形状与文字共享位）。
     pub fn bind_group(mut self, bg: Option<wgpu::BindGroup>) -> Self {
         self.bind_group = Some(bg);
         self
@@ -441,6 +445,8 @@ impl Renderer {
     pub fn gpu(&self) -> &std::sync::Arc<GpuContext> {
         &self.gpu
     }
+
+    /// 构造渲染器。逻辑/物理尺寸、scale、dpi_scale 用于 camera 投影与文字缩放。
     pub fn new(
         gpu: std::sync::Arc<GpuContext>,
         logical_width: f32,
@@ -534,7 +540,8 @@ impl Renderer {
         *self.last_draw_calls.lock()
     }
 
-    /// 更新抗锯齿设置。
+    /// 更新抗锯齿设置（样本数 / alpha_to_coverage / SSAA）。
+    /// 会清空现有 MSAA/DS 纹理，下一帧重建。
     pub fn update_aa(&mut self, aa: crate::window::AntiAliasing) {
         self.sample_count = aa.sample_count();
         self.alpha_to_coverage = aa.alpha_to_coverage();
