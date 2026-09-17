@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::area::Area;
 use crate::color::colors::*;

@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 
 use parking_lot::Mutex;
 
@@ -592,26 +592,6 @@ impl VireoWindow {
         *self.last_present.lock() = Some(now);
     }
 
-    /// 极简 resize 诊断：仅在「决策」切换时打印（一次拖动约 2-5 行），用于定位 resize 拖动黑边回归。
-    /// 决策 = RECONFIGURE（重配填满）/ STRETCH(suboptimal)（画旧 buffer，靠 DWM 拉伸）/ STABLE。
-    /// 由 `VIREO_RESIZE_TRACE=1` 触发；正常运行无开销。
-    fn trace_resize_state(handle: usize, decision: &str, detail: &str) {
-        if std::env::var_os("VIREO_RESIZE_TRACE").is_none() {
-            return;
-        }
-        use std::sync::{Mutex, OnceLock};
-        static LAST: OnceLock<Mutex<std::collections::HashMap<usize, String>>> = OnceLock::new();
-        let mut g = LAST
-            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-            .lock()
-            .unwrap();
-        let prev = g.get(&handle).cloned().unwrap_or_default();
-        if prev != decision {
-            g.insert(handle, decision.to_string());
-            eprintln!("[resize-trace] win{}: {} | {}", handle, decision, detail);
-        }
-    }
-
     fn draw_frame(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
         if *self.closing.lock() {
             return DrawReport {
@@ -631,13 +611,6 @@ impl VireoWindow {
         if *self.auto_refresh_input.lock() {
             self.refresh_input();
         }
-        // 缓存 env var：每帧调 GetEnvironmentVariableW 是内核调用，空闲时无意义。
-        fn draw_trace_enabled() -> bool {
-            static VAL: OnceLock<bool> = OnceLock::new();
-            *VAL.get_or_init(|| std::env::var_os("VIREO_DRAW_TRACE").is_some())
-        }
-        let trace = draw_trace_enabled();
-        let t_trace = std::time::Instant::now();
         let mut configure_secs = 0.0;
 
         // 1) 应用 pending present mode（改 config 即可；尺寸同步在下方统一 configure）
@@ -704,10 +677,7 @@ impl VireoWindow {
         self.refresh_metrics();
         let dpi_override = *self.applied_dpi_override.lock();
         let new_scale = dpi_override.unwrap_or(sf) as f32;
-        let mut configured_this_frame = false;
         let mut follow_pending = false;
-        let trace_size_drifted;
-        let trace_need_configure;
         {
             let sc = self.surface_config.lock();
             // 尺寸漂移只看物理（逻辑 = 物理 ÷ scale，物理在容差内且 scale 不变 ⇒
@@ -717,7 +687,6 @@ impl VireoWindow {
                 (size.width, size.height),
                 RESIZE_DRIFT_EPSILON,
             ) || new_scale != self.layout_scale() as f32;
-            trace_size_drifted = size_drifted;
             let mode_drifted = sc.present_mode != *self.applied_present_mode.lock();
             let latency_drifted =
                 sc.desired_maximum_frame_latency != *self.applied_frame_latency.lock();
@@ -760,27 +729,11 @@ impl VireoWindow {
                 || (size_drifted && refresh != ResizeRefresh::None)
                 || mode_drifted
                 || latency_drifted;
-            trace_need_configure = need_configure;
             if need_configure {
-                configured_this_frame = true;
                 let t_conf = std::time::Instant::now();
-                if trace {
-                    let label = match refresh {
-                        ResizeRefresh::Stable => "stable",
-                        ResizeRefresh::Live => "live",
-                        ResizeRefresh::None => "mode",
-                    };
-                    eprintln!(
-                        "[draw] conf-start size={}x{} ({} {:?})",
-                        size.width, size.height, label, now
-                    );
-                }
                 // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
                 self.configure_surface(size, now);
                 configure_secs = t_conf.elapsed().as_secs_f64();
-                if trace {
-                    eprintln!("[draw] conf-end {:?}us", t_conf.elapsed().as_micros());
-                }
             } else if size_drifted && *self.layout_follow.lock() {
                 // layout_follow（独立开关，默认关）：窗口已变但 surface 未重配——
                 // 内容要实时重排而非停在旧布局。真正更新 camera 推迟到 acquire 之后
@@ -797,9 +750,6 @@ impl VireoWindow {
                 // 尺寸采样时序、逻辑/物理整数舍入及 DPI 转换。
                 // 不重置 pending_resize_at：计时继续老化，松手满 debounce 触发
                 // 上方 Stable 分支一次性 configure（snap）。
-                if trace {
-                    eprintln!("[draw] follow-layout(drift) {}x{}", size.width, size.height);
-                }
                 // 相机（physical_size/dpi_scale）已由上方 `refresh_metrics()` 推进；
                 // 这里只置 follow_pending 标记供下方 acquire 后平滑段使用。
                 follow_pending = true;
@@ -830,29 +780,19 @@ impl VireoWindow {
             };
         }
         let t1 = std::time::Instant::now();
-        if trace {
-            eprintln!("[draw] acq-start");
-        }
         let acquired = self.surface.lock().get_current_texture();
-        let acq_elapsed = t1.elapsed();
-        let acq_us = acq_elapsed.as_micros();
         let (st, suboptimal) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(st) => {
-                if acq_us > 1000 {
-                    eprintln!("[acq] Success {:>6}us", acq_us);
-                }
                 self.draw_idle
                     .store(false, std::sync::atomic::Ordering::Release);
                 (st, false)
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
-                eprintln!("[acq] Suboptimal {:>6}us", acq_us);
                 self.draw_idle
                     .store(false, std::sync::atomic::Ordering::Release);
                 (st, true)
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                eprintln!("[acq] Outdated {:>6}us", acq_us);
                 // 重配后再试；本帧跳过
                 let size = self.inner.inner_size();
                 if size.width == 0 || size.height == 0 {
@@ -864,11 +804,6 @@ impl VireoWindow {
                 }
                 let t_conf = std::time::Instant::now();
                 self.configure_surface(size, t_conf);
-                Self::trace_resize_state(
-                    self.handle,
-                    "RECONFIGURE(outdated)",
-                    &format!("win={}x{}", size.width, size.height),
-                );
                 // `preparable` 兜底：首帧若走重配跳过，窗口会永远隐藏——显示它
                 // （宁可无内容一帧，不可永不出现），与 Timeout/Occluded 兜底一致。
                 self.maybe_show_prepared_window();
@@ -882,19 +817,16 @@ impl VireoWindow {
                 };
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
-                eprintln!("[acq] Timeout {:>6}us", acq_us);
                 // `preparable` 兜底：首帧若持续走 skip，窗口会永远隐藏——显示它
                 // （宁可无内容一帧，不可永不出现）。
                 self.maybe_show_prepared_window();
                 return skip_report(DrawSkipReason::Timeout);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
-                eprintln!("[acq] Occluded {:>6}us", acq_us);
                 self.maybe_show_prepared_window();
                 return skip_report(DrawSkipReason::Occluded);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                eprintln!("[acq] Lost {:>6}us", acq_us);
                 // surface 丢失：用现有 instance+window 重建 surface 并重配，本帧跳过
                 let size = self.inner.inner_size();
                 if size.width == 0 || size.height == 0 {
@@ -922,7 +854,6 @@ impl VireoWindow {
                 };
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("[acq] Validation {:>6}us", acq_us);
                 // get_current_texture 内部校验失败：surface 配置可能已失效。
                 // 按当前尺寸重配后本帧跳过（与 Outdated 一致），并记录告警——
                 // 不再伪装成「已重配」（旧实现只打 SurfaceReconfigured 不实际重配）。
@@ -949,27 +880,6 @@ impl VireoWindow {
                 };
             }
         };
-        {
-            let sc = self.surface_config.lock();
-            let decision = if trace_need_configure {
-                "RECONFIGURE"
-            } else if trace_size_drifted {
-                "STRETCH(suboptimal)"
-            } else {
-                "STABLE"
-            };
-            Self::trace_resize_state(
-                self.handle,
-                decision,
-                &format!(
-                    "win={}x{} swap={}x{} suboptimal={}",
-                    size.width, size.height, sc.width, sc.height, suboptimal
-                ),
-            );
-        }
-        if trace {
-            eprintln!("[draw] acq-end {:?}us", t1.elapsed().as_micros());
-        }
         let acquire_secs = t1.elapsed().as_secs_f64();
 
         // 4a) follow 布局跟随（实际执行）：acquire 可能等待 swapchain 空位；返回后
@@ -1030,9 +940,6 @@ impl VireoWindow {
                     }
                 };
                 if let Some((pw, ph)) = target {
-                    if trace {
-                        eprintln!("[draw] follow-layout(acq) {}x{}", pw, ph);
-                    }
                     let (logical_w, logical_h) =
                         phys_to_logical((pw, ph), dpi_override.unwrap_or(sf));
                     *self.physical_size.lock() = (pw, ph);
@@ -1077,18 +984,6 @@ impl VireoWindow {
         // 唤醒可能正在等待本帧完成的关窗路径（事件驱动，取代原先百万次自旋）。
         self.draw_idle_cv.1.notify_all();
         let present_secs = t3.elapsed().as_secs_f64();
-
-        if trace {
-            eprintln!(
-                "[draw] total={:?}us conf={} acq={:?}us enc+sub={:?}us pres={:?}us suboptimal={}",
-                t_trace.elapsed().as_micros(),
-                configured_this_frame,
-                (acquire_secs * 1e6) as u64,
-                (encode_secs * 1e6) as u64,
-                (present_secs * 1e6) as u64,
-                suboptimal
-            );
-        }
 
         // `preparable`：首帧渲染成功（已 present）后显示窗口。此时 surface 已
         // configure、内容已渲染，窗口第一次出现即完整形态，消除 winit 建窗的
