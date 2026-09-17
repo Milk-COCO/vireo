@@ -22,6 +22,14 @@
   The process exit code reflects only main's own fate: main panic → 1,
   otherwise 0 (a loop panic gracefully handled by main followed by a normal
   return still exits 0).
+- 默认窗口图标编译进库：根目录 `logo.png` 经 `include_bytes!` baked，
+  不再运行时读启动目录——此前在哪启动决定有没有图标，且失败全程静默。
+  `icon_from_path` 任一步失败改 `log::warn!`（路径 + 阶段）。
+  The default window icon is now baked into the library (`logo.png` via
+  `include_bytes!`) instead of being read from the startup directory at
+  runtime — previously icon presence depended on where the process was launched
+  from, and all failures were silent. `icon_from_path` now `log::warn!`s
+  (path + stage) on any failure.
 
 ## [0.1.1]
 

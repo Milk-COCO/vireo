@@ -338,20 +338,35 @@ impl WindowDesc {
         self
     }
 
+    /// 设置窗口图标（最高优先级；不设则用库内置 vireo logo，与启动目录无关）。
+    /// 任务栏图标另见 `vireo::platform::windows::WindowExtWindows::set_taskbar_icon`。
     pub fn icon(mut self, icon: Icon) -> Self {
         self.window_icon = Some(icon);
         self
     }
 
-    /// 从图片文件加载窗口图标（PNG/JPG/BMP）
+    /// 从图片文件加载窗口图标（PNG/JPG/BMP）。任一步失败（读文件/解码/
+    /// `Icon` 构造）则打 `log::warn!` 并保持原图标不变。
     pub fn icon_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
-        if let Ok(data) = std::fs::read(path.as_ref())
-            && let Ok(img) = image::load_from_memory(&data)
-        {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            if let Ok(icon) = Icon::from_rgba(rgba.into_raw(), w, h) {
+        let path = path.as_ref();
+        match std::fs::read(path)
+            .map_err(|e| format!("read: {e:?}"))
+            .and_then(|data| image::load_from_memory(&data).map_err(|e| format!("decode: {e}")))
+            .and_then(|img| {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                Icon::from_rgba(rgba.into_raw(), w, h)
+                    .map_err(|e| format!("Icon::from_rgba: {e:?}"))
+            }) {
+            Ok(icon) => {
                 self.window_icon = Some(icon);
+            }
+            Err(stage) => {
+                log::warn!(
+                    "vireo icon_from_path({}) failed at {} — icon unchanged",
+                    path.display(),
+                    stage
+                );
             }
         }
         self

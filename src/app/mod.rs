@@ -217,14 +217,17 @@ impl App {
         let instance = wgpu::Instance::new(desc);
         let gpu = Arc::new(GpuContext::new(&instance));
         let device_lost = gpu.device_lost();
-        let default_icon = std::fs::read("logo.png")
-            .ok()
-            .and_then(|data| image::load_from_memory(&data).ok())
-            .and_then(|img| {
+        // 默认图标编译进库（根目录 `logo.png` 经 `include_bytes!` baked，
+        // 与进程启动目录无关；此前运行时读 CWD 的 `logo.png`，在哪启动决定
+        // 有没有图标，已删除）。
+        let default_icon = {
+            const LOGO: &[u8] = include_bytes!("../../logo.png");
+            image::load_from_memory(LOGO).ok().and_then(|img| {
                 let rgba = img.to_rgba8();
                 let (w, h) = rgba.dimensions();
                 Icon::from_rgba(rgba.into_raw(), w, h).ok()
-            });
+            })
+        };
         let init_duration = init_start.elapsed().as_secs_f64();
 
         Self {
