@@ -1,5 +1,23 @@
 # Changelog / 更新日志
 
+## [0.1.2]
+
+### Fixed / 修复
+- vireo-main 结束（正常返回或 panic）即关闭所有窗口并退出进程：
+  loop/main panic 后不再留下冻住的窗口与僵尸进程（此前须 taskkill）。
+  收尾走逐窗 close 路径（与 X 关闭一致）；手动 `App::run`/`spawn`
+  自驱 main 的程序不受影响。
+  When vireo-main ends (normally or via panic), all windows are closed and the
+  process exits: no more frozen windows or zombie processes after loop/main
+  panics (which previously required taskkill). Teardown reuses the per-window
+  close path, identical to X-close. Programs driving main manually via
+  `App::run`/`spawn` are unaffected.
+- 并发双重关窗计数下溢：`alive_window_count` 只在槽位实际由 `Some` 变 `None`
+  时递减，否则回绕后退出谓词永久失效。
+  Fixed double-close underflow of `alive_window_count`: decrement only when the
+  slot actually transitions from `Some` to `None`, otherwise the counter would
+  wrap and permanently disable the exit predicate.
+
 ## [0.1.1]
 
 ### Fixed / 修复

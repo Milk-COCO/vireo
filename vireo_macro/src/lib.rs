@@ -11,6 +11,10 @@
 //! 宏生成的 `fn main` 等价于 `vireo::App::new(|app| async move { ... })`（或带
 //! `descriptor` 属性时 `vireo::App::with_descriptor(EXPR, |app| async move { ... })`）。
 //!
+//! 生命周期：用户 main 结束（正常返回或 panic）即关闭所有窗口并退出进程
+//! （见 `vireo::App::new` 文档）。loop panic 经 `ThreadHandle` 以 `Err` 交付，
+//! 不会留下冻住的窗口与僵尸进程。
+//!
 //! 两种用户写法都支持：
 //! - `async fn main() { ... app.window(...) ... }`：`app` 由宏注入（闭包参数），向后兼容。
 //! - `async fn main(app: App) { ... app.window(...) ... }`：`app` 为显式参数，更直观；

@@ -17,6 +17,40 @@ pub(crate) fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) ->
     }
 }
 
+/// supervisor 单轮决策（纯函数，可单测）。
+///
+/// - `Exit`：原退出条件（`main_done && all_loops_done && settled` / 全关 / 设备丢失）。
+/// - `CloseAll`：vireo-main 已结束且无存活 loop，但仍有窗口开着——这些窗口永远不会
+///   再被驱动（`ThreadHandle` 全在 main 手里，main 结束即全部 join；`mem::forget`
+///   或把 handle move 到别的线程属于刻意行为，不予保证）。继续留着只会冻住，
+///   故按 X 关闭同款路径逐个关窗，收尾由 `all_closed` 接管退出。
+///   只在宏风格生效：`main_done` 仅由 `vireo-main` spawn 路径置位，手动
+///   `App::run`/`spawn` 自驱 main 的程序（`main_done` 恒假）行为零变化。
+/// - `Wait`：继续等事件。
+pub(crate) enum SupervisorAction {
+    Exit,
+    CloseAll,
+    Wait,
+}
+
+pub(crate) fn decide_supervisor_action(
+    main_done: bool,
+    all_loops_done: bool,
+    windows_settled: bool,
+    all_closed: bool,
+    device_lost: bool,
+    open_windows: usize,
+    pending_creates: usize,
+) -> SupervisorAction {
+    if (main_done && all_loops_done && windows_settled) || all_closed || device_lost {
+        SupervisorAction::Exit
+    } else if main_done && all_loops_done && pending_creates == 0 && open_windows > 0 {
+        SupervisorAction::CloseAll
+    } else {
+        SupervisorAction::Wait
+    }
+}
+
 /// 应用单个 winit 事件到 App 状态（free function，供 supervisor 线程调用）。
 /// 这是 supervisor 线程事件处理分支，语义与原渲染帧循环逐位一致，
 /// 仅把 `app` 与各 channel 改为参数传入。
@@ -186,8 +220,11 @@ pub(crate) fn apply_winit_event_one(
                 }
             }
             if let Some(w) = app.windows.lock().get_mut(handle) {
-                *w = None;
-                app.alive_window_count.fetch_sub(1, Ordering::AcqRel);
+                // take-guard：并发双重关窗（X + `close()` 竞争）时只计数一次，
+                // 否则 `alive_window_count` 下溢回绕，退出谓词永久失效。
+                if w.take().is_some() {
+                    app.alive_window_count.fetch_sub(1, Ordering::AcqRel);
+                }
             }
         }
 
@@ -334,13 +371,48 @@ pub(crate) fn supervisor_loop(
         let all_windows_closed = created_windows > 0
             && app.window_count() == 0
             && app.pending_window_creates.load(Ordering::Acquire) == 0;
-        if (app.inner.main_done.load(Ordering::Acquire) && all_loops_done && windows_settled)
-            || all_windows_closed
-            || device_lost.load(Ordering::Acquire)
-        {
-            let _ = exit_tx.send(());
-            app.wake_event_loop();
-            return;
+        match decide_supervisor_action(
+            app.inner.main_done.load(Ordering::Acquire),
+            all_loops_done,
+            windows_settled,
+            all_windows_closed,
+            device_lost.load(Ordering::Acquire),
+            app.window_count(),
+            app.pending_window_creates.load(Ordering::Acquire),
+        ) {
+            SupervisorAction::Exit => {
+                let _ = exit_tx.send(());
+                app.wake_event_loop();
+                return;
+            }
+            SupervisorAction::CloseAll => {
+                // vireo-main 已死、无存活 loop：快照 open 句柄后逐个走关窗路径
+                //（close hooks / draw_idle / alive 计数与 X 关闭逐位一致），
+                // 下一轮由 all_closed 退出。`continue` 而非阻塞等事件——
+                // 关窗已同步完成，退出条件本轮即可满足。
+                // 与并发 X 关闭撞车时上方的 take-guard 保证计数只减一次。
+                let handles: Vec<usize> = {
+                    app.windows
+                        .lock()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, w)| w.as_ref().map(|_| i))
+                        .collect()
+                };
+                for handle in handles {
+                    apply_winit_event_one(
+                        &app,
+                        WinitEvent::CloseRequested { handle },
+                        &event_tx,
+                        &frame_style_tx,
+                        &aspect_ratio_tx,
+                        &nc_tx,
+                        &close_tx,
+                    );
+                }
+                continue;
+            }
+            SupervisorAction::Wait => {}
         }
         if !processed {
             match rx.recv() {
@@ -369,3 +441,75 @@ pub(crate) fn supervisor_loop(
 
 /// Winit 窗口引用类型（供 supervisor 使用）。
 use crate::window::VireoWindow;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_exit(a: SupervisorAction) -> bool {
+        matches!(a, SupervisorAction::Exit)
+    }
+    fn is_close_all(a: SupervisorAction) -> bool {
+        matches!(a, SupervisorAction::CloseAll)
+    }
+    fn is_wait(a: SupervisorAction) -> bool {
+        matches!(a, SupervisorAction::Wait)
+    }
+
+    #[test]
+    fn exit_on_main_loops_settled() {
+        assert!(is_exit(decide_supervisor_action(
+            true, true, true, false, false, 0, 0
+        )));
+    }
+
+    #[test]
+    fn exit_on_all_closed_even_if_main_alive() {
+        assert!(is_exit(decide_supervisor_action(
+            false, false, false, true, false, 0, 0
+        )));
+    }
+
+    #[test]
+    fn exit_on_device_lost_beats_everything() {
+        assert!(is_exit(decide_supervisor_action(
+            false, false, false, false, true, 3, 0
+        )));
+    }
+
+    #[test]
+    fn close_all_when_main_done_loops_done_windows_open() {
+        assert!(is_close_all(decide_supervisor_action(
+            true, true, false, false, false, 2, 0
+        )));
+    }
+
+    #[test]
+    fn wait_when_main_alive() {
+        assert!(is_wait(decide_supervisor_action(
+            false, true, false, false, false, 2, 0
+        )));
+    }
+
+    #[test]
+    fn wait_when_loops_running() {
+        assert!(is_wait(decide_supervisor_action(
+            true, false, false, false, false, 2, 0
+        )));
+    }
+
+    #[test]
+    fn wait_when_creates_in_flight() {
+        // 在途建窗：等 WindowCreated 落定再评估，保证收敛，不提前关窗。
+        assert!(is_wait(decide_supervisor_action(
+            true, true, false, false, false, 1, 1
+        )));
+    }
+
+    #[test]
+    fn wait_when_no_windows_and_not_settled() {
+        assert!(is_wait(decide_supervisor_action(
+            true, true, false, false, false, 0, 0
+        )));
+    }
+}

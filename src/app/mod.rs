@@ -127,6 +127,14 @@ pub(crate) enum DeferredTaskKind {
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl App {
+    /// 进程入口（宏风格）：OS 主线程构造 `App`，`vireo-main` 线程跑用户 future，
+    /// OS 主线程跑 winit 事件循环；阻塞到进程退出。
+    ///
+    /// 生命周期归属：**vireo-main 结束（正常返回或 panic）即关闭所有窗口并退出进程**
+    /// （supervisor 走逐窗 close 路径收尾，与 X 关闭一致）。loop panic 本身不结束进程，
+    /// 而是经 `ThreadHandle` 以 `Err` 交付；若其导致 main 随之结束（如 `.await.unwrap()`），
+    /// 收尾机制同样接管，不会留下冻住的窗口与僵尸进程。
+    /// 手动 `App::run`/`spawn` 自驱 main 的程序不受此规则影响。
     #[allow(clippy::new_ret_no_self)]
     pub fn new<F, Fut>(main: F)
     where
