@@ -17,6 +17,11 @@
   Fixed double-close underflow of `alive_window_count`: decrement only when the
   slot actually transitions from `Some` to `None`, otherwise the counter would
   wrap and permanently disable the exit predicate.
+- 进程退出码只反映 main 自身的结局：main panic → 1，其余 0
+  （loop panic 被 main 妥善处理后正常返回仍是 0）。
+  The process exit code reflects only main's own fate: main panic → 1,
+  otherwise 0 (a loop panic gracefully handled by main followed by a normal
+  return still exits 0).
 
 ## [0.1.1]
 

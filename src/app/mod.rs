@@ -64,6 +64,10 @@ pub struct AppInner {
     pub(crate) pending_window_creates: AtomicUsize,
     pub(crate) loops_ever_requested: AtomicBool,
     pub(crate) main_done: AtomicBool,
+    /// vireo-main 是否以 panic 结束（`main.rs` 的 `catch_unwind` 的 `Err` 分支置位）。
+    /// 收尾完成后决定进程退出码：true → `process::exit(1)`，false → 0。
+    /// 只反映 main 自身的结局；loop panic 被 main 妥善处理后正常返回仍是 0。
+    pub(crate) main_panicked: AtomicBool,
     pub(crate) event_tx: Mutex<Option<mpsc::Sender<WinitEvent>>>,
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     pub(crate) event_loop_proxy: OnceLock<winit::event_loop::EventLoopProxy<()>>,
@@ -135,6 +139,8 @@ impl App {
     /// 而是经 `ThreadHandle` 以 `Err` 交付；若其导致 main 随之结束（如 `.await.unwrap()`），
     /// 收尾机制同样接管，不会留下冻住的窗口与僵尸进程。
     /// 手动 `App::run`/`spawn` 自驱 main 的程序不受此规则影响。
+    /// 进程退出码只反映 main 自身的结局：main panic → 1，其余 0
+    ///（loop panic 被 main 妥善处理后正常返回仍是 0）。
     #[allow(clippy::new_ret_no_self)]
     pub fn new<F, Fut>(main: F)
     where
@@ -161,9 +167,16 @@ impl App {
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let channels = self.init_run_channels();
-        main::spawn(self.clone(), main);
+        let app = self.clone();
+        main::spawn(app.clone(), main);
         if let Err(e) = host::run_blocking(self, channels) {
             eprintln!("[vireo] app exited with error: {:?}", e);
+        }
+        // 退出码只反映 main 自身的结局：main panic → 1，其余 0。
+        // 此时 teardown 已全部完成（event loop 已退、supervisor 已 join），
+        // `process::exit` 跳过析构是安全的。loop panic 被 main 妥善处理后不影响。
+        if app.inner.main_panicked.load(Ordering::Acquire) {
+            std::process::exit(1);
         }
     }
 
@@ -237,6 +250,7 @@ impl App {
                 pending_window_creates: AtomicUsize::new(0),
                 loops_ever_requested: AtomicBool::new(false),
                 main_done: AtomicBool::new(false),
+                main_panicked: AtomicBool::new(false),
                 event_tx: Mutex::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),

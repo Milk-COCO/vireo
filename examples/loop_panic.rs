@@ -2,7 +2,7 @@
 //!
 //! 跑法：`cargo run --example loop_panic`（需显示器）。
 //! 预期（0.1.2+）：约 120 帧后 on_tick panic，主线程 `.await.unwrap()` 跟着 panic，
-//! 控制台打出两行 `[vireo]` 日志后窗口关闭、进程退出，无需 taskkill。
+//! 控制台打出两行 `[vireo]` 日志后窗口关闭、进程退出（退出码 1），无需 taskkill。
 //! 0.1.2 之前：窗口冻住、进程不退、exe 被锁，只能 taskkill。
 
 use vireo::prelude::*;
