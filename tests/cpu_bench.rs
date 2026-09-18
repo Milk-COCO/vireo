@@ -428,3 +428,64 @@ fn bench_merge_path_cpu() {
         let _ = combined.len();
     });
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 0（粒子计划门控）：instance 推送成本。
+// N=500/2000 两档，对比 (i) 现状逐调用 draw_rectangle（含 transform 注册 +
+// SDF 参数烘焙），(ii) 提案下限：同等字节 bulk memcpy。
+// 门限（必须 --release 下读数）：N=2000 时 (i) < 0.2ms/frame → 1b 暂缓。
+// 只打印不断言：绝对时间断言在机器间 flaky，结论由人下。
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn bench_particle_push() {
+    println!("\n=== Particle Push (Phase 0 gate; read under --release) ===");
+    let one = ShapeInstance {
+        bounds: [0.0, 0.0, 14.0, 14.0],
+        uv_bounds: [0.0, 0.0, 1.0, 1.0],
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+        sdf_params: [0.0; 4],
+        sdf_extra: [0.0; 2],
+        sdf_type: 0,
+        sdf_feather: 1.0,
+        transform_index: 0,
+        _padding: 0,
+    };
+    for &n in &[500usize, 2000usize] {
+        // (i) 现状：逐调用推送（带旋转，贴近 note/FX 负载）
+        let (_, total) = time_ms(|| {
+            for _ in 0..60 {
+                let mut b = DrawBatch::new();
+                b.set_sdf_feather(Some(1.0));
+                for i in 0..n {
+                    let x = (i % 50) as f32 * 17.0;
+                    let y = (i / 50) as f32 * 17.0;
+                    b.set_position(x, y);
+                    b.set_deg((i % 36) as f32 * 10.0);
+                    draw_rectangle(&mut b, Pos::new(-7.0, -7.0), 14.0, 14.0, Some(WHITE));
+                }
+            }
+        });
+        println!(
+            "  {:<40} {:>8.3} ms/frame",
+            format!("status quo draw_rectangle x{n}"),
+            total / 60.0
+        );
+        // (ii) 下限：同等字节 bulk memcpy（提案能达到的最好情况）
+        let template = vec![one; n];
+        let mut buf: Vec<ShapeInstance> = Vec::with_capacity(n);
+        let (_, total) = time_ms(|| {
+            for _ in 0..60 {
+                buf.clear();
+                buf.extend_from_slice(&template);
+            }
+        });
+        println!(
+            "  {:<40} {:>8.3} ms/frame",
+            format!("bulk memcpy {n}x104B (lower bound)"),
+            total / 60.0
+        );
+    }
+    println!("  GATE: N=2000 status quo < 0.2ms/frame（--release）→ 1b 暂缓，否则开工 1a/1b");
+}

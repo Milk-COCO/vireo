@@ -356,6 +356,24 @@ fn gpu_bench_scenes() {
         },
         FRAMES,
     );
+    // Phase 0（粒子计划基线）：同贴图 quad x500。1b 验收：同场景 draw call
+    // 不超过此基线（预期 1 dc，单纹理段跨参数合并）且像素一致。
+    let tex_quad = Texture::from_rgba(32, 32, &solid_rgba(32, 32, 230, 200, 130), &gpu);
+    measure_scene(
+        "Textured quads x500 (particle proxy)",
+        &canvas,
+        |b| {
+            b.set_sdf_feather(Some(1.0));
+            b.set_texture(Some(&tex_quad));
+            for i in 0..500 {
+                let x = (i % 25) as f32 * 35.0 + 10.0;
+                let y = (i / 25) as f32 * 35.0 + 10.0;
+                b.set_position(x, y);
+                draw_rectangle(b, Pos::new(0.0, 0.0), 28.0, 28.0, Some(WHITE));
+            }
+        },
+        FRAMES,
+    );
 }
 
 #[test]
