@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::area::{Area, AreaGeom, effective_area};
-use crate::gpu::{GeoInstance, GeoVertex, ParticleInstance, ShapeInstance, Vertex};
+use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, ParticleInstance, ShapeInstance, Vertex};
 use crate::material::Material;
 use crate::math::{
     Pos, Rect, Transform, UvRect, affine_rect_bounds, mul_affine_cols,
@@ -344,6 +344,13 @@ pub struct DrawBatch {
     /// flatten/draw 时整批一次消费，零 record 副作用。`Transform::IDENTITY` 是自然缺省
     /// （非 `Option`：`None` 与 `Some(IDENTITY)` 等价）。
     pub view: Transform,
+    /// 本批粒子用的时钟（**属性，非画笔状态**，batch-local **不继承**子树）。
+    ///
+    /// - draw 阶段按此 index 读注册表时间＋绑对应 camera 组（见 `Renderer::clock_camera_group`）；
+    ///   `draw_particles` 本身不读时间（D 已否决），spawn/sweep 取钟由用户经 `clock_time` 自理。
+    /// - 时钟是选择无法叠加（不像 transform 可乘），故无 `view` 式的祖先累计；
+    ///   子 batch 各用各的字段，整棵子树同钟请逐个设。默认 0 号钟。
+    pub particle_clock: ClockIndex,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
     ///
@@ -468,6 +475,7 @@ impl DrawBatch {
             shape_mesh_end: 0,
             transform: None,
             view: Transform::IDENTITY,
+            particle_clock: ClockIndex::ZERO,
             sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
@@ -514,6 +522,7 @@ impl DrawBatch {
         self.shape_mesh_end = 0;
         self.transform = None;
         self.view = Transform::IDENTITY;
+        self.particle_clock = ClockIndex::ZERO;
         self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
@@ -2122,6 +2131,7 @@ impl DrawBatch {
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             view: self.view,
+            particle_clock: self.particle_clock,
             sdf_feather: self.sdf_feather,
             color: self.color,
             uv: self.uv,

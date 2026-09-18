@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 
 use crate::area::AreaStencilOp;
 pub use crate::gpu::Vertex;
-use crate::gpu::{GeoInstance, GeoVertex, GpuContext, ParticleInstance, ShapeInstance};
+use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, GpuContext, ParticleInstance, ShapeInstance};
 use crate::material::Material;
 pub use crate::math::{Pos, Rect, Transform, UvRect};
 
@@ -364,6 +364,9 @@ struct ShapeInfo {
     instances: Vec<InstanceSegment>,
     geo_instances: Vec<GeoInstanceSegment>,
     particles: Vec<ParticleSegment>,
+    /// 本批粒子的时钟（`batch.particle_clock`，batch-local）。
+    /// 粒子段 group 0 绑此钟的 camera 组；非粒子绘制不用。
+    particle_clock: ClockIndex,
     ordered: Vec<OrderedShapeSegment>,
 }
 
@@ -418,6 +421,12 @@ pub struct Renderer {
     pub(crate) gpu: std::sync::Arc<GpuContext>,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    /// camera uniform CPU 镜像（80B：投影 64＋dpi 4＋padding/time 12）。
+    /// per-clock 组写 buffer 时从镜像拷投影/dpi，只 patch 时间字节，避免重算。
+    camera_mirror: [u8; 80],
+    /// per-clock camera 组：`(index, generation)` →（80B buffer，bind group）。
+    /// 同 group-0 BGL（零管线影响），按需创建；野 handle 回落 0 号组。
+    clock_groups: Mutex<FxHashMap<(u32, u32), (wgpu::Buffer, wgpu::BindGroup)>>,
     vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
@@ -521,6 +530,8 @@ impl Renderer {
             gpu,
             camera_buf,
             camera_bind_group,
+            camera_mirror: camera_raw,
+            clock_groups: Mutex::new(FxHashMap::default()),
             vertex_buf: Mutex::new(None),
             index_buf: Mutex::new(None),
             instance_buf: Mutex::new(None),
@@ -680,6 +691,7 @@ impl Renderer {
         self.gpu
             .queue
             .write_buffer(&self.camera_buf, 0, &camera_raw);
+        self.camera_mirror = camera_raw;
         self.logical_width = logical_width;
         self.logical_height = logical_height;
         self.scale = scale;
@@ -839,6 +851,43 @@ impl Renderer {
             mapped_at_creation: false,
         });
         *slot = Some((buffer, new_cap));
+    }
+
+    /// 取时钟的 camera 组（按需创建＋写入当前时间），供粒子段绑 group 0。
+    ///
+    /// - 同 group-0 BGL 的独立组实例：其他绘制（SDF/geo/text）不受影响，零管线变动。
+    /// - 内容每用必写（`camera_mirror` 投影/dpi ＋注册表时间），故槽位复用/野 handle
+    ///   天然正确；野 handle 由 `resolve_clock` 回落 0 号（warn 一条，见 `clock_time`）。
+    /// - TEMP 桥删除后，共享 `camera_buf` 的时间字节不再有人读（SDF/geo/FS 均无 time 字段）。
+    fn clock_camera_group(&self, id: ClockIndex) -> wgpu::BindGroup {
+        let eff = self.gpu.resolve_clock(id);
+        let key = eff.key();
+        let t = self.gpu.clock_time(eff);
+        let mut map = self.clock_groups.lock();
+        let entry = map.entry(key).or_insert_with(|| {
+            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vireo particle clock camera buffer"),
+                size: 80,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bg = self
+                .gpu
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("vireo particle clock camera bind group"),
+                    layout: &self.gpu.camera_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    }],
+                });
+            (buf, bg)
+        });
+        let mut raw = self.camera_mirror;
+        raw[68..72].copy_from_slice(&t.to_le_bytes());
+        self.gpu.queue.write_buffer(&entry.0, 0, &raw);
+        entry.1.clone()
     }
 
     fn ensure_geo_template_vertex_buffer(&self, size: u64) {

@@ -9,8 +9,11 @@
   GPU particle path: baked spawn params + VS integration over `camera.time`.
 - 粒子时钟注册表：`ClockIndex`（generational）＋`create_clock` / `destroy_clock` /
   `set_clock_scale`（0＝暂停，恢复无跳变）/ `set_clock_time` / `clock_time`；
-  多独立时间线，0 号默认钟。`ParticlePool::sweep`（单遍清除过期粒子，无分配）。
+  多独立时间线，0 号默认钟。
   Particle clock registry: multiple independent timelines, default clock 0.
+- `DrawBatch::particle_clock`（batch 属性，默认 0 号钟）＋Renderer per-clock camera 组：
+  同 batch 同钟，多批多钟同屏各走各的时间线（单 pass，零管线变动）。
+  Per-batch particle clock + per-clock camera groups: independent timelines on screen.
 - `ShapeStats::particles` 诊断字段（`shape_vertex_count` 含粒子等效顶点）。
 - `ParticlePool::sweep`（单遍清除过期粒子，无分配；示例每 30 帧调用一次）。
   `ParticlePool::sweep` (single-pass expiry without allocation).

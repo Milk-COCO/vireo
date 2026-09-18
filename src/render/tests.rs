@@ -598,6 +598,28 @@ fn particle_clear_and_clone_carry_state() {
 }
 
 #[test]
+fn particle_clock_defaults_zero_carries_and_resets() {
+    use crate::gpu::ClockIndex;
+    let mut batch = DrawBatch::new();
+    assert_eq!(batch.particle_clock, ClockIndex::ZERO);
+    // 非零值：clone 携带、clear 复位（batch-local，不继承子树）
+    batch.particle_clock = ClockIndex {
+        index: 7,
+        generation: 2,
+    };
+    let cloned = batch.clone_batch();
+    assert_eq!(
+        cloned.particle_clock,
+        ClockIndex {
+            index: 7,
+            generation: 2
+        }
+    );
+    batch.clear();
+    assert_eq!(batch.particle_clock, ClockIndex::ZERO);
+}
+
+#[test]
 fn automatic_rectangle_bounds_include_feather() {
     let mut batch = DrawBatch::new();
     batch.sdf_feather = Some(2.0);

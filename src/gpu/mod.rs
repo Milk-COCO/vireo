@@ -213,8 +213,8 @@ impl ParticleInstance {
 ///   先 resync，无跳变）；`set_clock_time` 定值（确定性回放）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ClockIndex {
-    index: u32,
-    generation: u32,
+    pub(crate) index: u32,
+    pub(crate) generation: u32,
 }
 
 impl ClockIndex {
@@ -223,6 +223,11 @@ impl ClockIndex {
         index: 0,
         generation: 0,
     };
+
+    /// 组表键（Renderer per-clock camera 组索引）。
+    pub(crate) fn key(&self) -> (u32, u32) {
+        (self.index, self.generation)
+    }
 }
 
 impl Default for ClockIndex {
@@ -815,18 +820,27 @@ impl GpuContext {
         }
     }
 
-    /// 读时钟当前时间。野 handle 回落 0 号钟时间＋`log::warn`（不 panic，
-    /// 与 AtlasFull 自愈同级 graceful 策略；正常路径无 warn）。
-    pub fn clock_time(&self, id: ClockIndex) -> f32 {
+    /// 解析有效时钟（野 handle 回落 ZERO＋warn 一条）。`clock_time` 与
+    /// `Renderer::clock_camera_group` 共用，保证两处看到同一有效 index。
+    pub(crate) fn resolve_clock(&self, id: ClockIndex) -> ClockIndex {
         let table = self.clocks.lock().unwrap();
-        if let Some(t) = table.time_of(id) {
-            return t;
+        match table.slots.get(id.index as usize) {
+            Some(slot) if slot.live && slot.generation == id.generation => id,
+            _ => {
+                log::warn!(
+                    "vireo gpu: stale clock {:?}, falling back to default clock",
+                    id
+                );
+                ClockIndex::ZERO
+            }
         }
-        log::warn!(
-            "vireo gpu: stale clock {:?}, falling back to default clock",
-            id
-        );
-        table.time_of(ClockIndex::ZERO).unwrap_or(0.0)
+    }
+
+    /// 读时钟当前时间。野 handle 经 `resolve_clock` 回落 0 号（warn 一条，不 panic）。
+    pub fn clock_time(&self, id: ClockIndex) -> f32 {
+        let eff = self.resolve_clock(id);
+        let table = self.clocks.lock().unwrap();
+        table.time_of(eff).unwrap_or(0.0)
     }
 
     /// 当前设备对 surface_format 支持的 MSAA sample_count 列表（升序）。

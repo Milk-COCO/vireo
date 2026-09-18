@@ -1717,6 +1717,115 @@ fn particle_textured_uv_rects() {
     );
 }
 
+/// 双钟独立时间线：A 钟定值 5.0（红）＋B 钟定值 2.0（蓝），同几何不同速。
+/// 同速 10px/s 下 A 中心 x=50、B 中心 x=20；断言各就各位且不串台＋各 1 dc。
+/// 单共享 uniform 永远做不出此布局（TEMP 桥时代两 quad 会重叠），故为本轮回归核心。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_dual_clock_independent_timelines() {
+    fn region_dominant(
+        pixels: &[u8],
+        w: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        want_red: bool,
+    ) -> bool {
+        // 相对判定：vireo 调色板非纯色（RED=(0.9,0.16,0.22)），经 sRGB 输出后
+        // 绝对阈值失效（如蓝的 g 通道约 179）。相对差 40 足以区分红/蓝/底。
+        let mut hit = 0u32;
+        let mut total = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = ((y * w + x) * 4) as usize;
+                let (r, g, b) = (
+                    pixels[idx] as u16,
+                    pixels[idx + 1] as u16,
+                    pixels[idx + 2] as u16,
+                );
+                total += 1;
+                if want_red {
+                    if r > g + 40 && r > b + 40 {
+                        hit += 1;
+                    }
+                } else if b > r + 40 && b > g + 40 {
+                    hit += 1;
+                }
+            }
+        }
+        hit * 2 > total
+    }
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let clock_a = gpu.create_clock();
+    let clock_b = gpu.create_clock();
+    assert!(gpu.set_clock_time(clock_a, 5.0));
+    assert!(gpu.set_clock_time(clock_b, 2.0));
+
+    let mut pool_a = ParticlePool::new();
+    pool_a.spawn(Particle {
+        pos: [0.0, 350.0],
+        vel: [10.0, 0.0],
+        size: [5.0, 5.0],
+        color: RED,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 100.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    let mut pool_b = ParticlePool::new();
+    pool_b.spawn(Particle {
+        pos: [0.0, 350.0],
+        vel: [10.0, 0.0],
+        size: [5.0, 5.0],
+        color: BLUE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 100.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+
+    let mut batch_a = DrawBatch::new();
+    batch_a.particle_clock = clock_a;
+    draw_particles(&mut batch_a, &pool_a);
+    let mut batch_b = DrawBatch::new();
+    batch_b.particle_clock = clock_b;
+    draw_particles(&mut batch_b, &pool_b);
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&batch_a, &batch_b]);
+    assert_eq!(
+        canvas.last_draw_calls(),
+        2,
+        "两批不同钟，各 1 dc（不同 bind group 不合并）"
+    );
+    let pixels = canvas.read_pixels();
+    // A 中心 (50,350)：x 47..53 红；B 中心 (20,350)：x 17..23 蓝
+    assert!(
+        region_dominant(&pixels, 900, 47, 347, 53, 353, true),
+        "A 钟粒子应在其时间线位置显红"
+    );
+    assert!(
+        !region_dominant(&pixels, 900, 47, 347, 53, 353, false),
+        "A 区不应串入 B 的蓝"
+    );
+    assert!(
+        region_dominant(&pixels, 900, 17, 347, 23, 353, false),
+        "B 钟粒子应在其时间线位置显蓝"
+    );
+    assert!(
+        !region_dominant(&pixels, 900, 17, 347, 23, 353, true),
+        "B 区不应串入 A 的红"
+    );
+}
+
 /// 时钟注册表语义（零渲染，纯注册表数学）：定值精确、暂停冻结 bit 精确、
 /// 恢复不跳变、destroy/stale 代数、0 号保护、槽位复用新代数。
 #[test]

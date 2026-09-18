@@ -38,16 +38,6 @@ impl Renderer {
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
         // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
         // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
-        // ---- 粒子时钟：每帧写 camera uniform padding（bytes 68..72）----
-        // TEMP 桥：当前只写 0 号默认钟；per-clock bind group 落地即删
-        // （届时各 batch 按 `particle_clock` 绑自家组，见计划 §十一）。
-        // `update_layout` 在 draw 之前跑（重写 padding 为 0），故 draw 入口写一次
-        // 即本帧生效（各 Renderer 自有 camera_buf，不跨 batch/窗口干扰）。
-        self.gpu.queue.write_buffer(
-            &self.camera_buf,
-            68,
-            &self.gpu.clock_time(ClockIndex::ZERO).to_le_bytes(),
-        );
         let mut events: Vec<DrawEvent> = Vec::new();
         let (_viewport, uses_stencil) = prepare_culling(
             batches,
@@ -815,6 +805,7 @@ impl Renderer {
                             instances: instance_segments,
                             geo_instances: geo_segments,
                             particles: particle_segments,
+                            particle_clock: batch.particle_clock,
                             ordered: if batch.shape_commands.is_empty()
                                 || !batch.shape_commands_valid()
                             {
@@ -983,6 +974,7 @@ impl Renderer {
                             instances: instance_segments,
                             geo_instances: geo_segments,
                             particles: particle_segments,
+                            particle_clock: batch.particle_clock,
                             ordered: Vec::new(),
                         })
                     } else {
@@ -1038,6 +1030,7 @@ impl Renderer {
                         instances: Vec::new(),
                         geo_instances: Vec::new(),
                         particles: Vec::new(),
+                        particle_clock: ClockIndex::ZERO,
                         ordered: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
@@ -1081,6 +1074,7 @@ impl Renderer {
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
+                            particle_clock: ClockIndex::ZERO,
                             ordered: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
@@ -1139,6 +1133,7 @@ impl Renderer {
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
+                            particle_clock: ClockIndex::ZERO,
                             ordered: Vec::new(),
                         };
                         v_offset += 4;
@@ -1693,6 +1688,8 @@ impl Renderer {
                                     // Particles 命令恒实例安全（record 期 custom VS 已烘焙为 mesh），
                                     // 故无 mesh 回退分支；custom VS 材料理论上到不了这里，
                                     // 到达则按内置管线绘制（材料被忽略，与 legacy instance 语义一致）。
+                                    // group 0 绑本批时钟的 camera 组（其余绘制仍用共享组）。
+                                    let clock_bg = self.clock_camera_group(shape.particle_clock);
                                     let seg_material = &segment.material;
                                     let seg_custom_bg: Option<wgpu::BindGroup> =
                                         match seg_material.as_ref() {
@@ -1730,7 +1727,7 @@ impl Renderer {
                                             crate::gpu::ShapeVertexLayout::Particle,
                                         );
                                         pass.set_pipeline(&custom_pipe);
-                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(0, &clock_bg, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
                                         if let Some(bg) = seg_custom_bg.as_ref() {
@@ -1767,7 +1764,7 @@ impl Renderer {
                                             pipe_op,
                                         );
                                         pass.set_pipeline(&particle_pipeline);
-                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(0, &clock_bg, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
                                         pass.set_vertex_buffer(
@@ -2106,6 +2103,8 @@ impl Renderer {
                             last_geometry = None;
                         }
                         if !shape.particles.is_empty() {
+                            // 本批时钟的 camera 组绑 group 0（legacy 路径同样）。
+                            let clock_bg = self.clock_camera_group(shape.particle_clock);
                             if use_custom_instance {
                                 let mat = info.custom_material.as_ref().unwrap();
                                 let custom_pipe = self.gpu.ensure_material_pipeline(
@@ -2119,7 +2118,7 @@ impl Renderer {
                                     crate::gpu::ShapeVertexLayout::Particle,
                                 );
                                 pass.set_pipeline(&custom_pipe);
-                                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                pass.set_bind_group(0, &clock_bg, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                                 if let Some(bg) = custom_bg.as_ref() {
                                     pass.set_bind_group(3, bg, &info.dynamic_offsets);
@@ -2158,7 +2157,7 @@ impl Renderer {
                                     pipe_op,
                                 );
                                 pass.set_pipeline(&particle_pipeline);
-                                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                pass.set_bind_group(0, &clock_bg, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                                 pass.set_vertex_buffer(
                                     0,

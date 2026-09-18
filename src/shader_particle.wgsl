@@ -57,8 +57,10 @@ fn vs_main(vertex: QuadVertex, instance: ParticleInput) -> VertexOutput {
     let fade_in = instance.fade_misc.x;
     let fade_out = instance.fade_misc.y;
     var fade = smoothstep(0.0, max(fade_in, 1e-6), max(age, 0.0));
-    if (life > 0.0) {
-        fade *= 1.0 - smoothstep(life - max(fade_out, 0.0), life, age);
+    // fade_out <= 0 = 到 life 硬切（`dead` 分支已退化剔除，此处跳过）。
+    // 注意：edge0 == edge1 的 smoothstep 未定义（实测某后端直接作废像素），必须守卫。
+    if (life > 0.0 && fade_out > 0.0) {
+        fade *= 1.0 - smoothstep(life - fade_out, life, age);
     }
     out.color = vec4<f32>(instance.color.rgb, instance.color.a * fade);
     out.sdf_params = vec4<f32>(0.0);
