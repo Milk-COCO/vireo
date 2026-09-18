@@ -3,6 +3,7 @@
 //! 存活期 CPU 只做 spawn/kill（无逐帧 transform/color 更新）。
 //!
 //! - 程序化 sprite atlas（单纹理四象限：软盘/硬方/圆环/十字）＋逐粒子 `uv_rect`
+//!   （象限 UV 内缝侧内收半 texel：exact 边界 bilinear 会渗邻象限，粒子边缘多 1px 线）
 //! - 空格：在鼠标位置按当前模式发射（1 radial burst / 2 ring / 3 rain）
 //! - T：冻结粒子时钟（0 号钟 `set_clock_scale(0)`，动画暂停，证明时间由 GPU 统一驱动）
 //! - M：fragment-only 自定义材质开关（`local_pos` 条带 tint，走粒子 instance 管线）
@@ -61,11 +62,12 @@ fn sprite_atlas() -> Vec<u8> {
     px
 }
 
+const HALF_TEXEL: f32 = 1.0 / 128.0;
 const QUADS: [[f32; 4]; 4] = [
-    [0.0, 0.0, 0.5, 0.5],
-    [0.5, 0.0, 1.0, 0.5],
-    [0.0, 0.5, 0.5, 1.0],
-    [0.5, 0.5, 1.0, 1.0],
+    [0.0, 0.0, 0.5 - HALF_TEXEL, 0.5 - HALF_TEXEL],
+    [0.5 + HALF_TEXEL, 0.0, 1.0, 0.5 - HALF_TEXEL],
+    [0.0, 0.5 + HALF_TEXEL, 0.5 - HALF_TEXEL, 1.0],
+    [0.5 + HALF_TEXEL, 0.5 + HALF_TEXEL, 1.0, 1.0],
 ];
 
 struct UiState {
