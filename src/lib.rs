@@ -108,6 +108,7 @@ pub mod material;
 pub mod math;
 pub mod nc;
 pub mod offscreen;
+pub mod particle;
 pub mod platform;
 pub mod render;
 pub mod shapes;
@@ -129,7 +130,9 @@ pub mod prelude {
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
     pub use crate::draw_text_hud;
+    pub use crate::gpu::ClockIndex;
     pub use crate::gpu::GpuContext;
+    pub use crate::gpu::ParticleInstance;
     pub use crate::gpu::ShapeInstance;
     pub use crate::gpu::VIREO_TARGET_SHAPE;
     pub use crate::gpu::VIREO_TARGET_TEXT;
@@ -242,6 +245,10 @@ pub mod prelude {
     pub use crate::nc::NonClientRegion;
     pub use crate::nc::WindowState;
     pub use crate::offscreen::OffscreenCanvas;
+    pub use crate::particle::Particle;
+    pub use crate::particle::ParticlePool;
+    pub use crate::particle::ParticleSlot;
+    pub use crate::particle::draw_particles;
     pub use crate::thread::Loop;
     pub use crate::thread::LoopContext;
     pub use crate::thread::Thread;

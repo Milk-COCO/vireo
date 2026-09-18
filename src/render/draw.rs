@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
-use crate::gpu::{GeoInstance, GeoVertex, MaterialTarget, ShapeInstance, Vertex};
+use crate::gpu::{
+    ClockIndex, GeoInstance, GeoVertex, MaterialTarget, ParticleInstance, ShapeInstance, Vertex,
+};
 use crate::material::Material;
 use crate::math::{IDENTITY_TRANSFORM_ROW, Transform, left_mul_view_table};
 
 use super::prepare_culling;
 use super::{
     BatchShapeCommand, DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment,
-    OrderedShapeSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment, TextRenderSegment,
+    OrderedShapeSegment, ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment,
+    TextRenderSegment,
 };
 
 impl Renderer {
@@ -35,6 +38,16 @@ impl Renderer {
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
         // Area 存在时，batch 自身 content 在 base+1 测（Area∩base），子树按 clips_children 走。
         // clips_children + Area：Push at base+1（content level），子看 base+2；Pop 回 base+1。
+        // ---- 粒子时钟：每帧写 camera uniform padding（bytes 68..72）----
+        // TEMP 桥：当前只写 0 号默认钟；per-clock bind group 落地即删
+        // （届时各 batch 按 `particle_clock` 绑自家组，见计划 §十一）。
+        // `update_layout` 在 draw 之前跑（重写 padding 为 0），故 draw 入口写一次
+        // 即本帧生效（各 Renderer 自有 camera_buf，不跨 batch/窗口干扰）。
+        self.gpu.queue.write_buffer(
+            &self.camera_buf,
+            68,
+            &self.gpu.clock_time(ClockIndex::ZERO).to_le_bytes(),
+        );
         let mut events: Vec<DrawEvent> = Vec::new();
         let (_viewport, uses_stencil) = prepare_culling(
             batches,
@@ -46,7 +59,7 @@ impl Renderer {
         );
 
         let has_content = clear_color.is_some()
-            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.texts.entries.is_empty()));
+            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
             *self.last_draw_calls.lock() = 0;
@@ -110,7 +123,8 @@ impl Renderer {
         ) -> (u32, u32) {
             let has_geom = !batch.vertices.is_empty()
                 || !batch.instances.is_empty()
-                || !batch.geo_instances.is_empty();
+                || !batch.geo_instances.is_empty()
+                || !batch.particles.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
             if batch.clips_children && (has_geom || batch.scissor.is_some()) {
                 // Push: Test content_level → Inc；ref_stack 存抬升后绝对值供 Pop
@@ -359,10 +373,12 @@ impl Renderer {
         let mut combined_vdata = self.scratch_vdata.lock();
         let mut combined_idata = self.scratch_idata.lock();
         let mut combined_instances = self.scratch_instances.lock();
+        let mut combined_particles = self.scratch_particles.lock();
         let mut combined_geo_instances = self.scratch_geo_instances.lock();
         combined_vdata.clear();
         combined_idata.clear();
         combined_instances.clear();
+        combined_particles.clear();
         combined_geo_instances.clear();
         let cap_v = total_vbytes as usize;
         let cap_i = total_ibytes as usize;
@@ -400,6 +416,18 @@ impl Renderer {
                                     instance.sdf_params[0] += batch_poly_base[info_idx] as f32;
                                 }
                                 instance
+                            },
+                        ));
+                    }
+                    // 粒子恒走 instance 路径（record 期 custom VS 已烘焙为 mesh，
+                    // `particles` 非空即实例安全，无需 fragment_only 门）。
+                    let particle_start = combined_particles.len() as u32;
+                    if !batch.particles.is_empty() {
+                        let transform_base = batch_transform_bases[info_idx];
+                        combined_particles.extend(batch.particles.iter().copied().map(
+                            |mut particle| {
+                                particle.transform_index += transform_base;
+                                particle
                             },
                         ));
                     }
@@ -493,6 +521,44 @@ impl Renderer {
                                 instance_count: total_end - last_end,
                                 bind_group: resolve_bg(batch.bind_group.clone()),
                                 material: batch_material.clone(),
+                            });
+                        }
+                        segments
+                    };
+                    // 粒子段：与 instance 段同机理（texture segment 切分 + 尾段兜底），
+                    // 下标进 `combined_particles`。material 取 batch 级（legacy 路径用；
+                    // ordered 路径用命令自带 material，见下）。
+                    let batch_particle_material = batch.custom_material.clone();
+                    let particle_segments = if batch.particles.is_empty() {
+                        Vec::new()
+                    } else if batch.particle_texture_segments.is_empty() {
+                        vec![ParticleSegment {
+                            particle_start,
+                            particle_count: batch.particles.len() as u32,
+                            bind_group: resolve_bg(batch.bind_group.clone()),
+                            material: batch_particle_material.clone(),
+                        }]
+                    } else {
+                        let mut segments: Vec<ParticleSegment> = batch
+                            .particle_texture_segments
+                            .iter()
+                            .map(|segment| ParticleSegment {
+                                particle_start: particle_start + segment.instance_start,
+                                particle_count: segment.instance_count,
+                                bind_group: resolve_bg(segment.bind_group.clone()),
+                                material: batch_particle_material.clone(),
+                            })
+                            .collect();
+                        let last_end = segments
+                            .last()
+                            .map_or(particle_start, |s| s.particle_start + s.particle_count);
+                        let total_end = particle_start + batch.particles.len() as u32;
+                        if last_end < total_end {
+                            segments.push(ParticleSegment {
+                                particle_start: last_end,
+                                particle_count: total_end - last_end,
+                                bind_group: resolve_bg(batch.bind_group.clone()),
+                                material: batch_particle_material.clone(),
                             });
                         }
                         segments
@@ -748,6 +814,7 @@ impl Renderer {
                             geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                             instances: instance_segments,
                             geo_instances: geo_segments,
+                            particles: particle_segments,
                             ordered: if batch.shape_commands.is_empty()
                                 || !batch.shape_commands_valid()
                             {
@@ -805,6 +872,22 @@ impl Renderer {
                                                     material: material.clone(),
                                                 });
                                             }
+                                        }
+                                        BatchShapeCommand::Particles {
+                                            particle_start: local_start,
+                                            particle_count,
+                                            bind_group,
+                                            material,
+                                            ..
+                                        } => {
+                                            ordered.push(OrderedShapeSegment::Particles(
+                                                ParticleSegment {
+                                                    particle_start: particle_start + *local_start,
+                                                    particle_count: *particle_count,
+                                                    bind_group: resolve_bg(bind_group.clone()),
+                                                    material: material.clone(),
+                                                },
+                                            ));
                                         }
                                         BatchShapeCommand::GeoInstances {
                                             geo_instance_start: local_start,
@@ -889,13 +972,17 @@ impl Renderer {
                             };
                         idx_offset += mesh_index_count;
                         Some(info)
-                    } else if !instance_segments.is_empty() || !geo_segments.is_empty() {
+                    } else if !instance_segments.is_empty()
+                        || !geo_segments.is_empty()
+                        || !particle_segments.is_empty()
+                    {
                         Some(ShapeInfo {
                             base_vertex: 0,
                             segments: Vec::new(),
                             geometry: false,
                             instances: instance_segments,
                             geo_instances: geo_segments,
+                            particles: particle_segments,
                             ordered: Vec::new(),
                         })
                     } else {
@@ -950,6 +1037,7 @@ impl Renderer {
                         geometry: true,
                         instances: Vec::new(),
                         geo_instances: Vec::new(),
+                        particles: Vec::new(),
                         ordered: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
@@ -992,6 +1080,7 @@ impl Renderer {
                             geometry: !geom.has_sdf && geom.sdf_feather.is_none(),
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
+                            particles: Vec::new(),
                             ordered: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
@@ -1049,6 +1138,7 @@ impl Renderer {
                             geometry: true,
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
+                            particles: Vec::new(),
                             ordered: Vec::new(),
                         };
                         v_offset += 4;
@@ -1081,6 +1171,17 @@ impl Renderer {
                 &instance_buf.as_ref().unwrap().0,
                 0,
                 bytemuck::cast_slice(&combined_instances),
+            );
+        }
+
+        if !combined_particles.is_empty() {
+            let size = (combined_particles.len() * size_of::<ParticleInstance>()) as u64;
+            self.ensure_particle_buffer(size);
+            let particle_buf = self.particle_buf.lock();
+            self.gpu.queue.write_buffer(
+                &particle_buf.as_ref().unwrap().0,
+                0,
+                bytemuck::cast_slice(&combined_particles),
             );
         }
 
@@ -1318,6 +1419,7 @@ impl Renderer {
             let vbuf = self.vertex_buf.lock();
             let ibuf = self.index_buf.lock();
             let instance_buf = self.instance_buf.lock();
+            let particle_buf = self.particle_buf.lock();
             let geo_template_vbuf = self.geo_template_vertex_buf.lock();
             let geo_template_ibuf = self.geo_template_index_buf.lock();
             let geo_instance_buf = self.geo_instance_buf.lock();
@@ -1580,6 +1682,114 @@ impl Renderer {
                                             0,
                                             segment.instance_start
                                                 ..segment.instance_start + segment.instance_count,
+                                        );
+                                        shape_draw_calls += 1;
+                                    }
+                                    shapes_bound = false;
+                                    last_geometry = None;
+                                }
+                                OrderedShapeSegment::Particles(segment) => {
+                                    // 逐 segment 从材质派生 pipeline 状态（与 Instances 臂同构）。
+                                    // Particles 命令恒实例安全（record 期 custom VS 已烘焙为 mesh），
+                                    // 故无 mesh 回退分支；custom VS 材料理论上到不了这里，
+                                    // 到达则按内置管线绘制（材料被忽略，与 legacy instance 语义一致）。
+                                    let seg_material = &segment.material;
+                                    let seg_custom_bg: Option<wgpu::BindGroup> =
+                                        match seg_material.as_ref() {
+                                            Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                                &self.gpu.device,
+                                                &self.gpu.queue,
+                                                &self.gpu.bind_group_pool,
+                                            ),
+                                            _ => None,
+                                        };
+                                    if seg_material.is_some()
+                                        && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
+                                        && seg_custom_bg.is_none()
+                                    {
+                                        shapes_bound = false;
+                                        last_geometry = None;
+                                        continue;
+                                    }
+                                    let seg_use_custom = seg_material.is_some();
+                                    let has_custom_vs = seg_material
+                                        .as_ref()
+                                        .map(|m| m.has_custom_vertex_shader())
+                                        .unwrap_or(false);
+                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
+                                    if use_custom_instance {
+                                        let mat = seg_material.as_ref().unwrap();
+                                        let custom_pipe = self.gpu.ensure_material_pipeline(
+                                            mat,
+                                            MaterialTarget::Shape,
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            if uses_stencil { pipe_op.min(4) } else { 0 },
+                                            crate::gpu::ShapeVertexLayout::Particle,
+                                        );
+                                        pass.set_pipeline(&custom_pipe);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        if let Some(bg) = seg_custom_bg.as_ref() {
+                                            pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                                        }
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            self.gpu.instance_quad_vertex_buf.slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            particle_buf.as_ref().unwrap().0.slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            self.gpu.instance_quad_index_buf.slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            0..6,
+                                            0,
+                                            segment.particle_start
+                                                ..segment.particle_start + segment.particle_count,
+                                        );
+                                        shape_draw_calls += 1;
+                                    } else {
+                                        let particle_pipeline = self.gpu.ensure_particle_pipeline(
+                                            self.sample_count,
+                                            self.alpha_to_coverage,
+                                            self.ssaa,
+                                            uses_stencil,
+                                            pipe_op,
+                                        );
+                                        pass.set_pipeline(&particle_pipeline);
+                                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                        pass.set_bind_group(1, &segment.bind_group, &[]);
+                                        pass.set_bind_group(2, engine_bg, &[]);
+                                        pass.set_vertex_buffer(
+                                            0,
+                                            self.gpu.instance_quad_vertex_buf.slice(..),
+                                        );
+                                        pass.set_vertex_buffer(
+                                            1,
+                                            particle_buf.as_ref().unwrap().0.slice(..),
+                                        );
+                                        pass.set_index_buffer(
+                                            self.gpu.instance_quad_index_buf.slice(..),
+                                            wgpu::IndexFormat::Uint32,
+                                        );
+                                        if uses_stencil {
+                                            pass.set_stencil_reference(info.stencil_ref);
+                                        }
+                                        pass.draw_indexed(
+                                            0..6,
+                                            0,
+                                            segment.particle_start
+                                                ..segment.particle_start + segment.particle_count,
                                         );
                                         shape_draw_calls += 1;
                                     }
@@ -1888,6 +2098,90 @@ impl Renderer {
                                         0,
                                         segment.instance_start
                                             ..segment.instance_start + segment.instance_count,
+                                    );
+                                    shape_draw_calls += 1;
+                                }
+                            }
+                            shapes_bound = false;
+                            last_geometry = None;
+                        }
+                        if !shape.particles.is_empty() {
+                            if use_custom_instance {
+                                let mat = info.custom_material.as_ref().unwrap();
+                                let custom_pipe = self.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    self.ssaa,
+                                    uses_stencil,
+                                    if uses_stencil { pipe_op.min(4) } else { 0 },
+                                    crate::gpu::ShapeVertexLayout::Particle,
+                                );
+                                pass.set_pipeline(&custom_pipe);
+                                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                                if let Some(bg) = custom_bg.as_ref() {
+                                    pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                                }
+                                pass.set_vertex_buffer(
+                                    0,
+                                    self.gpu.instance_quad_vertex_buf.slice(..),
+                                );
+                                pass.set_vertex_buffer(
+                                    1,
+                                    particle_buf.as_ref().unwrap().0.slice(..),
+                                );
+                                pass.set_index_buffer(
+                                    self.gpu.instance_quad_index_buf.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                if uses_stencil {
+                                    pass.set_stencil_reference(info.stencil_ref);
+                                }
+                                for segment in &shape.particles {
+                                    pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    pass.draw_indexed(
+                                        0..6,
+                                        0,
+                                        segment.particle_start
+                                            ..segment.particle_start + segment.particle_count,
+                                    );
+                                    shape_draw_calls += 1;
+                                }
+                            } else {
+                                let particle_pipeline = self.gpu.ensure_particle_pipeline(
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    self.ssaa,
+                                    uses_stencil,
+                                    pipe_op,
+                                );
+                                pass.set_pipeline(&particle_pipeline);
+                                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                                pass.set_vertex_buffer(
+                                    0,
+                                    self.gpu.instance_quad_vertex_buf.slice(..),
+                                );
+                                pass.set_vertex_buffer(
+                                    1,
+                                    particle_buf.as_ref().unwrap().0.slice(..),
+                                );
+                                pass.set_index_buffer(
+                                    self.gpu.instance_quad_index_buf.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                                if uses_stencil {
+                                    pass.set_stencil_reference(info.stencil_ref);
+                                }
+                                for segment in &shape.particles {
+                                    pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    pass.draw_indexed(
+                                        0..6,
+                                        0,
+                                        segment.particle_start
+                                            ..segment.particle_start + segment.particle_count,
                                     );
                                     shape_draw_calls += 1;
                                 }

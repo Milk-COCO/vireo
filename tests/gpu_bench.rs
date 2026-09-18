@@ -36,6 +36,7 @@ fn measure_scene(
         geo_instances: 0,
         geo_templates: 0,
         geo_template_vertices: 0,
+        particles: 0,
     };
     let mut draw_calls: u32 = 0;
     for _ in 0..frames {
@@ -1433,4 +1434,325 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         region_has_color(&pixels, 64, 8, 8, 24, 24),
         "填齐纹理槽后：整批应正常绘制，区域应有内容"
     );
+}
+
+/// 粒子默认路径：500 不朽粒子 1 dc＋像素可见；未出生粒子被 VS 剔除。
+/// 时间走 0 号钟定值，证明 time uniform 真正驱动 VS。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_default_path_single_draw_call_and_time_driven_cull() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.set_clock_time(ClockIndex::ZERO, 50.0);
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    let mut pool = ParticlePool::new();
+    for i in 0..500 {
+        let x = (i % 25) as f32 * 35.0 + 10.0;
+        let y = (i / 25) as f32 * 35.0 + 10.0;
+        pool.spawn(Particle {
+            pos: [x + 14.0, y + 14.0],
+            vel: [0.0, 0.0],
+            size: [14.0, 14.0],
+            color: WHITE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            birth: 0.0,
+            life: -1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            seed: 0.0,
+        });
+    }
+    // 未出生：birth 在 override 之后 → age < 0 → VS 退化剔除
+    let mut future_pool = ParticlePool::new();
+    future_pool.spawn(Particle {
+        pos: [450.0, 350.0],
+        vel: [0.0, 0.0],
+        size: [40.0, 40.0],
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 100.0,
+        life: -1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+
+    let mut b = DrawBatch::new();
+    draw_particles(&mut b, &pool);
+    let stats = b.shape_stats();
+    assert_eq!(stats.particles, 500);
+    assert_eq!(stats.mesh_vertices, 0, "默认路径不应 mesh 展开");
+    assert_eq!(b.shape_vertex_count(), 2000);
+
+    let mut b2 = DrawBatch::new();
+    draw_particles(&mut b2, &future_pool);
+
+    // 分两次 draw（各清屏）：活集查可见，未出生集独占一帧查全黑。
+    // 未出生检查区若与活集同帧，会撞上网格粒子（col12/row9 落在区内），故分开。
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    assert_eq!(canvas.last_draw_calls(), 1, "活集单纹理段跨参数合并，1 dc");
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 900, 14, 14, 34, 34),
+        "存活粒子像素应可见"
+    );
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b2]);
+    assert_eq!(
+        canvas.last_draw_calls(),
+        1,
+        "全剔除批次仍发一次 draw（GPU 侧剔除，CPU 不剪枝）"
+    );
+    let pixels = canvas.read_pixels();
+    assert!(
+        !region_has_color(&pixels, 900, 410, 310, 490, 390),
+        "未出生粒子应被 VS 剔除（time uniform 生效）"
+    );
+}
+
+/// Fragment-only Custom Material + 粒子路径：500 粒子 1 dc＋像素可见。
+/// 验证 `ensure_material_pipeline(Particle)` 真实编译出可用管线。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_fragment_only_particle_path() {
+    const MATERIAL_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * 0.5, in.color.a);
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("material pipelines");
+
+    let mut pool = ParticlePool::new();
+    for i in 0..500 {
+        let x = (i % 25) as f32 * 35.0 + 10.0;
+        let y = (i / 25) as f32 * 35.0 + 10.0;
+        pool.spawn(Particle {
+            pos: [x + 14.0, y + 14.0],
+            vel: [0.0, 0.0],
+            size: [14.0, 14.0],
+            color: WHITE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            birth: 0.0,
+            life: -1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            seed: i as f32,
+        });
+    }
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(material));
+    draw_particles(&mut b, &pool);
+    let stats = b.shape_stats();
+    assert_eq!(
+        stats.particles, 500,
+        "fragment-only material 应仍走粒子 instance 路径"
+    );
+    assert_eq!(
+        stats.mesh_vertices, 0,
+        "fragment-only material 不应 mesh 展开"
+    );
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  fragment-only Material + particle x500 draw calls = {draw_calls}");
+    assert_eq!(
+        draw_calls, 1,
+        "fragment-only Material 应走粒子 instance pipeline，1 dc"
+    );
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 900, 14, 14, 34, 34),
+        "粒子 material 像素应可见"
+    );
+}
+
+/// 粒子 reorder 合并：P(2)＋geo 圆＋P(2)，同白纹理。
+/// 保序 → 3 dc；`preserve_order=false` → 两段 Particles 按 bind group 聚拢
+/// （范围在粒子缓冲内连续）合并 → 2 dc。覆盖 sort_key/try_merge 粒子臂运行时。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_reorder_merges_across_gap() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    let mut pool = ParticlePool::new();
+    for (x, y) in [(100.0, 100.0), (200.0, 100.0)] {
+        pool.spawn(Particle {
+            pos: [x, y],
+            vel: [0.0, 0.0],
+            size: [10.0, 10.0],
+            color: WHITE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            birth: 0.0,
+            life: -1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            seed: 0.0,
+        });
+    }
+
+    let mut b = DrawBatch::new();
+    draw_particles(&mut b, &pool);
+    b.clear_sdf_feather();
+    draw_circle(&mut b, Pos::new(400.0, 300.0), 30.0, Some(RED));
+    draw_particles(&mut b, &pool);
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    assert_eq!(canvas.last_draw_calls(), 3, "保序：粒子/几何/粒子各一段");
+    b.preserve_order = false;
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    assert_eq!(
+        canvas.last_draw_calls(),
+        2,
+        "重排：两段同 bg 粒子合并为 1 dc ＋几何 1 dc"
+    );
+}
+
+/// 带纹理粒子：左红右蓝 8×8 纹理，两粒子各取半区 uv。
+/// 断言 {A,B}=={红,蓝}（集合相等，不依赖 U 翻转约定）＋同纹理 1 dc。
+/// 证明 batch 纹理绑定＋逐粒子 `uv_rect` 生效（非白 fallback）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_textured_uv_rects() {
+    fn region_dominant(
+        pixels: &[u8],
+        w: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        want_red: bool,
+    ) -> bool {
+        let mut hit = 0u32;
+        let mut total = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = ((y * w + x) * 4) as usize;
+                let (r, g, b) = (pixels[idx], pixels[idx + 1], pixels[idx + 2]);
+                total += 1;
+                if want_red {
+                    if r > 150 && g < 120 && b < 120 {
+                        hit += 1;
+                    }
+                } else if b > 150 && r < 120 && g < 120 {
+                    hit += 1;
+                }
+            }
+        }
+        hit * 2 > total
+    }
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    // 左半红、右半蓝
+    let mut tex_bytes = Vec::with_capacity(8 * 8 * 4);
+    for _ in 0..8 {
+        for x in 0..8 {
+            if x < 4 {
+                tex_bytes.extend_from_slice(&[255, 0, 0, 255]);
+            } else {
+                tex_bytes.extend_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+    }
+    let tex = Texture::from_rgba(8, 8, &tex_bytes, &gpu);
+
+    let mut pool = ParticlePool::new();
+    pool.spawn(Particle {
+        pos: [100.0, 100.0],
+        vel: [0.0, 0.0],
+        size: [40.0, 40.0],
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 0.5, 1.0],
+        birth: 0.0,
+        life: -1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    pool.spawn(Particle {
+        pos: [340.0, 100.0],
+        vel: [0.0, 0.0],
+        size: [40.0, 40.0],
+        color: WHITE,
+        uv_rect: [0.5, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: -1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+
+    let mut b = DrawBatch::new();
+    b.set_texture(Some(&tex));
+    draw_particles(&mut b, &pool);
+    assert_eq!(b.shape_stats().particles, 2);
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    assert_eq!(canvas.last_draw_calls(), 1, "同纹理两粒子应合并为 1 dc");
+    let pixels = canvas.read_pixels();
+    // A=(60..140)^2 取左半，B=(300..380)×(60..140) 取右半；检查区避开中缝过滤带
+    let a_red = region_dominant(&pixels, 900, 70, 70, 95, 125, true);
+    let a_blue = region_dominant(&pixels, 900, 70, 70, 95, 125, false);
+    let b_red = region_dominant(&pixels, 900, 345, 70, 375, 125, true);
+    let b_blue = region_dominant(&pixels, 900, 345, 70, 375, 125, false);
+    assert!(
+        (a_red && !a_blue && b_blue && !b_red) || (a_blue && !a_red && b_red && !b_blue),
+        "two particles must sample opposite texture halves regardless of U direction"
+    );
+}
+
+/// 时钟注册表语义（零渲染，纯注册表数学）：定值精确、暂停冻结 bit 精确、
+/// 恢复不跳变、destroy/stale 代数、0 号保护、槽位复用新代数。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn clock_registry_semantics() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    // 默认钟走时＋定值精确
+    assert!(gpu.clock_time(ClockIndex::ZERO) >= 0.0);
+    assert!(gpu.set_clock_time(ClockIndex::ZERO, 123.0));
+    assert!((gpu.clock_time(ClockIndex::ZERO) - 123.0).abs() < 0.01);
+
+    // 暂停冻结（elapsed×0 恒 0，bit 精确）；恢复不跳变
+    let c = gpu.create_clock();
+    assert!(gpu.set_clock_scale(c, 0.0));
+    let frozen_a = gpu.clock_time(c);
+    let frozen_b = gpu.clock_time(c);
+    assert_eq!(frozen_a, frozen_b);
+    assert!(gpu.set_clock_scale(c, 1.0));
+    assert!((gpu.clock_time(c) - frozen_a).abs() < 0.01);
+
+    // destroy 语义：一次成功，重复/0号/stale 全 false
+    assert!(gpu.destroy_clock(c));
+    assert!(!gpu.destroy_clock(c));
+    assert!(!gpu.destroy_clock(ClockIndex::ZERO));
+    assert!(!gpu.set_clock_scale(c, 1.0));
+    assert!(!gpu.set_clock_time(c, 0.0));
+    // 野 handle 回落（warn 一条，不 panic；回落值即 0 号钟时间）
+    let fallback = gpu.clock_time(c);
+    assert!((fallback - gpu.clock_time(ClockIndex::ZERO)).abs() < 0.01);
+
+    // 槽位复用＋新代数
+    let c2 = gpu.create_clock();
+    assert_ne!(c, c2);
+    assert!(gpu.set_clock_scale(c2, 2.0));
+    assert!(gpu.set_clock_time(c2, 7.0));
 }

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::material::Material;
 
-use super::{GeoInstance, GeoVertex, GpuContext, QuadVertex, ShapeInstance, Vertex};
+use super::{
+    GeoInstance, GeoVertex, GpuContext, ParticleInstance, QuadVertex, ShapeInstance, Vertex,
+};
 
 // ---------------------------------------------------------------------------
 // WGSL constants and helper functions
@@ -57,6 +59,18 @@ pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool) -> String {
         )
     } else {
         source.to_owned()
+    }
+}
+
+/// 默认粒子 VS（`shader_particle.wgsl`），按 `ssaa` 同步 local_pos 插值。
+/// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致（SDF 字段恒 0，
+/// `vireo_apply_sdf` 早退；`local_pos` 为 material FS 可读参考）。
+pub(crate) fn default_particle_vertex_wgsl(ssaa: bool) -> String {
+    let source = include_str!("../shader_particle.wgsl");
+    if ssaa {
+        source.to_owned()
+    } else {
+        source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
     }
 }
 
@@ -226,7 +240,9 @@ pub(crate) const MATERIAL_INPUT_WGSL: &str = r#"
 //     NOT a continuous whole-line/text-area UV. Continuous text mapping needs a future
 //     field (e.g. text_uv / screen_uv) — do NOT repurpose base_uv.
 // - color: default base color after engine sampling * vertex/text color (rgb only for material_main;
-//          alpha is reapplied by the engine wrapper after material_main)
+//          alpha is reapplied by the engine wrapper after material_main;
+//          particle fade is baked into instance color and composes through that re-application:
+//          materials return constant/modulated alpha and never need to read base.a)
 // - local_pos: shape-only local position; text fills (0,0)
 // - sdf_params / sdf_extra / sdf_type / sdf_feather: shape-only SDF data; text fills zeros
 // - content_type: text-only (0=color atlas glyph, 1=mask glyph); shape fills 0
@@ -418,6 +434,10 @@ pub(crate) enum MaterialTarget {
 /// - `GeoInstance`：双 buffer `[GeoVertex, GeoInstance]`（16B + 32B），
 ///   共享模板 + 每实例 color/transform；支持 `merge_geo_templates` 合并。
 ///   **仅 fragment-only Material 可用**。
+/// - `Particle`：双 buffer `[QuadVertex, ParticleInstance]`（8B + 88B），
+///   共享 unit quad + 每实例 spawn 参数；VS 按 `camera.time` 积分（pos/fade），
+///   FS 极简（tex×color，无 SDF）。
+///   **仅 fragment-only Material 可用**（custom VS 请用 mesh bake 回退，见 `draw_particles`）。
 ///
 /// `material_pipeline_key` 加 layout bit（bit 6-7）区分。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +445,7 @@ pub(crate) enum ShapeVertexLayout {
     Mesh = 0,
     SdfInstance = 1,
     GeoInstance = 2,
+    Particle = 3,
 }
 
 /// 把 `TextureFormat` 折叠成管线缓存键用的低位数值。
@@ -896,6 +917,114 @@ impl GpuContext {
         pipeline
     }
 
+    /// 粒子实例化管线：共享 unit quad + per-instance spawn 参数，VS 按 `camera.time`
+    /// 积分。FS 极简（tex×color，无 SDF 分支）；`local_pos` 仅供 material FS 参考。
+    /// 缓存键镜像 instance 管线，标记位 `3 << 23`（instance=1, geo=2）。
+    pub(crate) fn ensure_particle_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        ssaa: bool,
+        use_stencil: bool,
+        stencil_op: u32,
+    ) -> wgpu::RenderPipeline {
+        let op = stencil_op.min(2);
+        let key = sample_count
+            | ((alpha_to_coverage as u32) << 16)
+            | ((ssaa as u32) << 17)
+            | ((use_stencil as u32) << 19)
+            | (op << 20)
+            | (3u32 << 23)
+            | (surface_format_bits(self.surface_format()) << 4);
+        let mut pipes = self.pipelines.lock().unwrap();
+        if let Some(p) = pipes.get(&key) {
+            return p.clone();
+        }
+        let module = if ssaa {
+            &self.shader_particle_ssaa
+        } else {
+            &self.shader_particle
+        };
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo particle pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+        let depth_stencil = if use_stencil {
+            let face = match op {
+                1 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::IncrementClamp,
+                },
+                2 => wgpu::StencilFaceState {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                _ => wgpu::StencilFaceState::IGNORE,
+            };
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask: if op == 0 { 0 } else { 0xff },
+                    write_mask: if op == 1 { 0xff } else { 0 },
+                },
+                bias: Default::default(),
+            })
+        } else {
+            None
+        };
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vireo particle pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(QuadVertex::desc()), Some(ParticleInstance::desc())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            });
+        pipes.insert(key, pipeline.clone());
+        pipeline
+    }
+
     // -----------------------------------------------------------------------
     // Material pipeline creation
     // -----------------------------------------------------------------------
@@ -1030,12 +1159,15 @@ impl GpuContext {
                     ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa),
                     ShapeVertexLayout::SdfInstance => default_sdf_instance_vertex_wgsl(ssaa),
                     ShapeVertexLayout::GeoInstance => default_geo_instance_vertex_wgsl(ssaa),
+                    ShapeVertexLayout::Particle => default_particle_vertex_wgsl(ssaa),
                 };
                 let vs_source = match shape_layout {
                     ShapeVertexLayout::Mesh => {
                         shape_vertex_source.map(str::to_owned).unwrap_or(default_vs)
                     }
-                    ShapeVertexLayout::SdfInstance | ShapeVertexLayout::GeoInstance => {
+                    ShapeVertexLayout::SdfInstance
+                    | ShapeVertexLayout::GeoInstance
+                    | ShapeVertexLayout::Particle => {
                         if shape_vertex_source.is_some() {
                             return Err(format!(
                                 "material: custom vertex shader is not supported with \
@@ -1131,6 +1263,9 @@ impl GpuContext {
             }
             ShapeVertexLayout::GeoInstance => {
                 vec![Some(GeoVertex::desc()), Some(GeoInstance::desc())]
+            }
+            ShapeVertexLayout::Particle => {
+                vec![Some(QuadVertex::desc()), Some(ParticleInstance::desc())]
             }
         };
         self.device
@@ -1342,7 +1477,7 @@ mod custom_material_tests {
 
     #[test]
     fn material_shape_layout_pipeline_keys_are_distinct() {
-        // Mesh / SdfInstance / GeoInstance 必须产生不同 key（shape target）
+        // Mesh / SdfInstance / GeoInstance / Particle 必须产生不同 key（shape target）
         let mesh = material_pipeline_key(
             MaterialTarget::Shape,
             1,
@@ -1373,9 +1508,22 @@ mod custom_material_tests {
             ShapeVertexLayout::GeoInstance,
             wgpu::TextureFormat::Rgba8UnormSrgb,
         );
+        let particle = material_pipeline_key(
+            MaterialTarget::Shape,
+            1,
+            false,
+            false,
+            false,
+            0,
+            ShapeVertexLayout::Particle,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
         assert_ne!(mesh, sdf);
         assert_ne!(mesh, geo);
         assert_ne!(sdf, geo);
+        assert_ne!(mesh, particle);
+        assert_ne!(sdf, particle);
+        assert_ne!(geo, particle);
         // Text target 不受 layout 影响
         assert_eq!(
             material_pipeline_key(

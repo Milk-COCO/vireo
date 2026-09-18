@@ -49,9 +49,15 @@ pub struct GpuContext {
     shader_geo_instance: wgpu::ShaderModule, // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
     shader_instance_ssaa: wgpu::ShaderModule,
+    shader_particle: wgpu::ShaderModule,
+    shader_particle_ssaa: wgpu::ShaderModule,
     /// GPU 设备丢失标志：由 `Device::set_device_lost_callback` 置位。
     /// 供 `VireoWindow::draw`（返回 `Failed(DeviceLost)`）与渲染循环（终止）共用。
     device_lost: Arc<std::sync::atomic::AtomicBool>,
+    /// 粒子时钟注册表（多独立时间线，见 [`ClockIndex`]）。
+    /// `draw` 写 uniform 与用户取钟读同一表，单数据源无分歧。
+    /// 0 号槽为默认钟，随 `new` 出生、不可 destroy。
+    clocks: Mutex<ClockTable>,
 }
 
 #[repr(C)]
@@ -134,6 +140,132 @@ impl GeoInstance {
                 },
             ],
         }
+    }
+}
+
+/// 粒子实例（88B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
+/// fade 包络），存活期 CPU 零更新。复用共享 unit quad（`instance_quad_*_buf`），
+/// 与 `ShapeInstance` 独立成管线（见 `ShapeVertexLayout::Particle`），默认管线零影响。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ParticleInstance {
+    /// 出生位置 xy + 半尺寸 wh（world/逻辑像素，record 时世界坐标）。
+    pub pos_size: [f32; 4],
+    /// 速度 px/s + 出生时间 + 寿命秒（`life <= 0` = 不朽，跳过 fade-out）。
+    pub vel_time: [f32; 4],
+    /// 基色 rgba（a = 峰值 alpha，fade 包络乘在此之上）。
+    pub color: [f32; 4],
+    /// 图集矩形（u0,v0,u1,v1，绝对坐标，不受 batch `set_uv` 重映射）。
+    pub uv_rect: [f32; 4],
+    /// fade_in 秒 + fade_out 秒 + 每粒子随机种子 + 标志位（保留，当前必须 0）。
+    pub fade_misc: [f32; 4],
+    /// 变换矩阵索引（record 时取 batch 当前值，`batch.view` 左乘自动覆盖）。
+    pub transform_index: u32,
+    pub _padding: u32,
+}
+
+impl ParticleInstance {
+    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 64,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    offset: 80,
+                    format: wgpu::VertexFormat::Uint32,
+                    shader_location: 6,
+                },
+            ],
+        }
+    }
+}
+
+/// 粒子时钟句柄（generational：`destroy` 后槽位复用，野 handle 可检出）。
+///
+/// - 默认钟 [`ClockIndex::ZERO`] 随 `GpuContext::new` 出生，不可 destroy。
+/// - 各时间线相互独立：`time = base + elapsed(start) * scale`。
+/// - `scale = 0` 即暂停（时间冻结），恢复倍速后从冻结点继续（`set_clock_scale`
+///   先 resync，无跳变）；`set_clock_time` 定值（确定性回放）。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ClockIndex {
+    index: u32,
+    generation: u32,
+}
+
+impl ClockIndex {
+    /// 默认钟（0 号槽 0 代），未指定时钟时的缺省值。
+    pub const ZERO: ClockIndex = ClockIndex {
+        index: 0,
+        generation: 0,
+    };
+}
+
+impl Default for ClockIndex {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+struct ClockSlot {
+    start: std::time::Instant,
+    base: f32,
+    scale: f32,
+    generation: u32,
+    live: bool,
+}
+
+struct ClockTable {
+    slots: Vec<ClockSlot>,
+    free: Vec<u32>,
+}
+
+impl ClockTable {
+    fn new() -> Self {
+        Self {
+            slots: vec![ClockSlot {
+                start: std::time::Instant::now(),
+                base: 0.0,
+                scale: 1.0,
+                generation: 0,
+                live: true,
+            }],
+            free: Vec::new(),
+        }
+    }
+
+    fn time_of(&self, id: ClockIndex) -> Option<f32> {
+        self.slots.get(id.index as usize).and_then(|slot| {
+            if slot.live && slot.generation == id.generation {
+                Some(slot.base + slot.start.elapsed().as_secs_f32() * slot.scale)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -464,6 +596,18 @@ impl GpuContext {
             label: Some("vireo instance shader (MSAA)"),
             source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
         });
+        // 粒子 VS：与 instance 同源结构（`local_pos` 插值变体），FS 极简（tex×color，无 SDF）。
+        let shader_particle_src = include_str!("../shader_particle.wgsl");
+        let shader_particle_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo particle shader (SSAA)"),
+            source: wgpu::ShaderSource::Wgsl(shader_particle_src.into()),
+        });
+        let shader_particle_src =
+            shader_particle_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
+        let shader_particle = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo particle shader (MSAA)"),
+            source: wgpu::ShaderSource::Wgsl(shader_particle_src.into()),
+        });
         let instance_quad_vertex_buf =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vireo instance unit quad vertices"),
@@ -590,8 +734,99 @@ impl GpuContext {
             shader_geo_instance,
             shader_instance,
             shader_instance_ssaa,
+            shader_particle,
+            shader_particle_ssaa,
             device_lost,
+            clocks: Mutex::new(ClockTable::new()),
         }
+    }
+
+    /// 创建独立粒子时钟，返回句柄（槽位复用＋代数防野）。
+    pub fn create_clock(&self) -> ClockIndex {
+        let mut table = self.clocks.lock().unwrap();
+        if let Some(index) = table.free.pop() {
+            let slot = &mut table.slots[index as usize];
+            slot.start = std::time::Instant::now();
+            slot.base = 0.0;
+            slot.scale = 1.0;
+            slot.live = true;
+            ClockIndex {
+                index,
+                generation: slot.generation,
+            }
+        } else {
+            let index = table.slots.len() as u32;
+            table.slots.push(ClockSlot {
+                start: std::time::Instant::now(),
+                base: 0.0,
+                scale: 1.0,
+                generation: 0,
+                live: true,
+            });
+            ClockIndex {
+                index,
+                generation: 0,
+            }
+        }
+    }
+
+    /// 销毁时钟（0 号默认钟不可销毁）。stale/已死返回 `false`。
+    pub fn destroy_clock(&self, id: ClockIndex) -> bool {
+        if id.index == 0 {
+            return false;
+        }
+        let mut table = self.clocks.lock().unwrap();
+        match table.slots.get_mut(id.index as usize) {
+            Some(slot) if slot.live && slot.generation == id.generation => {
+                slot.live = false;
+                slot.generation = slot.generation.wrapping_add(1);
+                table.free.push(id.index);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 设时钟倍速（0＝暂停冻结；恢复后从冻结点继续，无跳变）。stale 返回 `false`。
+    pub fn set_clock_scale(&self, id: ClockIndex, scale: f32) -> bool {
+        let mut table = self.clocks.lock().unwrap();
+        match table.slots.get_mut(id.index as usize) {
+            Some(slot) if slot.live && slot.generation == id.generation => {
+                let now = slot.base + slot.start.elapsed().as_secs_f32() * slot.scale;
+                slot.base = now;
+                slot.start = std::time::Instant::now();
+                slot.scale = scale;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 定值时钟（确定性测试/回放；scale 不变）。stale 返回 `false`。
+    pub fn set_clock_time(&self, id: ClockIndex, t: f32) -> bool {
+        let mut table = self.clocks.lock().unwrap();
+        match table.slots.get_mut(id.index as usize) {
+            Some(slot) if slot.live && slot.generation == id.generation => {
+                slot.base = t;
+                slot.start = std::time::Instant::now();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 读时钟当前时间。野 handle 回落 0 号钟时间＋`log::warn`（不 panic，
+    /// 与 AtlasFull 自愈同级 graceful 策略；正常路径无 warn）。
+    pub fn clock_time(&self, id: ClockIndex) -> f32 {
+        let table = self.clocks.lock().unwrap();
+        if let Some(t) = table.time_of(id) {
+            return t;
+        }
+        log::warn!(
+            "vireo gpu: stale clock {:?}, falling back to default clock",
+            id
+        );
+        table.time_of(ClockIndex::ZERO).unwrap_or(0.0)
     }
 
     /// 当前设备对 surface_format 支持的 MSAA sample_count 列表（升序）。

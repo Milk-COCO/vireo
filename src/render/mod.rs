@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 
 use crate::area::AreaStencilOp;
 pub use crate::gpu::Vertex;
-use crate::gpu::{GeoInstance, GeoVertex, GpuContext, ShapeInstance};
+use crate::gpu::{GeoInstance, GeoVertex, GpuContext, ParticleInstance, ShapeInstance};
 use crate::material::Material;
 pub use crate::math::{Pos, Rect, Transform, UvRect};
 
@@ -31,7 +31,8 @@ pub(crate) use cull::{AabbMap, ViewMap, prepare_culling};
 ///
 /// 注：GPU 端最终输出顶点数 ≠ 上述任一字段；
 /// instance 路径 GPU 输出 = `sdf_instances * 4`（每个 instance 1 个 unit quad）；
-/// geo instance 路径 GPU 输出 = `sum(geo_instances[i].template_vertex_count)`。
+/// geo instance 路径 GPU 输出 = `sum(geo_instances[i].template_vertex_count)`；
+/// 粒子路径 GPU 输出 = `particles * 4`（每个粒子 1 个 unit quad）。
 /// 合并值见 [`DrawBatch::shape_vertex_count`].
 ///
 /// **draw call 数不在本结构**：真实 draw call 由渲染器统计（
@@ -44,6 +45,7 @@ pub struct ShapeStats {
     pub geo_instances: usize,
     pub geo_templates: usize,
     pub geo_template_vertices: usize,
+    pub particles: usize,
 }
 
 /// 形状与文字共享状态机的并集覆盖（去重）。
@@ -171,6 +173,15 @@ struct InstanceSegment {
     material: Option<Arc<Material>>,
 }
 
+/// 粒子段：`combined_particles` 的一段，共享 unit quad（与 `InstanceSegment` 同机理，
+/// 缓冲不同）。`material` 逐段捕获（画笔状态机，不同材质不合并）。
+struct ParticleSegment {
+    particle_start: u32,
+    particle_count: u32,
+    bind_group: wgpu::BindGroup,
+    material: Option<Arc<Material>>,
+}
+
 #[derive(Clone)]
 struct GeoInstanceSegment {
     geo_instance_start: u32,
@@ -202,10 +213,11 @@ enum OrderedShapeSegment {
     },
     Instances(InstanceSegment),
     GeoInstances(GeoInstanceSegment),
+    Particles(ParticleSegment),
 }
 
 impl OrderedShapeSegment {
-    /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, geometry/bg)`。
+    /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, 3 = particles, geometry/bg)`。
     /// 同类且同 bind group 的段会被排到一起以便合并。
     #[inline]
     fn sort_key(&self) -> (u8, u8, u64) {
@@ -217,6 +229,7 @@ impl OrderedShapeSegment {
             } => (0, *geometry as u8, bind_group_id(bind_group)),
             OrderedShapeSegment::Instances(s) => (1, 0, bind_group_id(&s.bind_group)),
             OrderedShapeSegment::GeoInstances(s) => (2, 0, bind_group_id(&s.bind_group)),
+            OrderedShapeSegment::Particles(s) => (3, 0, bind_group_id(&s.bind_group)),
         }
     }
 
@@ -271,6 +284,23 @@ impl OrderedShapeSegment {
                 Some(OrderedShapeSegment::Instances(InstanceSegment {
                     instance_start: merged.0,
                     instance_count: merged.1,
+                    bind_group: s.bind_group.clone(),
+                    material: s.material.clone(),
+                }))
+            }
+            (OrderedShapeSegment::Particles(s), OrderedShapeSegment::Particles(s2)) => {
+                let merged = merge_decision(
+                    s.bind_group == s2.bind_group
+                        && s.material.as_ref().map(Arc::as_ptr)
+                            == s2.material.as_ref().map(Arc::as_ptr),
+                    s.particle_start,
+                    s.particle_count,
+                    s2.particle_start,
+                    s2.particle_count,
+                )?;
+                Some(OrderedShapeSegment::Particles(ParticleSegment {
+                    particle_start: merged.0,
+                    particle_count: merged.1,
                     bind_group: s.bind_group.clone(),
                     material: s.material.clone(),
                 }))
@@ -333,6 +363,7 @@ struct ShapeInfo {
     geometry: bool,
     instances: Vec<InstanceSegment>,
     geo_instances: Vec<GeoInstanceSegment>,
+    particles: Vec<ParticleSegment>,
     ordered: Vec<OrderedShapeSegment>,
 }
 
@@ -391,6 +422,7 @@ pub struct Renderer {
     index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     geo_instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    particle_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     geo_template_vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     geo_template_index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     physical_width: u32,
@@ -429,6 +461,7 @@ pub struct Renderer {
     scratch_last_dynamic_offsets: Mutex<Vec<u32>>,
     scratch_scissor_stack: Mutex<Vec<(u32, u32, u32, u32)>>,
     scratch_instances: Mutex<Vec<ShapeInstance>>,
+    scratch_particles: Mutex<Vec<ParticleInstance>>,
     scratch_geo_instances: Mutex<Vec<GeoInstance>>,
     scratch_geo_vertices: Mutex<Vec<GeoVertex>>,
     scratch_geo_indices: Mutex<Vec<u32>>,
@@ -492,6 +525,7 @@ impl Renderer {
             index_buf: Mutex::new(None),
             instance_buf: Mutex::new(None),
             geo_instance_buf: Mutex::new(None),
+            particle_buf: Mutex::new(None),
             geo_template_vertex_buf: Mutex::new(None),
             geo_template_index_buf: Mutex::new(None),
             physical_width,
@@ -522,6 +556,7 @@ impl Renderer {
             scratch_last_dynamic_offsets: Mutex::new(Vec::new()),
             scratch_scissor_stack: Mutex::new(Vec::new()),
             scratch_instances: Mutex::new(Vec::new()),
+            scratch_particles: Mutex::new(Vec::new()),
             scratch_geo_instances: Mutex::new(Vec::new()),
             scratch_geo_vertices: Mutex::new(Vec::new()),
             scratch_geo_indices: Mutex::new(Vec::new()),
@@ -776,6 +811,29 @@ impl Renderer {
         };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vireo geo instance buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *slot = Some((buffer, new_cap));
+    }
+
+    fn ensure_particle_buffer(&self, size: u64) {
+        if size == 0 {
+            return;
+        }
+        let mut slot = self.particle_buf.lock();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two()
+        } else {
+            (cur * 2).max(size)
+        };
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo particle instance buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,

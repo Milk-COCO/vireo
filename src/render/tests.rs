@@ -2,6 +2,7 @@ use super::*;
 use crate::area::Area;
 use crate::color::colors::*;
 use crate::math::{left_mul_view_table, transform_key};
+use crate::particle::{Particle, ParticlePool, draw_particles};
 use crate::shapes::{draw_circle, draw_polygon, draw_rectangle, draw_rounded_rect};
 use crate::text::{TextDef, TextOverride};
 
@@ -533,6 +534,67 @@ fn texture_generation_splits_instance_commands() {
         batch.shape_commands[1],
         BatchShapeCommand::Instances { .. }
     ));
+}
+
+fn test_pool_particle() -> Particle {
+    Particle {
+        pos: [0.0, 0.0],
+        vel: [0.0, 0.0],
+        size: [4.0, 4.0],
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: -1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    }
+}
+
+#[test]
+fn particle_commands_merge_contiguous_and_split_on_generation() {
+    let mut batch = DrawBatch::new();
+    let mut pool = ParticlePool::new();
+    pool.spawn(test_pool_particle());
+    draw_particles(&mut batch, &pool);
+    draw_particles(&mut batch, &pool);
+    assert_eq!(batch.particles.len(), 2);
+    assert_eq!(batch.shape_commands.len(), 1);
+    assert!(matches!(
+        batch.shape_commands[0],
+        BatchShapeCommand::Particles {
+            particle_start: 0,
+            particle_count: 2,
+            ..
+        }
+    ));
+    batch.advance_shape_texture_generation();
+    draw_particles(&mut batch, &pool);
+    assert_eq!(batch.shape_commands.len(), 2);
+    assert!(matches!(
+        batch.shape_commands[1],
+        BatchShapeCommand::Particles {
+            particle_start: 2,
+            particle_count: 1,
+            ..
+        }
+    ));
+    assert!(batch.shape_commands_valid());
+}
+
+#[test]
+fn particle_clear_and_clone_carry_state() {
+    let mut batch = DrawBatch::new();
+    let mut pool = ParticlePool::new();
+    pool.spawn(test_pool_particle());
+    draw_particles(&mut batch, &pool);
+    let cloned = batch.clone_batch();
+    assert_eq!(cloned.particles.len(), 1);
+    assert_eq!(cloned.shape_stats().particles, 1);
+    batch.clear();
+    assert!(batch.particles.is_empty());
+    assert!(batch.particle_texture_segments.is_empty());
+    assert_eq!(batch.shape_stats().particles, 0);
 }
 
 #[test]

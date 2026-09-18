@@ -1,5 +1,20 @@
 # Changelog / 更新日志
 
+## [0.2.0] — 未发布 / unreleased
+
+### Added / 新增
+
+- GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
+  （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
+  GPU particle path: baked spawn params + VS integration over `camera.time`.
+- 粒子时钟注册表：`ClockIndex`（generational）＋`create_clock` / `destroy_clock` /
+  `set_clock_scale`（0＝暂停，恢复无跳变）/ `set_clock_time` / `clock_time`；
+  多独立时间线，0 号默认钟。`ParticlePool::sweep`（单遍清除过期粒子，无分配）。
+  Particle clock registry: multiple independent timelines, default clock 0.
+- `ShapeStats::particles` 诊断字段（`shape_vertex_count` 含粒子等效顶点）。
+- `ParticlePool::sweep`（单遍清除过期粒子，无分配；示例每 30 帧调用一次）。
+  `ParticlePool::sweep` (single-pass expiry without allocation).
+
 ## [0.1.2]
 
 ### Fixed / 修复

@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::area::{Area, AreaGeom, effective_area};
-use crate::gpu::{GeoInstance, GeoVertex, ShapeInstance, Vertex};
+use crate::gpu::{GeoInstance, GeoVertex, ParticleInstance, ShapeInstance, Vertex};
 use crate::material::Material;
 use crate::math::{
     Pos, Rect, Transform, UvRect, affine_rect_bounds, mul_affine_cols,
@@ -278,6 +278,13 @@ pub(crate) enum BatchShapeCommand {
         texture_generation: u32,
         material: Option<Arc<Material>>,
     },
+    Particles {
+        particle_start: u32,
+        particle_count: u32,
+        bind_group: Option<wgpu::BindGroup>,
+        texture_generation: u32,
+        material: Option<Arc<Material>>,
+    },
     GeoInstances {
         geo_instance_start: u32,
         geo_instance_count: u32,
@@ -314,6 +321,10 @@ pub struct DrawBatch {
     pub(crate) texture_segments: Vec<TextureSegment>,
     pub(crate) instances: Vec<ShapeInstance>,
     pub(crate) instance_texture_segments: Vec<InstanceTextureSegment>,
+    /// 粒子实例（`draw_particles` 推送，`ParticleInstance` 88B，VS 按 time 积分）。
+    /// 与 `instances` 独立成缓冲/命令/段，默认管线零影响。
+    pub(crate) particles: Vec<ParticleInstance>,
+    pub(crate) particle_texture_segments: Vec<InstanceTextureSegment>,
     pub(crate) geo_instances: Vec<GeoInstance>,
     pub(crate) geo_instance_texture_segments: Vec<InstanceTextureSegment>,
     pub(crate) geo_templates: Vec<GeoTemplate>,
@@ -444,6 +455,8 @@ impl DrawBatch {
             texture_segments: Vec::with_capacity(2),
             instances: Vec::with_capacity(32),
             instance_texture_segments: Vec::with_capacity(2),
+            particles: Vec::with_capacity(32),
+            particle_texture_segments: Vec::with_capacity(2),
             geo_instances: Vec::with_capacity(32),
             geo_instance_texture_segments: Vec::with_capacity(2),
             geo_templates: Vec::with_capacity(8),
@@ -488,6 +501,8 @@ impl DrawBatch {
         self.texture_segments.clear();
         self.instances.clear();
         self.instance_texture_segments.clear();
+        self.particles.clear();
+        self.particle_texture_segments.clear();
         self.geo_instances.clear();
         self.geo_instance_texture_segments.clear();
         self.geo_templates.clear();
@@ -675,6 +690,43 @@ impl DrawBatch {
             for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
                 let (wx, wy) =
                     Self::world_xy(&self.transform_table, instance.transform_index, x, y);
+                expand(
+                    &mut w_min_x,
+                    &mut w_max_x,
+                    &mut w_min_y,
+                    &mut w_max_y,
+                    wx,
+                    wy,
+                );
+            }
+        }
+        for p in &self.particles {
+            any = true;
+            let (px, py, hw, hh) = (p.pos_size[0], p.pos_size[1], p.pos_size[2], p.pos_size[3]);
+            let mut pts = [
+                (px - hw, py - hh),
+                (px + hw, py - hh),
+                (px + hw, py + hh),
+                (px - hw, py + hh),
+                (px, py),
+                (px, py),
+                (px, py),
+                (px, py),
+            ];
+            let mut n = 4;
+            if p.vel_time[3] > 0.0 {
+                // 有限寿命：终点框也纳入（保守外接）。不朽且运动的粒子只用
+                // 出生框——会误裁剪，届时请用手动 bounds（见 `draw_particles`）。
+                let ex = px + p.vel_time[0] * p.vel_time[3];
+                let ey = py + p.vel_time[1] * p.vel_time[3];
+                pts[4] = (ex - hw, ey - hh);
+                pts[5] = (ex + hw, ey - hh);
+                pts[6] = (ex + hw, ey + hh);
+                pts[7] = (ex - hw, ey + hh);
+                n = 8;
+            }
+            for (x, y) in pts[..n].iter().copied() {
+                let (wx, wy) = Self::world_xy(&self.transform_table, p.transform_index, x, y);
                 expand(
                     &mut w_min_x,
                     &mut w_max_x,
@@ -987,18 +1039,20 @@ impl DrawBatch {
 
     /// 当前 batch 的等效 shape 顶点数（GPU 端最终输出），用于诊断和统计。
     ///
-    /// = `mesh_vertices + instances * 4 + Σ geo 模板顶点数`
+    /// = `mesh_vertices + instances * 4 + particles * 4 + Σ geo 模板顶点数`
     ///
     /// - **mesh path**：每个 shape 推送 4 顶点 unit quad（CPU 端）。
     /// - **instance path**：CPU 端只推送 1 个 `ShapeInstance`（约 80 字节），
     ///   GPU 渲染时用 1 个共享 quad × N instances = `N * 4` 顶点。
+    /// - **particle path**：CPU 端只推送 1 个 `ParticleInstance`（88B），
+    ///   GPU 渲染时同样 `N * 4` 顶点（VS 按 time 积分）。
     /// - **geo-instance path**：CPU 端只推送 1 个 `GeoInstance` + 共享模板顶点，
     ///   每个实例渲染模板的全部顶点；模板顶点数按实例重复计数。
     ///
     /// 不包含子 batch 与文字。如果想看 CPU 端实际推送量，调用
     /// [`Self::shape_stats`]。
     pub fn shape_vertex_count(&self) -> usize {
-        let mut count = self.vertices.len() + self.instances.len() * 4;
+        let mut count = self.vertices.len() + self.instances.len() * 4 + self.particles.len() * 4;
         for instance in &self.geo_instances {
             if let Some(template) = self
                 .geo_templates
@@ -1011,7 +1065,7 @@ impl DrawBatch {
         count
     }
 
-    /// 两段式诊断：CPU mesh 顶点数 / instance 参数数 / geo-instance 参数数。
+    /// 两段式诊断：CPU mesh 顶点数 / instance 参数数 / geo-instance 参数数 / 粒子数。
     /// draw call 数见渲染器 [`Renderer::last_draw_calls`]。
     pub fn shape_stats(&self) -> ShapeStats {
         ShapeStats {
@@ -1020,6 +1074,7 @@ impl DrawBatch {
             geo_instances: self.geo_instances.len(),
             geo_templates: self.geo_templates.len(),
             geo_template_vertices: self.geo_template_vertices.len(),
+            particles: self.particles.len(),
         }
     }
 
@@ -1275,6 +1330,7 @@ impl DrawBatch {
         if let Some(bg) = ov.bind_group {
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_particle_texture_segment(self.bind_group.clone());
             self.add_geo_instance_texture_segment(self.bind_group.clone());
             self.advance_shape_texture_generation();
             self.bind_group = bg.clone();
@@ -1293,6 +1349,7 @@ impl DrawBatch {
             // 含 clear（None）：必须封段，否则后续/本段顶点会落到 trailing 用恢复后的贴图
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_particle_texture_segment(self.bind_group.clone());
             self.add_geo_instance_texture_segment(self.bind_group.clone());
             self.advance_shape_texture_generation();
             self.bind_group = saved_bind_group;
@@ -1673,6 +1730,11 @@ impl DrawBatch {
                         }
                     })
             }
+            BatchShapeCommand::Particles {
+                particle_start,
+                particle_count,
+                ..
+            } => particle_start.saturating_add(*particle_count) <= self.particles.len() as u32,
             BatchShapeCommand::GeoInstances {
                 geo_instance_start,
                 geo_instance_count,
@@ -1719,6 +1781,36 @@ impl DrawBatch {
         self.shape_commands.push(BatchShapeCommand::Instances {
             instance_start: start,
             instance_count: end - start,
+            bind_group: self.bind_group.clone(),
+            texture_generation: self.shape_texture_generation,
+            material: self.custom_material.clone(),
+        });
+    }
+
+    pub(crate) fn record_particle_command(&mut self, start: u32) {
+        self.record_pending_mesh_command();
+        let end = self.particles.len() as u32;
+        if end <= start {
+            return;
+        }
+        if let Some(BatchShapeCommand::Particles {
+            particle_start,
+            particle_count,
+            texture_generation,
+            material: last_material,
+            ..
+        }) = self.shape_commands.last_mut()
+            && *texture_generation == self.shape_texture_generation
+            && *particle_start + *particle_count == start
+            && last_material.as_ref().map(Arc::as_ptr)
+                == self.custom_material.as_ref().map(Arc::as_ptr)
+        {
+            *particle_count += end - start;
+            return;
+        }
+        self.shape_commands.push(BatchShapeCommand::Particles {
+            particle_start: start,
+            particle_count: end - start,
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
             material: self.custom_material.clone(),
@@ -2016,6 +2108,8 @@ impl DrawBatch {
             texture_segments: self.texture_segments.clone(),
             instances: self.instances.clone(),
             instance_texture_segments: self.instance_texture_segments.clone(),
+            particles: self.particles.clone(),
+            particle_texture_segments: self.particle_texture_segments.clone(),
             geo_instances: self.geo_instances.clone(),
             geo_instance_texture_segments: self.geo_instance_texture_segments.clone(),
             geo_templates: self.geo_templates.clone(),
@@ -2061,6 +2155,7 @@ impl DrawBatch {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.add_particle_texture_segment(self.bind_group.clone());
         self.add_geo_instance_texture_segment(self.bind_group.clone());
         self.advance_shape_texture_generation();
         self.bind_group = bg.clone();
@@ -2092,6 +2187,7 @@ impl DrawBatch {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
+        self.add_particle_texture_segment(self.bind_group.clone());
         self.add_geo_instance_texture_segment(self.bind_group.clone());
         self.advance_shape_texture_generation();
         self.bind_group = texture.map(|t| t.bind_group.clone());
@@ -2123,6 +2219,23 @@ impl DrawBatch {
         let end = self.instances.len() as u32;
         if end > start {
             self.instance_texture_segments.push(InstanceTextureSegment {
+                instance_start: start,
+                instance_count: end - start,
+                bind_group: bg,
+            });
+        }
+    }
+
+    /// 粒子纹理段：与 instance 段同机理，下标进 `particles` 表。
+    /// 所有封 instance 段处同步封粒子段（空范围时 no-op）。
+    fn add_particle_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+        let start = self
+            .particle_texture_segments
+            .last()
+            .map_or(0, |s| s.instance_start + s.instance_count);
+        let end = self.particles.len() as u32;
+        if end > start {
+            self.particle_texture_segments.push(InstanceTextureSegment {
                 instance_start: start,
                 instance_count: end - start,
                 bind_group: bg,
@@ -2768,6 +2881,7 @@ impl DrawBatch {
         if let Some(bind_group) = opts.bind_group {
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_particle_texture_segment(self.bind_group.clone());
             self.advance_shape_texture_generation();
             self.bind_group = bind_group;
         }
@@ -2865,6 +2979,7 @@ impl DrawBatch {
         if texture_overridden {
             self.add_texture_segment(self.bind_group.clone());
             self.add_instance_texture_segment(self.bind_group.clone());
+            self.add_particle_texture_segment(self.bind_group.clone());
             self.advance_shape_texture_generation();
         }
         self.bind_group = saved_bg;
