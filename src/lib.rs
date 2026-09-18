@@ -254,6 +254,7 @@ pub mod prelude {
     pub use crate::thread::Thread;
     pub use crate::thread::ThreadHandle;
     pub use crate::window::OffscreenIndex;
+    pub use wgpu::AddressMode;
     pub use wgpu::PresentMode;
     // `#[vireo::main]` 过程宏：把 `async fn main` 改写为在主线程跑 winit 的入口。
     pub use vireo_macro::main;

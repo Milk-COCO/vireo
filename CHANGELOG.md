@@ -15,6 +15,10 @@
   同 batch 同钟，多批多钟同屏各走各的时间线（单 pass，零管线变动）。
   Per-batch particle clock + per-clock camera groups: independent timelines on screen.
 - `ShapeStats::particles` 诊断字段（`shape_vertex_count` 含粒子等效顶点）。
+- `Texture` address mode：`set_address_mode`（原地切换）/ `with_address_mode`
+  （共享 image 的新对象，同帧多 mode 混用）＋prelude `AddressMode`
+  （直接用 `wgpu::AddressMode`；默认 ClampToEdge，老行为不变）。
+  Texture address modes: switch in place or share one image across modes.
 - `ParticlePool::sweep`（单遍清除过期粒子，无分配；示例每 30 帧调用一次）。
   `ParticlePool::sweep` (single-pass expiry without allocation).
 

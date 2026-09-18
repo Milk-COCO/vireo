@@ -1865,3 +1865,95 @@ fn clock_registry_semantics() {
     assert!(gpu.set_clock_scale(c2, 2.0));
     assert!(gpu.set_clock_time(c2, 7.0));
 }
+
+/// 同一张图两种采样：左红右蓝 8x8，三 quad 同用 uv `[0,0,2,1]`。
+/// A＝`with_address_mode(Repeat)`，B＝默认 Clamp，C＝`set_address_mode(Repeat)`。
+/// 断言 A/C 右半 wrap 回红（与左半同色）、B 右半钳成蓝；三段不同 bind group → 3 dc。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn texture_repeat_wraps() {
+    fn col(pixels: &[u8], w: u32, x0: u32, x1: u32, y0: u32, y1: u32) -> (u32, u32, u32) {
+        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * w + x) * 4) as usize;
+                r += pixels[i] as u32;
+                g += pixels[i + 1] as u32;
+                b += pixels[i + 2] as u32;
+                n += 1;
+            }
+        }
+        (r / n, g / n, b / n)
+    }
+    fn is_red(c: (u32, u32, u32)) -> bool {
+        c.0 > 150 && c.1 < 120 && c.2 < 120
+    }
+    fn is_blue(c: (u32, u32, u32)) -> bool {
+        c.2 > 150 && c.0 < 120 && c.1 < 120
+    }
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    let mut tex_bytes = Vec::with_capacity(8 * 8 * 4);
+    for _ in 0..8 {
+        for x in 0..8 {
+            if x < 4 {
+                tex_bytes.extend_from_slice(&[255, 0, 0, 255]);
+            } else {
+                tex_bytes.extend_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+    }
+    let tex = Texture::from_rgba(8, 8, &tex_bytes, &gpu);
+    let tiled = tex.with_address_mode(&gpu, wgpu::AddressMode::Repeat);
+    assert_eq!((tiled.width, tiled.height), (8, 8));
+    let mut tex2 = Texture::from_rgba(8, 8, &tex_bytes, &gpu);
+    tex2.set_address_mode(&gpu, wgpu::AddressMode::Repeat);
+
+    let mut b = DrawBatch::new();
+    // A：repeat（with_），x 40..200
+    b.set_texture(Some(&tiled));
+    b.set_uv(0.0, 0.0, 2.0, 1.0);
+    draw_rectangle(&mut b, Pos::new(40.0, 40.0), 160.0, 120.0, Some(WHITE));
+    // B：clamp，x 250..410
+    b.set_texture(Some(&tex));
+    b.set_uv(0.0, 0.0, 2.0, 1.0);
+    draw_rectangle(&mut b, Pos::new(250.0, 40.0), 160.0, 120.0, Some(WHITE));
+    // C：repeat（setter），x 460..620
+    b.set_texture(Some(&tex2));
+    b.set_uv(0.0, 0.0, 2.0, 1.0);
+    draw_rectangle(&mut b, Pos::new(460.0, 40.0), 160.0, 120.0, Some(WHITE));
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    assert_eq!(canvas.last_draw_calls(), 3, "三段不同 bind group 应 3 dc");
+    let px = canvas.read_pixels();
+    // 每 quad 采左平坦（u≈0.15..0.3，红）与右平坦（u≈1.15..1.3；repeat 回红 / clamp 钳蓝）；
+    // 带宽 12px（≈1.2 texel），离 u=0.5/1.0/1.5 缝线与几何边都 ≥1 texel
+    let (al, ar) = (
+        col(&px, 900, 52, 64, 90, 110),
+        col(&px, 900, 132, 144, 90, 110),
+    );
+    let (bl, br) = (
+        col(&px, 900, 262, 274, 90, 110),
+        col(&px, 900, 372, 392, 90, 110),
+    );
+    let (cl, cr) = (
+        col(&px, 900, 472, 484, 90, 110),
+        col(&px, 900, 552, 564, 90, 110),
+    );
+    println!("[repeat] A={al:?}/{ar:?} B={bl:?}/{br:?} C={cl:?}/{cr:?}");
+    assert!(
+        is_red(al) && is_red(ar),
+        "with_ Repeat 右半应 wrap 回红：{al:?}/{ar:?}"
+    );
+    assert!(
+        is_red(bl) && is_blue(br),
+        "Clamp 右半应钳成蓝：{bl:?}/{br:?}"
+    );
+    assert!(
+        is_red(cl) && is_red(cr),
+        "setter Repeat 右半应 wrap 回红：{cl:?}/{cr:?}"
+    );
+}

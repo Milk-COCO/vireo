@@ -25,6 +25,9 @@ pub struct GpuContext {
     pub default_sampler: wgpu::Sampler,
     pub(crate) non_filtering_sampler: wgpu::Sampler,
     pub(crate) comparison_sampler: wgpu::Sampler,
+    /// address mode sampler 懒缓存（Repeat/MirrorRepeat/ClampToBorder 按需建；
+    /// ClampToEdge 短路走 `default_sampler`，不进表）。
+    sampler_cache: Mutex<FxHashMap<wgpu::AddressMode, wgpu::Sampler>>,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub white_bind_group: Arc<wgpu::BindGroup>,
@@ -719,6 +722,7 @@ impl GpuContext {
             default_sampler,
             non_filtering_sampler,
             comparison_sampler,
+            sampler_cache: Mutex::new(FxHashMap::default()),
             white_texture,
             white_texture_view,
             white_bind_group,
@@ -744,6 +748,30 @@ impl GpuContext {
             device_lost,
             clocks: Mutex::new(ClockTable::new()),
         }
+    }
+
+    /// 按 address mode 取 filtering sampler（Linear；三轴同 mode）。
+    /// ClampToEdge 短路返回 `default_sampler`；其余懒创建＋缓存（冷门后端建不出
+    /// 某 mode 时只影响用它的人，不拖累 `new`）。
+    pub(crate) fn sampler_for(&self, mode: wgpu::AddressMode) -> wgpu::Sampler {
+        if mode == wgpu::AddressMode::ClampToEdge {
+            return self.default_sampler.clone();
+        }
+        if let Some(s) = self.sampler_cache.lock().unwrap().get(&mode) {
+            return s.clone();
+        }
+        let s = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vireo address sampler"),
+            address_mode_u: mode,
+            address_mode_v: mode,
+            address_mode_w: mode,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+            ..Default::default()
+        });
+        self.sampler_cache.lock().unwrap().insert(mode, s.clone());
+        s
     }
 
     /// 创建独立粒子时钟，返回句柄（槽位复用＋代数防野）。

@@ -182,6 +182,39 @@ impl Texture {
         }
     }
 
+    /// 切换本纹理的 address mode（原地）：按 mode 重建 bind group。
+    /// 只影响之后 `set_texture` 录的段（已录段拿的是旧 bind group 快照，不变）。
+    /// 默认 ClampToEdge（`from_*` 构造即此，老行为不变）。
+    ///
+    /// 警告：Repeat/MirrorRepeat ＋ 拼 atlas＝wrap 渗色（采到邻区域甚至对边，
+    /// 半 texel 内收救不了），要 gutter 或独占整图。单图平铺（tiling 背景）随便用。
+    pub fn set_address_mode(&mut self, gpu: &GpuContext, mode: wgpu::AddressMode) {
+        self.bind_group = make_bind_group(
+            &gpu.device,
+            &gpu.texture_bind_group_layout,
+            &self.view,
+            &gpu.sampler_for(mode),
+        );
+    }
+
+    /// 同一张 image、另一种采样：共享 texture/view（句柄 clone，零重传），
+    /// 只按 mode 建新 bind group。同一帧内同图多 mode 混用走这个；
+    /// 只要单 mode 走 `set_address_mode`（不产生多余对象）。
+    pub fn with_address_mode(&self, gpu: &GpuContext, mode: wgpu::AddressMode) -> Texture {
+        Texture {
+            texture: self.texture.clone(),
+            view: self.view.clone(),
+            bind_group: make_bind_group(
+                &gpu.device,
+                &gpu.texture_bind_group_layout,
+                &self.view,
+                &gpu.sampler_for(mode),
+            ),
+            width: self.width,
+            height: self.height,
+        }
+    }
+
     /// 像素区域转换为归一化 UV 坐标 (u0, v0, u1, v1)。
     pub fn uv(&self, px: u32, py: u32, pw: u32, ph: u32) -> (f32, f32, f32, f32) {
         let w = self.width as f32;
@@ -193,6 +226,29 @@ impl Texture {
             (py + ph) as f32 / h,
         )
     }
+}
+
+/// 以指定 view＋sampler 建纹理 bind group（from_*/set/with 共用形状）。
+fn make_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("texture bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 /// 生成 ffcc00 / 6699ff 棋盘 missing 纹理（8x8）。
