@@ -146,7 +146,7 @@ impl GeoInstance {
     }
 }
 
-/// 粒子实例（136B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
+/// 粒子实例（152B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
 /// fade 包络），存活期 CPU 零更新。复用共享 unit quad（`instance_quad_*_buf`），
 /// 与 `ShapeInstance` 独立成管线（见 `ShapeVertexLayout::Particle`），默认管线零影响。
 #[repr(C)]
@@ -168,6 +168,8 @@ pub struct ParticleInstance {
     pub end_rgba_size: [f32; 4],
     /// 图集序列 cols + rows + fps + start 行优先（全 0/`cols*rows<=1`/`fps<=0` = 静态）。
     pub atlas_seq: [f32; 4],
+    /// 包络扩展字：x = fade_mid（`< 0` = None，今日 smoothstep）；yzw 保留，必须 0。
+    pub fade_shape: [f32; 4],
     /// 变换矩阵索引（record 时取 batch 当前值，`batch.view` 左乘自动覆盖）。
     pub transform_index: u32,
     pub _padding: u32,
@@ -221,6 +223,11 @@ impl ParticleInstance {
                 },
                 wgpu::VertexAttribute {
                     offset: 128,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 10,
+                },
+                wgpu::VertexAttribute {
+                    offset: 144,
                     format: wgpu::VertexFormat::Uint32,
                     shader_location: 6,
                 },

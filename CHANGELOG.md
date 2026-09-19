@@ -32,6 +32,9 @@
   cap 为 0 全拒；降 cap 不追溯）＋prelude `AtlasSeq`/`OverflowPolicy`。
   Particle G1-G5: rotation, damping/gravity closed-form, size/color endpoints,
   atlas sequences, pool cap with heap KillOldest.
+- 粒子 `fade_mid` 包络中点（`Option<f32>`，默认 None = smoothstep；设值后 fade_out 段
+  改线性三点 `1.0 → mid → 0.0`，与时长正交，`clamp 0..1`；`fade_in` 恒 smoothstep）。
+  Particle fade-out midpoint shaping (linear 3-point vs smoothstep).
 
 ## [0.1.2]
 

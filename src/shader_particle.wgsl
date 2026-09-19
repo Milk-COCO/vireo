@@ -12,6 +12,7 @@ struct ParticleInput {
     @location(7) motion2: vec4<f32>,
     @location(8) end_rgba_size: vec4<f32>,
     @location(9) atlas_seq: vec4<f32>,
+    @location(10) fade_shape: vec4<f32>,
 };
 
 // 与 SDF instance 的 `VertexOutput` 逐字段一致，供 custom material FS 复用
@@ -99,7 +100,20 @@ fn vs_main(vertex: QuadVertex, instance: ParticleInput) -> VertexOutput {
     // fade_out <= 0 = 到 life 硬切（`dead` 分支已退化剔除，此处跳过）。
     // 注意：edge0 == edge1 的 smoothstep 未定义（实测某后端直接作废像素），必须守卫。
     if (life > 0.0 && fade_out > 0.0) {
-        fade *= 1.0 - smoothstep(life - fade_out, life, age);
+        let mid = instance.fade_shape.x;
+        if (mid >= 0.0) {
+            // 线性三点 1→mid→0（中点在段中央；fade_in 段不受影响）。
+            let t0 = life - fade_out;
+            let mc = clamp(mid, 0.0, 1.0);
+            let f = clamp((age - t0) / max(fade_out, 1e-6), 0.0, 1.0);
+            if (f > 0.5) {
+                fade *= mix(mc, 0.0, f * 2.0 - 1.0);
+            } else {
+                fade *= mix(1.0, mc, f * 2.0);
+            }
+        } else {
+            fade *= 1.0 - smoothstep(life - fade_out, life, age);
+        }
     }
     out.color = vec4<f32>(instance.color.rgb, instance.color.a * fade);
     if (instance.fade_misc.w > 0.5) {

@@ -1460,6 +1460,7 @@ fn particle_default_path_single_draw_call_and_time_driven_cull() {
             gravity: [0.0, 0.0],
             size_mul_end: 1.0,
             atlas: None,
+            fade_mid: None,
             color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1481,6 +1482,7 @@ fn particle_default_path_single_draw_call_and_time_driven_cull() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1546,6 +1548,7 @@ fn particle_gravity_and_damping_displace() {
         gravity: [0.0, 400.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1579,6 +1582,7 @@ fn particle_gravity_and_damping_displace() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1622,6 +1626,7 @@ fn particle_endpoints_mix_color_and_size() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: Some(Color::new(1.0, 0.0, 0.0, 1.0)),
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1641,6 +1646,7 @@ fn particle_endpoints_mix_color_and_size() {
         gravity: [0.0, 0.0],
         size_mul_end: 0.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1710,6 +1716,7 @@ fn particle_atlas_seq_advances_frames() {
                 fps: 1.0,
                 start: 0,
             }),
+            fade_mid: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             birth: 0.0,
@@ -1745,6 +1752,62 @@ fn particle_atlas_seq_advances_frames() {
     );
 }
 
+/// G7 包络像素验证：同条件下线性中点（0.7→约 218）vs smoothstep（0.5→约 187）
+/// 并排可分。注意 `Some(0.5)` ≠ smoothstep 外观（线性 vs 曲线），故对照只看分得开。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_fade_mid_linear_vs_smoothstep() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.set_clock_time(ClockIndex::ZERO, 1.0);
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    let mut pool = ParticlePool::new();
+    let mut spawn_at = |x: f32, mid: Option<f32>| {
+        pool.spawn(Particle {
+            pos: [x, 350.0],
+            vel: [0.0, 0.0],
+            size: [20.0, 20.0],
+            rotation: 0.0,
+            damping: 0.0,
+            gravity: [0.0, 0.0],
+            size_mul_end: 1.0,
+            color_end: None,
+            atlas: None,
+            fade_mid: mid,
+            color: WHITE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            birth: 0.0,
+            life: 2.0,
+            fade_in: 0.0,
+            fade_out: 2.0,
+            seed: 0.0,
+        });
+    };
+    spawn_at(300.0, Some(0.7));
+    spawn_at(600.0, None);
+    let mut b = DrawBatch::new();
+    draw_particles(&mut b, &pool);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    let px = |x: u32| {
+        let o = ((350 * 900 + x) * 4) as usize;
+        pixels[o]
+    };
+    let lin = px(300);
+    let sm = px(600);
+    assert!(
+        (200..=235).contains(&lin),
+        "线性中点 0.7 应约 218，got {lin}"
+    );
+    assert!(
+        (165..=200).contains(&sm),
+        "smoothstep 中点应约 187，got {sm}"
+    );
+    assert!(lin > sm + 10, "两档必须分得开（{lin} vs {sm}）");
+}
+
 /// Fragment-only Custom Material + 粒子路径：500 粒子 1 dc＋像素可见。
 /// 验证 `ensure_material_pipeline(Particle)` 真实编译出可用管线。
 #[test]
@@ -1777,6 +1840,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
             gravity: [0.0, 0.0],
             size_mul_end: 1.0,
             atlas: None,
+            fade_mid: None,
             color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1838,6 +1902,7 @@ fn particle_reorder_merges_across_gap() {
             gravity: [0.0, 0.0],
             size_mul_end: 1.0,
             atlas: None,
+            fade_mid: None,
             color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -1927,6 +1992,7 @@ fn particle_textured_uv_rects() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 0.5, 1.0],
@@ -1945,6 +2011,7 @@ fn particle_textured_uv_rects() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: WHITE,
         uv_rect: [0.5, 0.0, 1.0, 1.0],
@@ -2033,6 +2100,7 @@ fn particle_dual_clock_independent_timelines() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: RED,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -2052,6 +2120,7 @@ fn particle_dual_clock_independent_timelines() {
         gravity: [0.0, 0.0],
         size_mul_end: 1.0,
         atlas: None,
+        fade_mid: None,
         color_end: None,
         color: BLUE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -2184,6 +2253,7 @@ fn particle_blend_overlap_path() {
                 gravity: [0.0, 0.0],
                 size_mul_end: 1.0,
                 atlas: None,
+                fade_mid: None,
                 color_end: None,
                 color: c,
                 uv_rect: q,

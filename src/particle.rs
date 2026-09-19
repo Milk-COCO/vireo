@@ -61,6 +61,11 @@ pub struct Particle {
     pub fade_in: f32,
     /// 淡出秒（`<= 0` = 到 life 时硬切；寿命内按 `life - fade_out → life` 包络）。
     pub fade_out: f32,
+    /// fade_out 段中点（默认 None = 今日 smoothstep，外观中点恒 0.5）。
+    /// 设值后该段改线性三点 `1.0 → mid → 0.0`（中点在段中央，仍只作用于 fade_out 区间，
+    /// 与 `fade_in`/`fade_out` 时长正交；`clamp 0..1`）。注意 `Some(0.5)` ≠ 今日外观
+    /// （线性 vs smoothstep）。`fade_in` 段恒 smoothstep，不受影响。
+    pub fade_mid: Option<f32>,
     /// 尺寸终点倍率（`size *= mix(1.0, size_mul_end, k)`，`k = clamp(age/life)` 线性；
     /// 默认 1.0 = 无变化；0.0 = 收缩到点；不朽粒子 k 恒 0）。
     pub size_mul_end: f32,
@@ -400,6 +405,7 @@ pub fn draw_particles(batch: &mut DrawBatch, pool: &ParticlePool) {
                 Some(a) => [a.cols as f32, a.rows as f32, a.fps, a.start as f32],
                 None => [0.0, 0.0, 0.0, 0.0],
             },
+            fade_shape: [p.fade_mid.unwrap_or(-1.0), 0.0, 0.0, 0.0],
             transform_index,
             _padding: 0,
         }
@@ -464,6 +470,7 @@ mod tests {
             size_mul_end: 1.0,
             color_end: None,
             atlas: None,
+            fade_mid: None,
             seed: 0.5,
         }
     }
@@ -622,6 +629,19 @@ mod tests {
         draw_particles(&mut batch, &pool);
         assert_eq!(batch.particles[0].atlas_seq, [4.0, 2.0, 12.0, 3.0]);
         assert_eq!(batch.particles[1].atlas_seq, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn draw_particles_bakes_fade_mid_or_sentinel() {
+        let mut batch = DrawBatch::new();
+        let mut pool = ParticlePool::new();
+        let mut p = test_particle();
+        p.fade_mid = Some(0.7);
+        pool.spawn(p);
+        pool.spawn(test_particle());
+        draw_particles(&mut batch, &pool);
+        assert_eq!(batch.particles[0].fade_shape, [0.7, 0.0, 0.0, 0.0]);
+        assert_eq!(batch.particles[1].fade_shape, [-1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -608,6 +608,7 @@ fn test_pool_particle() -> Particle {
         size_mul_end: 1.0,
         color_end: None,
         atlas: None,
+        fade_mid: None,
         seed: 0.0,
     }
 }

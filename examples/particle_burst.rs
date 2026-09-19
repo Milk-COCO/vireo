@@ -13,6 +13,7 @@
 //! - D：阻尼开关（新粒子 damping=-2.5 指数衰减；正数=增长，填负才衰减）
 //! - E：终点开关（新粒子收缩到 15%＋烧成 ember 色；alpha 仍只走包络）
 //! - A：序列开关（新粒子整表 2×2 当 4 帧 8fps 播；关=QUADS 单格静态）
+//! - F：包络开关（新粒子 fade_out 段改线性三点 1→0.8→0；中段更亮、尾段更脆）
 //! - L：容量三态（关→500/KillOldest→500/DropNewest；开着按住 Space 看 live 钉住 500）
 //! - G：压力档（一次 30000，粒子层仍 1 dc）/ +/-：持续负载目标（immortal 顶到数）
 //! - C：清池 / H：HUD 文字开关
@@ -103,6 +104,7 @@ struct UiState {
     damp: bool,
     endpoints: bool,
     atlas_on: bool,
+    fade_linear: bool,
     cap_mode: u8,
     stress: bool,
     clear: bool,
@@ -124,6 +126,7 @@ fn spawn_burst(
     grav_y: f32,
     endpoints: bool,
     atlas_on: bool,
+    fade_linear: bool,
 ) {
     if pool.live_count() > 120_000 {
         return;
@@ -204,6 +207,8 @@ fn spawn_burst(
         } else {
             (QUADS[quad], None)
         };
+        // 包络演示：fade_out 段改线性三点 1→0.8→0（中段更亮、尾段更脆）。
+        let fade_mid = if fade_linear { Some(0.8) } else { None };
         pool.spawn(Particle {
             pos: [cx, cy],
             vel,
@@ -214,6 +219,7 @@ fn spawn_burst(
             size_mul_end: end_mul,
             color_end: end_col,
             atlas,
+            fade_mid,
             color,
             uv_rect: uv,
             birth: now,
@@ -253,6 +259,7 @@ async fn main(app: App) {
         damp: false,
         endpoints: false,
         atlas_on: false,
+        fade_linear: false,
         cap_mode: 0,
         stress: false,
         clear: false,
@@ -279,6 +286,7 @@ async fn main(app: App) {
             KeyCode::KeyD => ui.damp = !ui.damp,
             KeyCode::KeyE => ui.endpoints = !ui.endpoints,
             KeyCode::KeyA => ui.atlas_on = !ui.atlas_on,
+            KeyCode::KeyF => ui.fade_linear = !ui.fade_linear,
             KeyCode::KeyL => ui.cap_mode = (ui.cap_mode + 1) % 3,
             KeyCode::KeyS => ui.stress = true,
             KeyCode::KeyC => ui.clear = true,
@@ -337,6 +345,7 @@ async fn main(app: App) {
                     size_mul_end: 1.0,
                     color_end: None,
                     atlas: None,
+                    fade_mid: None,
                     color: Color::new(0.5, 0.7, 1.0, 0.6),
                     uv_rect: QUADS[0],
                     birth: now,
@@ -376,7 +385,7 @@ async fn main(app: App) {
                     let y = rand01(&mut rng) * 700.0;
                     let angle = rand01(&mut rng) * std::f32::consts::TAU;
                     let speed = 20.0 + rand01(&mut rng) * 80.0;
-                    pool.spawn(Particle {
+        pool.spawn(Particle {
                     pos: [x, y],
                     vel: [angle.cos() * speed, angle.sin() * speed],
                     size: [2.0, 2.0],
@@ -399,6 +408,7 @@ async fn main(app: App) {
                     } else {
                         None
                     },
+                    fade_mid: if ui.fade_linear { Some(0.8) } else { None },
                     color: WHITE,
                     uv_rect: if ui.atlas_on {
                         [0.0, 0.0, 1.0, 1.0]
@@ -416,7 +426,7 @@ async fn main(app: App) {
             if ui.burst {
                 let (mx, my) = win.mouse_pos().logical();
                 spawn_burst(&mut pool, &mut rng, now, mx as f32, my as f32, ui.mode, 60, ui.spin,
-                    if ui.damp { -2.5 } else { 0.0 }, if ui.gravity { 400.0 } else { 0.0 }, ui.endpoints, ui.atlas_on);
+                    if ui.damp { -2.5 } else { 0.0 }, if ui.gravity { 400.0 } else { 0.0 }, ui.endpoints, ui.atlas_on, ui.fade_linear);
             }
             ui.burst = false;
             ui.stress = false;
@@ -462,6 +472,7 @@ async fn main(app: App) {
                 } else {
                     None
                 },
+                fade_mid: if ui.fade_linear { Some(0.8) } else { None },
             });
                 sustained += 1;
             }
@@ -511,7 +522,7 @@ async fn main(app: App) {
             );
             draw_text(
                 &mut batch.texts,
-                "Space=emit 1/2/3=mode T=freeze M=material B=additive R=spin G=grav D=damp E=end A=seq L=cap S=stress30k +/-=sustain C=clear H=text V=present",
+                "Space=emit 1/2/3=mode T=freeze M=material B=additive R=spin G=grav D=damp E=end A=seq F=fade L=cap S=stress30k +/-=sustain C=clear H=text V=present",
                 Pos::new(10., 34.),
                 TextDef::default(),
                 TextOverride::new(),
@@ -543,7 +554,7 @@ async fn main(app: App) {
         hud_tick += 1;
         if hud_tick % 15 == 0 {
             stats_line = format!(
-                "live={} target={} fps={:.0} dc={} t={:.1}{} mode={} material={} blend={} {}{}{}{}{}{}{}",
+                "live={} target={} fps={:.0} dc={} t={:.1}{} mode={} material={} blend={} {}{}{}{}{}{}{}{}",
                 pool.live_count(),
                 target,
                 ctx.fps(),
@@ -563,6 +574,7 @@ async fn main(app: App) {
                 if ui.lock().unwrap().damp { " DAMP" } else { "" },
                 if ui.lock().unwrap().endpoints { " END" } else { "" },
                 if ui.lock().unwrap().atlas_on { " ATLAS" } else { "" },
+                if ui.lock().unwrap().fade_linear { " FADE" } else { "" },
                 match ui.lock().unwrap().cap_mode {
                     1 => " CAP500K",
                     2 => " CAP500D",

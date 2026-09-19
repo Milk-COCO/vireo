@@ -434,7 +434,7 @@ pub(crate) enum MaterialTarget {
 /// - `GeoInstance`：双 buffer `[GeoVertex, GeoInstance]`（16B + 32B），
 ///   共享模板 + 每实例 color/transform；支持 `merge_geo_templates` 合并。
 ///   **仅 fragment-only Material 可用**。
-/// - `Particle`：双 buffer `[QuadVertex, ParticleInstance]`（8B + 88B），
+/// - `Particle`：双 buffer `[QuadVertex, ParticleInstance]`（8B + 152B），
 ///   共享 unit quad + 每实例 spawn 参数；VS 按 `camera.time` 积分（pos/fade），
 ///   FS 极简（tex×color，无 SDF）。
 ///   **仅 fragment-only Material 可用**（custom VS 请用 mesh bake 回退，见 `draw_particles`）。

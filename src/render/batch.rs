@@ -329,7 +329,7 @@ pub struct DrawBatch {
     pub(crate) texture_segments: Vec<TextureSegment>,
     pub(crate) instances: Vec<ShapeInstance>,
     pub(crate) instance_texture_segments: Vec<InstanceTextureSegment>,
-    /// 粒子实例（`draw_particles` 推送，`ParticleInstance` 88B，VS 按 time 积分）。
+    /// 粒子实例（`draw_particles` 推送，`ParticleInstance` 152B，VS 按 time 积分）。
     /// 与 `instances` 独立成缓冲/命令/段，默认管线零影响。
     pub(crate) particles: Vec<ParticleInstance>,
     pub(crate) particle_texture_segments: Vec<InstanceTextureSegment>,
@@ -1107,7 +1107,7 @@ impl DrawBatch {
     /// - **mesh path**：每个 shape 推送 4 顶点 unit quad（CPU 端）。
     /// - **instance path**：CPU 端只推送 1 个 `ShapeInstance`（约 80 字节），
     ///   GPU 渲染时用 1 个共享 quad × N instances = `N * 4` 顶点。
-    /// - **particle path**：CPU 端只推送 1 个 `ParticleInstance`（88B），
+    /// - **particle path**：CPU 端只推送 1 个 `ParticleInstance`（152B），
     ///   GPU 渲染时同样 `N * 4` 顶点（VS 按 time 积分）。
     /// - **geo-instance path**：CPU 端只推送 1 个 `GeoInstance` + 共享模板顶点，
     ///   每个实例渲染模板的全部顶点；模板顶点数按实例重复计数。
