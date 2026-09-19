@@ -595,13 +595,19 @@ fn test_pool_particle() -> Particle {
     Particle {
         pos: [0.0, 0.0],
         vel: [0.0, 0.0],
+        damping: 0.0,
+        gravity: [0.0, 0.0],
         size: [4.0, 4.0],
+        rotation: 0.0,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
         birth: 0.0,
         life: -1.0,
         fade_in: 0.0,
         fade_out: 0.0,
+        size_mul_end: 1.0,
+        color_end: None,
+        atlas: None,
         seed: 0.0,
     }
 }

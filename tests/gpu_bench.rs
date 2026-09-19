@@ -1455,6 +1455,12 @@ fn particle_default_path_single_draw_call_and_time_driven_cull() {
             pos: [x + 14.0, y + 14.0],
             vel: [0.0, 0.0],
             size: [14.0, 14.0],
+            rotation: 0.0,
+            damping: 0.0,
+            gravity: [0.0, 0.0],
+            size_mul_end: 1.0,
+            atlas: None,
+            color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             birth: 0.0,
@@ -1470,6 +1476,12 @@ fn particle_default_path_single_draw_call_and_time_driven_cull() {
         pos: [450.0, 350.0],
         vel: [0.0, 0.0],
         size: [40.0, 40.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
         birth: 100.0,
@@ -1512,6 +1524,227 @@ fn particle_default_path_single_draw_call_and_time_driven_cull() {
     );
 }
 
+/// G2 闭式积分像素验证：重力抛物线分支（damping=0）＋指数分支（damping≠0）
+/// 各一位移断言。`set_clock_time` 定死 age，两分支各一帧。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_gravity_and_damping_displace() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.set_clock_time(ClockIndex::ZERO, 1.0);
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    // 重力：birth 上方 200px 处出生，age=1 下坠 0.5*400*1²=200 → 落回中心
+    let mut pool = ParticlePool::new();
+    pool.spawn(Particle {
+        pos: [450.0, 150.0],
+        vel: [0.0, 0.0],
+        size: [10.0, 10.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 400.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 10.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    let mut b = DrawBatch::new();
+    draw_particles(&mut b, &pool);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 900, 440, 340, 460, 360),
+        "重力粒子应落在出生点下方 200px"
+    );
+    assert!(
+        !region_has_color(&pixels, 900, 440, 140, 460, 160),
+        "出生点处应已无粒子（整 quad 移走）"
+    );
+
+    // 阻尼：vel 200/damping -2/age 1 → x=(e^-2-1)/(-2)*200≈86.5（非线性 200）
+    let mut pool2 = ParticlePool::new();
+    pool2.spawn(Particle {
+        pos: [100.0, 350.0],
+        vel: [200.0, 0.0],
+        size: [10.0, 10.0],
+        rotation: 0.0,
+        damping: -2.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 10.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    let mut b2 = DrawBatch::new();
+    draw_particles(&mut b2, &pool2);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b2]);
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 900, 176, 340, 196, 360),
+        "阻尼粒子应落在 x≈186（指数衰减，非线性 300）"
+    );
+    assert!(
+        !region_has_color(&pixels, 900, 290, 340, 310, 360),
+        "线性终点 x=300 处应无粒子"
+    );
+}
+/// G3 终点像素验证：k=0.5 时颜色 mix＋尺寸收缩各一断言。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_endpoints_mix_color_and_size() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.set_clock_time(ClockIndex::ZERO, 1.0);
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    let mut pool = ParticlePool::new();
+    // 颜色：白→纯红，life 2/age 1 → k=0.5 → linear(1,0.5,0.5) → sRGB 亮粉
+    pool.spawn(Particle {
+        pos: [300.0, 350.0],
+        vel: [0.0, 0.0],
+        size: [10.0, 10.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 2.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    // 尺寸：半 30→mul 0，k=0.5 → 半 15（出生盒 ±30 处应黑）
+    pool.spawn(Particle {
+        pos: [600.0, 350.0],
+        vel: [0.0, 0.0],
+        size: [30.0, 30.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 0.0,
+        atlas: None,
+        color_end: None,
+        color: WHITE,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+        birth: 0.0,
+        life: 2.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        seed: 0.0,
+    });
+    let mut b = DrawBatch::new();
+    draw_particles(&mut b, &pool);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    let px = |x: u32, y: u32| {
+        let o = ((y * 900 + x) * 4) as usize;
+        (pixels[o], pixels[o + 1], pixels[o + 2])
+    };
+    let (r, g, bl) = px(300, 350);
+    assert!(
+        r > 200 && (100..=220).contains(&g) && (100..=220).contains(&bl),
+        "k=0.5 白→红应为亮粉，got ({r},{g},{bl})"
+    );
+    let (r2, g2, b2) = px(600, 350);
+    assert!(r2 > 200 && g2 > 200 && b2 > 200, "收缩粒子中心应仍亮");
+    assert!(
+        !region_has_color(&pixels, 900, 622, 340, 638, 360),
+        "出生盒边缘（±22~38）收缩后应黑"
+    );
+}
+
+/// G5 序列像素验证：2×2 四色表，frame 0 = 红（左上），frame 1 = 绿（右上）。
+/// 行优先，row 0 = v0 边。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_atlas_seq_advances_frames() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+    // 64×64 四象限：TL 红 / TR 绿 / BL 蓝 / BR 白（row 0 = 数据前 32 行 = v0 边）
+    let mut data = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            let c = match (x < 32, y < 32) {
+                (true, true) => [255, 0, 0, 255],
+                (false, true) => [0, 255, 0, 255],
+                (true, false) => [0, 0, 255, 255],
+                (false, false) => [255, 255, 255, 255],
+            };
+            data.extend_from_slice(&c);
+        }
+    }
+    let tex = Texture::from_rgba(64, 64, &data, &gpu);
+    let spawn_seq = |pool: &mut ParticlePool| {
+        pool.spawn(Particle {
+            pos: [450.0, 350.0],
+            vel: [0.0, 0.0],
+            size: [20.0, 20.0],
+            rotation: 0.0,
+            damping: 0.0,
+            gravity: [0.0, 0.0],
+            size_mul_end: 1.0,
+            color_end: None,
+            atlas: Some(AtlasSeq {
+                cols: 2,
+                rows: 2,
+                fps: 1.0,
+                start: 0,
+            }),
+            color: WHITE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            birth: 0.0,
+            life: 10.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            seed: 0.0,
+        });
+    };
+    let draw_at = |t: f32| {
+        gpu.set_clock_time(ClockIndex::ZERO, t);
+        let mut pool = ParticlePool::new();
+        spawn_seq(&mut pool);
+        let mut b = DrawBatch::new();
+        b.set_texture(Some(&tex));
+        draw_particles(&mut b, &pool);
+        canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+        canvas.read_pixels()
+    };
+    let px = |pixels: &[u8]| {
+        let o = ((350 * 900 + 450) * 4) as usize;
+        (pixels[o], pixels[o + 1], pixels[o + 2])
+    };
+    let (r0, g0, b0) = px(&draw_at(0.2));
+    assert!(
+        r0 > 200 && g0 < 80 && b0 < 80,
+        "frame 0 应为红，got ({r0},{g0},{b0})"
+    );
+    let (r1, g1, b1) = px(&draw_at(1.2));
+    assert!(
+        g1 > 200 && r1 < 80 && b1 < 80,
+        "frame 1 应为绿，got ({r1},{g1},{b1})"
+    );
+}
+
 /// Fragment-only Custom Material + 粒子路径：500 粒子 1 dc＋像素可见。
 /// 验证 `ensure_material_pipeline(Particle)` 真实编译出可用管线。
 #[test]
@@ -1539,6 +1772,12 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
             pos: [x + 14.0, y + 14.0],
             vel: [0.0, 0.0],
             size: [14.0, 14.0],
+            rotation: 0.0,
+            damping: 0.0,
+            gravity: [0.0, 0.0],
+            size_mul_end: 1.0,
+            atlas: None,
+            color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             birth: 0.0,
@@ -1594,6 +1833,12 @@ fn particle_reorder_merges_across_gap() {
             pos: [x, y],
             vel: [0.0, 0.0],
             size: [10.0, 10.0],
+            rotation: 0.0,
+            damping: 0.0,
+            gravity: [0.0, 0.0],
+            size_mul_end: 1.0,
+            atlas: None,
+            color_end: None,
             color: WHITE,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             birth: 0.0,
@@ -1677,6 +1922,12 @@ fn particle_textured_uv_rects() {
         pos: [100.0, 100.0],
         vel: [0.0, 0.0],
         size: [40.0, 40.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
         color: WHITE,
         uv_rect: [0.0, 0.0, 0.5, 1.0],
         birth: 0.0,
@@ -1689,6 +1940,12 @@ fn particle_textured_uv_rects() {
         pos: [340.0, 100.0],
         vel: [0.0, 0.0],
         size: [40.0, 40.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
         color: WHITE,
         uv_rect: [0.5, 0.0, 1.0, 1.0],
         birth: 0.0,
@@ -1771,6 +2028,12 @@ fn particle_dual_clock_independent_timelines() {
         pos: [0.0, 350.0],
         vel: [10.0, 0.0],
         size: [5.0, 5.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
         color: RED,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
         birth: 0.0,
@@ -1784,6 +2047,12 @@ fn particle_dual_clock_independent_timelines() {
         pos: [0.0, 350.0],
         vel: [10.0, 0.0],
         size: [5.0, 5.0],
+        rotation: 0.0,
+        damping: 0.0,
+        gravity: [0.0, 0.0],
+        size_mul_end: 1.0,
+        atlas: None,
+        color_end: None,
         color: BLUE,
         uv_rect: [0.0, 0.0, 1.0, 1.0],
         birth: 0.0,
@@ -1910,6 +2179,12 @@ fn particle_blend_overlap_path() {
                 pos: [200.0, 200.0],
                 vel: [0.0, 0.0],
                 size: [60.0, 60.0],
+                rotation: 0.0,
+                damping: 0.0,
+                gravity: [0.0, 0.0],
+                size_mul_end: 1.0,
+                atlas: None,
+                color_end: None,
                 color: c,
                 uv_rect: q,
                 birth: 0.0,

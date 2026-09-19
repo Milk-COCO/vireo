@@ -146,7 +146,7 @@ impl GeoInstance {
     }
 }
 
-/// 粒子实例（88B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
+/// 粒子实例（136B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
 /// fade 包络），存活期 CPU 零更新。复用共享 unit quad（`instance_quad_*_buf`），
 /// 与 `ShapeInstance` 独立成管线（见 `ShapeVertexLayout::Particle`），默认管线零影响。
 #[repr(C)]
@@ -160,8 +160,14 @@ pub struct ParticleInstance {
     pub color: [f32; 4],
     /// 图集矩形（u0,v0,u1,v1，绝对坐标，不受 batch `set_uv` 重映射）。
     pub uv_rect: [f32; 4],
-    /// fade_in 秒 + fade_out 秒 + 每粒子随机种子 + 标志位（保留，当前必须 0）。
+    /// fade_in 秒 + fade_out 秒 + 每粒子随机种子 + 标志位（bit0 = 有 color_end）。
     pub fade_misc: [f32; 4],
+    /// 阻尼指数 + 重力 xy + 网格朝向弧度（全 0 = 无阻尼/无重力/无旋转，今日行为）。
+    pub motion2: [f32; 4],
+    /// 终点 rgb + 尺寸终点倍率（默认 `[0,0,0,1]`；有无 color_end 看 `fade_misc.w` bit0）。
+    pub end_rgba_size: [f32; 4],
+    /// 图集序列 cols + rows + fps + start 行优先（全 0/`cols*rows<=1`/`fps<=0` = 静态）。
+    pub atlas_seq: [f32; 4],
     /// 变换矩阵索引（record 时取 batch 当前值，`batch.view` 左乘自动覆盖）。
     pub transform_index: u32,
     pub _padding: u32,
@@ -200,6 +206,21 @@ impl ParticleInstance {
                 },
                 wgpu::VertexAttribute {
                     offset: 80,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 7,
+                },
+                wgpu::VertexAttribute {
+                    offset: 96,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 8,
+                },
+                wgpu::VertexAttribute {
+                    offset: 112,
+                    format: wgpu::VertexFormat::Float32x4,
+                    shader_location: 9,
+                },
+                wgpu::VertexAttribute {
+                    offset: 128,
                     format: wgpu::VertexFormat::Uint32,
                     shader_location: 6,
                 },

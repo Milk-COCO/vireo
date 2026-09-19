@@ -742,11 +742,20 @@ impl DrawBatch {
         for p in &self.particles {
             any = true;
             let (px, py, hw, hh) = (p.pos_size[0], p.pos_size[1], p.pos_size[2], p.pos_size[3]);
+            // 静态（无旋转＋尺寸不放大）走紧盒，省 hypot；否则外接圆保守。
+            // grow 用 abs().max(1.0)：NaN 消毒为 1.0（culling 侧；VS 照旧）。
+            let grow = p.end_rgba_size[3].abs().max(1.0);
+            let (bx, by) = if p.motion2[3] == 0.0 && grow == 1.0 {
+                (hw, hh)
+            } else {
+                let r = hw.hypot(hh) * grow;
+                (r, r)
+            };
             let mut pts = [
-                (px - hw, py - hh),
-                (px + hw, py - hh),
-                (px + hw, py + hh),
-                (px - hw, py + hh),
+                (px - bx, py - by),
+                (px + bx, py - by),
+                (px + bx, py + by),
+                (px - bx, py + by),
                 (px, py),
                 (px, py),
                 (px, py),
@@ -754,14 +763,29 @@ impl DrawBatch {
             ];
             let mut n = 4;
             if p.vel_time[3] > 0.0 {
-                // 有限寿命：终点框也纳入（保守外接）。不朽且运动的粒子只用
-                // 出生框——会误裁剪，届时请用手动 bounds（见 `draw_particles`）。
-                let ex = px + p.vel_time[0] * p.vel_time[3];
-                let ey = py + p.vel_time[1] * p.vel_time[3];
-                pts[4] = (ex - hw, ey - hh);
-                pts[5] = (ex + hw, ey - hh);
-                pts[6] = (ex + hw, ey + hh);
-                pts[7] = (ex - hw, ey + hh);
+                // 有限寿命：终点框也纳入。不阻尼走线性（无 exp）；阻尼/重力走闭式解＋
+                // 曲线余量（g=0 时余量为 0）。不朽且运动的粒子只用出生框——会误裁剪，
+                // 届时请用手动 bounds（见 `draw_particles`）。
+                let life = p.vel_time[3];
+                let (ex, ey) = if p.motion2[0] == 0.0 && p.motion2[1] == 0.0 && p.motion2[2] == 0.0
+                {
+                    (px + p.vel_time[0] * life, py + p.vel_time[1] * life)
+                } else {
+                    let tr = crate::particle::integrate_travel(
+                        [p.vel_time[0], p.vel_time[1]],
+                        p.motion2[0],
+                        [p.motion2[1], p.motion2[2]],
+                        life,
+                    );
+                    (px + tr[0], py + tr[1])
+                };
+                // 曲线相对弦的最大偏离不超抛物线项：终点框加保守余量。
+                let m = 0.5 * p.motion2[1].hypot(p.motion2[2]) * life * life;
+                let (exx, eyy) = (bx + m, by + m);
+                pts[4] = (ex - exx, ey - eyy);
+                pts[5] = (ex + exx, ey - eyy);
+                pts[6] = (ex + exx, ey + eyy);
+                pts[7] = (ex - exx, ey + eyy);
                 n = 8;
             }
             for (x, y) in pts[..n].iter().copied() {

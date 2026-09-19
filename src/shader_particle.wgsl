@@ -9,6 +9,9 @@ struct ParticleInput {
     @location(4) uv_rect: vec4<f32>,
     @location(5) fade_misc: vec4<f32>,
     @location(6) @interpolate(flat) xform: u32,
+    @location(7) motion2: vec4<f32>,
+    @location(8) end_rgba_size: vec4<f32>,
+    @location(9) atlas_seq: vec4<f32>,
 };
 
 // 与 SDF instance 的 `VertexOutput` 逐字段一致，供 custom material FS 复用
@@ -44,9 +47,31 @@ fn vs_main(vertex: QuadVertex, instance: ParticleInput) -> VertexOutput {
     let life = instance.vel_time.w;
     let age = camera.time_secs - birth;
     let dead = age < 0.0 || (life > 0.0 && age > life);
-    let pos = instance.pos_size.xy + instance.vel_time.xy * max(age, 0.0);
-    let half_size = instance.pos_size.zw;
-    let local_pos = mix(pos - half_size, pos + half_size, t);
+    let damp = instance.motion2.x;
+    let grav = instance.motion2.yz;
+    let tt = max(age, 0.0);
+    // 闭式积分：v(t) = v0*e^(dt) + g*(e^(dt)-1)/d。
+    // f32 下 (e^q-1-q)/d² 在 q→0 灾难性抵消（WGSL 无 expm1），故按无量纲 q=d*t
+    // 分段：|q|<0.01 用 Taylor（k1 到 q²、k2 到 q²，截断误差 O(q³) 无缝），外侧用 exp。
+    let q = damp * tt;
+    var travel: vec2<f32>;
+    if (abs(q) < 0.01) {
+        travel = instance.vel_time.xy * (tt * (1.0 + q * (0.5 + q / 6.0)))
+            + grav * (tt * tt * (0.5 + q * (1.0 / 6.0 + q / 24.0)));
+    } else {
+        let e = exp(q);
+        travel = instance.vel_time.xy * ((e - 1.0) / damp)
+            + grav * ((e - 1.0 - q) / (damp * damp));
+    }
+    let pos = instance.pos_size.xy + travel;
+    // 寿命期插值进度（不朽无分母，k 恒 0 =  stay 起点）。
+    let k = select(0.0, clamp(age / max(life, 1e-6), 0.0, 1.0), life > 0.0);
+    let half_size = instance.pos_size.zw * mix(1.0, instance.end_rgba_size.a, k);
+    let ang = instance.motion2.w;
+    let cs = cos(ang);
+    let sn = sin(ang);
+    let off = vertex.corner * half_size;
+    let local_pos = pos + vec2<f32>(off.x * cs - off.y * sn, off.x * sn + off.y * cs);
     let world_pos = transforms[instance.xform] * vec3<f32>(local_pos, 1.0);
     out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
     if (dead) {
@@ -54,6 +79,20 @@ fn vs_main(vertex: QuadVertex, instance: ParticleInput) -> VertexOutput {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     }
     out.uv = mix(instance.uv_rect.xy, instance.uv_rect.zw, t);
+    // 图集序列：uv_rect 当整表按 cols×rows 切分（row 0 = v0 边）；
+    // cols*rows<=1 或 fps<=0 即静态（None 烘焙零值，零成本）。
+    let cols = instance.atlas_seq.x;
+    let rows = instance.atlas_seq.y;
+    let nframes = cols * rows;
+    if (nframes > 1.0 && instance.atlas_seq.z > 0.0) {
+        let frame = (floor(max(age, 0.0) * instance.atlas_seq.z) + instance.atlas_seq.w) % nframes;
+        let col = frame % cols;
+        let row = floor(frame / cols);
+        let span = instance.uv_rect.zw - instance.uv_rect.xy;
+        let cell = span / vec2<f32>(cols, rows);
+        let cell_min = instance.uv_rect.xy + vec2<f32>(col, row) * cell;
+        out.uv = mix(cell_min, cell_min + cell, t);
+    }
     let fade_in = instance.fade_misc.x;
     let fade_out = instance.fade_misc.y;
     var fade = smoothstep(0.0, max(fade_in, 1e-6), max(age, 0.0));
@@ -63,6 +102,12 @@ fn vs_main(vertex: QuadVertex, instance: ParticleInput) -> VertexOutput {
         fade *= 1.0 - smoothstep(life - fade_out, life, age);
     }
     out.color = vec4<f32>(instance.color.rgb, instance.color.a * fade);
+    if (instance.fade_misc.w > 0.5) {
+        out.color = vec4<f32>(
+            mix(instance.color.rgb, instance.end_rgba_size.rgb, k),
+            instance.color.a * fade,
+        );
+    }
     out.sdf_params = vec4<f32>(0.0);
     out.local_pos = local_pos;
     out.sdf_type = 0u;

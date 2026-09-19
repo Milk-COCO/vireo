@@ -245,6 +245,8 @@ pub mod prelude {
     pub use crate::nc::NonClientRegion;
     pub use crate::nc::WindowState;
     pub use crate::offscreen::OffscreenCanvas;
+    pub use crate::particle::AtlasSeq;
+    pub use crate::particle::OverflowPolicy;
     pub use crate::particle::Particle;
     pub use crate::particle::ParticlePool;
     pub use crate::particle::ParticleSlot;

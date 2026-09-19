@@ -25,6 +25,13 @@
   Raw blend-state passthrough: per-segment freeze for shapes and text.
 - `ParticlePool::sweep`（单遍清除过期粒子，无分配；示例每 30 帧调用一次）。
   `ParticlePool::sweep` (single-pass expiry without allocation).
+- 粒子 G1~G5：`rotation`（只转网格）＋`damping`/`gravity`（原始指数语义闭式积分，
+  正=增长、衰减填负；`q=d*t` 分段 Taylor 保 f32 稳定）＋`size_mul_end`/`color_end`
+  （alpha 仍只走包络，`end.a` 忽略）＋`AtlasSeq` 图集序列（行优先）＋
+  `set_max_live`/`OverflowPolicy::{DropNewest, KillOldest}`（堆维护，摊销 O(log n)；
+  cap 为 0 全拒；降 cap 不追溯）＋prelude `AtlasSeq`/`OverflowPolicy`。
+  Particle G1-G5: rotation, damping/gravity closed-form, size/color endpoints,
+  atlas sequences, pool cap with heap KillOldest.
 
 ## [0.1.2]
 
