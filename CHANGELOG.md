@@ -19,6 +19,10 @@
   （共享 image 的新对象，同帧多 mode 混用）＋prelude `AddressMode`
   （直接用 `wgpu::AddressMode`；默认 ClampToEdge，老行为不变）。
   Texture address modes: switch in place or share one image across modes.
+- 混合全透传：`DrawBatch::set_blend_state` / `clear_blend_state` /
+  `set_blend_constant`（形状＋文字，逐段冻结；语义 = wgpu 原样，用户自负；
+  `Src1` 要 dual-source feature，vireo 不开）＋prelude `BlendState` 等。
+  Raw blend-state passthrough: per-segment freeze for shapes and text.
 - `ParticlePool::sweep`（单遍清除过期粒子，无分配；示例每 30 帧调用一次）。
   `ParticlePool::sweep` (single-pass expiry without allocation).
 

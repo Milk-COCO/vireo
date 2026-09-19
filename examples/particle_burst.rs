@@ -7,6 +7,7 @@
 //! - 空格：在鼠标位置按当前模式发射（1 radial burst / 2 ring / 3 rain）
 //! - T：冻结粒子时钟（0 号钟 `set_clock_scale(0)`，动画暂停，证明时间由 GPU 统一驱动）
 //! - M：fragment-only 自定义材质开关（`local_pos` 条带 tint，走粒子 instance 管线）
+//! - B：粒子批切加色混合（`set_blend_state`，火光；黑底稀疏粒子下与 alpha 肉眼难分，看互叠处）
 //! - G：压力档（一次 30000，粒子层仍 1 dc）/ +/-：持续负载目标（immortal 顶到数）
 //! - C：清池 / H：HUD 文字开关
 //! - HUD：存活数 / FPS / draw calls / 粒子时钟 / build-enc-acq-pres（EMA 平滑）
@@ -70,11 +71,27 @@ const QUADS: [[f32; 4]; 4] = [
     [0.5 + HALF_TEXEL, 0.5 + HALF_TEXEL, 1.0, 1.0],
 ];
 
+/// 加色混合（SrcAlpha/One；vireo 输出 straight alpha，fade/alpha 正常参与。
+/// 不是 `BlendState::ADDITIVE`（One/One，给 premultiplied 输入用的）。
+const ADDITIVE: BlendState = BlendState {
+    color: BlendComponent {
+        src_factor: BlendFactor::SrcAlpha,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+    alpha: BlendComponent {
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+};
+
 struct UiState {
     burst: bool,
     mode: u8,
     frozen: bool,
     material: bool,
+    additive: bool,
     stress: bool,
     clear: bool,
     hud_text: bool,
@@ -178,6 +195,7 @@ async fn main(app: App) {
         mode: 0,
         frozen: false,
         material: false,
+        additive: false,
         stress: false,
         clear: false,
         hud_text: true,
@@ -197,6 +215,7 @@ async fn main(app: App) {
             KeyCode::Digit3 => ui.mode = 2,
             KeyCode::KeyT => ui.frozen = !ui.frozen,
             KeyCode::KeyM => ui.material = !ui.material,
+            KeyCode::KeyB => ui.additive = !ui.additive,
             KeyCode::KeyG => ui.stress = true,
             KeyCode::KeyC => ui.clear = true,
             KeyCode::KeyH => ui.hud_text = !ui.hud_text,
@@ -346,6 +365,9 @@ async fn main(app: App) {
         if material_on {
             batch.set_custom_material(Some(tint.clone()));
         }
+        if ui.lock().unwrap().additive {
+            batch.set_blend_state(ADDITIVE);
+        }
         let t0 = std::time::Instant::now();
         draw_particles(&mut batch, &pool);
         let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -360,7 +382,7 @@ async fn main(app: App) {
             );
             draw_text(
                 &mut batch.texts,
-                "Space=emit 1/2/3=mode T=freeze M=material G=stress30k +/-=sustain C=clear H=text V=present",
+                "Space=emit 1/2/3=mode T=freeze M=material B=additive G=stress30k +/-=sustain C=clear H=text V=present",
                 Pos::new(10., 34.),
                 TextDef::default(),
                 TextOverride::new(),
@@ -392,7 +414,7 @@ async fn main(app: App) {
         hud_tick += 1;
         if hud_tick % 15 == 0 {
             stats_line = format!(
-                "live={} target={} fps={:.0} dc={} t={:.1}{} mode={} material={}{}",
+                "live={} target={} fps={:.0} dc={} t={:.1}{} mode={} material={} blend={} {}",
                 pool.live_count(),
                 target,
                 ctx.fps(),
@@ -401,6 +423,11 @@ async fn main(app: App) {
                 if frozen { " FROZEN" } else { "" },
                 mode_name,
                 if material_on { "on" } else { "off" },
+                if ui.lock().unwrap().additive {
+                    "add"
+                } else {
+                    "alpha"
+                },
                 if present_immediate { " IMM" } else { "" },
             );
             perf_line = format!(

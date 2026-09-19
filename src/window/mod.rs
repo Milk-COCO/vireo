@@ -627,8 +627,12 @@ impl VireoWindow {
             let sc = aa.sample_count();
             let atc = aa.alpha_to_coverage();
             let ssaa = aa.is_ssaa();
-            let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
-            let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
+            let _ =
+                self.gpu
+                    .ensure_pipeline(sc, atc, ssaa, false, wgpu::BlendState::ALPHA_BLENDING);
+            let _ = self
+                .gpu
+                .ensure_pipeline(sc, atc, ssaa, true, wgpu::BlendState::ALPHA_BLENDING);
             self.renderer.lock().update_aa(aa);
         }
 

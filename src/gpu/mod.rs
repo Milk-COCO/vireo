@@ -45,7 +45,7 @@ pub struct GpuContext {
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
-    pipelines: Mutex<FxHashMap<u32, wgpu::RenderPipeline>>,
+    pipelines: Mutex<FxHashMap<(u32, wgpu::BlendState), wgpu::RenderPipeline>>,
     shader: wgpu::ShaderModule,              // MSAA：per-pixel 着色
     shader_ssaa: wgpu::ShaderModule,         // SSAA：per-sample 着色
     shader_geo: wgpu::ShaderModule,          // 几何光栅化：无 SDF 分支
@@ -691,7 +691,10 @@ impl GpuContext {
 
         let mut pipelines = FxHashMap::default();
         pipelines.insert(
-            1 | surface_format_bits(surface_format),
+            (
+                1 | surface_format_bits(surface_format),
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
             render_pipeline.clone(),
         );
 
@@ -1173,17 +1176,21 @@ impl GpuContext {
                 0,
                 bgl_ref,
                 layout,
+                wgpu::BlendState::ALPHA_BLENDING,
             )?;
             pipelines.insert(
-                material_pipeline_key(
-                    target,
-                    1,
-                    false,
-                    false,
-                    false,
-                    0,
-                    layout,
-                    self.surface_format(),
+                (
+                    material_pipeline_key(
+                        target,
+                        1,
+                        false,
+                        false,
+                        false,
+                        0,
+                        layout,
+                        self.surface_format(),
+                    ),
+                    wgpu::BlendState::ALPHA_BLENDING,
                 ),
                 Arc::new(pipeline),
             );
@@ -1243,17 +1250,21 @@ impl GpuContext {
                 0,
                 bgl_ref,
                 layout,
+                wgpu::BlendState::ALPHA_BLENDING,
             )?;
             pipelines.insert(
-                material_pipeline_key(
-                    target,
-                    1,
-                    false,
-                    false,
-                    false,
-                    0,
-                    layout,
-                    self.surface_format(),
+                (
+                    material_pipeline_key(
+                        target,
+                        1,
+                        false,
+                        false,
+                        false,
+                        0,
+                        layout,
+                        self.surface_format(),
+                    ),
+                    wgpu::BlendState::ALPHA_BLENDING,
                 ),
                 Arc::new(pipeline),
             );

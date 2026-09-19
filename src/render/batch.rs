@@ -270,6 +270,8 @@ pub(crate) enum BatchShapeCommand {
         texture_generation: u32,
         geometry: bool,
         material: Option<Arc<Material>>,
+        blend: wgpu::BlendState,
+        blend_constant: wgpu::Color,
     },
     Instances {
         instance_start: u32,
@@ -277,6 +279,8 @@ pub(crate) enum BatchShapeCommand {
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
+        blend: wgpu::BlendState,
+        blend_constant: wgpu::Color,
     },
     Particles {
         particle_start: u32,
@@ -284,6 +288,8 @@ pub(crate) enum BatchShapeCommand {
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
+        blend: wgpu::BlendState,
+        blend_constant: wgpu::Color,
     },
     GeoInstances {
         geo_instance_start: u32,
@@ -294,6 +300,8 @@ pub(crate) enum BatchShapeCommand {
         bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
+        blend: wgpu::BlendState,
+        blend_constant: wgpu::Color,
     },
 }
 
@@ -422,6 +430,24 @@ pub struct DrawBatch {
     /// 公开 API 走 [`Self::custom_material`] / [`Self::set_custom_material`] /
     /// [`Self::clear_custom_material`]；字段私有，shape 内部可直接读。
     pub(crate) custom_material: Option<Arc<Material>>,
+    /// 混合状态机（同 `color`/`custom_material`，形状＋文字共用）。
+    /// 默认 `ALPHA_BLENDING`。record 时逐 shape/text 冻结，批内可自由切换；
+    /// 不同 blend 不合并 draw call（`preserve_order=false` 重排时按 blend 分组）。
+    ///
+    /// 语义 = wgpu 原样（color/alpha 各一道 `src_factor×src OP dst_factor×dst`），用户自负：
+    /// `Constant` 系数读默认黑常数，除非配 [`Self::blend_constant`]；
+    /// `Src1` 系要 dual-source feature（vireo 不开，硬传报 validation 错）；
+    /// Screen 类是近似（真 Photoshop Screen 要乘积项，单方程表达不了）。
+    ///
+    /// 公开 API 走 [`Self::blend_state`] / [`Self::set_blend_state`] /
+    /// [`Self::clear_blend_state`]；字段私有，shape 内部可直接读。
+    pub(crate) blend_state: wgpu::BlendState,
+    /// blend 常量（`Constant`/`OneMinusConstant` 系数用；默认透明黑 = wgpu 默认行为）。
+    /// 同 blend 一起逐 shape/text 冻结。注意类型是 `wgpu::Color`（f64），
+    /// 不是 prelude 的 `Color`（f32 画笔色）——同名不同类型。
+    ///
+    /// 公开 API 走 [`Self::blend_constant`] / [`Self::set_blend_constant`]。
+    pub(crate) blend_constant: wgpu::Color,
     /// Dynamic uniform/storage offsets for group 3 binding（逐 draw 偏移，字节）。
     /// 长度必须等于 BGL 中 `has_dynamic_offset` 的 binding 数量。
     pub dynamic_offsets: Vec<u32>,
@@ -494,6 +520,8 @@ impl DrawBatch {
             scissor: None,
             text_clip: None,
             custom_material: None,
+            blend_state: wgpu::BlendState::ALPHA_BLENDING,
+            blend_constant: wgpu::Color::TRANSPARENT,
             dynamic_offsets: Vec::new(),
             preserve_order: true,
             merge_geo_templates: false,
@@ -540,6 +568,8 @@ impl DrawBatch {
         self.scissor = None;
         self.text_clip = None;
         self.custom_material = None;
+        self.blend_state = wgpu::BlendState::ALPHA_BLENDING;
+        self.blend_constant = wgpu::Color::TRANSPARENT;
         self.dynamic_offsets.clear();
         self.preserve_order = true;
         self.merge_geo_templates = false;
@@ -1278,6 +1308,41 @@ impl DrawBatch {
         self.custom_material = None;
     }
 
+    /// 当前混合状态（默认 `ALPHA_BLENDING`）。
+    #[inline]
+    pub fn blend_state(&self) -> wgpu::BlendState {
+        self.blend_state
+    }
+
+    /// 设置混合状态（画笔状态机）：后续 shape/text 走此 `wgpu::BlendState`。
+    /// 只影响之后 record 的内容（已录的冻结了旧值）；不同 blend 不合并 draw call。
+    #[inline]
+    pub fn set_blend_state(&mut self, state: wgpu::BlendState) {
+        self.blend_state = state;
+        self.texts.set_blend_state(state);
+    }
+
+    /// 清除混合状态（回到 `ALPHA_BLENDING`）。
+    #[inline]
+    pub fn clear_blend_state(&mut self) {
+        self.blend_state = wgpu::BlendState::ALPHA_BLENDING;
+        self.texts.set_blend_state(wgpu::BlendState::ALPHA_BLENDING);
+    }
+
+    /// 当前 blend 常量（默认透明黑）。
+    #[inline]
+    pub fn blend_constant(&self) -> wgpu::Color {
+        self.blend_constant
+    }
+
+    /// 设置 blend 常量（`Constant`/`OneMinusConstant` 系数用；`wgpu::Color`，f64）。
+    /// 同 blend 一起逐 shape/text 冻结。
+    #[inline]
+    pub fn set_blend_constant(&mut self, constant: wgpu::Color) {
+        self.blend_constant = constant;
+        self.texts.set_blend_constant(constant);
+    }
+
     /// 当前 UV 子区域。
     #[inline]
     pub fn uv(&self) -> UvRect {
@@ -1650,6 +1715,8 @@ impl DrawBatch {
                 texture_generation: self.shape_texture_generation,
                 geometry: gap_geometry,
                 material: self.custom_material.clone(),
+                blend: self.blend_state,
+                blend_constant: self.blend_constant,
             });
         }
         if let Some(BatchShapeCommand::Mesh {
@@ -1658,6 +1725,8 @@ impl DrawBatch {
             texture_generation,
             geometry: last_geometry,
             material: last_material,
+            blend: last_blend,
+            blend_constant: last_constant,
             ..
         }) = self.shape_commands.last_mut()
             && *texture_generation == self.shape_texture_generation
@@ -1665,6 +1734,8 @@ impl DrawBatch {
             && *ndx_start + *ndx_count == start
             && last_material.as_ref().map(Arc::as_ptr)
                 == self.custom_material.as_ref().map(Arc::as_ptr)
+            && *last_blend == self.blend_state
+            && *last_constant == self.blend_constant
         {
             *ndx_count += end - start;
             self.shape_mesh_end = end;
@@ -1677,6 +1748,8 @@ impl DrawBatch {
             texture_generation: self.shape_texture_generation,
             geometry,
             material: self.custom_material.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
         self.shape_mesh_end = end;
     }
@@ -1777,12 +1850,16 @@ impl DrawBatch {
             instance_count,
             texture_generation,
             material: last_material,
+            blend: last_blend,
+            blend_constant: last_constant,
             ..
         }) = self.shape_commands.last_mut()
             && *texture_generation == self.shape_texture_generation
             && *instance_start + *instance_count == start
             && last_material.as_ref().map(Arc::as_ptr)
                 == self.custom_material.as_ref().map(Arc::as_ptr)
+            && *last_blend == self.blend_state
+            && *last_constant == self.blend_constant
         {
             *instance_count += end - start;
             return;
@@ -1793,6 +1870,8 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
             material: self.custom_material.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -1807,12 +1886,16 @@ impl DrawBatch {
             particle_count,
             texture_generation,
             material: last_material,
+            blend: last_blend,
+            blend_constant: last_constant,
             ..
         }) = self.shape_commands.last_mut()
             && *texture_generation == self.shape_texture_generation
             && *particle_start + *particle_count == start
             && last_material.as_ref().map(Arc::as_ptr)
                 == self.custom_material.as_ref().map(Arc::as_ptr)
+            && *last_blend == self.blend_state
+            && *last_constant == self.blend_constant
         {
             *particle_count += end - start;
             return;
@@ -1823,6 +1906,8 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
             material: self.custom_material.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -1928,6 +2013,8 @@ impl DrawBatch {
             index_count,
             texture_generation,
             material: last_material,
+            blend: last_blend,
+            blend_constant: last_constant,
             ..
         }) = self.shape_commands.last_mut()
         {
@@ -1939,6 +2026,8 @@ impl DrawBatch {
                 && *index_count == cur.index_count
                 && last_material.as_ref().map(Arc::as_ptr)
                     == self.custom_material.as_ref().map(Arc::as_ptr)
+                && *last_blend == self.blend_state
+                && *last_constant == self.blend_constant
             {
                 *geo_instance_count += end - start;
                 return;
@@ -1954,6 +2043,8 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             texture_generation: self.shape_texture_generation,
             material: self.custom_material.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -2150,6 +2241,8 @@ impl DrawBatch {
             scissor: self.scissor,
             text_clip: self.text_clip,
             custom_material: self.custom_material.clone(),
+            blend_state: self.blend_state,
+            blend_constant: self.blend_constant,
             dynamic_offsets: self.dynamic_offsets.clone(),
             preserve_order: self.preserve_order,
             merge_geo_templates: self.merge_geo_templates,

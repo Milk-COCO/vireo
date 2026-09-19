@@ -268,8 +268,12 @@ impl App {
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
         let ssaa = aa.is_ssaa();
-        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
-        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
+        let _ = self
+            .gpu
+            .ensure_pipeline(sc, atc, ssaa, false, wgpu::BlendState::ALPHA_BLENDING);
+        let _ = self
+            .gpu
+            .ensure_pipeline(sc, atc, ssaa, true, wgpu::BlendState::ALPHA_BLENDING);
         let init_duration = start.elapsed().as_secs_f64();
         let mut guard = self.offscreens.lock();
         let idx = guard.len();
@@ -321,8 +325,12 @@ impl App {
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
         let ssaa = aa.is_ssaa();
-        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, false);
-        let _ = self.gpu.ensure_pipeline(sc, atc, ssaa, true);
+        let _ = self
+            .gpu
+            .ensure_pipeline(sc, atc, ssaa, false, wgpu::BlendState::ALPHA_BLENDING);
+        let _ = self
+            .gpu
+            .ensure_pipeline(sc, atc, ssaa, true, wgpu::BlendState::ALPHA_BLENDING);
         let init_duration = start.elapsed().as_secs_f64();
         let handle = *self.next_handle.lock();
         *self.next_handle.lock() = handle + 1;

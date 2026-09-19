@@ -499,15 +499,20 @@ impl GpuContext {
         alpha_to_coverage: bool,
         ssaa: bool,
         geometry: bool,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突。
         // bits4-15 = surface format（macOS Metal 为 Bgra8UnormSrgb），格式不同
         // 的管线键不同，避免复用首窗口同步前的默认 Rgba8 管线。
-        let key = sample_count
-            | ((alpha_to_coverage as u32) << 16)
-            | ((ssaa as u32) << 17)
-            | ((geometry as u32) << 18)
-            | (surface_format_bits(self.surface_format()) << 4);
+        // blend 不进 bit（`BlendState` 全 Hash，进元组键后半）。
+        let key = (
+            sample_count
+                | ((alpha_to_coverage as u32) << 16)
+                | ((ssaa as u32) << 17)
+                | ((geometry as u32) << 18)
+                | (surface_format_bits(self.surface_format()) << 4),
+            blend,
+        );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -546,7 +551,7 @@ impl GpuContext {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format(),
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -579,16 +584,27 @@ impl GpuContext {
         ssaa: bool,
         geometry: bool,
         stencil_op: u32,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let op = stencil_op.min(4);
+        // op3/4 不写颜色（blend=None）：blend 归一化回 Alpha，防建重复管线。
+        let no_color = op == 3 || op == 4;
+        let key_blend = if no_color {
+            wgpu::BlendState::ALPHA_BLENDING
+        } else {
+            blend
+        };
         // bit19 = use_stencil=1；bits20-22 = stencil_op；bits4-15 = surface format
-        let key = sample_count
-            | ((alpha_to_coverage as u32) << 16)
-            | ((ssaa as u32) << 17)
-            | ((geometry as u32) << 18)
-            | (1u32 << 19)
-            | (op << 20)
-            | (surface_format_bits(self.surface_format()) << 4);
+        let key = (
+            sample_count
+                | ((alpha_to_coverage as u32) << 16)
+                | ((ssaa as u32) << 17)
+                | ((geometry as u32) << 18)
+                | (1u32 << 19)
+                | (op << 20)
+                | (surface_format_bits(self.surface_format()) << 4),
+            key_blend,
+        );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -613,7 +629,6 @@ impl GpuContext {
             });
         // op3/4 不写颜色，但仍走 fs_main，以便 SDF discard 裁出正确轮廓
         //（fs_stencil_only 无 SDF，圆/圆角会落成 AABB）。
-        let no_color = op == 3 || op == 4;
         let frag_entry = "fs_main";
         let color_target = if no_color {
             Some(wgpu::ColorTargetState {
@@ -624,7 +639,7 @@ impl GpuContext {
         } else {
             Some(wgpu::ColorTargetState {
                 format: self.surface_format(),
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })
         };
@@ -716,15 +731,19 @@ impl GpuContext {
         ssaa: bool,
         use_stencil: bool,
         stencil_op: u32,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let op = stencil_op.min(2);
-        let key = sample_count
-            | ((alpha_to_coverage as u32) << 16)
-            | ((ssaa as u32) << 17)
-            | ((use_stencil as u32) << 19)
-            | (op << 20)
-            | (1u32 << 23)
-            | (surface_format_bits(self.surface_format()) << 4);
+        let key = (
+            sample_count
+                | ((alpha_to_coverage as u32) << 16)
+                | ((ssaa as u32) << 17)
+                | ((use_stencil as u32) << 19)
+                | (op << 20)
+                | (1u32 << 23)
+                | (surface_format_bits(self.surface_format()) << 4),
+            blend,
+        );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -792,7 +811,7 @@ impl GpuContext {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format(),
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -823,15 +842,19 @@ impl GpuContext {
         ssaa: bool,
         use_stencil: bool,
         stencil_op: u32,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let op = stencil_op.min(2);
-        let key = sample_count
-            | ((alpha_to_coverage as u32) << 16)
-            | ((ssaa as u32) << 17)
-            | ((use_stencil as u32) << 19)
-            | (op << 20)
-            | (2u32 << 23)
-            | (surface_format_bits(self.surface_format()) << 4);
+        let key = (
+            sample_count
+                | ((alpha_to_coverage as u32) << 16)
+                | ((ssaa as u32) << 17)
+                | ((use_stencil as u32) << 19)
+                | (op << 20)
+                | (2u32 << 23)
+                | (surface_format_bits(self.surface_format()) << 4),
+            blend,
+        );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -895,7 +918,7 @@ impl GpuContext {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format(),
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -927,15 +950,19 @@ impl GpuContext {
         ssaa: bool,
         use_stencil: bool,
         stencil_op: u32,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let op = stencil_op.min(2);
-        let key = sample_count
-            | ((alpha_to_coverage as u32) << 16)
-            | ((ssaa as u32) << 17)
-            | ((use_stencil as u32) << 19)
-            | (op << 20)
-            | (3u32 << 23)
-            | (surface_format_bits(self.surface_format()) << 4);
+        let key = (
+            sample_count
+                | ((alpha_to_coverage as u32) << 16)
+                | ((ssaa as u32) << 17)
+                | ((use_stencil as u32) << 19)
+                | (op << 20)
+                | (3u32 << 23)
+                | (surface_format_bits(self.surface_format()) << 4),
+            blend,
+        );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
@@ -1003,7 +1030,7 @@ impl GpuContext {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format(),
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -1039,18 +1066,28 @@ impl GpuContext {
         stencil_mode: bool,
         stencil_op: u32,
         shape_layout: ShapeVertexLayout,
+        blend: wgpu::BlendState,
     ) -> Arc<wgpu::RenderPipeline> {
         let ssaa =
             ssaa && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
-        let key = material_pipeline_key(
-            target,
-            sample_count,
-            alpha_to_coverage,
-            ssaa,
-            stencil_mode,
-            stencil_op,
-            shape_layout,
-            self.surface_format(),
+        // 空颜色掩码（shape stencil cover/erase）不写颜色：blend 归一化防重复管线。
+        let key_blend = if stencil_mode && (stencil_op == 3 || stencil_op == 4) {
+            wgpu::BlendState::ALPHA_BLENDING
+        } else {
+            blend
+        };
+        let key = (
+            material_pipeline_key(
+                target,
+                sample_count,
+                alpha_to_coverage,
+                ssaa,
+                stencil_mode,
+                stencil_op,
+                shape_layout,
+                self.surface_format(),
+            ),
+            key_blend,
         );
         let mut pipes = material.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
@@ -1068,6 +1105,7 @@ impl GpuContext {
                 stencil_op,
                 material.bgl(),
                 shape_layout,
+                key_blend,
             )
             .expect("material WGSL was validated by create_material");
         let arc = Arc::new(pipeline);
@@ -1086,6 +1124,7 @@ impl GpuContext {
         stencil_op: u32,
         material_bgl: Option<&wgpu::BindGroupLayout>,
         shape_layout: ShapeVertexLayout,
+        blend: wgpu::BlendState,
     ) -> Result<wgpu::RenderPipeline, String> {
         let ssaa = ssaa && target == MaterialTarget::Shape && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1186,6 +1225,7 @@ impl GpuContext {
                     stencil_op,
                     material_bgl,
                     shape_layout,
+                    blend,
                 )
             }
             MaterialTarget::Text => self
@@ -1199,6 +1239,7 @@ impl GpuContext {
                     &fragment_source_str,
                     multisample,
                     depth_stencil,
+                    blend,
                 ),
         };
 
@@ -1222,6 +1263,7 @@ impl GpuContext {
         stencil_op: u32,
         material_bgl: Option<&wgpu::BindGroupLayout>,
         shape_layout: ShapeVertexLayout,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let vertex = self
             .device
@@ -1283,7 +1325,7 @@ impl GpuContext {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format(),
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(blend),
                         write_mask: if stencil_op == 3 || stencil_op == 4 {
                             wgpu::ColorWrites::empty()
                         } else {

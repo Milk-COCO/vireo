@@ -323,14 +323,14 @@ pub struct Material {
     pub(crate) source: String,
     pub(crate) shape_vertex_source: Option<String>,
     /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
-    pub(crate) pipelines: Mutex<FxHashMap<u64, Arc<wgpu::RenderPipeline>>>,
+    pub(crate) pipelines: Mutex<FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>>,
 }
 
 impl Material {
     pub(crate) fn new_zero_resource(
         source: String,
         shape_vertex_source: Option<String>,
-        pipelines: FxHashMap<u64, Arc<wgpu::RenderPipeline>>,
+        pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
             state: MaterialState::ZeroResource,
@@ -347,7 +347,7 @@ impl Material {
         cache_policy: CachePolicy,
         source: String,
         shape_vertex_source: Option<String>,
-        pipelines: FxHashMap<u64, Arc<wgpu::RenderPipeline>>,
+        pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
         device: wgpu::Device,
     ) -> Self {
         let fingerprints = FxHashMap::default();
@@ -373,7 +373,7 @@ impl Material {
         init_bind_group: Option<wgpu::BindGroup>,
         source: String,
         shape_vertex_source: Option<String>,
-        pipelines: FxHashMap<u64, Arc<wgpu::RenderPipeline>>,
+        pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
             state: MaterialState::B {

@@ -1866,6 +1866,324 @@ fn clock_registry_semantics() {
     assert!(gpu.set_clock_time(c2, 7.0));
 }
 
+/// 粒子混合路径像素回归：重叠红＋绿粒子，alpha 版只留顶层绿、additive 版黄。
+/// （形状版由 `blend_modes_*` 覆盖；此处专测粒子 instance 管线选管线正确。）
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn particle_blend_overlap_path() {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    const ADD: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+    };
+    fn center(px: &[u8], w: u32) -> (u32, u32, u32) {
+        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+        for y in 190..210 {
+            for x in 190..210 {
+                let i = ((y * w + x) * 4) as usize;
+                r += px[i] as u32;
+                g += px[i + 1] as u32;
+                b += px[i + 2] as u32;
+                n += 1;
+            }
+        }
+        (r / n, g / n, b / n)
+    }
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 400);
+    const PR: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+    const PG: Color = Color::new(0.0, 1.0, 0.0, 1.0);
+    let mk = |blend: Option<BlendState>| {
+        let mut pool = ParticlePool::new();
+        for (c, q) in [(PR, [0.0, 0.0, 1.0, 1.0]), (PG, [0.0, 0.0, 1.0, 1.0])] {
+            pool.spawn(Particle {
+                pos: [200.0, 200.0],
+                vel: [0.0, 0.0],
+                size: [60.0, 60.0],
+                color: c,
+                uv_rect: q,
+                birth: 0.0,
+                life: -1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                seed: 0.0,
+            });
+        }
+        let mut b = DrawBatch::new();
+        if let Some(bl) = blend {
+            b.set_blend_state(bl);
+        }
+        draw_particles(&mut b, &pool);
+        b
+    };
+    let ba = mk(None);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&ba]);
+    let ca = center(&canvas.read_pixels(), 400);
+    let bb = mk(Some(ADD));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&bb]);
+    let cb = center(&canvas.read_pixels(), 400);
+    println!("[pblend] alpha={ca:?} additive={cb:?}");
+    assert!(ca.1 > 200 && ca.0 < 120, "alpha 应只留顶层绿：{ca:?}");
+    assert!(cb.0 > 200 && cb.1 > 200, "additive 应黄：{cb:?}");
+}
+
+/// 混合三档像素：红＋绿交叠。
+/// additive（SrcAlpha/One）中心黄；multiply（Dst/Zero）白×红得红；
+/// screen（One/OneMinusSrc）蓝底＋红得品红；a=0.5 加色是 SrcAlpha/One 的证据
+///（One/One 会给出纯黄）。默认 batch 与显式 Alpha 逐字节相等。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn blend_modes_additive_multiply_screen() {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    const ADD: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+    };
+    const MULT: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::Dst,
+            dst_factor: BlendFactor::Zero,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::Zero,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+    };
+    const SCREEN: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::OneMinusSrc,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        },
+    };
+    fn mean(px: &[u8], w: u32, x0: u32, x1: u32, y0: u32, y1: u32) -> (u32, u32, u32) {
+        let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * w + x) * 4) as usize;
+                r += px[i] as u32;
+                g += px[i + 1] as u32;
+                b += px[i + 2] as u32;
+                n += 1;
+            }
+        }
+        (r / n, g / n, b / n)
+    }
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 1000, 700);
+    // 纯色（命名色非纯色：RED 带绿蓝、GREEN 带蓝，断言用裸值）。
+    const PR: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+    const PG: Color = Color::new(0.0, 1.0, 0.0, 1.0);
+    const PB: Color = Color::new(0.0, 0.0, 1.0, 1.0);
+    let mut b = DrawBatch::new();
+    // additive：红(40,40)＋绿(120,80)，交叠中心 (150..170, 100..120) 应黄
+    b.set_blend_state(ADD);
+    draw_rectangle(&mut b, Pos::new(40.0, 40.0), 160.0, 120.0, Some(PR));
+    draw_rectangle(&mut b, Pos::new(120.0, 80.0), 160.0, 120.0, Some(PG));
+    // a=0.5 半透明红＋不透明绿：(127,255,0)；One/One 会给出 (255,255,0)
+    draw_rectangle(
+        &mut b,
+        Pos::new(340.0, 40.0),
+        160.0,
+        120.0,
+        Some(Color::new(1.0, 0.0, 0.0, 0.5)),
+    );
+    draw_rectangle(&mut b, Pos::new(420.0, 80.0), 160.0, 120.0, Some(PG));
+    // multiply：白底（alpha）＋红（mult）→ 红（黑底上 mult 恒黑，无意义）
+    draw_rectangle(&mut b, Pos::new(620.0, 40.0), 160.0, 120.0, Some(WHITE));
+    b.set_blend_state(MULT);
+    draw_rectangle(&mut b, Pos::new(700.0, 80.0), 160.0, 120.0, Some(PR));
+    // screen：蓝＋红 → 品红
+    b.set_blend_state(SCREEN);
+    draw_rectangle(&mut b, Pos::new(40.0, 300.0), 160.0, 120.0, Some(PB));
+    draw_rectangle(&mut b, Pos::new(120.0, 340.0), 160.0, 120.0, Some(PR));
+    // alpha 对照：默认 vs 显式（同几何，不同 x）
+    b.clear_blend_state();
+    draw_rectangle(&mut b, Pos::new(340.0, 300.0), 160.0, 120.0, Some(PR));
+    draw_rectangle(&mut b, Pos::new(420.0, 340.0), 160.0, 120.0, Some(PG));
+    b.set_blend_state(BlendState::ALPHA_BLENDING);
+    draw_rectangle(&mut b, Pos::new(620.0, 300.0), 160.0, 120.0, Some(PR));
+    draw_rectangle(&mut b, Pos::new(700.0, 340.0), 160.0, 120.0, Some(PG));
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let px = canvas.read_pixels();
+    let add = mean(&px, 1000, 150, 170, 100, 120);
+    let half = mean(&px, 1000, 450, 470, 100, 120);
+    let mult = mean(&px, 1000, 730, 750, 100, 120);
+    let scr = mean(&px, 1000, 150, 170, 360, 380);
+    let adef = mean(&px, 1000, 450, 470, 360, 380);
+    let aexp = mean(&px, 1000, 730, 750, 360, 380);
+    println!(
+        "[blend] add={add:?} half={half:?} mult={mult:?} scr={scr:?} adef={adef:?} aexp={aexp:?}"
+    );
+    assert!(
+        add.0 > 200 && add.1 > 200 && add.2 < 120,
+        "additive 红＋绿应黄：{add:?}"
+    );
+    // 回读是 sRGB 编码：linear 0.5 → 约 184（One/One 会给出 255，此即 SrcAlpha/One 证据）
+    assert!(
+        half.0 > 160 && half.0 < 215 && half.1 > 200 && half.2 < 120,
+        "a=0.5 加色应 linear(0.5,1,0)：{half:?}"
+    );
+    assert!(
+        mult.0 > 200 && mult.1 < 120 && mult.2 < 120,
+        "multiply 白×红应红：{mult:?}"
+    );
+    assert!(
+        scr.0 > 200 && scr.2 > 200 && scr.1 < 120,
+        "screen 蓝＋红应品红：{scr:?}"
+    );
+    assert!(
+        adef.1 > 200 && adef.0 < 120,
+        "alpha 对照应只留顶层绿：{adef:?}"
+    );
+    assert_eq!(
+        adef, aexp,
+        "默认与显式 Alpha 应逐字节相等：{adef:?} vs {aexp:?}"
+    );
+}
+
+/// blend 常量管道：白 quad＋color=(Constant,Zero)＋红常量 → 红输出。
+/// constant 不同步会输出黑。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn blend_constant_plumbing() {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    const CONST_RED: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::Constant,
+            dst_factor: BlendFactor::Zero,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::Zero,
+            operation: BlendOperation::Add,
+        },
+    };
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 300);
+    let mut b = DrawBatch::new();
+    b.set_blend_state(CONST_RED);
+    b.set_blend_constant(wgpu::Color {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    });
+    draw_rectangle(&mut b, Pos::new(40.0, 40.0), 160.0, 120.0, Some(WHITE));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let px = canvas.read_pixels();
+    let (mut r, mut g, mut n) = (0u32, 0u32, 0u32);
+    for y in 80..120 {
+        for x in 80..160 {
+            let i = ((y * 400 + x) * 4) as usize;
+            r += px[i] as u32;
+            g += px[i + 1] as u32;
+            n += 1;
+        }
+    }
+    let (rm, gm) = (r / n, g / n);
+    println!("[blend-const] r={rm} g={gm}");
+    assert!(
+        rm > 200 && gm < 120,
+        "Constant 红常量应输出红：r={rm} g={gm}"
+    );
+}
+
+/// 文字混合冒烟：蓝底红字，alpha 版红占优、additive 版品红占优（多数票，抗抗锯齿边）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn blend_additive_text() {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    const ADD: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+    };
+    fn votes(px: &[u8], w: u32) -> (u32, u32) {
+        let (mut red, mut mag) = (0u32, 0u32);
+        for y in 60..130 {
+            for x in 60..160 {
+                let i = ((y * w + x) * 4) as usize;
+                let (r, g, bl) = (px[i], px[i + 1], px[i + 2]);
+                if r > 150 && g < 120 && bl < 120 {
+                    red += 1;
+                } else if r > 150 && bl > 150 && g < 120 {
+                    mag += 1;
+                }
+            }
+        }
+        (red, mag)
+    }
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 300);
+    let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+    let mut ba = DrawBatch::new();
+    draw_text(
+        &mut ba.texts,
+        "RR",
+        Pos::new(60.0, 60.0),
+        TextDef::default().font_size(48.0),
+        TextOverride::from_color(RED),
+    );
+    canvas.draw(Some(blue), &[&ba]);
+    let (ared, amag) = votes(&canvas.read_pixels(), 400);
+    let mut bb = DrawBatch::new();
+    bb.set_blend_state(ADD);
+    draw_text(
+        &mut bb.texts,
+        "RR",
+        Pos::new(60.0, 60.0),
+        TextDef::default().font_size(48.0),
+        TextOverride::from_color(RED),
+    );
+    canvas.draw(Some(blue), &[&bb]);
+    let (bred, bmag) = votes(&canvas.read_pixels(), 400);
+    println!("[blend-text] alpha red={ared} mag={amag}; add red={bred} mag={bmag}");
+    assert!(ared > amag, "alpha 版应红占优：red={ared} mag={amag}");
+    assert!(bmag > bred, "additive 版应品红占优：red={bred} mag={bmag}");
+}
+
 /// 同一张图两种采样：左红右蓝 8x8，三 quad 同用 uv `[0,0,2,1]`。
 /// A＝`with_address_mode(Repeat)`，B＝默认 Clamp，C＝`set_address_mode(Repeat)`。
 /// 断言 A/C 右半 wrap 回红（与左半同色）、B 右半钳成蓝；三段不同 bind group → 3 dc。

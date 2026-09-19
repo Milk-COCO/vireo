@@ -13,6 +13,18 @@ use super::{
     TextRenderSegment,
 };
 
+/// 同步 blend 常量：段用 `Constant` 系数时才调（小众路径；无条件设置，正确优先）。
+#[inline]
+fn sync_blend_constant(
+    pass: &mut wgpu::RenderPass,
+    blend: wgpu::BlendState,
+    constant: wgpu::Color,
+) {
+    if blend.color.uses_constant() || blend.alpha.uses_constant() {
+        pass.set_blend_constant(constant);
+    }
+}
+
 impl Renderer {
     /// 编码渲染命令到 `CommandBuffer`，**不** submit/present。
     ///
@@ -190,7 +202,6 @@ impl Renderer {
                         scissor_push: None,
                         scissor_pop: false,
                         custom_material: custom_mat,
-                        custom_text_pipeline: None,
                         dynamic_offsets: batch.dynamic_offsets.clone(),
                     });
                 }
@@ -207,7 +218,6 @@ impl Renderer {
                         scissor_push: None,
                         scissor_pop: false,
                         custom_material: None,
-                        custom_text_pipeline: None,
                         dynamic_offsets: Vec::new(),
                     });
                 }
@@ -225,7 +235,6 @@ impl Renderer {
                         scissor_push: None,
                         scissor_pop: false,
                         custom_material: None,
-                        custom_text_pipeline: None,
                         dynamic_offsets: Vec::new(),
                     });
                     if !is_setup {
@@ -247,7 +256,6 @@ impl Renderer {
                         scissor_push: Some(*rect),
                         scissor_pop: false,
                         custom_material: None,
-                        custom_text_pipeline: None,
                         dynamic_offsets: Vec::new(),
                     });
                 }
@@ -261,7 +269,6 @@ impl Renderer {
                         scissor_push: None,
                         scissor_pop: true,
                         custom_material: None,
-                        custom_text_pipeline: None,
                         dynamic_offsets: Vec::new(),
                     });
                 }
@@ -481,6 +488,8 @@ impl Renderer {
                         bg.unwrap_or_else(|| self.gpu.white_bind_group.as_ref().clone())
                     };
                     let batch_material = batch.custom_material.clone();
+                    let batch_blend = batch.blend_state;
+                    let batch_blend_constant = batch.blend_constant;
                     let instance_segments = if !use_instances {
                         Vec::new()
                     } else if batch.instance_texture_segments.is_empty() {
@@ -489,6 +498,8 @@ impl Renderer {
                             instance_count: batch.instances.len() as u32,
                             bind_group: resolve_bg(batch.bind_group.clone()),
                             material: batch_material.clone(),
+                            blend: batch_blend,
+                            blend_constant: batch_blend_constant,
                         }]
                     } else {
                         let mut segments: Vec<InstanceSegment> = batch
@@ -499,6 +510,8 @@ impl Renderer {
                                 instance_count: segment.instance_count,
                                 bind_group: resolve_bg(segment.bind_group.clone()),
                                 material: batch_material.clone(),
+                                blend: batch_blend,
+                                blend_constant: batch_blend_constant,
                             })
                             .collect();
                         let last_end = segments
@@ -511,6 +524,8 @@ impl Renderer {
                                 instance_count: total_end - last_end,
                                 bind_group: resolve_bg(batch.bind_group.clone()),
                                 material: batch_material.clone(),
+                                blend: batch_blend,
+                                blend_constant: batch_blend_constant,
                             });
                         }
                         segments
@@ -527,6 +542,8 @@ impl Renderer {
                             particle_count: batch.particles.len() as u32,
                             bind_group: resolve_bg(batch.bind_group.clone()),
                             material: batch_particle_material.clone(),
+                            blend: batch_blend,
+                            blend_constant: batch_blend_constant,
                         }]
                     } else {
                         let mut segments: Vec<ParticleSegment> = batch
@@ -537,6 +554,8 @@ impl Renderer {
                                 particle_count: segment.instance_count,
                                 bind_group: resolve_bg(segment.bind_group.clone()),
                                 material: batch_particle_material.clone(),
+                                blend: batch_blend,
+                                blend_constant: batch_blend_constant,
                             })
                             .collect();
                         let last_end = segments
@@ -549,6 +568,8 @@ impl Renderer {
                                 particle_count: total_end - last_end,
                                 bind_group: resolve_bg(batch.bind_group.clone()),
                                 material: batch_particle_material.clone(),
+                                blend: batch_blend,
+                                blend_constant: batch_blend_constant,
                             });
                         }
                         segments
@@ -571,6 +592,8 @@ impl Renderer {
                                     index_count: tpl.index_count,
                                     bind_group: bg,
                                     material: batch_material.clone(),
+                                    blend: batch_blend,
+                                    blend_constant: batch_blend_constant,
                                 }
                             };
                         let seg_count = batch.geo_instance_texture_segments.len() as u32;
@@ -629,6 +652,8 @@ impl Renderer {
                                     index_count: tpl.index_count,
                                     bind_group: bg,
                                     material: batch_material.clone(),
+                                    blend: batch_blend,
+                                    blend_constant: batch_blend_constant,
                                 }
                             };
                         if batch.geo_instance_texture_segments.is_empty() {
@@ -770,6 +795,8 @@ impl Renderer {
                                 ndx_start: idx_offset,
                                 ndx_count: mesh_index_count,
                                 bind_group: bg,
+                                blend: batch_blend,
+                                blend_constant: batch_blend_constant,
                             }]
                         } else {
                             let mut v: Vec<ShapeSegment> = batch
@@ -779,6 +806,8 @@ impl Renderer {
                                     ndx_start: idx_offset + s.ndx_start,
                                     ndx_count: s.ndx_count,
                                     bind_group: resolve_bg(s.bind_group.clone()),
+                                    blend: batch_blend,
+                                    blend_constant: batch_blend_constant,
                                 })
                                 .collect();
                             let last_end = v
@@ -792,6 +821,8 @@ impl Renderer {
                                     ndx_start: last_end,
                                     ndx_count: total_end - last_end,
                                     bind_group: bg,
+                                    blend: batch_blend,
+                                    blend_constant: batch_blend_constant,
                                 });
                             }
                             v
@@ -806,6 +837,7 @@ impl Renderer {
                             geo_instances: geo_segments,
                             particles: particle_segments,
                             particle_clock: batch.particle_clock,
+                            blend: batch.blend_state,
                             ordered: if batch.shape_commands.is_empty()
                                 || !batch.shape_commands_valid()
                             {
@@ -825,6 +857,8 @@ impl Renderer {
                                             bind_group,
                                             geometry,
                                             material,
+                                            blend,
+                                            blend_constant,
                                             ..
                                         } => {
                                             ordered.push(OrderedShapeSegment::Mesh {
@@ -833,6 +867,8 @@ impl Renderer {
                                                 bind_group: resolve_bg(bind_group.clone()),
                                                 geometry: *geometry,
                                                 material: material.clone(),
+                                                blend: *blend,
+                                                blend_constant: *blend_constant,
                                             });
                                         }
                                         BatchShapeCommand::Instances {
@@ -840,6 +876,8 @@ impl Renderer {
                                             instance_count,
                                             bind_group,
                                             material,
+                                            blend,
+                                            blend_constant,
                                             ..
                                         } => {
                                             if use_instances {
@@ -850,6 +888,8 @@ impl Renderer {
                                                         instance_count: *instance_count,
                                                         bind_group: resolve_bg(bind_group.clone()),
                                                         material: material.clone(),
+                                                        blend: *blend,
+                                                        blend_constant: *blend_constant,
                                                     },
                                                 ));
                                             } else {
@@ -861,6 +901,8 @@ impl Renderer {
                                                     bind_group: resolve_bg(bind_group.clone()),
                                                     geometry: false,
                                                     material: material.clone(),
+                                                    blend: *blend,
+                                                    blend_constant: *blend_constant,
                                                 });
                                             }
                                         }
@@ -869,6 +911,8 @@ impl Renderer {
                                             particle_count,
                                             bind_group,
                                             material,
+                                            blend,
+                                            blend_constant,
                                             ..
                                         } => {
                                             ordered.push(OrderedShapeSegment::Particles(
@@ -877,6 +921,8 @@ impl Renderer {
                                                     particle_count: *particle_count,
                                                     bind_group: resolve_bg(bind_group.clone()),
                                                     material: material.clone(),
+                                                    blend: *blend,
+                                                    blend_constant: *blend_constant,
                                                 },
                                             ));
                                         }
@@ -885,6 +931,8 @@ impl Renderer {
                                             geo_instance_count,
                                             bind_group,
                                             material,
+                                            blend,
+                                            blend_constant,
                                             ..
                                         } => {
                                             if use_geo {
@@ -916,6 +964,8 @@ impl Renderer {
                                                                     bind_group.clone(),
                                                                 ),
                                                                 material: material.clone(),
+                                                                blend: *blend,
+                                                                blend_constant: *blend_constant,
                                                             },
                                                         ),
                                                     );
@@ -932,6 +982,8 @@ impl Renderer {
                                         bind_group: resolve_bg(batch.bind_group.clone()),
                                         geometry: !batch.has_sdf && batch.sdf_feather.is_none(),
                                         material: batch.custom_material.clone(),
+                                        blend: batch.blend_state,
+                                        blend_constant: batch.blend_constant,
                                     });
                                 }
                                 if !batch.preserve_order {
@@ -975,6 +1027,7 @@ impl Renderer {
                             geo_instances: geo_segments,
                             particles: particle_segments,
                             particle_clock: batch.particle_clock,
+                            blend: batch.blend_state,
                             ordered: Vec::new(),
                         })
                     } else {
@@ -1022,6 +1075,9 @@ impl Renderer {
                         ndx_start: idx_offset,
                         ndx_count: 6,
                         bind_group: bg,
+                        // stencil 掩码不写颜色：blend 归一化（与管线键归一化一致）。
+                        blend: wgpu::BlendState::ALPHA_BLENDING,
+                        blend_constant: wgpu::Color::TRANSPARENT,
                     }];
                     let si = ShapeInfo {
                         base_vertex: v_offset as i32,
@@ -1031,6 +1087,7 @@ impl Renderer {
                         geo_instances: Vec::new(),
                         particles: Vec::new(),
                         particle_clock: ClockIndex::ZERO,
+                        blend: wgpu::BlendState::ALPHA_BLENDING,
                         ordered: Vec::new(),
                     };
                     event_infos[ei].shape = Some(si);
@@ -1066,6 +1123,9 @@ impl Renderer {
                             ndx_start: idx_offset,
                             ndx_count: n,
                             bind_group: bg,
+                            // stencil 掩码不写颜色：blend 归一化（与管线键归一化一致）。
+                            blend: wgpu::BlendState::ALPHA_BLENDING,
+                            blend_constant: wgpu::Color::TRANSPARENT,
                         }];
                         let info = ShapeInfo {
                             base_vertex: v_offset as i32,
@@ -1075,6 +1135,7 @@ impl Renderer {
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
                             particle_clock: ClockIndex::ZERO,
+                            blend: wgpu::BlendState::ALPHA_BLENDING,
                             ordered: Vec::new(),
                         };
                         v_offset += geom.vertices.len() as u32;
@@ -1125,6 +1186,9 @@ impl Renderer {
                             ndx_start: idx_offset,
                             ndx_count: 6,
                             bind_group: bg,
+                            // stencil 掩码不写颜色：blend 归一化（与管线键归一化一致）。
+                            blend: wgpu::BlendState::ALPHA_BLENDING,
+                            blend_constant: wgpu::Color::TRANSPARENT,
                         }];
                         let info = ShapeInfo {
                             base_vertex: v_offset as i32,
@@ -1134,6 +1198,7 @@ impl Renderer {
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
                             particle_clock: ClockIndex::ZERO,
+                            blend: wgpu::BlendState::ALPHA_BLENDING,
                             ordered: Vec::new(),
                         };
                         v_offset += 4;
@@ -1285,26 +1350,12 @@ impl Renderer {
                             vertex_start: segment.vertex_start,
                             vertex_count: segment.vertex_count,
                             bind_group,
+                            blend: segment.blend,
+                            blend_constant: segment.blend_constant,
                         }
                     })
                     .collect();
                 drop(text_ctx);
-                if let Some(material) = batch.custom_material.as_ref() {
-                    let text_tests_stencil = uses_stencil
-                        && (event_infos[ei].stencil_op == 1
-                            || event_infos[ei].stencil_op == 2
-                            || event_infos[ei].area_op.is_some());
-                    event_infos[ei].custom_text_pipeline = Some(self.gpu.ensure_material_pipeline(
-                        material,
-                        MaterialTarget::Text,
-                        self.sample_count,
-                        self.alpha_to_coverage,
-                        false,
-                        uses_stencil,
-                        if text_tests_stencil { 2 } else { 0 },
-                        crate::gpu::ShapeVertexLayout::Mesh,
-                    ));
-                }
             }
         }
         self.gpu
@@ -1418,15 +1469,14 @@ impl Renderer {
             let geo_template_vbuf = self.geo_template_vertex_buf.lock();
             let geo_template_ibuf = self.geo_template_index_buf.lock();
             let geo_instance_buf = self.geo_instance_buf.lock();
-            let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
             let engine_bg = &engine_storage_bind_group;
             let mut shapes_bound = false;
             let mut last_geometry: Option<bool> = None;
             let mut last_stencil_op: u32 = u32::MAX;
             let mut last_custom_ptr: *const Material = std::ptr::null();
+            let mut last_blend: Option<wgpu::BlendState> = None;
             let mut last_dynamic_offsets = self.scratch_last_dynamic_offsets.lock();
             last_dynamic_offsets.clear();
-            let mut last_text_mode: Option<crate::text::TextStencilMode> = None;
             let mut scissor_stack = self.scratch_scissor_stack.lock();
             scissor_stack.clear();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
@@ -1488,6 +1538,8 @@ impl Renderer {
                                     bind_group,
                                     geometry,
                                     material,
+                                    blend,
+                                    blend_constant,
                                 } => {
                                     // 逐 segment 从材质派生 pipeline 状态
                                     let seg_custom_bg: Option<wgpu::BindGroup> =
@@ -1511,6 +1563,7 @@ impl Renderer {
                                     let need_rebind = !shapes_bound
                                         || seg_ptr != last_custom_ptr
                                         || (!seg_use_custom && last_geometry != Some(*geometry))
+                                        || (!seg_use_custom && last_blend != Some(*blend))
                                         || (uses_stencil && pipe_op != last_stencil_op)
                                         || info.dynamic_offsets != *last_dynamic_offsets;
                                     if need_rebind {
@@ -1527,6 +1580,7 @@ impl Renderer {
                                                 uses_stencil,
                                                 if uses_stencil { pipe_op.min(4) } else { 0 },
                                                 crate::gpu::ShapeVertexLayout::Mesh,
+                                                *blend,
                                             );
                                             &custom_pipe
                                         } else if uses_stencil {
@@ -1536,6 +1590,7 @@ impl Renderer {
                                                 self.ssaa,
                                                 *geometry,
                                                 pipe_op.min(4),
+                                                *blend,
                                             );
                                             &tmp_pipe
                                         } else {
@@ -1544,6 +1599,7 @@ impl Renderer {
                                                 self.alpha_to_coverage,
                                                 self.ssaa,
                                                 *geometry,
+                                                *blend,
                                             );
                                             &tmp_pipe
                                         };
@@ -1564,12 +1620,14 @@ impl Renderer {
                                         shapes_bound = true;
                                         last_custom_ptr = seg_ptr;
                                         last_geometry = Some(*geometry);
+                                        last_blend = Some(*blend);
                                         last_stencil_op = pipe_op;
                                         last_dynamic_offsets.clone_from(&info.dynamic_offsets);
                                     }
                                     if uses_stencil {
                                         pass.set_stencil_reference(info.stencil_ref);
                                     }
+                                    sync_blend_constant(&mut pass, *blend, *blend_constant);
                                     pass.set_bind_group(1, bind_group, &[]);
                                     pass.draw_indexed(
                                         *ndx_start..*ndx_start + *ndx_count,
@@ -1615,6 +1673,7 @@ impl Renderer {
                                             uses_stencil,
                                             if uses_stencil { pipe_op.min(4) } else { 0 },
                                             crate::gpu::ShapeVertexLayout::SdfInstance,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&custom_pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -1638,6 +1697,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             0..6,
                                             0,
@@ -1652,6 +1716,7 @@ impl Renderer {
                                             self.ssaa,
                                             uses_stencil,
                                             pipe_op,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&instance_pipeline);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -1672,6 +1737,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             0..6,
                                             0,
@@ -1725,6 +1795,7 @@ impl Renderer {
                                             uses_stencil,
                                             if uses_stencil { pipe_op.min(4) } else { 0 },
                                             crate::gpu::ShapeVertexLayout::Particle,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&custom_pipe);
                                         pass.set_bind_group(0, &clock_bg, &[]);
@@ -1748,6 +1819,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             0..6,
                                             0,
@@ -1762,6 +1838,7 @@ impl Renderer {
                                             self.ssaa,
                                             uses_stencil,
                                             pipe_op,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&particle_pipeline);
                                         pass.set_bind_group(0, &clock_bg, &[]);
@@ -1782,6 +1859,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             0..6,
                                             0,
@@ -1830,6 +1912,7 @@ impl Renderer {
                                             uses_stencil,
                                             if uses_stencil { pipe_op.min(4) } else { 0 },
                                             crate::gpu::ShapeVertexLayout::GeoInstance,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&custom_pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -1853,6 +1936,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             segment.template_index_start
                                                 ..segment.template_index_start
@@ -1870,6 +1958,7 @@ impl Renderer {
                                             self.ssaa,
                                             uses_stencil,
                                             pipe_op,
+                                            segment.blend,
                                         );
                                         pass.set_pipeline(&geo_pipeline);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -1890,6 +1979,11 @@ impl Renderer {
                                         if uses_stencil {
                                             pass.set_stencil_reference(info.stencil_ref);
                                         }
+                                        sync_blend_constant(
+                                            &mut pass,
+                                            segment.blend,
+                                            segment.blend_constant,
+                                        );
                                         pass.draw_indexed(
                                             segment.template_index_start
                                                 ..segment.template_index_start
@@ -1939,6 +2033,7 @@ impl Renderer {
                         let need_rebind = !shapes_bound
                             || custom_ptr != last_custom_ptr
                             || (!use_custom && last_geometry != Some(shape.geometry))
+                            || (!use_custom && last_blend != Some(shape.blend))
                             || (uses_stencil && pipe_op != last_stencil_op)
                             || info.dynamic_offsets != *last_dynamic_offsets;
                         if need_rebind {
@@ -1956,6 +2051,7 @@ impl Renderer {
                                         true,
                                         pipe_op.min(4),
                                         crate::gpu::ShapeVertexLayout::Mesh,
+                                        shape.blend,
                                     );
                                 } else {
                                     custom_pipe = self.gpu.ensure_material_pipeline(
@@ -1967,6 +2063,7 @@ impl Renderer {
                                         false,
                                         0,
                                         crate::gpu::ShapeVertexLayout::Mesh,
+                                        shape.blend,
                                     );
                                 }
                                 &custom_pipe
@@ -1977,6 +2074,7 @@ impl Renderer {
                                     self.ssaa,
                                     shape.geometry,
                                     pipe_op.min(4),
+                                    shape.blend,
                                 );
                                 &tmp_pipe
                             } else {
@@ -1985,6 +2083,7 @@ impl Renderer {
                                     self.alpha_to_coverage,
                                     self.ssaa,
                                     shape.geometry,
+                                    shape.blend,
                                 );
                                 &tmp_pipe
                             };
@@ -2003,6 +2102,7 @@ impl Renderer {
                             shapes_bound = true;
                             last_custom_ptr = custom_ptr;
                             last_geometry = Some(shape.geometry);
+                            last_blend = Some(shape.blend);
                             last_stencil_op = pipe_op;
                             last_dynamic_offsets.clone_from(&info.dynamic_offsets);
                         }
@@ -2011,6 +2111,7 @@ impl Renderer {
                         }
                         for seg in &shape.segments {
                             pass.set_bind_group(1, &seg.bind_group, &[]);
+                            sync_blend_constant(&mut pass, seg.blend, seg.blend_constant);
                             pass.draw_indexed(
                                 seg.ndx_start..seg.ndx_start + seg.ndx_count,
                                 shape.base_vertex,
@@ -2030,6 +2131,7 @@ impl Renderer {
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::SdfInstance,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&custom_pipe);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -2054,6 +2156,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.instances {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         0..6,
                                         0,
@@ -2069,6 +2176,7 @@ impl Renderer {
                                     self.ssaa,
                                     uses_stencil,
                                     pipe_op,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&instance_pipeline);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -2090,6 +2198,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.instances {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         0..6,
                                         0,
@@ -2116,6 +2229,7 @@ impl Renderer {
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::Particle,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&custom_pipe);
                                 pass.set_bind_group(0, &clock_bg, &[]);
@@ -2140,6 +2254,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.particles {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         0..6,
                                         0,
@@ -2155,6 +2274,7 @@ impl Renderer {
                                     self.ssaa,
                                     uses_stencil,
                                     pipe_op,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&particle_pipeline);
                                 pass.set_bind_group(0, &clock_bg, &[]);
@@ -2176,6 +2296,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.particles {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         0..6,
                                         0,
@@ -2200,6 +2325,7 @@ impl Renderer {
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::GeoInstance,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&custom_pipe);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -2224,6 +2350,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.geo_instances {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         segment.template_index_start
                                             ..segment.template_index_start + segment.index_count,
@@ -2241,6 +2372,7 @@ impl Renderer {
                                     self.ssaa,
                                     uses_stencil,
                                     pipe_op,
+                                    shape.blend,
                                 );
                                 pass.set_pipeline(&geo_pipeline);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -2262,6 +2394,11 @@ impl Renderer {
                                 }
                                 for segment in &shape.geo_instances {
                                     pass.set_bind_group(1, &segment.bind_group, &[]);
+                                    sync_blend_constant(
+                                        &mut pass,
+                                        segment.blend,
+                                        segment.blend_constant,
+                                    );
                                     pass.draw_indexed(
                                         segment.template_index_start
                                             ..segment.template_index_start + segment.index_count,
@@ -2291,10 +2428,7 @@ impl Renderer {
                     } else {
                         crate::text::TextStencilMode::Pass
                     };
-                    if last_text_mode != Some(text_mode) {
-                        text_ctx.ensure_text_stencil_mode(&self.gpu.device, text_mode);
-                        last_text_mode = Some(text_mode);
-                    }
+                    // 管线由段循环按（mode, blend, material）逐段 ensure（见下），此处不预建。
                     // Push 后 mask 已 Inc：父文字测 new_level = ref+1
                     let text_ref = if info.stencil_op == 1 {
                         info.stencil_ref + 1
@@ -2303,6 +2437,8 @@ impl Renderer {
                     };
                     // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
                     // 否则部分后端会把 ref 重置为 0。
+                    // 文字管线按（mode, blend, material）去重：段连续同状态只建一次
+                    //（custom material 的 glyphon 管线无缓存，重建很贵）。
                     // 文字路径：材质取 batch 最终值（text 无 per-shape command）。
                     let material_bg = match info.custom_material.as_ref() {
                         Some(m) if m.bgl().is_some() => m.ensure_bind_group(
@@ -2313,7 +2449,42 @@ impl Renderer {
                         _ => None,
                     };
                     let material_bg = material_bg.as_ref();
+                    let text_tests_stencil = uses_stencil
+                        && (info.stencil_op == 1 || info.stencil_op == 2 || info.area_op.is_some());
+                    let mut last_text_key: Option<(
+                        crate::text::TextStencilMode,
+                        wgpu::BlendState,
+                        Option<*const Material>,
+                    )> = None;
+                    let mut text_mat_pipe: Option<Arc<wgpu::RenderPipeline>> = None;
                     for segment in &info.text {
+                        let mat_key = info.custom_material.as_ref().map(Arc::as_ptr);
+                        let key = (text_mode, segment.blend, mat_key);
+                        if last_text_key != Some(key) {
+                            // custom 管线先行：raw 的 Text 臂内部 lock text_ctx，
+                            // 此处必须 guard-free（临时的 guard 逐句释放）。
+                            text_mat_pipe = info.custom_material.as_ref().map(|m| {
+                                self.gpu.ensure_material_pipeline(
+                                    m,
+                                    MaterialTarget::Text,
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    false,
+                                    uses_stencil,
+                                    if text_tests_stencil { 2 } else { 0 },
+                                    crate::gpu::ShapeVertexLayout::Mesh,
+                                    segment.blend,
+                                )
+                            });
+                            self.gpu.text_ctx.lock().unwrap().ensure_text_pipeline(
+                                &self.gpu.device,
+                                text_mode,
+                                segment.blend,
+                            );
+                            last_text_key = Some(key);
+                        }
+                        sync_blend_constant(&mut pass, segment.blend, segment.blend_constant);
+                        let text_ctx = self.gpu.text_ctx.lock().unwrap();
                         if let Err(e) = text_ctx.text_renderer.render_range_with_material(
                             &text_ctx.text_atlas,
                             &text_ctx.viewport,
@@ -2323,7 +2494,7 @@ impl Renderer {
                             segment.vertex_count,
                             if uses_stencil { Some(text_ref) } else { None },
                             segment.bind_group.as_ref(),
-                            info.custom_text_pipeline.as_deref(),
+                            text_mat_pipe.as_deref(),
                             material_bg,
                             &info.dynamic_offsets,
                         ) {

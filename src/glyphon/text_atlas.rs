@@ -7,7 +7,7 @@ use lru::LruCache;
 use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use wgpu::{
-    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
+    BindGroup, BlendState, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
     RenderPipeline, Sampler, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
@@ -424,9 +424,10 @@ impl TextAtlas {
         device: &Device,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
+        blend: BlendState,
     ) -> RenderPipeline {
         self.cache
-            .get_or_create_pipeline(device, self.format, multisample, depth_stencil)
+            .get_or_create_pipeline(device, self.format, multisample, depth_stencil, blend)
     }
 
     pub(crate) fn create_material_pipeline(
@@ -436,6 +437,7 @@ impl TextAtlas {
         fragment_source: &str,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
+        blend: BlendState,
     ) -> RenderPipeline {
         self.cache.create_material_pipeline(
             device,
@@ -444,6 +446,7 @@ impl TextAtlas {
             self.format,
             multisample,
             depth_stencil,
+            blend,
         )
     }
 

@@ -536,6 +536,61 @@ fn texture_generation_splits_instance_commands() {
     ));
 }
 
+#[test]
+fn set_blend_state_splits_commands_and_freezes() {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    const ADD: BlendState = BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        },
+    };
+    let mut batch = DrawBatch::new();
+    assert_eq!(batch.blend_state(), BlendState::ALPHA_BLENDING);
+    draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
+    batch.set_blend_state(ADD);
+    assert_eq!(batch.blend_state(), ADD);
+    // 文字画笔同步传播（同 set_uv 机理）。
+    assert_eq!(batch.texts.blend_state, ADD);
+    draw_circle(&mut batch, Pos::new(10.0, 0.0), 4.0, Some(BLUE));
+    assert_eq!(batch.shape_commands.len(), 2);
+    assert!(matches!(
+        &batch.shape_commands[0],
+        BatchShapeCommand::Instances { blend, .. } if *blend == BlendState::ALPHA_BLENDING
+    ));
+    assert!(matches!(
+        &batch.shape_commands[1],
+        BatchShapeCommand::Instances { blend, .. } if *blend == ADD
+    ));
+    // 同 blend 连续合并。
+    draw_circle(&mut batch, Pos::new(20.0, 0.0), 4.0, Some(BLUE));
+    assert_eq!(batch.shape_commands.len(), 2);
+    // constant 冻结：改 constant 即断段。
+    batch.set_blend_constant(wgpu::Color {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    });
+    draw_circle(&mut batch, Pos::new(30.0, 0.0), 4.0, Some(BLUE));
+    assert_eq!(batch.shape_commands.len(), 3);
+    assert!(matches!(
+        &batch.shape_commands[2],
+        BatchShapeCommand::Instances { blend_constant, .. }
+            if blend_constant.r == 1.0 && blend_constant.b == 0.0
+    ));
+    batch.clear_blend_state();
+    assert_eq!(batch.blend_state(), BlendState::ALPHA_BLENDING);
+    assert_eq!(batch.texts.blend_state, BlendState::ALPHA_BLENDING);
+    assert!(batch.shape_commands_valid());
+}
+
 fn test_pool_particle() -> Particle {
     Particle {
         pos: [0.0, 0.0],

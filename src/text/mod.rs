@@ -228,6 +228,8 @@ pub(crate) struct PreparedTextSegment {
     pub vertex_count: u32,
     pub texture_view: Option<wgpu::TextureView>,
     pub bind_group: Option<wgpu::BindGroup>,
+    pub blend: wgpu::BlendState,
+    pub blend_constant: wgpu::Color,
 }
 
 impl TextTextureState {
@@ -345,6 +347,8 @@ mod tests {
             override_: TextOverride::default(),
             transform_index: 0,
             texture_state: TextTextureState::default(),
+            blend: wgpu::BlendState::ALPHA_BLENDING,
+            blend_constant: wgpu::Color::TRANSPARENT,
         }
     }
 
@@ -389,6 +393,8 @@ mod tests {
             override_: TextOverride::default(),
             transform_index: 0,
             texture_state: TextTextureState::default(),
+            blend: wgpu::BlendState::ALPHA_BLENDING,
+            blend_constant: wgpu::Color::TRANSPARENT,
         };
         assert_eq!(entry.approx_font_size(), 48.0);
     }

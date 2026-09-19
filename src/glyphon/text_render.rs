@@ -6,9 +6,9 @@ use super::{
 use cosmic_text::{Color, SubpixelBin};
 use std::slice;
 use wgpu::{
-    BindGroup, Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT, DepthStencilState,
-    Device, Extent3d, MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+    BindGroup, BlendState, Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT,
+    DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue, RenderPass,
+    RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
 };
 
 /// A text renderer that uses cached glyphs to render text into an existing render pass.
@@ -36,7 +36,12 @@ impl TextRenderer {
             mapped_at_creation: false,
         });
 
-        let pipeline = atlas.get_or_create_pipeline(device, multisample, depth_stencil);
+        let pipeline = atlas.get_or_create_pipeline(
+            device,
+            multisample,
+            depth_stencil,
+            BlendState::ALPHA_BLENDING,
+        );
 
         Self {
             vertex_buffer,

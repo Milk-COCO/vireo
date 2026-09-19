@@ -164,6 +164,8 @@ struct ShapeSegment {
     ndx_start: u32,
     ndx_count: u32,
     bind_group: wgpu::BindGroup,
+    blend: wgpu::BlendState,
+    blend_constant: wgpu::Color,
 }
 
 struct InstanceSegment {
@@ -171,6 +173,8 @@ struct InstanceSegment {
     instance_count: u32,
     bind_group: wgpu::BindGroup,
     material: Option<Arc<Material>>,
+    blend: wgpu::BlendState,
+    blend_constant: wgpu::Color,
 }
 
 /// 粒子段：`combined_particles` 的一段，共享 unit quad（与 `InstanceSegment` 同机理，
@@ -180,6 +184,8 @@ struct ParticleSegment {
     particle_count: u32,
     bind_group: wgpu::BindGroup,
     material: Option<Arc<Material>>,
+    blend: wgpu::BlendState,
+    blend_constant: wgpu::Color,
 }
 
 #[derive(Clone)]
@@ -191,6 +197,8 @@ struct GeoInstanceSegment {
     index_count: u32,
     bind_group: wgpu::BindGroup,
     material: Option<Arc<Material>>,
+    blend: wgpu::BlendState,
+    blend_constant: wgpu::Color,
 }
 
 /// 几何模板：batch 内 `geo_template_vertices` / `geo_template_indices` 的一段。
@@ -210,6 +218,8 @@ enum OrderedShapeSegment {
         bind_group: wgpu::BindGroup,
         geometry: bool,
         material: Option<Arc<Material>>,
+        blend: wgpu::BlendState,
+        blend_constant: wgpu::Color,
     },
     Instances(InstanceSegment),
     GeoInstances(GeoInstanceSegment),
@@ -219,6 +229,7 @@ enum OrderedShapeSegment {
 impl OrderedShapeSegment {
     /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, 3 = particles, geometry/bg)`。
     /// 同类且同 bind group 的段会被排到一起以便合并。
+    /// blend 不进键（`try_merge` 要求相等；混 blend 重排本就层叠自负，见 `preserve_order`）。
     #[inline]
     fn sort_key(&self) -> (u8, u8, u64) {
         match self {
@@ -245,6 +256,8 @@ impl OrderedShapeSegment {
                     bind_group,
                     geometry,
                     material,
+                    blend,
+                    blend_constant,
                 },
                 OrderedShapeSegment::Mesh {
                     ndx_start: n2,
@@ -252,12 +265,16 @@ impl OrderedShapeSegment {
                     bind_group: b2,
                     geometry: g2,
                     material: m2,
+                    blend: b2_blend,
+                    blend_constant: b2_constant,
                 },
             ) => {
                 let merged = merge_decision(
                     geometry == g2
                         && bind_group == b2
-                        && material.as_ref().map(Arc::as_ptr) == m2.as_ref().map(Arc::as_ptr),
+                        && material.as_ref().map(Arc::as_ptr) == m2.as_ref().map(Arc::as_ptr)
+                        && blend == b2_blend
+                        && blend_constant == b2_constant,
                     *ndx_start,
                     *ndx_count,
                     *n2,
@@ -269,13 +286,17 @@ impl OrderedShapeSegment {
                     bind_group: bind_group.clone(),
                     geometry: *geometry,
                     material: material.clone(),
+                    blend: *blend,
+                    blend_constant: *blend_constant,
                 })
             }
             (OrderedShapeSegment::Instances(s), OrderedShapeSegment::Instances(s2)) => {
                 let merged = merge_decision(
                     s.bind_group == s2.bind_group
                         && s.material.as_ref().map(Arc::as_ptr)
-                            == s2.material.as_ref().map(Arc::as_ptr),
+                            == s2.material.as_ref().map(Arc::as_ptr)
+                        && s.blend == s2.blend
+                        && s.blend_constant == s2.blend_constant,
                     s.instance_start,
                     s.instance_count,
                     s2.instance_start,
@@ -286,13 +307,17 @@ impl OrderedShapeSegment {
                     instance_count: merged.1,
                     bind_group: s.bind_group.clone(),
                     material: s.material.clone(),
+                    blend: s.blend,
+                    blend_constant: s.blend_constant,
                 }))
             }
             (OrderedShapeSegment::Particles(s), OrderedShapeSegment::Particles(s2)) => {
                 let merged = merge_decision(
                     s.bind_group == s2.bind_group
                         && s.material.as_ref().map(Arc::as_ptr)
-                            == s2.material.as_ref().map(Arc::as_ptr),
+                            == s2.material.as_ref().map(Arc::as_ptr)
+                        && s.blend == s2.blend
+                        && s.blend_constant == s2.blend_constant,
                     s.particle_start,
                     s.particle_count,
                     s2.particle_start,
@@ -303,6 +328,8 @@ impl OrderedShapeSegment {
                     particle_count: merged.1,
                     bind_group: s.bind_group.clone(),
                     material: s.material.clone(),
+                    blend: s.blend,
+                    blend_constant: s.blend_constant,
                 }))
             }
             (OrderedShapeSegment::GeoInstances(s), OrderedShapeSegment::GeoInstances(s2)) => {
@@ -312,7 +339,9 @@ impl OrderedShapeSegment {
                         && s.template_index_start == s2.template_index_start
                         && s.index_count == s2.index_count
                         && s.material.as_ref().map(Arc::as_ptr)
-                            == s2.material.as_ref().map(Arc::as_ptr),
+                            == s2.material.as_ref().map(Arc::as_ptr)
+                        && s.blend == s2.blend
+                        && s.blend_constant == s2.blend_constant,
                     s.geo_instance_start,
                     s.geo_instance_count,
                     s2.geo_instance_start,
@@ -326,6 +355,8 @@ impl OrderedShapeSegment {
                     index_count: s.index_count,
                     bind_group: s.bind_group.clone(),
                     material: s.material.clone(),
+                    blend: s.blend,
+                    blend_constant: s.blend_constant,
                 }))
             }
             _ => None,
@@ -333,7 +364,7 @@ impl OrderedShapeSegment {
     }
 }
 
-/// 合并决策（纯函数）：`same_state` = pipeline 状态一致（bind group / geometry）。
+/// 合并决策（纯函数）：`same_state` = pipeline 状态一致（bind group / geometry / blend）。
 /// 仅当状态一致且范围连续（`start + count == next_start`）时返回合并后的 `(start, count)`。
 fn merge_decision(
     same_state: bool,
@@ -364,6 +395,8 @@ struct ShapeInfo {
     instances: Vec<InstanceSegment>,
     geo_instances: Vec<GeoInstanceSegment>,
     particles: Vec<ParticleSegment>,
+    /// legacy 路径的统一 blend（段构建时即 batch 级一致；ordered 路径用段自带值，此处忽略）。
+    blend: wgpu::BlendState,
     /// 本批粒子的时钟（`batch.particle_clock`，batch-local）。
     /// 粒子段 group 0 绑此钟的 camera 组；非粒子绘制不用。
     particle_clock: ClockIndex,
@@ -374,6 +407,8 @@ struct TextRenderSegment {
     vertex_start: u32,
     vertex_count: u32,
     bind_group: Option<wgpu::BindGroup>,
+    blend: wgpu::BlendState,
+    blend_constant: wgpu::Color,
 }
 
 struct EventInfo {
@@ -385,7 +420,6 @@ struct EventInfo {
     scissor_push: Option<Rect>,
     scissor_pop: bool,
     custom_material: Option<Arc<Material>>,
-    custom_text_pipeline: Option<Arc<wgpu::RenderPipeline>>,
     dynamic_offsets: Vec<u32>,
 }
 

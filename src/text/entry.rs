@@ -24,6 +24,10 @@ pub enum TextEntry {
         transform_index: u32,
         /// 入队时冻结的 batch 贴图状态。
         texture_state: TextTextureState,
+        /// 入队时冻结的 batch 混合状态（`DrawBatch::blend_state`）。
+        blend: wgpu::BlendState,
+        /// 入队时冻结的 batch blend 常量。
+        blend_constant: wgpu::Color,
     },
     Parts {
         pos: Pos,
@@ -33,6 +37,10 @@ pub enum TextEntry {
         transform_index: u32,
         /// 入队时冻结的 batch 贴图状态。
         texture_state: TextTextureState,
+        /// 入队时冻结的 batch 混合状态（`DrawBatch::blend_state`）。
+        blend: wgpu::BlendState,
+        /// 入队时冻结的 batch blend 常量。
+        blend_constant: wgpu::Color,
     },
     Stable {
         pos: Pos,
@@ -46,6 +54,10 @@ pub enum TextEntry {
         line_count: u32,
         /// 入队时冻结的 batch 贴图状态。
         texture_state: TextTextureState,
+        /// 入队时冻结的 batch 混合状态（`DrawBatch::blend_state`）。
+        blend: wgpu::BlendState,
+        /// 入队时冻结的 batch blend 常量。
+        blend_constant: wgpu::Color,
     },
 }
 
@@ -87,6 +99,24 @@ impl TextEntry {
             TextEntry::Normal { texture_state, .. }
             | TextEntry::Parts { texture_state, .. }
             | TextEntry::Stable { texture_state, .. } => texture_state,
+        }
+    }
+
+    /// 入队时冻结的混合状态。
+    pub fn blend(&self) -> wgpu::BlendState {
+        match self {
+            TextEntry::Normal { blend, .. }
+            | TextEntry::Parts { blend, .. }
+            | TextEntry::Stable { blend, .. } => *blend,
+        }
+    }
+
+    /// 入队时冻结的 blend 常量。
+    pub fn blend_constant(&self) -> wgpu::Color {
+        match self {
+            TextEntry::Normal { blend_constant, .. }
+            | TextEntry::Parts { blend_constant, .. }
+            | TextEntry::Stable { blend_constant, .. } => *blend_constant,
         }
     }
 
@@ -165,11 +195,14 @@ impl TextEntry {
 /// 经 [`DrawBatch`] 时优先用 `batch.text` 等以捕获 transform。
 ///
 /// 内部维护文字画笔 [`TextTextureState`]：由 batch 的 `set_texture` / `set_uv`
-/// 更新，在每次 push 时冻结到条目。
+/// 更新，在每次 push 时冻结到条目；混合画笔（`blend_state` / `blend_constant`）
+/// 由 batch 的 `set_blend_state` / `set_blend_constant` 更新，同样逐条目冻结。
 #[derive(Clone)]
 pub struct TextEntryList {
     pub entries: Vec<TextEntry>,
     pub(crate) texture_state: TextTextureState,
+    pub(crate) blend_state: wgpu::BlendState,
+    pub(crate) blend_constant: wgpu::Color,
 }
 
 impl Default for TextEntryList {
@@ -183,12 +216,16 @@ impl TextEntryList {
         Self {
             entries: Vec::with_capacity(8),
             texture_state: TextTextureState::default(),
+            blend_state: wgpu::BlendState::ALPHA_BLENDING,
+            blend_constant: wgpu::Color::TRANSPARENT,
         }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
         self.texture_state = TextTextureState::default();
+        self.blend_state = wgpu::BlendState::ALPHA_BLENDING;
+        self.blend_constant = wgpu::Color::TRANSPARENT;
     }
 
     /// 从另一个 TextEntryList 复制条目
@@ -196,6 +233,8 @@ impl TextEntryList {
         Self {
             entries: other.entries.clone(),
             texture_state: other.texture_state.clone(),
+            blend_state: other.blend_state,
+            blend_constant: other.blend_constant,
         }
     }
 
@@ -222,6 +261,18 @@ impl TextEntryList {
         self.texture_state.uv = uv;
     }
 
+    /// 更新当前文字画笔的混合状态（由 [`DrawBatch::set_blend_state`] 调用）。
+    /// 之后 `push*` 的条目会冻结新值。
+    pub(crate) fn set_blend_state(&mut self, blend: wgpu::BlendState) {
+        self.blend_state = blend;
+    }
+
+    /// 更新当前文字画笔的 blend 常量（由 [`DrawBatch::set_blend_constant`] 调用）。
+    /// 之后 `push*` 的条目会冻结新值。
+    pub(crate) fn set_blend_constant(&mut self, constant: wgpu::Color) {
+        self.blend_constant = constant;
+    }
+
     /// 添加文本条目。
     ///
     /// **默认 `transform_index = 0`**：约定为 batch / 全局 transform 表的**单位矩阵槽**
@@ -235,6 +286,8 @@ impl TextEntryList {
             override_: ov,
             transform_index: 0,
             texture_state: self.texture_state.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -254,6 +307,8 @@ impl TextEntryList {
             override_: ov,
             transform_index,
             texture_state: self.texture_state.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -280,6 +335,8 @@ impl TextEntryList {
             line_width: stable.line_width,
             line_count: stable.line_count,
             texture_state: self.texture_state.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -306,6 +363,8 @@ impl TextEntryList {
             override_: ov,
             transform_index,
             texture_state: self.texture_state.clone(),
+            blend: self.blend_state,
+            blend_constant: self.blend_constant,
         });
     }
 
@@ -328,6 +387,8 @@ impl TextEntryList {
 
     /// prepare + render 所有文本条目到 render pass（单 batch 便利方法）。
     /// 不使用 transform（所有文字用恒等矩阵）。
+    ///
+    /// 混合取首条目（整批同 blend 才精确；混 blend 请走 `Renderer::draw` 逐段路径）。
     ///
     /// 不变量：本方法内的 prepare 与 render 之间，以及调用方 `Renderer::draw` 的整个执行期间，
     /// 不得改动 `text_ctx.viewport` 或 `text_ctx.text_atlas`（也不要响应窗口 resize）。
@@ -355,7 +416,13 @@ impl TextEntryList {
             None,
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
-        let text_ctx = gpu.text_ctx.lock().unwrap();
+        let first_blend = self
+            .entries
+            .first()
+            .map(|e| e.blend())
+            .unwrap_or(wgpu::BlendState::ALPHA_BLENDING);
+        let mut text_ctx = gpu.text_ctx.lock().unwrap();
+        text_ctx.ensure_text_pipeline(&gpu.device, crate::text::TextStencilMode::None, first_blend);
         if let Err(e) = text_ctx.text_renderer.render(
             &text_ctx.text_atlas,
             &text_ctx.viewport,

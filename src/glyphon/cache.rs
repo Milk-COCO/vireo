@@ -27,6 +27,7 @@ type InnerCache = Mutex<
         TextureFormat,
         MultisampleState,
         Option<DepthStencilState>,
+        BlendState,
         RenderPipeline,
     )>,
 >;
@@ -244,6 +245,7 @@ impl Cache {
         format: TextureFormat,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
+        blend: BlendState,
     ) -> RenderPipeline {
         let Inner {
             cache,
@@ -257,8 +259,10 @@ impl Cache {
 
         cache
             .iter()
-            .find(|(fmt, ms, ds, _)| fmt == &format && ms == &multisample && ds == &depth_stencil)
-            .map(|(_, _, _, p)| p.clone())
+            .find(|(fmt, ms, ds, b, _)| {
+                fmt == &format && ms == &multisample && ds == &depth_stencil && b == &blend
+            })
+            .map(|(_, _, _, _, p)| p.clone())
             .unwrap_or_else(|| {
                 let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
                     label: Some("glyphon pipeline"),
@@ -274,7 +278,7 @@ impl Cache {
                         entry_point: Some("fs_main"),
                         targets: &[Some(ColorTargetState {
                             format,
-                            blend: Some(BlendState::ALPHA_BLENDING),
+                            blend: Some(blend),
                             write_mask: ColorWrites::default(),
                         })],
                         compilation_options: PipelineCompilationOptions::default(),
@@ -289,7 +293,7 @@ impl Cache {
                     multiview_mask: None,
                 });
 
-                cache.push((format, multisample, depth_stencil, pipeline.clone()));
+                cache.push((format, multisample, depth_stencil, blend, pipeline.clone()));
 
                 pipeline
             })
@@ -304,6 +308,7 @@ impl Cache {
         format: TextureFormat,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
+        blend: BlendState,
     ) -> RenderPipeline {
         let fragment = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("glyphon material fragment"),
@@ -342,7 +347,7 @@ impl Cache {
                 entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format,
-                    blend: Some(BlendState::ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: ColorWrites::default(),
                 })],
                 compilation_options: PipelineCompilationOptions::default(),

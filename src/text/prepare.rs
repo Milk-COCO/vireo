@@ -22,6 +22,8 @@ pub(super) struct AreaMeta {
     pub(super) transform_index: u32,
     pub(super) base_uv_rect: [f32; 4],
     pub(super) texture_state: TextTextureState,
+    pub(super) blend: wgpu::BlendState,
+    pub(super) blend_constant: wgpu::Color,
 }
 
 pub(super) enum MetaBuf {
@@ -264,6 +266,8 @@ impl TextEntryList {
                                 transform_index: phys_idx,
                                 base_uv_rect: batch_base_uv,
                                 texture_state: texture_state.clone(),
+                                blend: entry.blend(),
+                                blend_constant: entry.blend_constant(),
                             });
                         }
                     }
@@ -291,6 +295,8 @@ impl TextEntryList {
                                     transform_index: phys_idx,
                                     base_uv_rect: batch_base_uv,
                                     texture_state: texture_state.clone(),
+                                    blend: entry.blend(),
+                                    blend_constant: entry.blend_constant(),
                                 });
                                 cursor_x += w;
                             }
@@ -319,6 +325,8 @@ impl TextEntryList {
                                                 transform_index: phys_idx,
                                                 base_uv_rect: batch_base_uv,
                                                 texture_state: texture_state.clone(),
+                                                blend: entry.blend(),
+                                                blend_constant: entry.blend_constant(),
                                             },
                                             w,
                                         )
@@ -351,6 +359,8 @@ impl TextEntryList {
                                                 transform_index: phys_idx,
                                                 base_uv_rect: batch_base_uv,
                                                 texture_state: texture_state.clone(),
+                                                blend: entry.blend(),
+                                                blend_constant: entry.blend_constant(),
                                             },
                                             lw,
                                         )
@@ -370,6 +380,8 @@ impl TextEntryList {
                                         transform_index: phys_idx,
                                         base_uv_rect: batch_base_uv,
                                         texture_state: texture_state.clone(),
+                                        blend: entry.blend(),
+                                        blend_constant: entry.blend_constant(),
                                     });
                                 }
                                 cursor_x += h.line_width();
@@ -388,6 +400,8 @@ impl TextEntryList {
                                             transform_index: phys_idx,
                                             base_uv_rect: batch_base_uv,
                                             texture_state: texture_state.clone(),
+                                            blend: entry.blend(),
+                                            blend_constant: entry.blend_constant(),
                                         });
                                     }
                                     cursor_x += cluster.advance;
@@ -408,6 +422,8 @@ impl TextEntryList {
                         transform_index: phys_idx,
                         base_uv_rect: batch_base_uv,
                         texture_state: texture_state.clone(),
+                        blend: entry.blend(),
+                        blend_constant: entry.blend_constant(),
                     });
                 }
             }
@@ -431,8 +447,14 @@ impl TextEntryList {
             let mut first = 0;
             while first < metas.len() {
                 let generation = metas[first].texture_state.generation;
+                let first_blend = metas[first].blend;
+                let first_constant = metas[first].blend_constant;
                 let mut end = first + 1;
-                while end < metas.len() && metas[end].texture_state.generation == generation {
+                while end < metas.len()
+                    && metas[end].texture_state.generation == generation
+                    && metas[end].blend == first_blend
+                    && metas[end].blend_constant == first_constant
+                {
                     end += 1;
                 }
 
@@ -558,6 +580,8 @@ impl TextEntryList {
                         vertex_count,
                         texture_view: metas[first].texture_state.view.clone(),
                         bind_group: metas[first].texture_state.bind_group.clone(),
+                        blend: metas[first].blend,
+                        blend_constant: metas[first].blend_constant,
                     });
                 }
                 first = end;
