@@ -4,7 +4,7 @@ use std::sync::{Arc, mpsc};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{Icon, WindowAttributes, WindowId},
 };
 
@@ -21,6 +21,9 @@ pub struct Runner {
     event_tx: mpsc::Sender<WinitEvent>,
     cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
     exit_rx: mpsc::Receiver<()>,
+    exit_ack_tx: mpsc::Sender<()>,
+    /// 自唤醒代理（`about_to_wait` 调 `exit()` 后再发一次 wake；见该处注释）。
+    wake_proxy: Option<EventLoopProxy<()>>,
     frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
     aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
     nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
@@ -273,11 +276,15 @@ impl ApplicationHandler for Runner {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut exit_requested = false;
+        let mut exit_hits = 0u32;
         while self.exit_rx.try_recv().is_ok() {
             exit_requested = true;
+            exit_hits += 1;
         }
         if self.resumed_fired {
+            let mut n = 0u32;
             while let Ok(req) = self.create_rx.try_recv() {
+                n += 1;
                 self.create_window(
                     event_loop,
                     req.handle as usize,
@@ -285,6 +292,9 @@ impl ApplicationHandler for Runner {
                     req.init_duration,
                     req.on_close,
                 );
+            }
+            if n > 0 {
+                crate::app::exit_log(&format!("about_to_wait: drained {} create", n));
             }
         }
         while let Ok((handle, mut reg)) = self.cb_rx.try_recv() {
@@ -330,10 +340,27 @@ impl ApplicationHandler for Runner {
             crate::platform::windows::nc_apply(hwnd, upd);
         }
         while let Ok(handle) = self.close_rx.try_recv() {
+            crate::app::exit_log(&format!("about_to_wait: close handle={}", handle));
             self.request_close(handle);
         }
         if exit_requested {
+            crate::app::exit_log(&format!(
+                "about_to_wait: exit_rx hits={} → ack + event_loop.exit() + self-wake",
+                exit_hits
+            ));
+            let _ = self.exit_ack_tx.send(());
             event_loop.exit();
+            // winit 0.30 Windows 的 `exit()` 只是置原子标志、不唤醒等待者，而主循环的
+            // 退出检查点全在 `wait_for_messages` 返回之后（`ControlFlow::Wait` 下无限 park）。
+            // 无焦点零事件时 park 永不返回 → `run_app` 永不返回。exit 后自己再发一次 wake，
+            // 把 MsgWait 叫醒去检查标志；有后续事件时这条 wake 是多余但无害的。
+            // （若循环已退，send 失败，无害。）
+            if let Some(proxy) = self.wake_proxy.as_ref() {
+                match proxy.send_event(()) {
+                    Ok(()) => crate::app::exit_log("about_to_wait: self-wake ok"),
+                    Err(_) => crate::app::exit_log("about_to_wait: self-wake FAILED"),
+                }
+            }
         } else {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
         }
@@ -541,6 +568,7 @@ pub(crate) fn run_blocking(
     app.windows.lock().clear();
 
     let gpu_for_runner = app.gpu.clone();
+    let wake_proxy = app.event_loop_proxy.get().cloned();
     let device_lost = app.device_lost.clone();
     let device_lost_super = device_lost.clone();
 
@@ -556,6 +584,7 @@ pub(crate) fn run_blocking(
                 channels.nc_tx,
                 channels.close_tx,
                 channels.exit_tx,
+                channels.exit_ack_rx,
                 0usize,
                 device_lost_super,
             )
@@ -567,6 +596,8 @@ pub(crate) fn run_blocking(
             event_tx: channels.event_tx,
             cb_rx: channels.cb_rx,
             exit_rx: channels.exit_rx,
+            exit_ack_tx: channels.exit_ack_tx,
+            wake_proxy,
             frame_style_rx: channels.frame_style_rx,
             aspect_ratio_rx: channels.aspect_ratio_rx,
             nc_rx: channels.nc_rx,

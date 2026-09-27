@@ -33,6 +33,7 @@ where
                     .store(true, Ordering::Release);
             }
             app_inner_for_flag.main_done.store(true, Ordering::Release);
+            crate::app::exit_log("vireo-main: done (+Wake)");
             if let Some(tx) = app_inner_for_flag.event_tx.lock().clone() {
                 let _ = tx.send(WinitEvent::Wake);
             }

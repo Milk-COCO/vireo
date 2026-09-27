@@ -30,6 +30,8 @@ pub(crate) struct RunChannels {
     pub cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
     pub exit_rx: mpsc::Receiver<()>,
     pub exit_tx: mpsc::Sender<()>,
+    pub exit_ack_rx: mpsc::Receiver<()>,
+    pub exit_ack_tx: mpsc::Sender<()>,
     pub frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
     pub aspect_ratio_rx: mpsc::Receiver<(isize, Option<f64>)>,
     pub nc_rx: mpsc::Receiver<(isize, crate::platform::windows::NcUpdate)>,
@@ -40,6 +42,19 @@ pub(crate) struct RunChannels {
     pub aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
     pub nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     pub close_tx: mpsc::Sender<usize>,
+}
+
+/// 退出链路诊断（`VIREO_EXIT_TRACE=1` 开；`=0`/未设关）：supervisor/winit 退出握手、
+/// wake 结果、drain 命中、关窗等待全链路打点。默认零开销（OnceLock 缓存开关）。
+pub(crate) fn exit_trace() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("VIREO_EXIT_TRACE").is_some_and(|v| v != "0"))
+}
+
+pub(crate) fn exit_log(msg: &str) {
+    if exit_trace() {
+        eprintln!("[vireo-exit] {}", msg);
+    }
 }
 
 pub struct AppInner {
@@ -185,6 +200,7 @@ impl App {
         let supervisor_event_tx = event_tx.clone();
         let (cb_tx, cb_rx) = mpsc::channel();
         let (exit_tx, exit_rx) = mpsc::channel();
+        let (exit_ack_tx, exit_ack_rx) = mpsc::channel();
         let (frame_style_tx, frame_style_rx) = mpsc::channel();
         let (aspect_ratio_tx, aspect_ratio_rx) = mpsc::channel();
         let (nc_tx, nc_rx) = mpsc::channel();
@@ -199,6 +215,8 @@ impl App {
             cb_rx,
             exit_rx,
             exit_tx,
+            exit_ack_rx,
+            exit_ack_tx,
             frame_style_rx,
             aspect_ratio_rx,
             nc_rx,
@@ -308,7 +326,12 @@ impl App {
 
     fn wake_event_loop(&self) {
         if let Some(proxy) = self.event_loop_proxy.get() {
-            let _ = proxy.send_event(());
+            match proxy.send_event(()) {
+                Ok(()) => exit_log("wake_event_loop: send_event ok"),
+                Err(_) => exit_log("wake_event_loop: send_event FAILED (loop closed?)"),
+            }
+        } else {
+            exit_log("wake_event_loop: no proxy yet");
         }
     }
 

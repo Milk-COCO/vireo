@@ -518,8 +518,14 @@ pub(crate) fn run_thread_loop(
     // 渲染线程退出（正常或 panic）→ 不再有任何 draw，所有窗口的 `draw_idle` 永久为真；
     // 唤醒正在等待关闭的 supervisor 路径，否则其 Condvar 等待会因本线程已死而永不唤醒
     // （最坏情况下渲染线程崩溃、当前帧未置 idle，关窗路径也据此安全放行）。
+    let mut forced = 0u32;
     for win in app.windows.lock().iter().filter_map(|o| o.clone()) {
         win.draw_idle.store(true, Ordering::Release);
         win.draw_idle_cv.1.notify_all();
+        forced += 1;
     }
+    crate::app::exit_log(&format!(
+        "render thread exit: force draw_idle on {} windows",
+        forced
+    ));
 }

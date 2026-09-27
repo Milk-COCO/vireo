@@ -212,11 +212,27 @@ pub(crate) fn apply_winit_event_one(
             if let Some(win) = app.windows.lock().get(handle).and_then(|o| o.clone()) {
                 *win.closing.lock() = true;
                 {
+                    // 关窗握手：等渲染线程不在帧内再 take。加 2s 超时——帧在途正常是 ms 级，
+                    // 超时说明渲染线程已死或卡住，无限等只会把退出拖成永久挂起，打 warn 放行。
                     let cv = &win.draw_idle_cv;
                     let mut guard = cv.0.lock().unwrap();
                     while !win.draw_idle.load(Ordering::Acquire) {
-                        guard = cv.1.wait(guard).unwrap();
+                        let (g, res) =
+                            cv.1.wait_timeout(guard, std::time::Duration::from_secs(2))
+                                .unwrap();
+                        guard = g;
+                        if res.timed_out() {
+                            super::exit_log(&format!(
+                                "supervisor: draw_idle 2s 未置位 (handle={}) → 放行关窗",
+                                handle
+                            ));
+                            break;
+                        }
                     }
+                    super::exit_log(&format!(
+                        "supervisor: close handle={} (draw_idle ok)",
+                        handle
+                    ));
                 }
             }
             if let Some(w) = app.windows.lock().get_mut(handle) {
@@ -322,10 +338,13 @@ pub(crate) fn supervisor_loop(
     nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     close_tx: mpsc::Sender<usize>,
     exit_tx: mpsc::Sender<()>,
+    exit_ack_rx: mpsc::Receiver<()>,
     expected_windows: usize,
     device_lost: Arc<AtomicBool>,
 ) {
     let mut created_windows = 0usize;
+    let mut pending_since: Option<std::time::Instant> = None;
+    let mut pending_warned_at: Option<std::time::Instant> = None;
     loop {
         let mut processed = false;
         loop {
@@ -371,6 +390,29 @@ pub(crate) fn supervisor_loop(
         let all_windows_closed = created_windows > 0
             && app.window_count() == 0
             && app.pending_window_creates.load(Ordering::Acquire) == 0;
+        // pending backstop：建窗在途超 10s 未落定（WindowCreated 丢了或 winit 侧没泵），
+        // 退出谓词永假。只打 error（不强行归零，迟到的 WindowCreated 还会正常递减）。
+        {
+            let pending = app.pending_window_creates.load(Ordering::Acquire);
+            let now = std::time::Instant::now();
+            if pending == 0 {
+                pending_since = None;
+                pending_warned_at = None;
+            } else {
+                let since = *pending_since.get_or_insert(now);
+                let overdue = now.saturating_duration_since(since);
+                let warn_due = pending_warned_at
+                    .map(|t| now.saturating_duration_since(t) >= std::time::Duration::from_secs(10))
+                    .unwrap_or(true);
+                if overdue >= std::time::Duration::from_secs(10) && warn_due {
+                    super::exit_log(&format!(
+                        "supervisor: ERROR pending_window_creates={} 已卡 {:?}（WindowCreated 未回）",
+                        pending, overdue
+                    ));
+                    pending_warned_at = Some(now);
+                }
+            }
+        }
         match decide_supervisor_action(
             app.inner.main_done.load(Ordering::Acquire),
             all_loops_done,
@@ -381,11 +423,47 @@ pub(crate) fn supervisor_loop(
             app.pending_window_creates.load(Ordering::Acquire),
         ) {
             SupervisorAction::Exit => {
+                super::exit_log(&format!(
+                    "supervisor: Exit (open={} pending={} created={}) → exit_tx + wake，等 ack",
+                    app.window_count(),
+                    app.pending_window_creates.load(Ordering::Acquire),
+                    created_windows
+                ));
                 let _ = exit_tx.send(());
                 app.wake_event_loop();
+                // 确认循环：winit 侧 about_to_wait 回 ack。无焦点 parked 时若某次 wake
+                // 丢了，这里 500ms 一次 re-wake＋打日志，最多等 5s（不再永久卡死）。
+                let start = std::time::Instant::now();
+                loop {
+                    match exit_ack_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                        Ok(()) => {
+                            super::exit_log("supervisor: exit ack ok，退出");
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            super::exit_log("supervisor: exit ack 超时 → re-wake");
+                            let _ = exit_tx.send(());
+                            app.wake_event_loop();
+                            if start.elapsed() >= std::time::Duration::from_secs(5) {
+                                super::exit_log(
+                                    "supervisor: exit ack 5s 未到，仍返回（事件循环侧见日志）",
+                                );
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            super::exit_log("supervisor: exit ack 通道断开，返回");
+                            break;
+                        }
+                    }
+                }
                 return;
             }
             SupervisorAction::CloseAll => {
+                super::exit_log(&format!(
+                    "supervisor: CloseAll (open={})，逐窗走关窗路径",
+                    app.window_count()
+                ));
                 // vireo-main 已死、无存活 loop：快照 open 句柄后逐个走关窗路径
                 //（close hooks / draw_idle / alive 计数与 X 关闭逐位一致），
                 // 下一轮由 all_closed 退出。`continue` 而非阻塞等事件——

@@ -475,6 +475,10 @@ impl Default for DrawBatch {
 }
 
 impl DrawBatch {
+    /// 新建录制批。内部约 20 个小 `Vec` 各做一次堆分配，且容量种子较小
+    /// （如 `particles` 从 32 起），首帧大负载会经历几何级 regrow＋memcpy。
+    /// 帧循环里复用更划算：循环外 `new()` 一次，帧内用 [`DrawBatch::clear`]
+    /// （只归零长度、保留容量），能省掉每帧的分配与 regrow 开销。
     pub fn new() -> Self {
         let mut transform_table = Vec::with_capacity(48);
         let mut transform_map = FxHashMap::default();
@@ -528,6 +532,8 @@ impl DrawBatch {
         }
     }
 
+    /// 清空本批供下一帧复用：各缓冲只归零长度、保留容量（零堆分配），
+    /// 画笔状态重置回与 [`DrawBatch::new`] 一致的默认值，transform 表重种单位阵。
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
