@@ -36,6 +36,18 @@
   改线性三点 `1.0 → mid → 0.0`，与时长正交，`clamp 0..1`；`fade_in` 恒 smoothstep）。
   Particle fade-out midpoint shaping (linear 3-point vs smoothstep).
 
+### Fixed / 修复
+
+- 无焦点时自动退出挂起：窗口已关闭但进程不退。根因是 winit 0.30 Windows 的
+  `exit()` 只置标志不唤醒等待者，而 `run_app` 的退出检查点全在无限 park 返回之后，
+  无焦点零事件时 park 永不返回。修为 `exit()` 后自发一次 wake（多余时无害）；
+  附带退出握手收敛：Exit ack 确认＋re-wake、`draw_idle` 2s 超时放行、建窗 pending
+  backstop 告警、全链路 `VIREO_EXIT_TRACE` 诊断。
+  Fixed hang on auto-exit without window focus: window closed but process stayed alive.
+  Root cause is winit 0.30 Windows `exit()` setting the flag without waking the waiter
+  while `run_app` only checks it after an infinite park; fixed with a self-wake after
+  `exit()`, plus exit handshake hardening (ack, timeouts, backstop, trace).
+
 ## [0.1.2]
 
 ### Fixed / 修复
