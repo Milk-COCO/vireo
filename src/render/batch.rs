@@ -532,7 +532,9 @@ impl DrawBatch {
         }
     }
 
-    /// 清空本批供下一帧复用：各缓冲只归零长度、保留容量（零堆分配），
+    /// 清空本批供下一帧复用：各缓冲只归零长度、保留容量（本批自身**无 children**时零堆分配；
+    /// 已 `push_child` 的子树不会被复用——`self.children.clear()` 会 drop 全部子 batch
+    /// （含它们的缓冲容量），跨帧复用子树需调用方持有并重填（见 [`DrawBatch::new`]），
     /// 画笔状态重置回与 [`DrawBatch::new`] 一致的默认值，transform 表重种单位阵。
     pub fn clear(&mut self) {
         self.vertices.clear();
@@ -619,11 +621,7 @@ impl DrawBatch {
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         for instance in &self.geo_instances {
-            if let Some(template) = self
-                .geo_templates
-                .iter()
-                .find(|t| t.vertex_start == instance.template_vertex_start)
-            {
+            if let Some(template) = self.geo_template_by_start(instance.template_vertex_start) {
                 let base = vertices.len() as u32;
                 let tvs = template.vertex_start as usize;
                 let color = crate::color::Color::new(
@@ -807,11 +805,7 @@ impl DrawBatch {
             }
         }
         for instance in &self.geo_instances {
-            if let Some(template) = self
-                .geo_templates
-                .iter()
-                .find(|t| t.vertex_start == instance.template_vertex_start)
-            {
+            if let Some(template) = self.geo_template_by_start(instance.template_vertex_start) {
                 any = true;
                 let tvs = template.vertex_start as usize;
                 for gv in &self.geo_template_vertices[tvs..tvs + template.vertex_count as usize] {
@@ -1123,11 +1117,7 @@ impl DrawBatch {
     pub fn shape_vertex_count(&self) -> usize {
         let mut count = self.vertices.len() + self.instances.len() * 4 + self.particles.len() * 4;
         for instance in &self.geo_instances {
-            if let Some(template) = self
-                .geo_templates
-                .iter()
-                .find(|t| t.vertex_start == instance.template_vertex_start)
-            {
+            if let Some(template) = self.geo_template_by_start(instance.template_vertex_start) {
                 count += template.vertex_count as usize;
             }
         }
@@ -1968,6 +1958,18 @@ impl DrawBatch {
         self.geo_templates.push(template);
         self.geo_template_map.insert(key, slot);
         template
+    }
+
+    /// 按 `template_vertex_start` 取模板（`O(log T)`）。
+    /// `geo_templates` 的 `vertex_start` 由 [`Self::ensure_geo_template`] 严格单调递增追加
+    /// （`pub(crate)` 无外部改动点，不变量由单点维护），故可用 `partition_point` 二分。
+    pub(crate) fn geo_template_by_start(&self, vertex_start: u32) -> Option<&GeoTemplate> {
+        let i = self
+            .geo_templates
+            .partition_point(|t| t.vertex_start < vertex_start);
+        self.geo_templates
+            .get(i)
+            .filter(|t| t.vertex_start == vertex_start)
     }
 
     /// 追加几何实例：引用模板 + 每实例 color/transform。
@@ -2997,10 +2999,9 @@ impl DrawBatch {
             self.uv = uv;
         }
 
-        let base = shape
-            .position()
-            .map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
-        if shape.position().is_some() || opts.transform.is_some() {
+        let shape_pos = shape.position();
+        let base = shape_pos.map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        if shape_pos.is_some() || opts.transform.is_some() {
             let current = self.transform.take();
             self.transform = Some(match (current, opts.transform) {
                 (Some(existing), Some(transform)) => existing.then(&base).then(&transform),
@@ -3152,10 +3153,9 @@ impl DrawBatch {
             self.uv = uv;
         }
 
-        let base = shape
-            .position()
-            .map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
-        if shape.position().is_some() || opts.transform.is_some() {
+        let shape_pos = shape.position();
+        let base = shape_pos.map_or(Transform::IDENTITY, |p| Transform::translation(p.x, p.y));
+        if shape_pos.is_some() || opts.transform.is_some() {
             let current = self.transform.take();
             self.transform = Some(match (current, opts.transform) {
                 (Some(existing), Some(transform)) => existing.then(&base).then(&transform),

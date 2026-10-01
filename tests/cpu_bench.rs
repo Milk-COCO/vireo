@@ -284,6 +284,63 @@ fn bench_typical_frames() {
 }
 
 #[test]
+fn bench_dense_textured_quads() {
+    println!("\n=== Dense Textured Quads (7k geo rects, unique poses) ===");
+    println!("  (vault note 场景：同贴图/同 uv/唯一位姿；判 V1 上限 = fresh − reused)");
+
+    const N: u32 = 7000;
+    const FRAMES: u32 = 20;
+
+    fn push_dense(b: &mut DrawBatch) {
+        b.clear_sdf_feather();
+        for i in 0..N {
+            b.set_position((i % 100) as f32 * 11.0, (i / 100) as f32 * 11.0);
+            b.set_deg((i % 360) as f32);
+            draw_rectangle(b, Pos::new(0.0, 0.0), 84.0, 8.0, Some(RED));
+            b.clear_transform();
+        }
+    }
+
+    // fresh：每帧新建（今日 vault children 行为）
+    let mut fresh_total = 0.0;
+    let mut fresh_geo = 0;
+    for _ in 0..FRAMES {
+        let (b, ms) = time_ms(|| {
+            let mut b = DrawBatch::new();
+            push_dense(&mut b);
+            b
+        });
+        fresh_total += ms;
+        fresh_geo = std::hint::black_box(b.shape_stats().geo_instances);
+    }
+    println!(
+        "  geo 7000 fresh batch:      {:.3} ms/frame  (geo_instances={})",
+        fresh_total / FRAMES as f64,
+        fresh_geo
+    );
+
+    // reused：循环外 new，帧内 clear（到稳态容量后零 regrow）
+    let mut b = DrawBatch::new();
+    push_dense(&mut b);
+    b.clear();
+    let mut reused_total = 0.0;
+    let reused_geo: usize;
+    for _ in 0..FRAMES {
+        let (_, ms) = time_ms(|| {
+            b.clear();
+            push_dense(&mut b);
+        });
+        reused_total += ms;
+    }
+    reused_geo = std::hint::black_box(b.shape_stats().geo_instances);
+    println!(
+        "  geo 7000 reused batch:     {:.3} ms/frame  (geo_instances={})",
+        reused_total / FRAMES as f64,
+        reused_geo
+    );
+}
+
+#[test]
 fn bench_outline_and_chain() {
     println!("\n=== Outline / LineChain / High-edge Polygon ===");
 

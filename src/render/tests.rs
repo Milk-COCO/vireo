@@ -243,6 +243,27 @@ fn instance_geometry_mode_falls_back_to_vertices() {
 }
 
 #[test]
+fn geo_template_by_start_finds_each_template() {
+    let mut batch = DrawBatch::new();
+    batch.sdf_feather = None;
+    batch.instance_circle(Pos::ZERO, 5.0, Some(WHITE));
+    batch.instance_rectangle(Pos::new(10.0, 0.0), 8.0, 6.0, Some(WHITE));
+    batch.instance_circle(Pos::new(20.0, 0.0), 7.0, Some(WHITE));
+    assert!(batch.geo_templates.len() >= 2);
+    for instance in &batch.geo_instances {
+        let t = batch
+            .geo_template_by_start(instance.template_vertex_start)
+            .expect("instance 必须命中自己模板");
+        assert_eq!(t.vertex_start, instance.template_vertex_start);
+    }
+    assert!(batch.geo_template_by_start(u32::MAX).is_none());
+    let gap = batch.geo_templates[0].vertex_start + 1;
+    if batch.geo_templates.len() > 1 && gap < batch.geo_templates[1].vertex_start {
+        assert!(batch.geo_template_by_start(gap).is_none());
+    }
+}
+
+#[test]
 fn to_area_expands_instances_to_legacy_quads() {
     let mut batch = DrawBatch::new();
     batch.instance_rectangle(Pos::new(3.0, 4.0), 10.0, 20.0, Some(GREEN));
