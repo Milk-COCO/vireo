@@ -3139,7 +3139,9 @@ impl DrawBatch {
         let saved_uv = self.uv;
         let saved_transform = self.transform;
         let saved_cache = self.cached_transform_index;
-        let saved_bg = self.bind_group.clone();
+        // 仅覆盖时才存恢复（`bind_group` 是 Arc：无条件 clone＋写回＝每 rect
+        // 两次原子涨落，值却不变；密集墙每帧上万次，省掉零行为变化）。
+        let saved_bg = opts.bind_group.as_ref().map(|_| self.bind_group.clone());
         if let Some(color) = opts.color {
             self.color = color;
         }
@@ -3273,8 +3275,8 @@ impl DrawBatch {
             self.add_texture_segment(self.bind_group.clone());
             self.add_geo_instance_texture_segment(self.bind_group.clone());
             self.advance_shape_texture_generation();
+            self.bind_group = saved_bg.unwrap_or(None);
         }
-        self.bind_group = saved_bg;
         self.transform = saved_transform;
         self.cached_transform_index = saved_cache;
         self.uv = saved_uv;
