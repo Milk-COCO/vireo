@@ -19,6 +19,9 @@ use crate::render::Pos;
 
 mod cache;
 pub use cache::ShapeCacheStats;
+
+#[cfg(target_os = "android")]
+mod android_fonts;
 pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
 mod context;
 mod entry;

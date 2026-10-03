@@ -45,3 +45,11 @@ windows-sys = { version = "0.61", features = [
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3" }
 objc2-core-foundation = { version = "0.3" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", features = ["android-native-activity"] }
+android_logger = "0.13"
+# 与 android-activity 0.6（winit 的 android-native-activity 后端）同版本，
+# 避免同一进程内出现两份 jni。vireo 只经 `vm_as_ptr` / `activity_as_ptr`
+# 拿裸指针自行建 JavaVM，不跨 crate 传 jni 类型。
+jni = "0.22.4"

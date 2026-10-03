@@ -116,6 +116,13 @@ pub mod text;
 pub mod texture;
 pub mod window;
 
+/// 安卓入口类型（仅 `target_os = "android"` 存在；winit 转发的 `android-activity` API）。
+/// `#[vireo::main]` 在安卓下展开为 `android_main` 并经此类型接入。
+#[cfg(target_os = "android")]
+pub mod android {
+    pub use winit::platform::android::activity::AndroidApp;
+}
+
 /// 初始化日志（透传 `env_logger`，`RUST_LOG` 生效）。应用 `main` 首行调用一次。
 pub fn init_logger() {
     let _ = env_logger::try_init();

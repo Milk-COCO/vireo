@@ -658,6 +658,8 @@ impl TextContext {
     ) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_system_fonts();
+        #[cfg(target_os = "android")]
+        crate::text::android_fonts::install(&mut font_system);
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device, transform_bgl);

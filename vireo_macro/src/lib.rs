@@ -108,15 +108,32 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
     // 注入——用户代码通过它访问 `App`。无论原签名是否 async，都包成 async 块。
     let body = quote! { |#param_ident| async move #block };
 
-    let entry = if let Some(desc) = args.descriptor {
-        quote! { vireo::App::with_descriptor(#desc, #body) }
-    } else {
-        quote! { vireo::App::new(#body) }
-    };
+    // 安卓没有 `fn main`：同一份用户源码在安卓 target 下展开为 NativeActivity
+    // 入口 `android_main`（`android-native-activity` 胶水层按符号名查找），
+    // 经 `App::new_on_android` 把 `AndroidApp` 交给 winit 事件循环。`descriptor`
+    // 属性暂不支持安卓（显式报错，不静默吞掉）。
+    if let Some(desc) = args.descriptor {
+        let entry = quote! { vireo::App::with_descriptor(#desc, #body) };
+        return Ok(quote! {
+            #[cfg(not(target_os = "android"))]
+            #vis fn main() #ret {
+                #entry;
+            }
+            #[cfg(target_os = "android")]
+            compile_error!("`descriptor` 属性暂不支持安卓 target");
+        });
+    }
 
+    let entry = quote! { vireo::App::new(#body) };
     Ok(quote! {
+        #[cfg(not(target_os = "android"))]
         #vis fn main() #ret {
             #entry;
+        }
+        #[cfg(target_os = "android")]
+        #[unsafe(no_mangle)]
+        pub fn android_main(app: vireo::android::AndroidApp) {
+            vireo::App::new_on_android(app, #body);
         }
     })
 }

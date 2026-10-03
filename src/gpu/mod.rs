@@ -312,16 +312,45 @@ impl GpuContext {
     /// format 位（`ensure_pipeline`/instance/geo/material），格式不同的旧条目
     /// 永不命中；同步时还会清空共享管线表兜底。
     pub fn new(instance: &wgpu::Instance) -> Self {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .unwrap_or_else(|e| {
-            log::error!("vireo gpu: request_adapter failed: {e:?}");
-            panic!("vireo gpu: no adapter found");
-        });
+        // 枚举打日志（安卓 GLES/Vulkan 二选一的依据；桌面只有一两个，无害）。
+        for a in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+            let i = a.get_info();
+            let l = a.limits();
+            log::warn!(
+                "vireo gpu: adapter {:?} {} storage_max={} compute_dim={}",
+                i.backend,
+                i.name,
+                l.max_storage_buffer_binding_size,
+                l.max_compute_workgroups_per_dimension
+            );
+        }
+        // vireo transform 表走 storage buffer：先正常要，拿到没 storage 的
+        // （WSA 的 GLES 模拟层报 0）再强制 fallback（SwiftShader Vulkan 全功能，
+        // 2D 负载 CPU 渲染足够），还拿不到才 panic。
+        let mut adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            }))
+            .unwrap_or_else(|e| {
+                log::error!("vireo gpu: request_adapter failed: {e:?}");
+                panic!("vireo gpu: no adapter found");
+            });
+        if adapter.limits().max_storage_buffer_binding_size == 0 {
+            log::warn!("vireo gpu: adapter has no storage buffers, retry with fallback");
+            adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: true,
+                apply_limit_buckets: false,
+            }))
+            .unwrap_or_else(|e| {
+                log::error!("vireo gpu: fallback request_adapter failed: {e:?}");
+                panic!("vireo gpu: no adapter found");
+            });
+        }
 
         // 无此 feature 时，pipeline 校验只认 WebGPU 保底 sample count（通常 [1, 4]），
         // 即便 adapter 列表含 8 也会在 create_render_pipeline 时 Validation panic。
@@ -334,10 +363,16 @@ impl GpuContext {
             required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         }
 
+        // limits 直接取 adapter 值：请求值与允许值逐位相等则任何方向的校验都过。
+        // 桌面 adapter 值只大不小（与旧 `Limits::default()` 实测行为一致）；
+        // 弱后端（GLES 无 compute/storage 报 0）不再被拒——vireo 不用 compute，
+        // storage 则由上面的 fallback 保障（真 0 会在建 buffer 时报出）。
+        let required_limits = adapter.limits();
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("vireo device"),
             required_features,
-            required_limits: wgpu::Limits::default(),
+            required_limits,
             memory_hints: wgpu::MemoryHints::Performance,
             experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::default(),

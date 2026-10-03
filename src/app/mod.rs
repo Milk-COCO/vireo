@@ -86,6 +86,9 @@ pub struct AppInner {
     pub(crate) event_tx: Mutex<Option<mpsc::Sender<WinitEvent>>>,
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     pub(crate) event_loop_proxy: OnceLock<winit::event_loop::EventLoopProxy<()>>,
+    /// 安卓 `android_main` 传进的 app 句柄（仅安卓存在；`run_blocking` 建事件循环时 take）。
+    #[cfg(target_os = "android")]
+    pub(crate) android_app: Mutex<Option<crate::android::AndroidApp>>,
 }
 
 pub struct App {
@@ -176,6 +179,31 @@ impl App {
         App::from_instance_descriptor(desc).run_entry(main)
     }
 
+    /// 安卓进程入口（仅安卓）：`#[vireo::main]` 展开的 `android_main` 调这个。
+    /// 存下 `AndroidApp`（`run_blocking` 建 winit 事件循环时 take 过去），
+    /// 日志走 `android_logger`（logcat 可见；桌面才用 `init_logger`），其余与 `new` 一致。
+    #[cfg(target_os = "android")]
+    pub fn new_on_android<F, Fut>(android_app: crate::android::AndroidApp, main: F)
+    where
+        F: FnOnce(App) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let _ = android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("vireo"),
+        );
+        // 安卓上 stderr 进不了 logcat：panic 信息改走 log，否则闪退无日志可查。
+        std::panic::set_hook(Box::new(|info| {
+            log::error!("panic: {info}");
+        }));
+        let app = App::from_instance_descriptor(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
+        *app.inner.android_app.lock() = Some(android_app);
+        app.run_entry(main)
+    }
+
     fn run_entry<F, Fut>(self, main: F)
     where
         F: FnOnce(App) -> Fut + Send + 'static,
@@ -190,6 +218,9 @@ impl App {
         // 退出码只反映 main 自身的结局：main panic → 1，其余 0。
         // 此时 teardown 已全部完成（event loop 已退、supervisor 已 join），
         // `process::exit` 跳过析构是安全的。loop panic 被 main 妥善处理后不影响。
+        // 安卓例外：`android_main` 内禁 `process::exit`（activity 生命周期由系统接管，
+        // 直接返回即可；见 android-activity 文档）。
+        #[cfg(not(target_os = "android"))]
         if app.inner.main_panicked.load(Ordering::Acquire) {
             std::process::exit(1);
         }
@@ -275,6 +306,8 @@ impl App {
                 event_tx: Mutex::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
+                #[cfg(target_os = "android")]
+                android_app: Mutex::new(None),
             }),
         }
     }
