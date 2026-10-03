@@ -559,7 +559,25 @@ pub(crate) fn run_blocking(
     app: App,
     channels: RunChannels,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(not(target_os = "android"))]
     let event_loop = EventLoop::new().unwrap();
+    #[cfg(target_os = "android")]
+    let event_loop = {
+        // 安卓的 `EventLoop` 必须绑定 `android_main` 传进的 app 句柄（非全局状态）。
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        // clone 而非 take：`platform::android::WindowExtAndroid` 的 JNI 要在运行期
+        // 拿同一个 app 句柄（建窗时存进 `VireoWindow`），所以原值要留着。
+        let android_app = app
+            .inner
+            .android_app
+            .lock()
+            .clone()
+            .expect("安卓下请走 App::new_on_android（#[vireo::main] 已处理）");
+        EventLoop::builder()
+            .with_android_app(android_app)
+            .build()
+            .unwrap()
+    };
     let _ = app.event_loop_proxy.set(event_loop.create_proxy());
 
     let default_icon = app.default_icon.lock().take();

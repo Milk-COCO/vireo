@@ -35,6 +35,25 @@
 - 粒子 `fade_mid` 包络中点（`Option<f32>`，默认 None = smoothstep；设值后 fade_out 段
   改线性三点 `1.0 → mid → 0.0`，与时长正交，`clamp 0..1`；`fade_in` 恒 smoothstep）。
   Particle fade-out midpoint shaping (linear 3-point vs smoothstep).
+- Android 平台支持：`App::new_on_android` ＋ `#[vireo::main]` 生成 `android_main`
+  （NativeActivity 入口）；Android 上自动加载 `/system/fonts` 修复
+  `no default font found` panic；`requested_maximum_frame_latency` 可配。
+  Android support: NativeActivity entry point + Android system font loading.
+- `vireo::platform::android::WindowExtAndroid`（`#[cfg(target_os = "android")]`，
+  不进 prelude）：系统 UI 显隐 / 滑动唤回行为、安全区三值模型、挖孔模式、
+  运行期朝向、常亮、屏幕亮度。
+  - 安全区三值：`safe_area`（物理最大遮挡，忽略可见性）/ `padding`（当前可见遮挡，
+    键盘会吸收底部）/ `ime_insets`（键盘）＋`cutouts()`（摄像头物理矩形）。
+    坐标系左上 y-down，单位 vireo 逻辑像素。设计参考 Flutter `MediaQuery` 三值模型
+    （Unity 单值 `safeArea` 与 Godot 4.4→4.5 都在这个歧义上出过 bug）。
+  - `SystemBars` 是 bitmask（可只隐藏状态栏或导航栏），`SystemBarBehavior` 只提供
+    Android 31+ 真正支持的两档（不提供 API 30 已废弃的僵尸枚举）。
+  - 平台强制行为已在 doc 注明：targetSdk 35+ 强制 edge-to-edge、API 36 无法退出；
+    桌面窗口化模式 caption bar 永远可见。
+  - setter 一律返回 `Result`（不静默 no-op），getter 打日志返回零值（每帧热路径）。
+    Rust 生态此前无任何安全区 / 沉浸式 API（winit 0.30 的
+    `WindowExtAndroid` 只有 2 个方法）。
+    Android system UI / safe-area / cutout control (first of its kind in Rust).
 
 ### Fixed / 修复
 

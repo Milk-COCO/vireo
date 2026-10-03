@@ -74,3 +74,6 @@ pub mod macos;
 #[cfg(not(target_os = "macos"))]
 /// macOS 存根（非 macOS 目标编译时的空实现）。
 pub mod macos {}
+#[cfg(target_os = "android")]
+/// Android 专用扩展（系统 UI 显隐、安全区、挖孔模式、窗口属性）。
+pub mod android;

@@ -1,0 +1,1420 @@
+//! Android 专用窗口扩展：系统 UI 显隐、安全区、挖孔模式、窗口属性。
+//!
+//! 需要显式导入后调用：
+//! ```no_run
+//! use vireo::platform::android::{SystemBarBehavior, SystemBars, WindowExtAndroid};
+//!
+//! win.set_system_bars(SystemBars::NONE)?;
+//! win.set_system_bar_behavior(SystemBarBehavior::ShowTransientBarsBySwipe)?;
+//! let safe = win.safe_area();
+//! # Ok::<(), vireo::error::VireoError>(())
+//! ```
+//!
+//! 非 Android 平台本模块不存在（`#[cfg(target_os = "android")]` 门控）。
+//!
+//! # 为什么放在 `platform` 而不是核心 API 面
+//!
+//! winit 0.30 的 [`winit::platform::android::WindowExtAndroid`] 只有 `content_rect()` 和
+//! `config()` 两个方法，`FEATURES.md` 里 Android 的 Fullscreen / Decorations / Resizing
+//! 全标 N/A，而 Platform 章节列了 iOS 的三条系统 UI 能力却完全没有 Android 章节——
+//! winit 明确表达「Android 没有这类能力」。vireo 补上，正是 `platform` 模块存在的意义。
+//!
+//! # 设计依据（跨引擎调研）
+//!
+//! 完整调研见 `.opencode/android_platform_design.md`。三条关键取舍：
+//!
+//! - **安全区给三个值而不是一个**（Flutter 模型）。Unity 的单值 `Screen.safeArea` 语义
+//!   会随构建期开关漂移，Godot 4.4→4.5 也因此回归（godot#109768）。三个值分别是
+//!   [`safe_area`] / [`padding`] / [`ime_insets`]。
+//! - **系统栏是 bitmask + 独立 behavior 轴**（不是单值枚举）。Android 原生
+//!   `WindowInsets.Type` 就是 bitflag，且「只隐藏状态栏不隐藏导航栏」是真实需求。
+//!   behavior 只提供 Android 31+ 真正支持的两档，不提供僵尸枚举
+//!   `BEHAVIOR_SHOW_BARS_BY_TOUCH`（API 30+ 废弃、S+ 无效）。
+//! - **不支持时返回 `Result`，不静默 no-op**。见 crate 内 AGENTS「表达规则」。
+//!
+//! # 平台强制行为（不要试图绕过）
+//!
+//! - **targetSdk 35+ 强制 edge-to-edge**：内容延伸到系统栏下方，应用无法退出
+//!   （API 36 起彻底不可退出）。此时 [`WindowExtAndroid::set_system_bars`] 的
+//!   `hide(systemBars)` 可能被平台忽略，用
+//!   [`WindowExtAndroid::system_bars_visible`] 查实际效果。
+//! - **桌面窗口化模式下 caption bar 永远可见**，即使开了沉浸式（Android 大屏行为）。
+//! - Android 官方明确「**不要在个人设备上永久隐藏系统栏**」，沉浸式应给用户滑动唤回。
+
+use crate::error::VireoError;
+use crate::math::Rect;
+use crate::window::VireoWindow;
+use jni::{jni_sig, jni_str};
+
+/// Android API level 常量（稳定值，见 `android.view.WindowInsets.Type` 等）。
+mod api {
+    // `WindowInsets.Type` 是 bitflag。这里用 u32 存，与 `SystemBars` 的位掩码一致，
+    // 传给 JNI（`jint`）时在调用点 `as i32`。
+    /// `WindowInsets.Type.statusBars()`
+    pub const STATUS_BARS: u32 = 0x0000_0001;
+    /// `WindowInsets.Type.navigationBars()`
+    pub const NAVIGATION_BARS: u32 = 0x0000_0002;
+    /// `WindowInsets.Type.captionBar()`
+    pub const CAPTION_BAR: u32 = 0x0000_0004;
+    /// `WindowInsets.Type.ime()`
+    pub const IME: u32 = 0x0000_0100;
+    /// `WindowInsets.Type.displayCutout()`
+    pub const DISPLAY_CUTOUT: u32 = 0x0000_0400;
+
+    /// `WindowInsetsController.BEHAVIOR_DEFAULT`
+    pub const BEHAVIOR_DEFAULT: i32 = 0;
+    /// `WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`（API 30+）
+    pub const BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE: i32 = 2;
+
+    /// `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON`
+    pub const FLAG_KEEP_SCREEN_ON: i32 = 0x0000_0080;
+
+    /// `WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT`（API 28+）
+    pub const CUTOUT_MODE_DEFAULT: i32 = 0;
+    /// `LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES`
+    pub const CUTOUT_MODE_SHORT_EDGES: i32 = 1;
+    /// `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS`
+    pub const CUTOUT_MODE_ALWAYS: i32 = 2;
+
+    /// `ActivityInfo.SCREEN_ORIENTATION_*`
+    pub const REQ_UNSPECIFIED: i32 = 0;
+    pub const REQ_LANDSCAPE: i32 = 1;
+    pub const REQ_PORTRAIT: i32 = 2;
+    pub const REQ_USER: i32 = 3;
+    pub const REQ_SENSOR: i32 = 4;
+    pub const REQ_NOSENSOR: i32 = 5;
+    pub const REQ_SENSOR_LANDSCAPE: i32 = 6;
+    pub const REQ_SENSOR_PORTRAIT: i32 = 7;
+
+    /// `Configuration.orientation`
+    pub const CONFIGURATION_PORTRAIT: i32 = 1;
+    pub const CONFIGURATION_LANDSCAPE: i32 = 2;
+
+    /// `View.SYSTEM_UI_FLAG_HIDE_NAVIGATION`（legacy 分支，API 30+ 起废弃）
+    pub const LEGACY_HIDE_NAVIGATION: i32 = 0x0000_0002;
+    /// `View.SYSTEM_UI_FLAG_FULLSCREEN`
+    pub const LEGACY_FULLSCREEN: i32 = 0x0000_0004;
+    /// `View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY`
+    pub const LEGACY_IMMERSIVE_STICKY: i32 = 0x0000_1000;
+    /// `View.SYSTEM_UI_FLAG_LAYOUT_STABLE`
+    pub const LEGACY_LAYOUT_STABLE: i32 = 0x0000_0100;
+    /// `View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION`
+    pub const LEGACY_LAYOUT_HIDE_NAVIGATION: i32 = 0x0000_0200;
+    /// `View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN`
+    pub const LEGACY_LAYOUT_FULLSCREEN: i32 = 0x0000_0400;
+
+    /// `WindowManager.LayoutParams.layoutInDisplayCutoutMode` 引入版本
+    pub const SDK_CUTOUT: i32 = 28;
+    /// `Window.getInsetsController()` / `WindowInsets.Type` 引入版本
+    pub const SDK_INSETS_CONTROLLER: i32 = 30;
+    /// `Window.setDecorFitsSystemWindows` 引入版本
+    pub const SDK_DECOR_FITS: i32 = 30;
+}
+
+// ---------------------------------------------------------------------------
+// 公开类型（不含 JNI 类型）
+// ---------------------------------------------------------------------------
+
+/// 四边内缩量。
+///
+/// **单位 = vireo 逻辑像素（Dp）**，与 vireo 绘制坐标系一致，可直接喂给
+/// [`crate::shapes`] 系列 API。需要物理像素时用 [`Insets::scaled`] 换算。
+///
+/// **坐标系：原点左上、y 向下**（与 vireo 一致）。注意 Unity 的 `Screen.safeArea`
+/// 原点在左下角，是个著名的踩坑点。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Insets {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl Insets {
+    /// 全零（无遮挡）。
+    pub const ZERO: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
+
+    /// 四边等值内缩。
+    pub const fn uniform(v: f32) -> Self {
+        Self {
+            left: v,
+            top: v,
+            right: v,
+            bottom: v,
+        }
+    }
+
+    /// 乘一个系数（物理 px ↔ 逻辑 px 换算，或做安全边距放大）。
+    pub const fn scaled(self, factor: f32) -> Self {
+        Self {
+            left: self.left * factor,
+            top: self.top * factor,
+            right: self.right * factor,
+            bottom: self.bottom * factor,
+        }
+    }
+
+    /// 取四边最大值（HUD 统一留边常用）。
+    pub fn max_edge(self) -> f32 {
+        let mut m = self.left;
+        if self.top > m {
+            m = self.top;
+        }
+        if self.right > m {
+            m = self.right;
+        }
+        if self.bottom > m {
+            m = self.bottom;
+        }
+        m
+    }
+
+    /// 内缩后的安全矩形（给定窗口尺寸）。
+    pub fn to_rect(self, width: f32, height: f32) -> Rect {
+        Rect::new(
+            self.left,
+            self.top,
+            (width - self.left - self.right).max(0.0),
+            (height - self.top - self.bottom).max(0.0),
+        )
+    }
+}
+
+/// **要隐藏的**系统栏集合（bitmask）。
+///
+/// 对应 Android `WindowInsets.Type` 的 `statusBars()` / `navigationBars()` /
+/// `captionBar()`。**故意用 bitmask 而非单值枚举**：「只隐藏状态栏、保留导航栏」
+/// 是真实需求（Flutter 的 `manual` + `SystemUiOverlay` 列表就是干这个的）。
+///
+/// # 语义方向（别搞反）
+///
+/// 集合里的位 = **隐藏**，集合外的位 = **保持系统默认可见**。
+///
+/// | 值 | 效果 |
+/// |---|---|
+/// | [`NONE`](Self::NONE) | 一个都不隐藏 = **全部显示** |
+/// | [`STATUS`](Self::STATUS) | 只隐藏状态栏，导航栏保留 |
+/// | [`NAVIGATION`](Self::NAVIGATION) | 只隐藏导航栏 |
+/// | [`ALL`](Self::ALL) | 全部隐藏（沉浸式） |
+///
+/// 想「全部隐藏」用 [`ALL`]，**不是** [`NONE`]。
+///
+/// `displayCutout` **不在**这个集合里——刘海是遮挡区不是系统栏，用
+/// [`WindowExtAndroid::safe_area`] / [`WindowExtAndroid::cutouts`] 表达。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemBars(u32);
+
+impl SystemBars {
+    /// 空集：**不隐藏任何栏**，即两个栏都显示。
+    ///
+    /// 注意：想要「全部隐藏」请用 [`ALL`](Self::ALL)。
+    pub const NONE: Self = Self(0);
+    /// 状态栏。
+    pub const STATUS: Self = Self(api::STATUS_BARS);
+    /// 导航栏。
+    pub const NAVIGATION: Self = Self(api::NAVIGATION_BARS);
+    /// caption bar（桌面窗口化模式；即使开沉浸式也永远可见）。
+    pub const CAPTION: Self = Self(api::CAPTION_BAR);
+    /// 状态栏 + 导航栏（游戏最常用）。
+    pub const STATUS_NAVIGATION: Self = Self(api::STATUS_BARS | api::NAVIGATION_BARS);
+    /// 全部三类。
+    pub const ALL: Self = Self(api::STATUS_BARS | api::NAVIGATION_BARS | api::CAPTION_BAR);
+
+    /// 原始位掩码。
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// 位或组合。
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// 是否包含全部给定位。
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// 是否为空集。
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// 从 Android `WindowInsets.Type` 位掩码构造，未知位（IME / displayCutout）被过滤。
+    pub fn from_android_bits(bits: i32) -> Self {
+        Self((bits as u32) & (api::STATUS_BARS | api::NAVIGATION_BARS | api::CAPTION_BAR))
+    }
+}
+
+impl core::ops::BitOr for SystemBars {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+/// 隐藏系统栏后，边缘滑动唤回时的行为。
+///
+/// 对应 Android `WindowInsetsController.setSystemBarsBehavior(int)`。
+///
+/// **刻意不提供** `BEHAVIOR_SHOW_BARS_BY_TOUCH` / `BEHAVIOR_SHOW_BARS_BY_SWIPE`：
+/// 前者 API 30 废弃、后者 API 31+ 完全不支持。Flutter 仍保留这两个枚举值并在文档里
+/// 反复写「你必须先迁移」——vireo 不做僵尸枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SystemBarBehavior {
+    /// 瞬时栏覆盖内容，短暂停留后自动隐藏。（`BEHAVIOR_DEFAULT`）
+    #[default]
+    Transient,
+    /// 边缘滑动显示，短暂停留后自动隐藏，**应用继续收到 touch**。
+    /// （`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`，API 30+）
+    ///
+    /// 游戏应当选这个：手势不丢。
+    ShowTransientBarsBySwipe,
+}
+
+impl SystemBarBehavior {
+    fn to_android(self) -> i32 {
+        match self {
+            Self::Transient => api::BEHAVIOR_DEFAULT,
+            Self::ShowTransientBarsBySwipe => api::BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE,
+        }
+    }
+}
+
+/// 内容是否延伸进摄像头挖孔区。
+///
+/// 对应 Android `WindowManager.LayoutParams.layoutInDisplayCutoutMode`（API 28+）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayCutoutMode {
+    /// 内容自动避开挖孔（顶部整条下移）。
+    #[default]
+    Default,
+    /// 铺满短边，挖孔区留黑。
+    ShortEdges,
+    /// 铺满整个屏，挖孔区留黑。
+    Always,
+}
+
+impl DisplayCutoutMode {
+    fn to_android(self) -> i32 {
+        match self {
+            Self::Default => api::CUTOUT_MODE_DEFAULT,
+            Self::ShortEdges => api::CUTOUT_MODE_SHORT_EDGES,
+            Self::Always => api::CUTOUT_MODE_ALWAYS,
+        }
+    }
+
+    fn from_android(v: i32) -> Option<Self> {
+        match v {
+            api::CUTOUT_MODE_DEFAULT => Some(Self::Default),
+            api::CUTOUT_MODE_SHORT_EDGES => Some(Self::ShortEdges),
+            api::CUTOUT_MODE_ALWAYS => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
+/// 请求的屏幕朝向（`Activity.setRequestedOrientation`）。
+///
+/// 数字定义是 `ActivityInfo.SCREEN_ORIENTATION_*`，与 [`DisplayOrientation`]
+/// （来自 `Configuration.orientation`）**编号不同**，别混。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Orientation {
+    /// 未指定，沿用系统/清单。
+    #[default]
+    Unspecified,
+    /// 固定横屏。
+    Landscape,
+    /// 固定竖屏。
+    Portrait,
+    /// 跟随用户的旋转锁。
+    User,
+    /// 跟随传感器。
+    Sensor,
+    /// 跟随传感器但忽略用户锁。
+    NoSensor,
+    /// 跟随传感器，横向（含反向）。
+    SensorLandscape,
+    /// 跟随传感器，纵向（含反向）。
+    SensorPortrait,
+}
+
+impl Orientation {
+    fn to_android(self) -> i32 {
+        match self {
+            Self::Unspecified => api::REQ_UNSPECIFIED,
+            Self::Landscape => api::REQ_LANDSCAPE,
+            Self::Portrait => api::REQ_PORTRAIT,
+            Self::User => api::REQ_USER,
+            Self::Sensor => api::REQ_SENSOR,
+            Self::NoSensor => api::REQ_NOSENSOR,
+            Self::SensorLandscape => api::REQ_SENSOR_LANDSCAPE,
+            Self::SensorPortrait => api::REQ_SENSOR_PORTRAIT,
+        }
+    }
+}
+
+/// 当前实际显示朝向（来自 `Resources.getConfiguration().orientation`）。
+///
+/// 与 [`Orientation`] **刻意分开**：后者是「请求」，这个是「实际」。
+/// Godot 的 `screen_get_orientation()` 返回项目设置值而不是运行时方向
+/// （godot#114840），vireo 不重复这个错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayOrientation {
+    #[default]
+    Unknown,
+    Portrait,
+    Landscape,
+}
+
+// ---------------------------------------------------------------------------
+// JNI 内部错误（不泄漏到公开 API）
+// ---------------------------------------------------------------------------
+
+pub(crate) enum JniErr {
+    Java(jni::errors::Error),
+    Null(&'static str),
+    NoActivity,
+    Unsupported(&'static str),
+}
+
+impl From<jni::errors::Error> for JniErr {
+    fn from(e: jni::errors::Error) -> Self {
+        Self::Java(e)
+    }
+}
+
+impl core::fmt::Debug for JniErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Java(e) => write!(f, "jni: {e:?}"),
+            Self::Null(what) => write!(f, "null java object: {what}"),
+            Self::NoActivity => write!(f, "android activity unavailable"),
+            Self::Unsupported(what) => write!(f, "unsupported on this api level: {what}"),
+        }
+    }
+}
+
+type JRes<T> = Result<T, JniErr>;
+
+/// `safe_area` / `padding` 用的 `WindowInsets.Type` 掩码。
+///
+/// **必须显式 `or` `displayCutout()`** —— Android 的 `systemBars()` 聚合值
+/// （statusBars | navigationBars | captionBar | systemOverlays）**不含**刘海，
+/// 这是 Unity / Godot 安全区出错的根源之一。
+/// `ime()` 刻意不在内：键盘遮挡走独立的 [`WindowExtAndroid::ime_insets`]。
+const SAFETY_MASK: u32 =
+    api::STATUS_BARS | api::NAVIGATION_BARS | api::CAPTION_BAR | api::DISPLAY_CUTOUT;
+
+fn sdk() -> i32 {
+    crate::android::AndroidApp::sdk_version()
+}
+
+/// 附加到当前线程的 JVM 并拿到 Activity 对象。
+fn with_activity<F, R>(app: &crate::android::AndroidApp, f: F) -> JRes<R>
+where
+    F: FnOnce(&mut jni::Env, &jni::objects::JObject<'_>) -> JRes<R>,
+{
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM) };
+    vm.attach_current_thread(|env| {
+        let raw = app.activity_as_ptr() as jni::sys::jobject;
+        if raw.is_null() {
+            return Err(JniErr::NoActivity);
+        }
+        // SAFETY: `raw` 来自 android-activity 持有的 jobject（native glue 持有的全局引用），
+        // 在 activity 存活期间有效；此处只借用不删除，符合 android-activity 文档的
+        // 「unowned reference」约定。
+        let activity = unsafe { jni::objects::JObject::from_raw(env, raw) };
+        f(env, &activity)
+    })
+}
+
+/// `Activity.getWindow()`
+fn get_window<'local>(
+    env: &mut jni::Env<'local>,
+    activity: &jni::objects::JObject<'_>,
+) -> JRes<jni::objects::JObject<'local>> {
+    Ok(env
+        .call_method(
+            activity,
+            jni_str!("getWindow"),
+            jni_sig!("()Landroid/view/Window;"),
+            &[],
+        )?
+        .l()?)
+}
+
+/// `Window.getDecorView()`
+fn get_decor_view<'local>(
+    env: &mut jni::Env<'local>,
+    window: &jni::objects::JObject<'_>,
+) -> JRes<jni::objects::JObject<'local>> {
+    Ok(env
+        .call_method(
+            window,
+            jni_str!("getDecorView"),
+            jni_sig!("()Landroid/view/View;"),
+            &[],
+        )?
+        .l()?)
+}
+
+/// `View.getRootWindowInsets()`（API 23+）
+fn get_root_insets<'local>(
+    env: &mut jni::Env<'local>,
+    decor: &jni::objects::JObject<'_>,
+) -> JRes<Option<jni::objects::JObject<'local>>> {
+    let obj = env
+        .call_method(
+            decor,
+            jni_str!("getRootWindowInsets"),
+            jni_sig!("()Landroid/view/WindowInsets;"),
+            &[],
+        )?
+        .l()?;
+    if obj.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(obj))
+    }
+}
+
+/// 取物理像素内缩。API 30+ 走 `getInsets`/`getInsetsIgnoringVisibility`，
+/// 更低版本分别退回 `getSystemWindowInset*` / `getStableInset*`。
+fn read_insets_px(
+    env: &mut jni::Env,
+    insets_obj: &jni::objects::JObject,
+    type_mask: u32,
+    ignoring_visibility: bool,
+) -> JRes<Insets> {
+    if sdk() >= api::SDK_INSETS_CONTROLLER {
+        // `jni_str!` 只接受字面量，所以两条分支各写一遍。
+        let o = if ignoring_visibility {
+            env.call_method(
+                insets_obj,
+                jni_str!("getInsetsIgnoringVisibility"),
+                jni_sig!("(I)Landroid/graphics/Insets;"),
+                &[jni::objects::JValue::Int(type_mask as i32)],
+            )?
+            .l()?
+        } else {
+            env.call_method(
+                insets_obj,
+                jni_str!("getInsets"),
+                jni_sig!("(I)Landroid/graphics/Insets;"),
+                &[jni::objects::JValue::Int(type_mask as i32)],
+            )?
+            .l()?
+        };
+        if o.is_null() {
+            return Err(JniErr::Null("WindowInsets.getInsets"));
+        }
+        Ok(Insets {
+            left: env.get_field(&o, jni_str!("left"), jni_sig!("I"))?.i()? as f32,
+            top: env.get_field(&o, jni_str!("top"), jni_sig!("I"))?.i()? as f32,
+            right: env.get_field(&o, jni_str!("right"), jni_sig!("I"))?.i()? as f32,
+            bottom: env.get_field(&o, jni_str!("bottom"), jni_sig!("I"))?.i()? as f32,
+        })
+    } else {
+        // API 30 以下没有 `getInsets*`，退回 `getSystemWindowInset*`（当前遮挡）
+        // 与 `getStableInset*`（忽略可见性）。`jni_str!` 只收字面量，四条各写一遍。
+        Ok(if ignoring_visibility {
+            Insets {
+                left: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getStableInsetLeft"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                top: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getStableInsetTop"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                right: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getStableInsetRight"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                bottom: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getStableInsetBottom"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+            }
+        } else {
+            Insets {
+                left: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getSystemWindowInsetLeft"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                top: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getSystemWindowInsetTop"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                right: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getSystemWindowInsetRight"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+                bottom: env
+                    .call_method(
+                        insets_obj,
+                        jni_str!("getSystemWindowInsetBottom"),
+                        jni_sig!("()I"),
+                        &[],
+                    )?
+                    .i()? as f32,
+            }
+        })
+    }
+}
+
+/// 物理 px 内缩 → 逻辑 px（Dp）。`scale` 非法时原样返回，不产生 inf/NaN。
+fn to_logical(scale: f32, px: Insets) -> Insets {
+    if scale > 0.0 {
+        px.scaled(1.0 / scale)
+    } else {
+        px
+    }
+}
+
+/// JNI 错误 → `VireoError`。
+fn to_err(what: &str, e: JniErr) -> VireoError {
+    VireoError::Other(format!("android: {what} failed: {e:?}"))
+}
+
+/// getter 失败：打 warn 并返回 `None`，让调用方走降级分支。
+fn warn_getter<T>(what: &str, e: JniErr) -> Option<T> {
+    log::warn!("vireo::platform::android: {what} failed: {e:?}");
+    None
+}
+
+// ---------------------------------------------------------------------------
+// VireoWindow 内部辅助（字段在 window/mod.rs，这里只放逻辑）
+// ---------------------------------------------------------------------------
+
+/// 上次请求的状态（本地缓存；平台可能改写，所以 getter 语义是「请求值」）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AndroidRequested {
+    pub system_bars: SystemBars,
+    pub system_bar_behavior: SystemBarBehavior,
+}
+
+impl Default for AndroidRequested {
+    fn default() -> Self {
+        Self {
+            system_bars: SystemBars::STATUS_NAVIGATION,
+            system_bar_behavior: SystemBarBehavior::ShowTransientBarsBySwipe,
+        }
+    }
+}
+
+impl VireoWindow {
+    /// 拿到底层 `AndroidApp`。
+    pub(crate) fn android_app(&self) -> Result<&crate::android::AndroidApp, JniErr> {
+        self.android_app.as_ref().ok_or(JniErr::NoActivity)
+    }
+
+    pub(crate) fn android_requested(&self) -> AndroidRequested {
+        *self.android_requested.lock()
+    }
+
+    /// setter 前置检查：拿 `AndroidApp`，失败直接转 `VireoError` 上抛。
+    fn require_android(
+        &self,
+        what: &'static str,
+    ) -> Result<&crate::android::AndroidApp, VireoError> {
+        self.android_app().map_err(|e| to_err(what, e))
+    }
+
+    pub(crate) fn set_android_requested(&self, f: impl FnOnce(&mut AndroidRequested)) {
+        let mut g = self.android_requested.lock();
+        f(&mut g);
+    }
+
+    /// 物理 px 内缩。
+    pub(crate) fn read_insets_px(
+        &self,
+        type_mask: u32,
+        ignoring_visibility: bool,
+    ) -> Result<Insets, JniErr> {
+        let app = self.android_app()?;
+        with_activity(app, |env, activity| {
+            let window = get_window(env, activity)?;
+            let decor = get_decor_view(env, &window)?;
+            let Some(insets_obj) = get_root_insets(env, &decor)? else {
+                return Err(JniErr::Null("View.getRootWindowInsets"));
+            };
+            read_insets_px(env, &insets_obj, type_mask, ignoring_visibility)
+        })
+    }
+
+    /// 逻辑 px 内缩（对外 getter 用）。
+    fn read_insets_logical(&self, type_mask: u32, ignoring_visibility: bool) -> JRes<Insets> {
+        let px = self.read_insets_px(type_mask, ignoring_visibility)?;
+        Ok(to_logical(self.layout_scale() as f32, px))
+    }
+
+    /// 把一段 JNI 逻辑投递到 Android UI 线程执行（系统 UI 改动必须在 UI 线程）。
+    /// 失败只打 warn——setter 的 `Result` 只表达「能不能发起」，实际生效用
+    /// `system_bars_visible()` 之类查询（SDL 的 request/confirm 模型）。
+    fn post_to_java_thread<F>(&self, what: &'static str, f: F)
+    where
+        F: FnOnce(&mut jni::Env, &jni::objects::JObject<'_>) -> JRes<()> + Send + 'static,
+    {
+        let app = match self.android_app() {
+            Ok(a) => a.clone(),
+            Err(e) => {
+                log::warn!("vireo::platform::android: {what} not posted: {e:?}");
+                return;
+            }
+        };
+        // closure 要 move `app`，所以调用方再拿一份（`AndroidApp` 是廉价 Arc clone）。
+        let owner = app.clone();
+        app.run_on_java_main_thread(Box::new(move || {
+            let vm = unsafe { jni::JavaVM::from_raw(owner.vm_as_ptr() as *mut jni::sys::JavaVM) };
+            let res = vm.attach_current_thread(|env| {
+                let raw = owner.activity_as_ptr() as jni::sys::jobject;
+                if raw.is_null() {
+                    return Err(JniErr::NoActivity);
+                }
+                let activity = unsafe { jni::objects::JObject::from_raw(env, raw) };
+                f(env, &activity)
+            });
+            if let Err(e) = res {
+                log::warn!("vireo::platform::android: {what} on UI thread failed: {e:?}");
+            }
+        }));
+    }
+
+    /// 实际执行系统栏显隐。API 30+ 走 `WindowInsetsController`，
+    /// 更低版本退回 `View.setSystemUiVisibility`（legacy）。
+    fn apply_system_bars(&self, bars: SystemBars, behavior: SystemBarBehavior) {
+        let all = api::STATUS_BARS | api::NAVIGATION_BARS | api::CAPTION_BAR;
+        let mask = bars.bits();
+
+        if sdk() >= api::SDK_INSETS_CONTROLLER {
+            self.post_to_java_thread("set_system_bars", move |env, activity| {
+                let window = get_window(env, activity)?;
+                let ctrl = env
+                    .call_method(
+                        window.as_ref(),
+                        jni_str!("getInsetsController"),
+                        jni_sig!("()Landroid/view/WindowInsetsController;"),
+                        &[],
+                    )?
+                    .l()?;
+                if ctrl.is_null() {
+                    return Err(JniErr::Null("Window.getInsetsController"));
+                }
+                env.call_method(
+                    &ctrl,
+                    jni_str!("setSystemBarsBehavior"),
+                    jni_sig!("(I)V"),
+                    &[jni::objects::JValue::Int(behavior.to_android())],
+                )?;
+                if mask != 0 {
+                    env.call_method(
+                        &ctrl,
+                        jni_str!("hide"),
+                        jni_sig!("(I)V"),
+                        &[jni::objects::JValue::Int(mask as i32)],
+                    )?;
+                }
+                let show_mask = all & !mask;
+                if show_mask != 0 {
+                    env.call_method(
+                        &ctrl,
+                        jni_str!("show"),
+                        jni_sig!("(I)V"),
+                        &[jni::objects::JValue::Int(show_mask as i32)],
+                    )?;
+                }
+                Ok(())
+            });
+        } else {
+            // legacy：组合 setSystemUiVisibility 标志（API 30+ 起废弃，但 minSdk 21 需要）
+            let mut flags = api::LEGACY_LAYOUT_STABLE;
+            let mut hide_mask = 0;
+            if mask & api::STATUS_BARS != 0 {
+                hide_mask |= api::LEGACY_FULLSCREEN;
+                flags |= api::LEGACY_LAYOUT_FULLSCREEN;
+            }
+            if mask & api::NAVIGATION_BARS != 0 {
+                hide_mask |= api::LEGACY_HIDE_NAVIGATION;
+                flags |= api::LEGACY_LAYOUT_HIDE_NAVIGATION;
+            }
+            let sticky = behavior == SystemBarBehavior::ShowTransientBarsBySwipe;
+            let effective = if hide_mask == 0 {
+                flags
+            } else if sticky {
+                flags | hide_mask | api::LEGACY_IMMERSIVE_STICKY
+            } else {
+                flags | hide_mask
+            };
+            self.post_to_java_thread("set_system_bars(legacy)", move |env, activity| {
+                let window = get_window(env, activity)?;
+                let decor = get_decor_view(env, &window)?;
+                env.call_method(
+                    &decor,
+                    jni_str!("setSystemUiVisibility"),
+                    jni_sig!("(I)V"),
+                    &[jni::objects::JValue::Int(effective)],
+                )?;
+                Ok(())
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait
+// ---------------------------------------------------------------------------
+
+/// Android 窗口扩展。
+///
+/// 平台特化 API，需显式 `use vireo::platform::android::WindowExtAndroid;`。
+/// 非 Android 平台本 trait 不存在（模块编译期缺失）。
+///
+/// **setter 一律返回 `Result`**：Android 上「不支持」意味着「需要 JNI 而未实现」，
+/// 是框架 invariant 缺失，不能静默 no-op（参照 SDL 的
+/// 「just a request, it can be denied」模型）。`Ok(())` 只表示请求已投递到 UI 线程，
+/// 实际是否生效用 [`system_bars_visible`](Self::system_bars_visible) 查。
+///
+/// **getter 返回具体值**：这些是每帧热路径（音游 UI 本来就每帧重建），失败时打
+/// `log::warn!` 并返回零值 / 空列表。返回 `Option` 的表示「平台查不到」。
+pub trait WindowExtAndroid {
+    // ---- 安全区（Flutter 三值模型）----
+
+    /// **物理最大遮挡区**：刘海 + 系统栏，**不管它们当前是否可见**。
+    ///
+    /// = Android `getInsetsIgnoringVisibility(systemBars|displayCutout)`
+    /// = Flutter `MediaQuery.viewPadding`
+    ///
+    /// 与 [`padding`](Self::padding) 的区别：系统栏隐藏后 `padding` 变 0，
+    /// 但 `safe_area` 保持物理值。做「HUD 固定避开刘海」应该用这个。
+    fn safe_area(&self) -> Insets;
+
+    /// **当前可见遮挡**：系统栏隐藏后即为 0；键盘弹出时会「吸收」底部安全区。
+    ///
+    /// = Android `getInsets(systemBars|displayCutout)`
+    /// = Flutter `padding` = `max(0, safe_area - ime_insets)`
+    ///
+    /// 单位是 vireo 逻辑像素。**布局跟随时应该用这个**。
+    fn padding(&self) -> Insets;
+
+    /// 软键盘等「完全遮挡」区域。
+    ///
+    /// = Android `getInsets(ime)` = Flutter `viewInsets`
+    ///
+    /// 音游底部 HUD + 中文输入法场景必须把它和 `safe_area` 分开算，否则 HUD 被键盘顶掉。
+    fn ime_insets(&self) -> Insets;
+
+    /// 摄像头 / 传感器占用的物理矩形（可能多个；无挖孔返回空）。
+    ///
+    /// = Godot `get_display_cutouts()` / Unity `Screen.cutouts`
+    ///
+    /// 这些区域**物理上无法显示内容**（背后是镜头模组），但**周边可以**——
+    /// 所以「内容穿挖孔」和「这里是黑块」是两件事，见
+    /// [`set_display_cutout_mode`](Self::set_display_cutout_mode)。
+    fn cutouts(&self) -> Vec<Rect>;
+
+    // ---- 系统栏 ----
+
+    /// 设置要**隐藏**哪些系统栏（集合外的保持系统默认可见）。
+    ///
+    /// 游戏的沉浸式配置 = [`SystemBars::ALL`] +
+    /// [`set_system_bar_behavior`](Self::set_system_bar_behavior) 配
+    /// [`ShowTransientBarsBySwipe`](SystemBarBehavior::ShowTransientBarsBySwipe)
+    /// （滑动唤回时应用仍能收到 touch）。
+    ///
+    /// 只隐藏状态栏、保留导航栏则传 [`SystemBars::STATUS`]。
+    /// **注意**：[`SystemBars::NONE`] 是「一个都不隐藏」，不是「全隐藏」。
+    ///
+    /// **targetSdk 35+ 强制 edge-to-edge**，此时系统可能忽略 `hide(systemBars)`；
+    /// 用 [`system_bars_visible`](Self::system_bars_visible) 查实际效果。
+    fn set_system_bars(&self, bars: SystemBars) -> Result<(), VireoError>;
+
+    /// 上次**请求**的系统栏集合（本地缓存，不查询平台）。
+    fn system_bars(&self) -> SystemBars;
+
+    /// 隐藏后边缘滑动唤回的行为。**游戏应选
+    /// [`ShowTransientBarsBySwipe`](SystemBarBehavior::ShowTransientBarsBySwipe)**，
+    /// 这样滑动时应用仍能收到 touch。
+    fn set_system_bar_behavior(&self, behavior: SystemBarBehavior) -> Result<(), VireoError>;
+
+    /// 上次**请求**的 behavior（本地缓存）。
+    fn system_bar_behavior(&self) -> SystemBarBehavior;
+
+    /// 系统栏**实际**是否可见。`None` = 平台查不到（API < 30 无可靠查询）。
+    fn system_bars_visible(&self) -> Option<bool>;
+
+    // ---- 布局模式 ----
+
+    /// 内容是否延伸进摄像头挖孔区。
+    ///
+    /// 对应 Android `WindowManager.LayoutParams.layoutInDisplayCutoutMode`（API 28+）。
+    ///
+    /// # ⚠️ 运行期只是 best-effort，真机上实测**不足以**让窗口扩展进挖孔区
+    ///
+    /// `layoutInDisplayCutoutMode` 是**建窗期读取的 theme 属性**
+    /// （`android:windowLayoutInDisplayCutoutMode`）。本方法走
+    /// `Window.setAttributes()` 在运行期改它，**不会触发窗口管理器重算窗口边框**。
+    /// 真机（Android 16 / 25098RA98C / targetSdk 34）实测：调用成功、getter 正确
+    /// 回报 `Always`，但窗口仍被 letterbox（2264×1080 而非屏幕 2392×1080），
+    /// 挖孔那 128px 依然没有 App 表面。`set_edge_to_edge(true)` 同测无效。
+    ///
+    /// # 真正可靠的途径（**app 侧，不是 vireo API**）
+    ///
+    /// 1. **targetSdk ≥ 35**：平台强制 edge-to-edge，`Always` 成为事实。
+    ///    Android 16（API 36）起**无法退出**。
+    ///    （注：`xbuild` 内置 NDK 最高只支持 sdk 34，此路径 vireo 侧未验证。）
+    /// 2. **manifest theme 属性**：App 自带 `styles.xml` 里写
+    ///    `android:windowLayoutInDisplayCutoutMode="always"`。
+    ///    vireo 不打包 `styles.xml`，无法代劳——这也是本方法只在运行期提供的根因。
+    ///
+    /// 换句话说：**这个开关最终由 app 的 manifest / targetSdk 决定**，
+    /// 本方法用于「已按其中一种配置好之后，仍需在运行期查询/微调」的场景。
+    fn set_display_cutout_mode(&self, mode: DisplayCutoutMode) -> Result<(), VireoError>;
+
+    /// 当前挖孔模式。`None` = 平台查不到（API < 28）。
+    fn display_cutout_mode(&self) -> Option<DisplayCutoutMode>;
+
+    /// 内容是否延伸到系统栏下方（`Window.setDecorFitsSystemWindows(false)`，API 30+）。
+    fn set_edge_to_edge(&self, enabled: bool) -> Result<(), VireoError>;
+
+    // ---- 朝向 ----
+
+    /// 运行期请求屏幕朝向（横屏游戏刚需；构建期只能靠 manifest）。
+    fn set_orientation(&self, orientation: Orientation) -> Result<(), VireoError>;
+
+    /// 当前**实际**显示朝向。与 [`Orientation`]（请求）刻意分开。
+    fn orientation(&self) -> DisplayOrientation;
+
+    // ---- 窗口属性 ----
+
+    /// 保持屏幕常亮（`FLAG_KEEP_SCREEN_ON`）。
+    ///
+    /// 游戏默认就该开：否则用户玩着玩着息屏。
+    fn set_keep_screen_on(&self, enabled: bool) -> Result<(), VireoError>;
+
+    /// 屏幕亮度。`None` = 跟随系统；`Some(v)`，`v ∈ [0.0, 1.0]`。
+    fn set_screen_brightness(&self, brightness: Option<f32>) -> Result<(), VireoError>;
+}
+
+impl WindowExtAndroid for VireoWindow {
+    fn safe_area(&self) -> Insets {
+        match self.read_insets_logical(SAFETY_MASK, true) {
+            Ok(v) => v,
+            Err(e) => warn_getter("safe_area", e).unwrap_or(Insets::ZERO),
+        }
+    }
+
+    fn padding(&self) -> Insets {
+        match self.read_insets_logical(SAFETY_MASK, false) {
+            Ok(v) => v,
+            Err(e) => warn_getter("padding", e).unwrap_or(Insets::ZERO),
+        }
+    }
+
+    fn ime_insets(&self) -> Insets {
+        match self.read_insets_logical(api::IME, false) {
+            Ok(v) => v,
+            Err(e) => warn_getter("ime_insets", e).unwrap_or(Insets::ZERO),
+        }
+    }
+
+    fn cutouts(&self) -> Vec<Rect> {
+        if sdk() < api::SDK_CUTOUT {
+            return Vec::new();
+        }
+        let app = match self.android_app() {
+            Ok(a) => a,
+            Err(e) => {
+                warn_getter::<()>("cutouts", e);
+                return Vec::new();
+            }
+        };
+        let scale = self.layout_scale() as f32;
+        let inv = if scale > 0.0 { 1.0 / scale } else { 1.0 };
+        match with_activity(app, |env, activity| {
+            let window = get_window(env, activity)?;
+            let decor = get_decor_view(env, &window)?;
+            let Some(insets_obj) = get_root_insets(env, &decor)? else {
+                return Ok(Vec::new());
+            };
+            let cutout = env
+                .call_method(
+                    &insets_obj,
+                    jni_str!("getDisplayCutout"),
+                    jni_sig!("()Landroid/view/DisplayCutout;"),
+                    &[],
+                )?
+                .l()?;
+            if cutout.is_null() {
+                log::debug!("vireo::platform::android: cutouts(): getDisplayCutout() null");
+                return Ok(Vec::new());
+            }
+            let list = env
+                .call_method(
+                    &cutout,
+                    jni_str!("getBoundingRects"),
+                    jni_sig!("()Ljava/util/List;"),
+                    &[],
+                )?
+                .l()?;
+            if list.is_null() {
+                log::debug!("vireo::platform::android: cutouts(): getBoundingRects() null");
+                return Ok(Vec::new());
+            }
+            let size = env
+                .call_method(&list, jni_str!("size"), jni_sig!("()I"), &[])?
+                .i()?;
+            if size <= 0 {
+                log::debug!("vireo::platform::android: cutouts(): bounding rects empty");
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::with_capacity(size as usize);
+            for i in 0..size {
+                let item = env
+                    .call_method(
+                        &list,
+                        jni_str!("get"),
+                        jni_sig!("(I)Ljava/lang/Object;"),
+                        &[jni::objects::JValue::Int(i)],
+                    )?
+                    .l()?;
+                if item.is_null() {
+                    continue;
+                }
+                let l = env.get_field(&item, jni_str!("left"), jni_sig!("I"))?.i()? as f32 * inv;
+                let t = env.get_field(&item, jni_str!("top"), jni_sig!("I"))?.i()? as f32 * inv;
+                let r = env
+                    .get_field(&item, jni_str!("right"), jni_sig!("I"))?
+                    .i()? as f32
+                    * inv;
+                let b = env
+                    .get_field(&item, jni_str!("bottom"), jni_sig!("I"))?
+                    .i()? as f32
+                    * inv;
+                out.push(Rect::new(l, t, (r - l).max(0.0), (b - t).max(0.0)));
+            }
+            Ok(out)
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                warn_getter::<()>("cutouts", e);
+                Vec::new()
+            }
+        }
+    }
+
+    fn set_system_bars(&self, bars: SystemBars) -> Result<(), VireoError> {
+        self.require_android("set_system_bars")?;
+        let behavior = self.android_requested().system_bar_behavior;
+        self.apply_system_bars(bars, behavior);
+        self.set_android_requested(|r| r.system_bars = bars);
+        Ok(())
+    }
+
+    fn system_bars(&self) -> SystemBars {
+        self.android_requested().system_bars
+    }
+
+    fn set_system_bar_behavior(&self, behavior: SystemBarBehavior) -> Result<(), VireoError> {
+        self.require_android("set_system_bar_behavior")?;
+        let bars = self.android_requested().system_bars;
+        self.apply_system_bars(bars, behavior);
+        self.set_android_requested(|r| r.system_bar_behavior = behavior);
+        Ok(())
+    }
+
+    fn system_bar_behavior(&self) -> SystemBarBehavior {
+        self.android_requested().system_bar_behavior
+    }
+
+    fn system_bars_visible(&self) -> Option<bool> {
+        if sdk() < api::SDK_INSETS_CONTROLLER {
+            return None;
+        }
+        let app = match self.android_app() {
+            Ok(a) => a,
+            Err(e) => return warn_getter("system_bars_visible", e),
+        };
+        match with_activity(app, |env, activity| {
+            let window = get_window(env, activity)?;
+            let decor = get_decor_view(env, &window)?;
+            let Some(insets_obj) = get_root_insets(env, &decor)? else {
+                return Ok(None);
+            };
+            let status = env
+                .call_method(
+                    &insets_obj,
+                    jni_str!("isVisible"),
+                    jni_sig!("(I)Z"),
+                    &[jni::objects::JValue::Int(api::STATUS_BARS as i32)],
+                )?
+                .z()?;
+            let nav = env
+                .call_method(
+                    &insets_obj,
+                    jni_str!("isVisible"),
+                    jni_sig!("(I)Z"),
+                    &[jni::objects::JValue::Int(api::NAVIGATION_BARS as i32)],
+                )?
+                .z()?;
+            Ok(Some(status || nav))
+        }) {
+            Ok(v) => v,
+            Err(e) => warn_getter("system_bars_visible", e),
+        }
+    }
+
+    fn set_display_cutout_mode(&self, mode: DisplayCutoutMode) -> Result<(), VireoError> {
+        if sdk() < api::SDK_CUTOUT {
+            return Err(to_err(
+                "set_display_cutout_mode",
+                JniErr::Unsupported("layoutInDisplayCutoutMode requires API 28"),
+            ));
+        }
+        self.require_android("set_display_cutout_mode")?;
+        let raw = mode.to_android();
+        self.post_to_java_thread("set_display_cutout_mode", move |env, activity| {
+            let window = get_window(env, activity)?;
+            let attrs = env
+                .call_method(
+                    window.as_ref(),
+                    jni_str!("getAttributes"),
+                    jni_sig!("()Landroid/view/WindowManager$LayoutParams;"),
+                    &[],
+                )?
+                .l()?;
+            if attrs.is_null() {
+                return Err(JniErr::Null("Window.getAttributes"));
+            }
+            env.set_field(
+                &attrs,
+                jni_str!("layoutInDisplayCutoutMode"),
+                jni_sig!("I"),
+                jni::objects::JValue::Int(raw),
+            )?;
+            env.call_method(
+                window.as_ref(),
+                jni_str!("setAttributes"),
+                jni_sig!("(Landroid/view/WindowManager$LayoutParams;)V"),
+                &[jni::objects::JValue::Object(&attrs)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn display_cutout_mode(&self) -> Option<DisplayCutoutMode> {
+        if sdk() < api::SDK_CUTOUT {
+            return None;
+        }
+        let app = match self.android_app() {
+            Ok(a) => a,
+            Err(e) => return warn_getter("display_cutout_mode", e),
+        };
+        match with_activity(app, |env, activity| {
+            let window = get_window(env, activity)?;
+            let attrs = env
+                .call_method(
+                    window.as_ref(),
+                    jni_str!("getAttributes"),
+                    jni_sig!("()Landroid/view/WindowManager$LayoutParams;"),
+                    &[],
+                )?
+                .l()?;
+            if attrs.is_null() {
+                return Ok(None);
+            }
+            let v = env
+                .get_field(&attrs, jni_str!("layoutInDisplayCutoutMode"), jni_sig!("I"))?
+                .i()?;
+            Ok(DisplayCutoutMode::from_android(v))
+        }) {
+            Ok(v) => v,
+            Err(e) => warn_getter("display_cutout_mode", e),
+        }
+    }
+
+    fn set_edge_to_edge(&self, enabled: bool) -> Result<(), VireoError> {
+        if sdk() < api::SDK_DECOR_FITS {
+            return Err(to_err(
+                "set_edge_to_edge",
+                JniErr::Unsupported("setDecorFitsSystemWindows requires API 30"),
+            ));
+        }
+        self.require_android("set_edge_to_edge")?;
+        self.post_to_java_thread("set_edge_to_edge", move |env, activity| {
+            let window = get_window(env, activity)?;
+            env.call_method(
+                window.as_ref(),
+                jni_str!("setDecorFitsSystemWindows"),
+                jni_sig!("(Z)V"),
+                &[jni::objects::JValue::Bool(enabled)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn set_orientation(&self, orientation: Orientation) -> Result<(), VireoError> {
+        self.require_android("set_orientation")?;
+        let raw = orientation.to_android();
+        self.post_to_java_thread("set_orientation", move |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("setRequestedOrientation"),
+                jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(raw)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn orientation(&self) -> DisplayOrientation {
+        let app = match self.android_app() {
+            Ok(a) => a,
+            Err(e) => return warn_getter("orientation", e).unwrap_or_default(),
+        };
+        match with_activity(app, |env, activity| {
+            let resources = env
+                .call_method(
+                    activity,
+                    jni_str!("getResources"),
+                    jni_sig!("()Landroid/content/res/Resources;"),
+                    &[],
+                )?
+                .l()?;
+            if resources.is_null() {
+                return Ok(DisplayOrientation::Unknown);
+            }
+            let config = env
+                .call_method(
+                    &resources,
+                    jni_str!("getConfiguration"),
+                    jni_sig!("()Landroid/content/res/Configuration;"),
+                    &[],
+                )?
+                .l()?;
+            if config.is_null() {
+                return Ok(DisplayOrientation::Unknown);
+            }
+            let o = env
+                .get_field(&config, jni_str!("orientation"), jni_sig!("I"))?
+                .i()?;
+            Ok(match o {
+                api::CONFIGURATION_PORTRAIT => DisplayOrientation::Portrait,
+                api::CONFIGURATION_LANDSCAPE => DisplayOrientation::Landscape,
+                _ => DisplayOrientation::Unknown,
+            })
+        }) {
+            Ok(v) => v,
+            Err(e) => warn_getter("orientation", e).unwrap_or_default(),
+        }
+    }
+
+    fn set_keep_screen_on(&self, enabled: bool) -> Result<(), VireoError> {
+        self.require_android("set_keep_screen_on")?;
+        self.post_to_java_thread("set_keep_screen_on", move |env, activity| {
+            let window = get_window(env, activity)?;
+            // `jni_str!` 只收字面量，两条分支各写一遍
+            let flags = &[jni::objects::JValue::Int(api::FLAG_KEEP_SCREEN_ON)];
+            if enabled {
+                env.call_method(
+                    window.as_ref(),
+                    jni_str!("addFlags"),
+                    jni_sig!("(I)V"),
+                    flags,
+                )?;
+            } else {
+                env.call_method(
+                    window.as_ref(),
+                    jni_str!("clearFlags"),
+                    jni_sig!("(I)V"),
+                    flags,
+                )?;
+            }
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn set_screen_brightness(&self, brightness: Option<f32>) -> Result<(), VireoError> {
+        self.require_android("set_screen_brightness")?;
+        let value = brightness.map(|v| v.clamp(0.0, 1.0)).unwrap_or(-1.0);
+        self.post_to_java_thread("set_screen_brightness", move |env, activity| {
+            let window = get_window(env, activity)?;
+            let attrs = env
+                .call_method(
+                    window.as_ref(),
+                    jni_str!("getAttributes"),
+                    jni_sig!("()Landroid/view/WindowManager$LayoutParams;"),
+                    &[],
+                )?
+                .l()?;
+            if attrs.is_null() {
+                return Err(JniErr::Null("Window.getAttributes"));
+            }
+            env.set_field(
+                &attrs,
+                jni_str!("screenBrightness"),
+                jni_sig!("F"),
+                jni::objects::JValue::Float(value),
+            )?;
+            env.call_method(
+                window.as_ref(),
+                jni_str!("setAttributes"),
+                jni_sig!("(Landroid/view/WindowManager$LayoutParams;)V"),
+                &[jni::objects::JValue::Object(&attrs)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insets_defaults_and_helpers() {
+        assert_eq!(Insets::default(), Insets::ZERO);
+        assert_eq!(Insets::uniform(4.0).max_edge(), 4.0);
+        assert_eq!(Insets::uniform(4.0).scaled(0.5).left, 2.0);
+        let r = Insets::uniform(10.0).to_rect(100.0, 50.0);
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 80.0, 30.0));
+    }
+
+    #[test]
+    fn insets_to_rect_clamps_negative() {
+        let r = Insets {
+            left: 60.0,
+            top: 0.0,
+            right: 60.0,
+            bottom: 0.0,
+        }
+        .to_rect(100.0, 100.0);
+        assert_eq!(r.w, 0.0);
+    }
+
+    #[test]
+    fn system_bars_is_bitmask() {
+        assert!(SystemBars::NONE.is_empty());
+        assert!(!SystemBars::STATUS.is_empty());
+        assert_eq!(SystemBars::STATUS.union(SystemBars::NAVIGATION).bits(), 0x3);
+        assert_eq!(
+            SystemBars::STATUS | SystemBars::NAVIGATION,
+            SystemBars::STATUS_NAVIGATION
+        );
+        assert!(SystemBars::ALL.contains(SystemBars::STATUS));
+        assert!(!SystemBars::STATUS.contains(SystemBars::NAVIGATION));
+        // IME / displayCutout 不是"系统栏"，必须被过滤
+        assert_eq!(
+            SystemBars::from_android_bits(0x100 | 0x400),
+            SystemBars::NONE
+        );
+        assert_eq!(
+            SystemBars::from_android_bits(0x1 | 0x400),
+            SystemBars::STATUS
+        );
+    }
+
+    #[test]
+    fn behavior_and_cutout_android_codes() {
+        assert_eq!(SystemBarBehavior::Transient.to_android(), 0);
+        assert_eq!(SystemBarBehavior::ShowTransientBarsBySwipe.to_android(), 2);
+        for m in [
+            DisplayCutoutMode::Default,
+            DisplayCutoutMode::ShortEdges,
+            DisplayCutoutMode::Always,
+        ] {
+            assert_eq!(DisplayCutoutMode::from_android(m.to_android()), Some(m));
+        }
+        // 未知值必须映射成 None，不能默默当成某个值
+        assert_eq!(DisplayCutoutMode::from_android(99), None);
+    }
+
+    #[test]
+    fn safety_mask_includes_display_cutout() {
+        // Android 文档：systemBars() **不**含 displayCutout()。安全区 mask 必须显式 or，
+        // 否则刘海区在 safe_area / padding 里会消失（HUD 撞刘海）。
+        assert_eq!(SAFETY_MASK, 0x1 | 0x2 | 0x4 | 0x400);
+        assert_ne!(SAFETY_MASK & api::DISPLAY_CUTOUT, 0);
+        assert_ne!(
+            SAFETY_MASK & api::IME,
+            0,
+            "IME 不应混进安全区，走独立 getter"
+        );
+    }
+
+    #[test]
+    fn orientation_android_codes_match_activityinfo() {
+        assert_eq!(Orientation::Unspecified.to_android(), 0);
+        assert_eq!(Orientation::Landscape.to_android(), 1);
+        assert_eq!(Orientation::Portrait.to_android(), 2);
+        assert_eq!(Orientation::User.to_android(), 3);
+        assert_eq!(Orientation::Sensor.to_android(), 4);
+        assert_eq!(Orientation::NoSensor.to_android(), 5);
+        assert_eq!(Orientation::SensorLandscape.to_android(), 6);
+        assert_eq!(Orientation::SensorPortrait.to_android(), 7);
+    }
+
+    #[test]
+    fn window_insets_type_bits_match_android() {
+        assert_eq!(api::STATUS_BARS, 0x1);
+        assert_eq!(api::NAVIGATION_BARS, 0x2);
+        assert_eq!(api::CAPTION_BAR, 0x4);
+        assert_eq!(api::IME, 0x100);
+        assert_eq!(api::DISPLAY_CUTOUT, 0x400);
+        // systemBars() 不含 ime / displayCutout —— 引擎界著名坑，必须显式 or
+        assert_eq!(
+            api::STATUS_BARS | api::NAVIGATION_BARS | api::CAPTION_BAR,
+            0x7
+        );
+        assert_eq!(api::FLAG_KEEP_SCREEN_ON, 0x80);
+        assert_eq!(api::BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, 2);
+    }
+
+    #[test]
+    fn to_logical_divides_by_scale() {
+        let px = Insets::uniform(90.0);
+        assert_eq!(to_logical(3.0, px), Insets::uniform(30.0));
+        // scale 非法时原样返回，不产生 inf/NaN
+        assert_eq!(to_logical(0.0, px), px);
+        assert_eq!(to_logical(-1.0, px), px);
+    }
+}

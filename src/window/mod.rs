@@ -338,6 +338,16 @@ pub struct VireoWindow {
     /// 意图（需 NSWindow 子类化 `acceptsFirstResponder` 覆盖，待 macOS 平台
     /// 窗口能力整批实施时一并实现）。
     focusable: Mutex<bool>,
+    /// Android `AndroidApp` 句柄，供 [`crate::platform::android::WindowExtAndroid`]
+    /// 做 JNI（系统栏 / 安全区 / 挖孔模式）。`App::new_on_android` 建窗时 clone 进来，
+    /// `None` = 非 Android 启动路径。
+    #[cfg(target_os = "android")]
+    pub(crate) android_app: Option<crate::android::AndroidApp>,
+    /// Android 侧「上次请求」的状态缓存（系统栏集合 / behavior）。
+    /// 平台可能改写（targetSdk 35+ 强制 edge-to-edge），所以 getter 返回的是
+    /// **请求值**，实际状态用 `system_bars_visible()` 查。
+    #[cfg(target_os = "android")]
+    pub(crate) android_requested: Mutex<crate::platform::android::AndroidRequested>,
     /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
     /// Frameless 无边框时 DWM 无法圆角，`set_frame_style` 离幀前钳 / 恢复用。
     pub(crate) user_corner_pref: Mutex<crate::platform::windows::CornerPreference>,
@@ -380,6 +390,7 @@ impl VireoWindow {
         close_tx: mpsc::Sender<usize>,
         event_loop_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
         handle: usize,
+        #[cfg(target_os = "android")] android_app: Option<crate::android::AndroidApp>,
     ) -> Self {
         let initial_present_mode = surface_config.present_mode;
         let initial_frame_latency = surface_config.desired_maximum_frame_latency;
@@ -431,6 +442,10 @@ impl VireoWindow {
             handle,
             frame_style: Mutex::new(frame_style),
             focusable: Mutex::new(true),
+            #[cfg(target_os = "android")]
+            android_app,
+            #[cfg(target_os = "android")]
+            android_requested: Mutex::new(crate::platform::android::AndroidRequested::default()),
             nc_tx,
             user_corner_pref: Mutex::new(crate::platform::windows::CornerPreference::Default),
             closing: Mutex::new(false),
