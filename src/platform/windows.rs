@@ -79,7 +79,7 @@ pub use winit::platform::windows::Color;
 /// 窗口圆角偏好（Windows 11 22000+，DWM `DWMWCP_*`）。
 ///
 /// vireo 自带枚举（镜像 winit `CornerPreference`，不 re-export winit 类型），
-/// 供 [`WindowExtWindows::set_corner_preference`] 与 [`VireoWindow::set_frame_style`]
+/// 供 [`WindowExtWindows::set_corner_preference`] 与 [`crate::window::VireoWindow::set_frame_style`]
 /// 的 `Frameless` 钳制/恢复逻辑共用同一类型。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CornerPreference {

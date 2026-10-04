@@ -268,6 +268,7 @@ pub struct VireoWindow {
     cb_tx: mpsc::Sender<(usize, crate::input::InputCallbacks)>,
     /// NC 状态变更通道（§7.6）。`pub(crate)` 供 `platform::windows::WindowExtWindows`
     /// 的 NC 方法使用。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     /// 程序化关窗通道（`VireoWindow::close` → winit 线程完整关窗路径）。
     close_tx: mpsc::Sender<usize>,
@@ -345,7 +346,7 @@ pub struct VireoWindow {
     pub(crate) android_app: Option<crate::android::AndroidApp>,
     /// Android 侧「上次请求」的状态缓存（系统栏集合 / behavior）。
     /// 平台可能改写（targetSdk 35+ 强制 edge-to-edge），所以 getter 返回的是
-    /// **请求值**，实际状态用 `system_bars_visible()` 查。
+    /// **请求值**，实际状态用 `effective_system_bars()` 查。
     #[cfg(target_os = "android")]
     pub(crate) android_requested: Mutex<crate::platform::android::AndroidRequested>,
     /// 用户圆角偏好（Windows 11 22000+）。`set_corner_preference` 记录；
@@ -1465,7 +1466,7 @@ impl VireoWindow {
     /// - `Some(size)`：已**立即应用**，返回实际生效的物理尺寸——可能被平台
     ///   约束（min/max 等）clamp，不一定等于请求值。
     /// - `None`：请求已交给窗口系统但**尚未生效**，稍后以 `Resized` 事件送达；
-    ///   需要时用 [`VireoWindow::metrics`] 轮询实际值。
+    ///   需要时用 [`Self::inner_size`] 轮询实际值。
     ///
     /// 参数意图同 [`VireoWindow::set_size`]（裸数值 = vireo 逻辑像素 =
     /// `Pp::Dp`，受 `dpi_override` 影响）。
@@ -2373,7 +2374,7 @@ impl VireoWindow {
     ///
     /// - [`FollowAmount::PerFrame`]：每帧都追到最新尺寸，最跟手，但窗口动得快时容易
     ///   「抖/闪一帧」。
-    /// - [`FollowAmount::Average(amt)`]：平均窗——camera 目标 = 最近 `amt` 内观测到的
+    /// - [`FollowAmount::Average`]：平均窗——camera 目标 = 最近 `amt` 内观测到的
     ///   窗口尺寸均值，连续渐变不跳格；窗越大越平滑（反应越慢）、越小越跟手。
     ///
     /// `Average` 的单位为 `Frames(0)` / `Time(0)` 时退化为 `PerFrame`。

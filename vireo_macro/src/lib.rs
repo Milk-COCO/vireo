@@ -111,8 +111,7 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
     // 安卓没有 `fn main`：同一份用户源码在安卓 target 下展开为
     // GameActivity 胶水层按符号名查找的入口 `android_main`，
     // 由 `vireo::app::android_main_entry` 把 `AndroidApp` 存进进程级单例后转
-    // `App::new` —— 与桌面走同一个构造器，公开 API 上不区分平台。`descriptor`
-    // 属性暂不支持安卓（显式报错，不静默吞掉）。
+    // `App::new` —— 与桌面走同一个构造器，公开 API 上不区分平台。
     if let Some(desc) = args.descriptor {
         let entry = quote! { vireo::App::with_descriptor(#desc, #body) };
         return Ok(quote! {
@@ -121,7 +120,10 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
                 #entry;
             }
             #[cfg(target_os = "android")]
-            compile_error!("`descriptor` 属性暂不支持安卓 target");
+            #[unsafe(no_mangle)]
+            pub fn android_main(app: vireo::android::AndroidApp) {
+                vireo::app::android_main_entry_with_descriptor(app, #desc, #body);
+            }
         });
     }
 

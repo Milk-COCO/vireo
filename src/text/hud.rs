@@ -37,12 +37,12 @@ pub(crate) fn is_hud_digit_char(ch: char) -> bool {
 /// 已 shape 的文字句柄，跨帧复用，与 `draw_text` 共享同一 cache。
 ///
 /// **线程安全**：`StableText: Send + Sync`（内部使用共享的 shape buffer 与 glyph 模板），
-/// 可跨线程传递（但 [`GpuContext`] 本身不是 `Send`，创建与使用应在同一线程）。
+/// 可跨线程传递（但 [`crate::gpu::GpuContext`] 本身不是 `Send`，创建与使用应在同一线程）。
 /// ## 生命周期
 /// - **Buffer 内存**：由 `StableText` 内的 `Arc<Buffer>` 保活；`drop` 后回收。
 /// - **Glyph 模板**：创建时从已 shaping 的 Buffer 提取，绘制时直接 physicalize，
 ///   保留连字、fallback、复杂脚本和多行布局，同时跳过重复的 layout-run 遍历。
-/// - **cache 槽**：[`GpuContext::make_stable_text`] 把对应槽标为「live」(`liveness: Arc<()>`)，
+/// - **cache 槽**：[`crate::gpu::GpuContext::make_stable_text`] 把对应槽标为「live」(`liveness: Arc<()>`)，
 ///   **直至所有 `StableText` clone 均 drop** 才会变为可淘汰。
 ///   同一文案的多次 `make_stable_text` 共享同一 liveness 标记（0→1 创建一次）。
 ///   GC/evict/clear 使用 `Arc::strong_count` 探测 liveness 标记是否还活着：
@@ -65,7 +65,7 @@ pub(crate) fn is_hud_digit_char(ch: char) -> bool {
 ///   direct prepare。
 ///
 /// ## 绘制 API
-/// - [`DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `make_stable_text` 时定型。
+/// - [`crate::render::DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `make_stable_text` 时定型。
 /// - [`TextEntryList::push_stable`]：添加到 `TextEntryList`（与 `text_parts` 配合使用）。
 ///
 /// ```ignore
@@ -136,7 +136,7 @@ impl std::fmt::Debug for StableText {
 /// [`TextPart::Stable`] 无此项（字号等已在 `make_stable_text` 时定型）。
 ///
 /// 提交时传 [`&[TextPart]`](TextPart)（例如 `&vec[..]` / [`HudLine::parts`]）；
-/// 引擎 clone 进 [`TextEntry::Parts`]。
+/// 引擎 clone 进 [`crate::text::TextEntry::Parts`]。
 #[derive(Clone, Debug)]
 pub enum TextPart {
     /// 内容稳定（标签、说明）。走整段 shape 缓存，同内容可 hit。

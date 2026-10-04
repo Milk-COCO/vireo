@@ -5,7 +5,7 @@
 //! （见 `AppInner` / `VireoWindow`），可安全从多条线程并发访问；winit 事件由 owner 线程转发、
 //! 经 supervisor 线程集中应用到 `App` 状态（见 `crate::app::supervisor_loop`）。
 //!
-//! 每条 loop 线程跑 [`run_thread_loop`]，在其中以非阻塞轮询方式驱动多 loop，并在 `App::windows`
+//! 每条 loop 线程跑 `run_thread_loop`，在其中以非阻塞轮询方式驱动多 loop，并在 `App::windows`
 //! 就绪（`windows_ready`）后开始；`panic` 经 `LoopHandleState` 转成 `Err` 对外暴露。
 
 use std::panic::AssertUnwindSafe;
@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 /// FPS 采样滑动窗口容量（per-thread）。
 pub(crate) const FPS_SAMPLE_CAP: usize = 30;
 
-/// per-thread 的 FPS / 帧时间统计。每帧由 [`run_thread_loop`] 调用 [`FpsStats::tick`] 更新；
+/// per-thread 的 FPS / 帧时间统计。每帧由 `run_thread_loop` 调用 [`FpsStats::tick`] 更新；
 /// 经 [`LoopContext`] / [`ThreadHandle`] 暴露给调用方。
 ///
 /// 该结构按线程独立存在，不再共享于 `App`（多 `spawn` 真并行时共享 `AtomicU64` 会被重复计数）。
@@ -247,7 +247,7 @@ pub struct Thread {
     /// 本 Thread 的 tick 速率上限（ticks per second）。
     ///
     /// 一整个 Thread 循环一次称为一个 **tick**（每个 `Loop` 各执行一次，称为该 Loop 的一个 tick，
-    /// 而非 frame）。`None` = 不限速；`Some(n)` = 用相位锁 [`pac_advance`] 把 tick 间隔钳到
+    /// 而非 frame）。`None` = 不限速；`Some(n)` = 用相位锁 `crate::window::metrics::pac_advance` 把 tick 间隔钳到
     /// `1/n` 秒。该上限在 [`App::spawn`] 时由 `App::max_fps` **作为默认值**种子
     /// （未显式设置时取 `app.max_fps()`，运行期改 `App::max_fps` 不影响已 spawn 的 Thread），
     /// 之后由本字段独立决定，App 不再直接控制。
@@ -261,7 +261,7 @@ impl Default for Thread {
 }
 
 impl Thread {
-    /// 新建空 `Thread`（稍后用 [`with_loop`] / [`with_loops`] 添加循环）。
+    /// 新建空 `Thread`（稍后用 [`Self::with_loop`] / [`Self::with_loops`] 添加循环）。
     pub fn new() -> Self {
         Self {
             loops: Vec::new(),

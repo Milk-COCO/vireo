@@ -7,7 +7,7 @@
 //! 的 `platform::android`，单测就永远不会执行（本平台其他 cfg 门控模块都踩过
 //! 这个盲区）。代价是桌面非 test 构建下部分项无人调用，故 `allow(dead_code)`。
 //!
-//! 由 [`crate::platform::android`] re-export，非 Android 平台那边模块不存在。
+//! 由 `platform::android` re-export，非 Android 平台那边模块不存在。
 //!
 //! # 单位：为什么必须换算
 //!
@@ -205,7 +205,7 @@ impl TextSpan {
 
 /// 一次 IME 状态快照。
 ///
-/// 由 [`WindowExtAndroid::text_input_state`](crate::platform::android::WindowExtAndroid::text_input_state)
+/// 由 `WindowExtAndroid::text_input_state`
 /// 每帧轮询取得（**不是**事件驱动 —— Android 的 `MainEvent` 里没有文本输入通知）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextInputState {

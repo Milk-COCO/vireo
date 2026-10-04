@@ -5,7 +5,7 @@
 //!
 //! batch 基础贴图：`DrawBatch::set_texture` / `set_uv` 更新画笔，`push*` 时冻结到
 //! [`TextEntry`] 的 [`TextTextureState`]；prepare 按 generation 输出
-//! [`PreparedTextSegment`] 供 Renderer 分段绑定。
+//! `PreparedTextSegment` 供 Renderer 分段绑定。
 //!
 //! 缓存策略（均可配置，经 `GpuContext`）：
 //! - TTL：`set_shape_cache_ttl(Some(d) | None)`，`None` = 不按时间回收
@@ -209,7 +209,7 @@ impl TextDef {
 
 /// 文字入队时捕获的 batch 贴图状态。
 ///
-/// 由 [`DrawBatch::set_texture`] / [`DrawBatch::set_uv`] 更新画笔，并在
+/// 由 [`crate::render::DrawBatch::set_texture`] / [`crate::render::DrawBatch::set_uv`] 更新画笔，并在
 /// `text` / `push*` 时 **clone 冻结** 到对应 [`TextEntry`]。连续相同
 /// [`generation`](Self::generation) 的条目在 prepare 时合并为同一渲染段。
 ///

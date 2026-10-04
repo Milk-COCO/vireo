@@ -1087,7 +1087,7 @@ impl GpuContext {
         self.text_ctx.lock().unwrap().shape_cache_len()
     }
 
-    /// 缓存中由 [`StableText`] 活跃持有的条目数。
+    /// 缓存中由 [`crate::text::StableText`] 活跃持有的条目数。
     /// 这些槽不会被 TTL/LRU/`clear_shape_cache` 回收。
     /// O(n) 扫描（n = shape_slots.len()）。
     pub fn shape_cache_held_count(&self) -> usize {
@@ -1104,7 +1104,7 @@ impl GpuContext {
         self.text_ctx.lock().unwrap().reset_shape_cache_stats();
     }
 
-    /// 从文本创建 [`StableText`]（预 shape，跨帧复用）。
+    /// 从文本创建 [`crate::text::StableText`]（预 shape，跨帧复用）。
     /// 只要返回的 `StableText` 存活，对应的 Buffer 不会被释放。
     ///
     /// **首帧性能提示**：首次 `make_stable_text` 会触发 `harfrust` shape 成本

@@ -216,7 +216,7 @@ pub struct WindowDesc {
     /// 期望最大在途帧（`SurfaceConfiguration::desired_maximum_frame_latency`）。
     /// DX12 下 swapchain buffer 数 = latency + 1：默认 2 → 3 buffer（CPU 可超前
     /// 2 帧，无 vsync 时峰值更高）；设 1 → 2 buffer（在途封顶 1，vsync 拖动时
-    /// camera 时差更小）。可在创建后经 [`VireoWindow::set_frame_latency`] 运行时调整。
+    /// camera 时差更小）。可在创建后经 [`crate::window::VireoWindow::set_frame_latency`] 运行时调整。
     pub frame_latency: u32,
 }
 
@@ -267,7 +267,7 @@ impl WindowDesc {
     /// 这是 vireo 层的坐标约定，**不**设置 winit 的 `scale_factor_override`——窗口的
     /// `dpi_override` 只参与 vireo 内部 scale / logical 换算、鼠标坐标换算与
     /// `metrics().scale_factor`，以及本 desc 尺寸族字段的物理化。运行时可用
-    /// [`VireoWindow::set_dpi_override`] 切换（保持 vireo 逻辑尺寸、resize 物理窗口）。
+    /// [`crate::window::VireoWindow::set_dpi_override`] 切换（保持 vireo 逻辑尺寸、resize 物理窗口）。
     pub fn dpi_override(mut self, dpi: Option<f64>) -> Self {
         debug_assert!(
             dpi.is_none_or(|d| d.is_finite() && d > 0.0),

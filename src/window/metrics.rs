@@ -162,7 +162,7 @@ pub(crate) fn phys_to_logical(phys: (u32, u32), scale: f64) -> (f64, f64) {
     }
 }
 
-/// 分段耗时（秒），由 [`VireoWindow::draw`] 回传。
+/// 分段耗时（秒），由 [`crate::window::VireoWindow::draw`] 回传。
 ///
 /// 新流程（render thread 独占 surface 帧循环）：
 /// - `configure_secs`：本帧 `surface.configure`（未 configure 时为 0）
@@ -182,7 +182,7 @@ pub struct DrawTimings {
     pub present_secs: f64,
 }
 
-/// 一次 [`VireoWindow::draw`] 的结果。
+/// 一次 [`crate::window::VireoWindow::draw`] 的结果。
 #[derive(Clone, Copy, Debug)]
 pub struct DrawReport {
     /// 本帧结局（presented / skipped / failed）
@@ -213,7 +213,7 @@ pub enum RenderAdvice {
     Unthrottled,
 }
 
-/// 一次 [`VireoWindow::draw`] 的结局。
+/// 一次 [`crate::window::VireoWindow::draw`] 的结局。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawOutcome {
     /// 已 acquire → submit → present 完成一帧。

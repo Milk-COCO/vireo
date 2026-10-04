@@ -192,7 +192,7 @@ impl TextEntry {
 /// 文本条目列表，存储一组待渲染的文本。
 ///
 /// 通过 `draw_text(&mut list, …)` / `push` 等添加条目；
-/// 经 [`DrawBatch`] 时优先用 `batch.text` 等以捕获 transform。
+/// 经 [`crate::render::DrawBatch`] 时优先用 `batch.text` 等以捕获 transform。
 ///
 /// 内部维护文字画笔 [`TextTextureState`]：由 batch 的 `set_texture` / `set_uv`
 /// 更新，在每次 push 时冻结到条目；混合画笔（`blend_state` / `blend_constant`）

@@ -37,7 +37,7 @@
 //! - **targetSdk 35+ 强制 edge-to-edge**：内容延伸到系统栏下方，应用无法退出
 //!   （API 36 起彻底不可退出）。此时 [`WindowExtAndroid::set_system_bars`] 的
 //!   `hide(systemBars)` 可能被平台忽略，用
-//!   [`WindowExtAndroid::system_bars_visible`] 查实际效果。
+//!   [`WindowExtAndroid::effective_system_bars`] 查实际效果。
 //! - **桌面窗口化模式下 caption bar 永远可见**，即使开了沉浸式（Android 大屏行为）。
 //! - Android 官方明确「**不要在个人设备上永久隐藏系统栏**」，沉浸式应给用户滑动唤回。
 //!
@@ -94,8 +94,8 @@
 //! 切换到 GameActivity 后该前提不成立（真机已确认搜狗输入法 `onStartInput` 连上），
 //! 该阻塞已解除。
 //!
-//! 反过来，桌面 `WindowLevel` 的 `AlwaysOnBottom` 在 Android **没有**对应档
-//! （低于 `TYPE_APPLICATION` 的都是系统保留窗口），所以 [`WindowLevel`] 是按
+//! 反过来，桌面 `VireoWindowLevel` 的 `AlwaysOnBottom` 在 Android **没有**对应档
+//! （低于 `TYPE_APPLICATION` 的都是系统保留窗口），所以 [`VireoWindowLevel`] 是按
 //! Android 的 `LayoutParams.type` 重新表达的，不是硬套 winit 四档。
 //!
 //! ## 参考 manifest
@@ -482,7 +482,7 @@ pub enum DisplayOrientation {
 ///
 /// # 权限
 ///
-/// [`WindowLevel::Overlay`] 需要 manifest 声明
+/// [`VireoWindowLevel::Overlay`] 需要 manifest 声明
 /// `android.permission.SYSTEM_ALERT_WINDOW`，**且**用户已在系统「显示在其他应用
 /// 上层」里授权。未授权时 [`WindowExtAndroid::set_window_level`] 会失败
 /// （`WindowManager.BadTokenException`）——vireo 不代用户跳授权设置页。
@@ -494,7 +494,7 @@ pub enum DisplayOrientation {
 /// `TYPE_APPLICATION` 的都是系统保留窗口）。所以这里按 Android 的 `type`
 /// 重新表达，不硬套 winit 的四档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WindowLevel {
+pub enum VireoWindowLevel {
     /// 普通应用窗口（`TYPE_APPLICATION`）。系统默认值。
     #[default]
     Normal,
@@ -502,14 +502,14 @@ pub enum WindowLevel {
     /// （`TYPE_APPLICATION_OVERLAY`，API 26+）。**需权限，见上。**
     Overlay,
     /// 系统弹窗级（`TYPE_SYSTEM_ALERT`）。**API 26 起已废弃**，
-    /// 官方文档要求非系统应用改用 [`WindowLevel::Overlay`]；保留仅为兼容老系统。
+    /// 官方文档要求非系统应用改用 [`VireoWindowLevel::Overlay`]；保留仅为兼容老系统。
     SystemAlert,
     /// 附着对话框（`TYPE_APPLICATION_ATTACHED_DIALOG`）：按顶层窗口布局，
     /// 而不是作为容器子窗口。
     AttachedDialog,
 }
 
-impl WindowLevel {
+impl VireoWindowLevel {
     fn to_android(self) -> i32 {
         match self {
             Self::Normal => api::TYPE_APPLICATION,
@@ -844,7 +844,7 @@ impl VireoWindow {
 
     /// 把一段 JNI 逻辑投递到 Android UI 线程执行（系统 UI 改动必须在 UI 线程）。
     /// 失败只打 warn——setter 的 `Result` 只表达「能不能发起」，实际生效用
-    /// `system_bars_visible()` 之类查询（SDL 的 request/confirm 模型）。
+    /// `effective_system_bars()` 之类查询（SDL 的 request/confirm 模型）。
     fn post_to_java_thread<F>(&self, what: &'static str, f: F)
     where
         F: FnOnce(&mut jni::Env, &jni::objects::JObject<'_>) -> JRes<()> + Send + 'static,
@@ -966,7 +966,7 @@ impl VireoWindow {
 /// **setter 一律返回 `Result`**：Android 上「不支持」意味着「需要 JNI 而未实现」，
 /// 是框架 invariant 缺失，不能静默 no-op（参照 SDL 的
 /// 「just a request, it can be denied」模型）。`Ok(())` 只表示请求已投递到 UI 线程，
-/// 实际是否生效用 [`system_bars_visible`](Self::system_bars_visible) 查。
+/// 实际是否生效用 [`effective_system_bars`](Self::effective_system_bars) 查。
 ///
 /// **getter 返回具体值**：这些是每帧热路径（音游 UI 本来就每帧重建），失败时打
 /// `log::warn!` 并返回零值 / 空列表。返回 `Option` 的表示「平台查不到」。
@@ -1028,7 +1028,7 @@ pub trait WindowExtAndroid {
     /// **注意**：[`SystemBars::NONE`] 是「一个都不隐藏」，不是「全隐藏」。
     ///
     /// **targetSdk 35+ 强制 edge-to-edge**，此时系统可能忽略 `hide(systemBars)`；
-    /// 用 [`system_bars_visible`](Self::system_bars_visible) 查实际效果。
+    /// 用 [`effective_system_bars`](Self::effective_system_bars) 查实际效果。
     fn set_system_bars(&self, bars: SystemBars) -> Result<(), VireoError>;
 
     /// 上次**请求**的系统栏集合（本地缓存，不查询平台）。
@@ -1042,8 +1042,18 @@ pub trait WindowExtAndroid {
     /// 上次**请求**的 behavior（本地缓存）。
     fn system_bar_behavior(&self) -> SystemBarBehavior;
 
-    /// 系统栏**实际**是否可见。`None` = 平台查不到（API < 30 无可靠查询）。
-    fn system_bars_visible(&self) -> Option<bool>;
+    /// 系统栏**实际**可见状态，逐条返回。`None` = 平台查不到（API < 30 无可靠查询）。
+    ///
+    /// 与 [`set_system_bars`](Self::set_system_bars) 的**请求值**对照，可以确认
+    /// 系统是否照办、或被 ROM / 用户手势改掉 —— 对应 SDL 的
+    /// 「just a request, it can be denied」模型。
+    ///
+    /// 返回值只含 `STATUS` / `NAVIGATION` / `CAPTION` 三类里**当前可见**的那些：
+    /// 全可见 = `SystemBars::ALL`，全隐藏 = `SystemBars::NONE`。
+    ///
+    /// ⚠️ 这是**活读** `WindowInsets.isVisible(type)`，逐类查 3 次 JNI。
+    /// 它是诊断 / 对齐用的，别放进每帧几十次的热路径。
+    fn effective_system_bars(&self) -> Option<SystemBars>;
 
     // ---- 布局模式 ----
 
@@ -1099,20 +1109,20 @@ pub trait WindowExtAndroid {
 
     /// 窗口层级（`WindowManager.LayoutParams.type`）。
     ///
-    /// ⚠️ [`WindowLevel::Overlay`] 需要 `SYSTEM_ALERT_WINDOW` 权限**且**用户已授权，
+    /// ⚠️ [`VireoWindowLevel::Overlay`] 需要 `SYSTEM_ALERT_WINDOW` 权限**且**用户已授权，
     /// 否则系统抛 `BadTokenException`。但那个异常发生在**稍后的 UI 线程**上
     /// （本方法是 fire-and-forget，见 trait 级说明），所以**不会**变成返回的 `Err` ——
     /// `Ok(())` 只表示「请求已投递」。失败表现为 `log::warn!` 一行 + 层级没生效。
     ///
     /// 要确认是否真的生效，读 [`window_level`](Self::window_level)（活读
     /// `LayoutParams.type`）—— 它返回 `None` 就是没设上。
-    fn set_window_level(&self, level: WindowLevel) -> Result<(), VireoError>;
+    fn set_window_level(&self, level: VireoWindowLevel) -> Result<(), VireoError>;
 
     /// 当前**实际**生效的窗口层级；`type` 是系统保留值时返回 `None`。
     ///
     /// 与 [`WindowExtAndroid::display_cutout_mode`] 一致走活读（`LayoutParams.type`），
     /// 不走本地缓存——层级有可能被平台或第三方库改掉。
-    fn window_level(&self) -> Option<WindowLevel>;
+    fn window_level(&self) -> Option<VireoWindowLevel>;
 
     // ---- 文本输入（IME）------------------------------------------------
 
@@ -1276,13 +1286,13 @@ impl WindowExtAndroid for VireoWindow {
         self.android_requested().system_bar_behavior
     }
 
-    fn system_bars_visible(&self) -> Option<bool> {
+    fn effective_system_bars(&self) -> Option<SystemBars> {
         if sdk() < api::SDK_INSETS_CONTROLLER {
             return None;
         }
         let app = match self.android_app() {
             Ok(a) => a,
-            Err(e) => return warn_getter("system_bars_visible", e),
+            Err(e) => return warn_getter("effective_system_bars", e),
         };
         match with_activity(app, |env, activity| {
             let window = get_window(env, activity)?;
@@ -1290,26 +1300,30 @@ impl WindowExtAndroid for VireoWindow {
             let Some(insets_obj) = get_root_insets(env, &decor)? else {
                 return Ok(None);
             };
-            let status = env
-                .call_method(
-                    &insets_obj,
-                    jni_str!("isVisible"),
-                    jni_sig!("(I)Z"),
-                    &[jni::objects::JValue::Int(api::STATUS_BARS as i32)],
-                )?
-                .z()?;
-            let nav = env
-                .call_method(
-                    &insets_obj,
-                    jni_str!("isVisible"),
-                    jni_sig!("(I)Z"),
-                    &[jni::objects::JValue::Int(api::NAVIGATION_BARS as i32)],
-                )?
-                .z()?;
-            Ok(Some(status || nav))
+            // 逐类查，不能只查 status/nav 两类 —— caption bar（API 30+ 才有）
+            // 单独可见时是真实状态，旧实现会把它整个丢掉。
+            let mut bits = 0i32;
+            for kind in [
+                api::STATUS_BARS as i32,
+                api::NAVIGATION_BARS as i32,
+                api::CAPTION_BAR as i32,
+            ] {
+                let visible = env
+                    .call_method(
+                        &insets_obj,
+                        jni_str!("isVisible"),
+                        jni_sig!("(I)Z"),
+                        &[jni::objects::JValue::Int(kind)],
+                    )?
+                    .z()?;
+                if visible {
+                    bits |= kind;
+                }
+            }
+            Ok(Some(SystemBars::from_android_bits(bits)))
         }) {
             Ok(v) => v,
-            Err(e) => warn_getter("system_bars_visible", e),
+            Err(e) => warn_getter("effective_system_bars", e),
         }
     }
 
@@ -1520,7 +1534,7 @@ impl WindowExtAndroid for VireoWindow {
         Ok(())
     }
 
-    fn set_window_level(&self, level: WindowLevel) -> Result<(), VireoError> {
+    fn set_window_level(&self, level: VireoWindowLevel) -> Result<(), VireoError> {
         self.require_android("set_window_level")?;
         let raw = level.to_android();
         self.post_to_java_thread("set_window_level", move |env, activity| {
@@ -1555,7 +1569,7 @@ impl WindowExtAndroid for VireoWindow {
         Ok(())
     }
 
-    fn window_level(&self) -> Option<WindowLevel> {
+    fn window_level(&self) -> Option<VireoWindowLevel> {
         let app = match self.android_app() {
             Ok(a) => a,
             Err(e) => return warn_getter("window_level", e),
@@ -1576,7 +1590,7 @@ impl WindowExtAndroid for VireoWindow {
             let v = env
                 .get_field(&attrs, jni_str!("type"), jni_sig!("I"))?
                 .i()?;
-            Ok(WindowLevel::from_android(v))
+            Ok(VireoWindowLevel::from_android(v))
         }) {
             Ok(v) => v,
             Err(e) => warn_getter("window_level", e),
@@ -1768,19 +1782,19 @@ mod tests {
 
         // 四个档位与 android 常数一一对应，且 round-trip 无损
         for lvl in [
-            WindowLevel::Normal,
-            WindowLevel::Overlay,
-            WindowLevel::SystemAlert,
-            WindowLevel::AttachedDialog,
+            VireoWindowLevel::Normal,
+            VireoWindowLevel::Overlay,
+            VireoWindowLevel::SystemAlert,
+            VireoWindowLevel::AttachedDialog,
         ] {
-            assert_eq!(WindowLevel::from_android(lvl.to_android()), Some(lvl));
+            assert_eq!(VireoWindowLevel::from_android(lvl.to_android()), Some(lvl));
         }
-        assert_eq!(WindowLevel::default(), WindowLevel::Normal);
+        assert_eq!(VireoWindowLevel::default(), VireoWindowLevel::Normal);
 
         // 系统保留 type（如 TYPE_PHONE=2002 / TYPE_STATUS_BAR=2000）不应被误认
-        assert_eq!(WindowLevel::from_android(2002), None);
-        assert_eq!(WindowLevel::from_android(2000), None);
-        assert_eq!(WindowLevel::from_android(1), None); // TYPE_BASE_APPLICATION
+        assert_eq!(VireoWindowLevel::from_android(2002), None);
+        assert_eq!(VireoWindowLevel::from_android(2000), None);
+        assert_eq!(VireoWindowLevel::from_android(1), None); // TYPE_BASE_APPLICATION
     }
 
     #[test]

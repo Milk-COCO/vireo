@@ -431,7 +431,7 @@ impl TextRenderer {
         )
     }
 
-    /// 同 [`render_range`]，但在 `set_pipeline` 之后设置 stencil reference（避免被重置）。
+    /// 同 [`Self::render_range`]，但在 `set_pipeline` 之后设置 stencil reference（避免被重置）。
     pub fn render_range_with_stencil_ref(
         &self,
         atlas: &TextAtlas,

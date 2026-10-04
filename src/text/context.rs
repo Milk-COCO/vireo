@@ -131,7 +131,7 @@ impl TextContext {
         self.text_renderer.set_pipeline(pipeline);
     }
 
-    /// 按帧粗选：无 DS 或默认 Test（细粒度用 [`ensure_text_stencil_mode`]）。
+    /// 按帧粗选：无 DS 或默认 Test（细粒度用 `Self::ensure_text_stencil_mode`）。
     pub fn ensure_text_ds(&mut self, device: &Device, use_stencil: bool) {
         self.ensure_text_stencil_mode(
             device,

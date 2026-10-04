@@ -179,6 +179,26 @@ where
     App::new(main)
 }
 
+/// [`android_main_entry`] 的「指定 wgpu 后端」版，供
+/// `#[vireo::main(descriptor = ...)]` 在 Android 上使用。
+///
+/// 与桌面版的差别只有一点：Android 上 wgpu 只靠 `InstanceDescriptor::backends`
+/// 决定候选后端（没有别的默认来源），所以 `backends` 里必须显式包含 `VULKAN`
+/// ——否则 wgpu 会按 `Backends::default()` 协商，可能落到未验证的 GLES 路径。
+#[doc(hidden)]
+#[cfg(target_os = "android")]
+pub fn android_main_entry_with_descriptor<F, Fut>(
+    android_app: crate::android::AndroidApp,
+    desc: wgpu::InstanceDescriptor,
+    main: F,
+) where
+    F: FnOnce(App) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _ = ANDROID_APP.set(android_app);
+    App::with_descriptor(desc, main)
+}
+
 impl App {
     /// 进程入口（宏风格）：OS 主线程构造 `App`，`vireo-main` 线程跑用户 future，
     /// OS 主线程跑 winit 事件循环；阻塞到进程退出。

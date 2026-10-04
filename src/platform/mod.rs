@@ -10,6 +10,10 @@
 pub mod windows;
 #[cfg(not(target_os = "windows"))]
 /// Windows 存根（非 Windows 目标编译时的空实现，保持跨平台 API 兼容）。
+// 这里的每个符号都只为「让 `window/mod.rs` 不必到处 `#[cfg(windows)]`」而存在，
+// 在非 Windows 目标上必然没有任何调用方 —— 这不是死代码，是编译期占位。
+// 同理适用于下面 `nc_tx`（只有 Windows 的 NC API 会读它）。
+#[allow(dead_code)]
 pub mod windows {
     //! 提供与 `windows.rs` 相同的公开符号，使上层 `window/mod.rs`
     //! 无需 `#[cfg(windows)]` 即可调用，cfg 只在 `mod` 门控。
@@ -41,13 +45,6 @@ pub mod windows {
     }
 
     pub fn win_hwnd(_window: &winit::window::Window) -> Option<isize> {
-        None
-    }
-    pub(crate) fn win_hwnd_stub(_window: &winit::window::Window) -> Option<isize> {
-        None
-    }
-    // 别名，供 window/mod.rs 的 `win_hwnd` 导入兼容
-    pub(crate) fn win_hwnd_isize(_window: &winit::window::Window) -> Option<isize> {
         None
     }
     pub fn nc_get_regions(_hwnd: isize) -> Option<Vec<crate::nc::NonClientRegion>> {
@@ -82,7 +79,7 @@ pub mod android;
 ///
 /// **无条件编译**（换算逻辑是纯函数，需要在桌面 `cargo test --lib` 里真跑起来；
 /// 挂进 `android` 的话单测永不执行）。桌面非 test 构建下部分项无人调用，
-/// 故模块内有 `allow(dead_code)`。由 [`android`] re-export，非安卓那边
+/// 故模块内有 `allow(dead_code)`。由 `android` re-export，非安卓那边
 /// `android` 模块不存在。
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod android_text_input;

@@ -300,9 +300,9 @@ pub(crate) enum MaterialState {
 ///
 /// | 创建方法 | group 3 资源 |
 /// |---------|-------------|
-/// | [`App::material`] | 无 group 3 |
-/// | [`App::material_with_resources`] | 描述符驱动：引擎自动建 BGL + 注入 WGSL + 名字 API |
-/// | [`App::material_manual`] | 用户自管 BGL（见 `custom_material_manual` 示例） |
+/// | [`crate::app::App::material`] | 无 group 3 |
+/// | [`crate::app::App::material_with_resources`] | 描述符驱动：引擎自动建 BGL + 注入 WGSL + 名字 API |
+/// | [`crate::app::App::material_manual`] | 用户自管 BGL（见 `custom_material_manual` 示例） |
 ///
 /// 前两者是 99% 场景的入口。`material_manual` 仅当需要自定义 BGL layout
 ///（第三方 shader / 已有 wgpu 代码）时用。
@@ -403,8 +403,8 @@ impl Material {
     }
 
     /// 是否带自定义 vertex shader。
-    /// 决定 shape path 走 mesh（[Vertex]）还是 instance layout（[QuadVertex, ShapeInstance] /
-    /// [GeoVertex, GeoInstance]）。Fragment-only material 在 SDF/Geo batch 上可走 instance 路径；
+    /// 决定 shape path 走 mesh（[`Vertex`](crate::gpu::Vertex)）还是 instance layout（`QuadVertex` / `ShapeInstance` /
+    /// `GeoVertex` / `GeoInstance`）。Fragment-only material 在 SDF/Geo batch 上可走 instance 路径；
     /// 带 custom VS 时必须走 mesh（VS 与 instance 字段契约不一致）。
     pub fn has_custom_vertex_shader(&self) -> bool {
         self.shape_vertex_source.is_some()

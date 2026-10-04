@@ -348,7 +348,7 @@ pub struct DrawBatch {
     /// 对本 batch 全部形状/文字/子树统一**左乘**（渲染期应用到 `transform_table`，
     /// 不落盘进顶点/实例）；子树继承（`flatten_events` 递归累计祖先 view）。
     ///
-    /// 与 [`Self::transform`]（状态机，record 时逐形状烘焙）正交：`view` 是属性，
+    /// 与 `Self::transform`（状态机，record 时逐形状烘焙）正交：`view` 是属性，
     /// flatten/draw 时整批一次消费，零 record 副作用。`Transform::IDENTITY` 是自然缺省
     /// （非 `Option`：`None` 与 `Some(IDENTITY)` 等价）。
     pub view: Transform,
@@ -1125,7 +1125,7 @@ impl DrawBatch {
     }
 
     /// 两段式诊断：CPU mesh 顶点数 / instance 参数数 / geo-instance 参数数 / 粒子数。
-    /// draw call 数见渲染器 [`Renderer::last_draw_calls`]。
+    /// draw call 数见渲染器 [`crate::render::Renderer::last_draw_calls`]。
     pub fn shape_stats(&self) -> ShapeStats {
         ShapeStats {
             mesh_vertices: self.vertices.len(),
@@ -2282,10 +2282,10 @@ impl DrawBatch {
     }
 
     /// 直接设置 shape 用 bind group（高级用法）。
-    /// `None` 与 [`set_texture`]`(None)` 相同：后续形状走白纹理。
+    /// `None` 与 [`Self::set_texture`]`(None)` 相同：后续形状走白纹理。
     ///
     /// **文字**：无法从裸 bind group 取出 view，会清空文字画笔贴图
-    ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`set_texture`]。
+    ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`Self::set_texture`]。
     pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
@@ -3418,7 +3418,7 @@ impl DrawBatch {
         self.texts.push_indexed(text, pos, def, ov, idx);
     }
 
-    /// 使用 [`StableText`] 直接绘制（位置 pos + 覆盖 ov；字号等已在创建时定型）。
+    /// 使用 [`crate::text::StableText`] 直接绘制（位置 pos + 覆盖 ov；字号等已在创建时定型）。
     pub fn text_stable(
         &mut self,
         stable: &crate::text::StableText,

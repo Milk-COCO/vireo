@@ -19,7 +19,7 @@ pub struct CustomGlyph {
     /// The color of this glyph (only relevant if the glyph is rendered with the
     /// type [`ContentType::Mask`])
     ///
-    /// Set to `None` to use [`crate::TextArea::default_color`].
+    /// Set to `None` to use [`crate::glyphon::TextArea::default_color`].
     pub color: Option<Color>,
     /// If `true`, then this glyph will be snapped to the nearest whole physical
     /// pixel and the resulting `SubpixelBin`'s in `RasterizationRequest` will always
