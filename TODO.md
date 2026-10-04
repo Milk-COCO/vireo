@@ -5,6 +5,64 @@
 
 ---
 
+## 环境
+
+### WSA（Windows Subsystem for Android）**不能**替代真机测 vireo
+
+2026-10-06 逐项排查后的定论。**已放弃这条路**，记在这里是为了别再走一遍。
+
+**表面症状**：`adb install` 成功后启动即崩，logcat 里
+
+```
+vireo gpu: no adapter found
+E/platform: DRM_IOCTL_VIRTGPU_CONTEXT_INIT failed with Invalid argument
+E/platform: virtgpu backend not enabling VIRTGPU_PARAM_CREATE_GUEST_HANDLE
+```
+
+**根因**：宿主没把可用 GPU 透传给 guest。`/dev/dri/card0` + `renderD128` 设备节点
+存在但打不开，`ro.hardware.egl=emulation`（EGL 在软件模式）。失败发生在
+**内核层**，在 wgpu 之下。
+
+**这不是能靠 vireo 配置绕过的**。已试过且全部同样结果：
+
+| 尝试 | 结果 |
+|---|---|
+| 默认协商（`App::new()`） | `no adapter found` |
+| `Backends::GL \| VULKAN`（走 ANGLE） | `no adapter found` |
+| `Backends::ALL` + `InstanceFlags::DEBUG` | `no adapter found` |
+
+**排查过程中被证伪的四个假设**（都曾以为是原因）：
+
+1. ❌「机器不支持虚拟化，WSA 起不来」—— `VirtualizationFirmwareEnabled=False`
+   在**任何客户机**上都读 False，不能当证据。WSA 服务一直在跑
+   （`vmmemWSA` / `WsaService` / `WsaClient`）。
+2. ❌「APK 装不上（ABI 不匹配）」—— `abilist` 含 `arm64-v8a`，实测装得上。
+   （但 x86_64 仍值得带，见下）
+3. ❌「GPU 后端没选对」—— 三个后端全试过。
+4. ❌「Vulkan ICD 缺失」—— `C:\Users\obe\Documents\WSA\vulkan_dzn.dll`（5.63 MB）
+   在，D3D12→Vulkan 转译层是有的，是 virtgpu 挂了。
+
+**要重新启用这条路**：换一台**裸机或有 GPU 直通**的 Windows。WSA 在真实
+NVIDIA/AMD/Intel GPU 上是能跑 wgpu 应用的。
+
+### 顺带修掉的真问题：`INSTALL_FAILED_VERSION_DOWNGRADE`
+
+旧 xbuild 版本（`versionCode=16777472`，xbuild 用时间戳推导）的 APK 还装在设备上，
+而我们换 gradle 后是 `versionCode=1` → **所有 `adb install -r` 都被拒**，
+报错 `Update version code 1 is older than current 16777472`。
+
+- 绕过：`adb uninstall <pkg>` 后重装
+- 模板默认 `versionCode = 1` 对新应用没问题，但如果用户是从 xbuild 迁移过来的，
+  第一次装必须先卸载
+
+### 多 ABI：模板已支持，但仍建议带 x86_64
+
+`examples/android/build.gradle` 现在是 ABI→triple 映射（`arm64-v8a` + `x86_64`）。
+加 ABI 只要加一行。虽然本机 WSA 用不上，但**换一台有 GPU 的机器就能立刻测**，
+不必重新改构建配置。
+
+---
+
 ## Android
 
 ### 16 KB page size 未保证（上架门槛，非优化）
@@ -69,24 +127,30 @@ Vulkan 驱动差异都要实测）。属于独立的工程动作，不该插在 
 
 ---
 
-### emoji 可能无法渲染（待真机确认）
+### emoji **确认无法渲染**（2026-10-06 真机实测）
 
-**现状**：Android 正文字体白名单只收 `NotoSans` 前缀（+ `ttf/otf/ttc`），
-`NotoColorEmoji` 不在其中。cosmic-text 需要**显式加载**彩色位图字体
-（CBDT/CBLC 格式），vireo 没做。所以 emoji 大概率渲不出来（可能显示为空白/
-豆腐块/单色替代）。
+**实测结论**：小米 25098RA98C / HyperOS / Android 16，`draw_text` 画
+`🦊🎵😀👨‍👩‍👧`，**渲染成 6 个豆腐块**（带 X 的方框 = `.notdef` 字形）。
+拉丁字母 `EMOJI:` 正常。所以**不是「可能」，是真的不行**。
 
-**为什么没做**：需要在真机上看到实际结果才能确定严重程度 —— 有些 ROM 会用
-系统 fallback 链补上，有些不会。如果真机确认能渲染（ROM 自己 fallback 了），
-那这条根本不是问题，直接删掉白名单里不需要动。
+**根因**：Android 正文字体白名单只收 `NotoSans` 前缀（+ `ttf/otf/ttc`），
+`NotoColorEmoji` 不在其中。即使在白名单里也不够 —— cosmic-text 需要
+**显式加载**彩色位图字体（CBDT/CBLC），vireo 的字体通道只走灰度 outline。
 
-**做之前需要**：一台能连的 Android 真机。在 pong 工程里 `draw_text` 画一串
-emoji（`🦊🎵😀👨‍👩‍👧‍👦`）看输出。
+**要做的话**：给 Android 字体加载加一条彩色字体通道。已知难点：
 
-**如果确认不能渲染**：方案是给 Android 字体加载加一条彩色字体通道 ——
-`fontdb` 能解析 CBDT 但 cosmic-text 的 rasterizer 不直接用，
-可能需要走 `cosmic_text::Font` 的 `font_metrics` + 自定义 raster，
-工程量不小。**先确认再评估。**
+- `fontdb` 能解析 CBDT/CBLC 元数据，但 cosmic-text 的 rasterizer 产出灰度位图，
+  彩色位图得走它自己的 `swash`/纹理路径
+- glyphon 的 glyph atlas 是单通道（`R8`？）还是 RGBA，决定了改造成本
+- 要考虑 tint / 两色 emoji（`COLRv1`）—— Android 上是单色为主，优先级可低
+
+**成本评估**：**不是小改动**。在确认「业务真的需要 emoji」之前不建议启动 ——
+音游 / 工具类 UI 里 emoji 通常不是必需项。**若不需要，这条可以永远不做。**
+
+**验证方法已就绪**（下次要复现直接照抄）：在应用里 `draw_text` 画
+`"EMOJI: 🦊🎵😀👨‍👩‍👧"`，`adb shell screencap -p` 抓屏看是否豆腐块。
+判据是**像素**，不是 logcat —— logcat 只会告诉你字符串提交了，
+看不出有没有字形（这次就差点被 logcat 误导）。
 
 ---
 

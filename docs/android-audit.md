@@ -341,3 +341,34 @@ assertion `left != right` failed: IME 不应混进安全区，走独立 getter
 
 **验证**：test --lib 260 passed（9 个从「不跑」变成「跑且通过」）；
 桌面 + Android target 均零 warning；cargo doc 零警告；模板 Android 检查通过
+### 真机复验（2026-10-06，小米 25098RA98C / HyperOS / Android 16）
+
+**P2-3 `effective_system_bars()`** — 真实数据：
+
+```
+bars=SystemBars(7)  visBars=Some(SystemBars(2))  ← 请求全隐藏，实际只剩导航栏可见
+safe.top=45.51  pad.top=0.0  ime.bottom=0.0     ← 三值模型区分正确
+cut_rects=[Rect { x:804.98, y:179.91, w:45.51, h:24.53 }]  ← 挖孔矩形，横屏时正确移到右上
+orient=Landscape  scale=2.8125
+```
+
+这是旧 `system_bars_visible() -> Option<bool>` 拿不到的信息 —— 旧版只会说
+「有栏可见」，新版能说出**只有导航栏**。
+
+**P3 生命周期桥** — `onPause`/`onResume` 经 `RegisterNatives` 绑定成功
+（logcat 无 `Failed to register native method`）。切后台实测：
+
+| 状态 | CPU | 进程 |
+|---|---|---|
+| 前台 | 26.6% | 存活 |
+| 后台 | **0.0%** | 存活（RSS 稳定 171M，状态 S） |
+| 回前台 | 27.5% | 存活 |
+
+后台 0% CPU 且进程未死，排除了两个混淆项：logcat 对后台 app 的限流、
+Android 冻结后台进程。渲染线程是**自己**停的。
+
+**emoji — 确认无法渲染**（详见 `TODO.md`）。`🦊🎵😀👨‍👩‍👧` 渲染成 6 个豆腐块。
+
+> 教训：验证渲染**必须看像素**。logcat 只证明字符串提交了
+> （`[emoji] draw "..."` 正常打印），完全看不出有没有字形 ——
+> 中间差点据此得出「渲染正常」的错误结论。

@@ -17,40 +17,65 @@ plugins {
 //   这里生成的产物 lib<rustCrate>.so
 //   MainActivity.java 的 System.loadLibrary("<rustCrate>")
 def rustCrate = 'vireoandroid'
-def rustTargetTriple = 'aarch64-linux-android'
-def rustAbi = 'arm64-v8a'
+
+// ABI -> Rust target triple。要加 ABI 就往这里加一行，别的地方会自动跟上。
+//
+// ⚠️ **至少要两个 ABI**，否则一半的测试设备装不上：
+//
+// | ABI | 跑在哪 |
+// |---|---|
+// | `arm64-v8a` | 真机、ARM 云手机 |
+// | `x86_64`    | **Windows Subsystem for Android**（WSA 跑在 x86_64 主机上时原生就是这个）|
+//
+// 只发 arm64 的 APK 在 x86_64 的 WSA 上 `adb install` 直接
+// `INSTALL_FAILED_NO_MATCHING_ABIS` —— 系统按 ABI 过滤，跟 WSA 能不能跑无关。
+// 除非装了微软的「Android Subsystem for ARM64」翻译包，但那是按 CPU 型号挑的，
+// 别指望。
+def rustAbis = [
+    'arm64-v8a': 'aarch64-linux-android',
+    'x86_64'   : 'x86_64-linux-android',
+]
 
 def ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('NDK_HOME')
 
-tasks.register('cargoNdkBuild', Exec) {
-    group = 'build'
-    description = "cargo ndk -t ${rustAbi} build --release --lib（产出 lib${rustCrate}.so）"
-    workingDir projectDir
-    // 必须是 `--lib`：Android 只要 cdylib，`src/main.rs` 是 bin target，
-    // 里面是桌面入口，交叉链接会失败。
-    commandLine 'cargo', 'ndk', '-t', rustAbi, 'build', '--release', '--lib'
-    if (ndkHome != null) {
-        environment 'ANDROID_NDK_HOME', ndkHome
-        environment 'NDK_HOME', ndkHome
+rustAbis.each { abi, triple ->
+    tasks.register("cargoNdkBuild-${abi}", Exec) {
+        group = 'build'
+        description = "cargo ndk -t ${abi} build --release --lib（产出 lib${rustCrate}.so）"
+        workingDir projectDir
+        // 必须是 `--lib`：Android 只要 cdylib，`src/lib.rs` 是 lib target，
+        // 缺 `--lib` 会连带编译桌面 bin target 而交叉链接失败。
+        commandLine 'cargo', 'ndk', '-t', abi, 'build', '--release', '--lib'
+        if (ndkHome != null) {
+            environment 'ANDROID_NDK_HOME', ndkHome
+            environment 'NDK_HOME', ndkHome
+        }
     }
 }
 
 tasks.register('copyRustLibs') {
     group = 'build'
-    description = "把 lib${rustCrate}.so 拷进 jniLibs/${rustAbi}"
-    dependsOn 'cargoNdkBuild'
-    // 只拷需要的那个 ABI。jniLibs 下多余的 .so 会被打进 APK，
+    description = "把 lib${rustCrate}.so 拷进各 ABI 的 jniLibs/"
+    // 注意 `keySet()`：Groovy 里 `Map.collect { }` 迭代的是 **value**（这里是 triple），
+    // 直接 `rustAbis.collect` 会拼出 `cargoNdkBuild-aarch64-linux-android` 这种
+    // 不存在的任务名，表现为「构建时找不到依赖的任务」这种难懂的报错。
+    dependsOn rustAbis.keySet().collect { abi -> "cargoNdkBuild-${abi}" }
+    // 只拷构建过的那些 ABI。jniLibs 下多余的 .so 会被打进 APK，
     // 体积翻倍且某些机型会挑错库。
     doLast {
-        def src = file("$projectDir/target/${rustTargetTriple}/release/lib${rustCrate}.so")
-        if (!src.exists()) {
-            throw new GradleException(
-                "cargo 没产出 ${src}。先自己跑一遍 `cargo ndk -t ${rustAbi} build --release --lib` 看报错。")
+        rustAbis.each { abi, triple ->
+            def src = file("$projectDir/target/${triple}/release/lib${rustCrate}.so")
+            if (!src.exists()) {
+                throw new GradleException(
+                    "cargo 没产出 ${src}。先自己跑一遍 " +
+                    "`cargo ndk -t ${abi} build --release --lib` 看报错。")
+            }
+            def dstDir = file("$projectDir/src/main/jniLibs/${abi}")
+            dstDir.mkdirs()
+            copy { from src; into dstDir }
+            logger.lifecycle("lib${rustCrate}.so -> jniLibs/${abi} " +
+                             "(${(src.length() / 1024.0).round()} KB)")
         }
-        def dstDir = file("$projectDir/src/main/jniLibs/${rustAbi}")
-        dstDir.mkdirs()
-        copy { from src; into dstDir }
-        logger.lifecycle("lib${rustCrate}.so -> jniLibs/${rustAbi} (${src.length() / 1024} KB)")
     }
 }
 
@@ -75,7 +100,9 @@ android {
         versionName = '0.1.0'
 
         ndk {
-            abiFilters 'arm64-v8a'
+            // 只列实际构建的 ABI。多列但没构建 → APK 里那个目录是空的，
+            // 某些机型会因此挑错库。
+            abiFilters(*rustAbis.keySet().toList())
         }
     }
 
