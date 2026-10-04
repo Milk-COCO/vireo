@@ -1,0 +1,12 @@
+# gradle
+.gradle/
+build/
+local.properties
+
+# cargo / cargo-ndk
+target/
+src/main/jniLibs/
+
+# 不提交锁文件：vireo 仓库本身也不跟踪 Cargo.lock，且模板锁版本对使用者没意义。
+# （若你的 app 要可复现构建，拷走之后自行 `git add Cargo.lock` 提交即可。）
+Cargo.lock

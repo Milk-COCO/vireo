@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GameActivity 版本的 manifest。
+
+  与旧 `manifest.yaml`（xbuild）的三点差异，都是必须改的：
+
+  1. activity 是 Java 类 `MainActivity`（`extends GameActivity`）而不是
+     `android.app.lib_name` meta-data。GameActivity 是 gradle AAR 里的类，
+     manifest 只能这么声明。
+  2. theme 必须是 AppCompat 子主题（GameActivity 继承 AppCompatActivity）。
+  3. **不要**加 `android.app.lib_name` / `android_native_app_glue`：
+     android-activity 的构建脚本已把同名 .so 动态打进 cdylib，
+     否则会装进两套胶水层反而出问题。加载由 Java 侧 `System.loadLibrary` 负责。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="Vireo Android"
+        android:theme="@style/ActivityTheme"
+        android:hardwareAccelerated="true"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

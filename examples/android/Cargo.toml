@@ -1,0 +1,21 @@
+[package]
+name = "vireo-android-template"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立 package，不并进 vireo 仓库的构建（vireo 根没有 [workspace]，
+# 但显式声明让这个模板被拷到任何 workspace 里都不会被牵连）。
+[workspace]
+
+[lib]
+# 必须和 `MainActivity.java` 里的 `System.loadLibrary("vireoandroid")` 一致。
+# cargo crate 名用 `-`（合法），cdylib 的符号名要用 `_`。
+name = "vireoandroid"
+crate-type = ["cdylib"]
+
+[dependencies]
+# 拷到自己的项目时改成 git / path / 版本号：
+#   vireo = "0.1"                          # crates.io
+#   vireo = { git = "https://github.com/..." }
+vireo = { path = "../.." }

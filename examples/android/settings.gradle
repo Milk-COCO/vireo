@@ -1,0 +1,26 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+    plugins {
+        // 版本照抄 `rust-mobile/rust-android-examples` 的 `agdk-winit-wgpu` 模板，
+        // 那是「GameActivity + winit + wgpu」唯一经过验证的组合，vireo 同源。
+        //
+        // AGP 9 需要 **JDK 17+**。若报 Unsupported class file major version，
+        // 说明还在用 JDK 11 —— 改 JAVA_HOME，不要降 AGP。
+        id 'com.android.application' version '9.1.0'
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// 改成你自己的包名 / 应用名。
+rootProject.name = 'vireo-android-template'

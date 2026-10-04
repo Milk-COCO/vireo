@@ -1,0 +1,125 @@
+// vireo 的 Android 构建工程。
+//
+// ⚠️ 为什么不用 `xbuild` / `cargo-apk`：那套 apk 工具链假设宿主是 `NativeActivity`，
+//   而 vireo 为了**中文输入法**必须用 `AGDK GameActivity`（`NativeActivity` 没有
+//   `InputConnection`，拿不到 IME）。`GameActivity extends AppCompatActivity`，
+//   于是**必须**有 gradle + 两个 AAR 依赖 —— 纯 Cargo 的 apk 工具做不到。
+//
+// 权威参考：https://github.com/rust-mobile/rust-android-examples/tree/main/agdk-winit-wgpu
+
+plugins {
+    id 'com.android.application'
+}
+
+// ---- Rust cdylib 打包 --------------------------------------------------
+// 三者必须一致：
+//   Cargo.toml 的 [lib] name  =  <rustCrate>
+//   这里生成的产物 lib<rustCrate>.so
+//   MainActivity.java 的 System.loadLibrary("<rustCrate>")
+def rustCrate = 'vireoandroid'
+def rustTargetTriple = 'aarch64-linux-android'
+def rustAbi = 'arm64-v8a'
+
+def ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('NDK_HOME')
+
+tasks.register('cargoNdkBuild', Exec) {
+    group = 'build'
+    description = "cargo ndk -t ${rustAbi} build --release --lib（产出 lib${rustCrate}.so）"
+    workingDir projectDir
+    // 必须是 `--lib`：Android 只要 cdylib，`src/main.rs` 是 bin target，
+    // 里面是桌面入口，交叉链接会失败。
+    commandLine 'cargo', 'ndk', '-t', rustAbi, 'build', '--release', '--lib'
+    if (ndkHome != null) {
+        environment 'ANDROID_NDK_HOME', ndkHome
+        environment 'NDK_HOME', ndkHome
+    }
+}
+
+tasks.register('copyRustLibs') {
+    group = 'build'
+    description = "把 lib${rustCrate}.so 拷进 jniLibs/${rustAbi}"
+    dependsOn 'cargoNdkBuild'
+    // 只拷需要的那个 ABI。jniLibs 下多余的 .so 会被打进 APK，
+    // 体积翻倍且某些机型会挑错库。
+    doLast {
+        def src = file("$projectDir/target/${rustTargetTriple}/release/lib${rustCrate}.so")
+        if (!src.exists()) {
+            throw new GradleException(
+                "cargo 没产出 ${src}。先自己跑一遍 `cargo ndk -t ${rustAbi} build --release --lib` 看报错。")
+        }
+        def dstDir = file("$projectDir/src/main/jniLibs/${rustAbi}")
+        dstDir.mkdirs()
+        copy { from src; into dstDir }
+        logger.lifecycle("lib${rustCrate}.so -> jniLibs/${rustAbi} (${src.length() / 1024} KB)")
+    }
+}
+
+tasks.named('preBuild') { dependsOn 'copyRustLibs' }
+
+android {
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = 'com.example.vireoandroid'
+
+        // GameActivity 4.4.0 要 minSdk 31，别降。
+        minSdk = 31
+
+        // ⚠️ targetSdk 35 不是可选项：
+        //   `windowLayoutInDisplayCutoutMode`（挖孔/刘海）在 targetSdk < 35 时
+        //   被系统忽略，内容被 letterbox 到安全区里。真机验证过：
+        //   旧配置 2264×1080 letterbox，新配置 2392×1080 满宽。
+        targetSdk = 35
+
+        versionCode = 1
+        versionName = '0.1.0'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled = false
+            // 保留 Rust 符号：logcat / native backtrace 才能定位到 Rust 帧
+            debuggable true
+        }
+        release {
+            // ⚠️ 开 minify 前先读 platform/android.rs 顶部关于 R8 的警告：
+            // android-activity 的 GameActivity 依赖走反射，混淆会让 JNI 入口找不到类。
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    namespace = 'com.example.vireoandroid'
+
+    // ---- 16 KB page size（Android 15+ 强制）--------------------------------
+    // `useLegacyPackaging = false` ⇒ extractNativeLibs=false ⇒ .so 以 STORED 方式
+    // 打进 APK，由 APK zip 对齐到 16 KB。这是**必要条件**，不是优化。
+    //
+    // ⚠️ 但它**不充分**：真正的 16 KB 对齐要求 **NDK r28+**（r28 起默认
+    // `-z max-page-size=16384`）。本模板验证时用的是 NDK 26.3，**16 KB 未保证**。
+    // 上架 Google Play（2025-11 起）前请把 NDK 升到 r28+ 并实测：
+    //   adb shell getconf PAGE_SIZE   # 设备侧
+    //   zipalign -c -P 16 -v 4 app-release.apk
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+dependencies {
+    // GameActivity 继承 AppCompatActivity，**必须有** appcompat，
+    // 用非 AppCompat 主题会在运行时崩（找不到 AppCompat 定义的 attr）。
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // GameActivity 本体（含 game-text-input，提供 InputConnection）。
+    implementation 'androidx.games:games-activity:4.4.0'
+}

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      必须是 AppCompat 子主题：`GameActivity extends AppCompatActivity`，
+      用平台主题（`android:Theme.*`）会在运行时崩 —— AppCompat 定义的 attr 找不到。
+
+      `windowLayoutInDisplayCutoutMode=shortEdges` 让内容延伸到刘海/挖孔区。
+      ⚠️ 需要 **targetSdk >= 35** 才生效，低于 35 系统直接忽略这个值，
+      内容会被 letterbox 到安全区内（真机实测：2264×1080 vs 2392×1080）。
+
+      ⚠️ **绝对不要加 `android:windowFullscreen`**（这个坑非常隐蔽）：
+         MIUI / HyperOS 的 `MiuiMirrorInputMethodImpl` 会拒绝「全屏 + 强制显示输入法」
+         的组合，logcat 刷 `InsetsControlTarget invalid!`，`show_soft_input()` 返回 Ok 但
+         `mInputShown=false` / `mImeWindowVis=0` —— 键盘永远不弹，且没有任何 Java 异常。
+         沉浸式请在 Rust 侧用 `set_system_bars(SystemBars::ALL)`，那是有效的那条路。
+    -->
+    <style name="ActivityTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>
