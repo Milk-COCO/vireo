@@ -8,6 +8,26 @@ Or rather — **V**ault's **I**nterface and **R**endering **E**ngine for **O**pt
 
 And it's also a 2D GPU rendering library built on `wgpu` + `winit`.
 
+## Platform support
+
+| Platform | Status |
+|---|---|
+| Windows (DX12 / Vulkan) | ✅ thoroughly tested |
+| Linux (Vulkan) | 🟡 compiles, untested |
+| macOS (Metal) | 🟡 compiles, untested |
+| **Android** (Vulkan) | ✅ **tested on device** (HyperOS 16) |
+
+Android runs on `AGDK GameActivity` (winit's `android-game-activity` backend), which is why
+**CJK text input works** — `NativeActivity` has no `InputConnection` and simply cannot do it.
+
+Android-only extras (all in `vireo::platform::android`, compiled only there):
+immersive system-bar bitmask, **three-value safe area** (`safe_area` / `padding` / `ime_insets`),
+display-cutout handling, text input (incl. UTF-16↔UTF-8 index conversion), orientation lock /
+keep-screen-on / brightness / window level.
+
+⚠️ The Android **build chain differs from desktop**: it needs `cargo ndk` + a gradle project;
+`xbuild` / `cargo-apk` do **not** work. A copyable project template lives in `examples/android/`.
+
 ```bash
 cargo run --example hello
 ```

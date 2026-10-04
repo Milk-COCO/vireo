@@ -13,8 +13,28 @@
 //!
 //! ## 支持平台
 //!
-//! Windows（DX12 / Vulkan）、Linux（Vulkan）、macOS（Metal）。
-//! 目前仅在 Windows 上做过测试，其余平台未验证。
+//! | 平台 | 状态 |
+//! |---|---|
+//! | Windows（DX12 / Vulkan）| ✅ 充分测试 |
+//! | Linux（Vulkan）| 🟡 可编译，未实测 |
+//! | macOS（Metal）| 🟡 可编译，未实测 |
+//! | **Android** | ✅ **已实测**（HyperOS 16 + Vulkan，见下）|
+//!
+//! Android 上通过 `winit` 的 `android-game-activity` 后端 + `AGDK GameActivity` 运行，
+//! 因此**支持中文输入法**（`NativeActivity` 无 `InputConnection`，做不到）。
+//! 平台能力在 [`platform::android`]（仅该平台编译）：
+//!
+//! - **沉浸式 / 系统栏**：bitmask（可只隐藏状态栏）、滑动唤回行为
+//! - **安全区三值**：`safe_area`（物理最大遮挡）/ `padding`（当前可见遮挡）/
+//!   `ime_insets`（键盘）＋`cutouts()`（摄像头矩形）
+//! - **挖孔**：构建期 `windowLayoutInDisplayCutoutMode` + `targetSdk ≥ 35`
+//! - **文本输入**：UTF-16↔UTF-8 下标换算、`InputType` 6 档、状态回填
+//! - 朝向锁定 / 常亮 / 屏幕亮度 / 窗口层级
+//!
+//! ⚠️ **构建链与桌面不同**：需要 `cargo ndk` + gradle 工程（`GameActivity` 是
+//! `AppCompatActivity` 子类，theme 必须是 AppCompat 子主题，并依赖
+//! `androidx.games:games-activity` 这个 AAR）——**`xbuild` / `cargo-apk` 不适用**。
+//! 参考工程见仓库内 `examples/android/`。
 //!
 //! ## 快速上手
 //!
@@ -87,7 +107,7 @@
 //! | [`offscreen`] | 离屏渲染 canvas |
 //! | [`texture`] | 贴图加载与管理 |
 //! | [`nc`] | 非客户区 hit-test 类型 |
-//! | [`platform`] | 平台特化 API（`windows` / `macos`） |
+//! | [`platform`] | 平台特化 API（`windows` / `macos` / `android`） |
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod area;
 

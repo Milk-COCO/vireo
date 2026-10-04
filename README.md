@@ -8,6 +8,25 @@ Vireo 只是一种可爱的小鸟！
 
 当然，它也是基于 `wgpu` + `winit` 的 2D GPU 渲染库！
 
+## 平台支持
+
+| 平台 | 状态 |
+|---|---|
+| Windows（DX12 / Vulkan）| ✅ 充分测试 |
+| Linux（Vulkan）| 🟡 可编译，未实测 |
+| macOS（Metal）| 🟡 可编译，未实测 |
+| **Android**（Vulkan）| ✅ **已实测**（HyperOS 16）|
+
+Android 上用 `AGDK GameActivity`（`winit` 的 `android-game-activity` 后端），
+所以**支持中文输入法**——`NativeActivity` 没有 `InputConnection`，做不到这件事。
+
+额外提供（都在 `vireo::platform::android`，仅该平台编译）：
+沉浸式 / 系统栏 bitmask、**安全区三值**（`safe_area` / `padding` / `ime_insets`）、
+挖孔适配、文本输入（含 UTF-16↔UTF-8 下标换算）、朝向锁定 / 常亮 / 亮度 / 窗口层级。
+
+⚠️ Android 的**构建链与桌面不同**：需要 `cargo ndk` + gradle 工程，
+`xbuild` / `cargo-apk` 不适用。可直接复制的工程模板见 `examples/android/`。
+
 ```bash
 cargo run --example hello
 ```

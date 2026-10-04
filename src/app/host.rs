@@ -31,6 +31,19 @@ pub struct Runner {
     close_rx: mpsc::Receiver<usize>,
     hwnds: Vec<isize>,
     id_to_handle: FxHashMap<WindowId, usize>,
+    /// 每窗口的换算因子：`(实时 scale_factor, dpi_override)`。
+    ///
+    /// 存在的唯一理由：`InputCallbacks::on_touch` 在 **winit 线程**上派发，
+    /// 那里拿不到 `VireoWindow`（它住渲染线程），而 winit 的 `Touch::location`
+    /// 是**物理像素**。不除以有效因子，callback 路径在所有 scale≠1 的平台
+    /// （Windows 150% / Retina / Android 2.8x）都会给错坐标。
+    ///
+    /// 有效值 = `dpi_override.unwrap_or(scale_factor)`，与
+    /// `Renderer::new` 收到的 `scale`、`window/mod.rs` 轮询路径用的
+    /// `applied_dpi_override.unwrap_or(scale_factor)` 三者保持一致。
+    ///
+    /// `InputState::touches` 轮询路径由渲染线程自己算，不依赖这份缓存。
+    window_scale: FxHashMap<usize, (f64, Option<f64>)>,
     close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
     window_callbacks: Vec<crate::input::InputCallbacks>,
     default_icon: Option<Icon>,
@@ -43,6 +56,15 @@ pub struct Runner {
 impl Runner {
     fn handle_for(&self, window_id: WindowId) -> Option<usize> {
         self.id_to_handle.get(&window_id).copied()
+    }
+
+    /// 该窗口「物理像素 → 逻辑像素」的除数。未知窗口回退 `1.0`（等价于不换算，
+    /// 与 `scale=1.0` 的桌面行为一致，不会凭空引入偏移）。
+    fn effective_scale(&self, handle: usize) -> f64 {
+        self.window_scale
+            .get(&handle)
+            .and_then(|(sf, ov)| ov.or(Some(*sf)))
+            .unwrap_or(1.0)
     }
 
     fn send(&self, event: WinitEvent) {
@@ -179,6 +201,8 @@ impl Runner {
 
         let scale = desc.dpi_override.unwrap_or(window.scale_factor()) as f32;
         let dpi = window.scale_factor() as f32;
+        self.window_scale
+            .insert(handle, (window.scale_factor(), desc.dpi_override));
         let s = to_pixel_size(
             window.inner_size().width as f64,
             window.inner_size().height as f64,
@@ -392,6 +416,11 @@ impl ApplicationHandler for Runner {
                 });
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(entry) = self.window_scale.get_mut(&handle) {
+                    // 只更新实时 scale_factor；`dpi_override` 设了之后有效值固定不动
+                    // （vireo 的「逻辑==物理」模型，见 dpi.rs）。
+                    entry.0 = scale_factor;
+                }
                 self.send(WinitEvent::ScaleFactorChanged {
                     handle,
                     scale: scale_factor,
@@ -495,7 +524,11 @@ impl ApplicationHandler for Runner {
                 self.send(WinitEvent::CursorLeft { handle });
             }
             WindowEvent::Touch(touch) => {
-                let mapped = crate::input::map_touch_event(&touch, 1.0);
+                // winit 的 `Touch::location` 是**物理像素**；`TouchEvent` 文档
+                // 承诺逻辑坐标，必须除以有效 scale。原先硬编码 1.0，
+                // 在所有 scale≠1 的平台都给错坐标（与轮询路径不一致）。
+                let sf = self.effective_scale(handle);
+                let mapped = crate::input::map_touch_event(&touch, sf);
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                     for cb in &mut cbs.on_touch {
                         cb(&mapped);
@@ -622,6 +655,7 @@ pub(crate) fn run_blocking(
             close_rx: channels.close_rx,
             hwnds: Vec::new(),
             id_to_handle: FxHashMap::default(),
+            window_scale: FxHashMap::default(),
             close_hooks: FxHashMap::default(),
             window_callbacks: Vec::new(),
             default_icon,

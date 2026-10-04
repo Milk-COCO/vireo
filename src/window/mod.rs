@@ -1650,16 +1650,48 @@ impl VireoWindow {
     /// 开启后窗口才会收到 [`Ime`](crate::input::Ime) 事件；preedit 期间**不再收到**
     /// `KeyboardInput`。应在期待文本输入时开启（例如输入框聚焦），否则关闭。
     ///
-    /// 1:1 封装 winit [`Window::set_ime_allowed`](winit::window::Window::set_ime_allowed)。
+    /// 桌面端 1:1 封装 winit [`Window::set_ime_allowed`](winit::window::Window::set_ime_allowed)，
     /// 内部由 winit 排队到窗口线程执行，任意线程可调用。
+    ///
+    /// ## Android：这不是你该用的 API
+    ///
+    /// winit 的 Android 实现把 `allowed=true` 转成 `show_soft_input(true)`，
+    /// 而该标志是 `SHOW_IMPLICIT`，语义为「**仅当输入法被隐式请求时才显示**」。
+    /// 游戏里没有聚焦的 Android View，永远不会有隐式请求 → **键盘永远不弹**，
+    /// 而且**不返回任何错误**，看起来像「GameActivity 的 IME 不工作」。
+    ///
+    /// 所以这里转发到 [`platform::android::WindowExtAndroid::show_soft_input`] /
+    /// `hide_soft_input`（内部传 `show_implicit = false` 强制显示，真机验证有效）。
+    ///
+    /// Android 上还需要先调 [`platform::android::WindowExtAndroid::set_input_type`]
+    /// 声明输入类型（必须在弹键盘之前），且文本输入是**每帧轮询**
+    /// [`platform::android::WindowExtAndroid::text_input_state`] 而非事件驱动
+    /// —— Android 的 winit 不产生 `Ime` 事件。详见该模块文档。
     ///
     /// ## Platform-specific
     ///
+    /// - **Android：** 本方法只控制键盘显隐，**收不到 `Ime` 事件**；用上面的
+    ///   `platform::android` 系列 API。
     /// - **macOS:** IME 必须开启才能收到 dead-key 序列组合的文本输入。
-    /// - **iOS / Android:** 控制软键盘显示/隐藏。
+    /// - **iOS:** 控制软键盘显示/隐藏。
     /// - **Web / Orbital:** 不支持。
     /// - **X11:** 开启 IME 后 compose 期间不再报告 dead keys。
     pub fn set_ime_allowed(&self, allowed: bool) {
+        // winit 的 Android 路径带 `SHOW_IMPLICIT`，游戏场景永不生效（见上方文档）。
+        #[cfg(target_os = "android")]
+        {
+            use crate::platform::android::WindowExtAndroid;
+            let r = if allowed {
+                self.show_soft_input()
+            } else {
+                self.hide_soft_input()
+            };
+            if let Err(e) = r {
+                log::warn!("set_ime_allowed({allowed}) on Android failed: {e}");
+            }
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
         self.inner.set_ime_allowed(allowed);
     }
 

@@ -252,6 +252,15 @@ pub(crate) fn map_modifiers(mods: &winit::keyboard::ModifiersState) -> Modifiers
 }
 
 pub(crate) fn map_touch_event(touch: &winit::event::Touch, scale_factor: f64) -> TouchEvent {
+    // 除数护栏：`scale_factor <= 0` 会产出 inf/NaN 坐标。
+    // 实际路径上 `dpi_override` 非正值已被 `dpi.rs` 视为 None（走系统 scale），
+    // 而 `Window::scale_factor()` 也不会返回 0 —— 但除法这里仍兜一层，
+    // 免得将来新增调用点时静默产出 NaN 坐标（NaN 参与布局比较会静默失效）。
+    let sf = if scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
     let phase = match touch.phase {
         winit::event::TouchPhase::Started => TouchPhase::Started,
         winit::event::TouchPhase::Moved => TouchPhase::Moved,
@@ -261,8 +270,8 @@ pub(crate) fn map_touch_event(touch: &winit::event::Touch, scale_factor: f64) ->
     TouchEvent {
         id: touch.id,
         phase,
-        x: (touch.location.x / scale_factor) as f32,
-        y: (touch.location.y / scale_factor) as f32,
+        x: (touch.location.x / sf) as f32,
+        y: (touch.location.y / sf) as f32,
         force: touch.force.map(|f| match f {
             winit::event::Force::Calibrated {
                 force,
@@ -374,4 +383,58 @@ mod tests {
     }
 
     // ---- InputCallbacks ----
+
+    // ---- 触摸坐标单位换算 ----
+
+    fn touch_at(x: f64, y: f64) -> winit::event::Touch {
+        winit::event::Touch {
+            device_id: winit::event::DeviceId::dummy(),
+            phase: winit::event::TouchPhase::Started,
+            location: winit::dpi::PhysicalPosition::new(x, y),
+            force: None,
+            id: 0,
+        }
+    }
+
+    #[test]
+    fn map_touch_event_divides_by_scale_factor() {
+        // 回归测试：`InputCallbacks::on_touch` 曾把 scale 硬编码成 1.0，
+        // 导致所有 scale≠1 的平台（Windows 150% / Retina / Android 2.8x）
+        // callback 路径给的是**物理像素**，与 `TouchEvent` 文档（逻辑坐标）
+        // 以及 `InputState::touches` 轮询路径都不一致。
+        let t = touch_at(300.0, 150.0);
+
+        // scale = 1.0：恒等（这是桌面 100% 缩放，所以该 bug 长期未暴露）
+        let e = map_touch_event(&t, 1.0);
+        assert_eq!((e.x, e.y), (300.0, 150.0));
+
+        // scale = 2.0：必须减半
+        let e = map_touch_event(&t, 2.0);
+        assert_eq!((e.x, e.y), (150.0, 75.0));
+
+        // 真机 Android 值（HyperOS density 2.8125）
+        let e = map_touch_event(&t, 2.8125);
+        assert!((e.x - 300.0 / 2.8125).abs() < 1e-3);
+        assert!((e.y - 150.0 / 2.8125).abs() < 1e-3);
+    }
+
+    #[test]
+    fn map_touch_event_preserves_id_phase_force() {
+        let mut t = touch_at(10.0, 20.0);
+        t.id = 42;
+        t.phase = winit::event::TouchPhase::Moved;
+        t.force = Some(winit::event::Force::Normalized(0.75));
+        let e = map_touch_event(&t, 2.0);
+        assert_eq!(e.id, 42);
+        assert_eq!(e.phase, TouchPhase::Moved);
+        assert_eq!(e.force, Some(0.75));
+    }
+
+    #[test]
+    fn map_touch_event_scale_zero_does_not_panic() {
+        // 防御：scale 为 0 会产生 inf/NaN 坐标。虽不该发生（dpi_override 挡了非正值），
+        // 但除法路径值得挡一下。
+        let e = map_touch_event(&touch_at(300.0, 150.0), 0.0);
+        assert!(e.x.is_finite() && e.y.is_finite(), "不能产生 inf/NaN");
+    }
 }
