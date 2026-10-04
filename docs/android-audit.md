@@ -297,3 +297,47 @@ README 两份同步加「平台支持」小节。
 **仍未覆盖**：`onStop` / `onDestroy` / `onSaveInstanceState` / `onTrimMemory`。
 需要的话照 `nativeOnPause` 的写法自己加（Rust 侧只要在
 `register_native_methods` 的表里多一行 + 一个 `extern "system" fn`）。
+### P2-1 修复记录：9 个从未运行的测试
+
+**背景**：`platform::android` 整个被 `#[cfg(target_os = "android")]` 门控，所以它内部
+的 `#[cfg(test)] mod tests` 在桌面的 `cargo test --lib` 里**从未被编译过**，更别说执行。
+那 9 个测试验证的全是纯计算（Insets 换算、SystemBars bitmask、AOSP 常量对齐、
+`SAFETY_MASK` 组成、朝向编码），**根本不需要 JVM** —— 等于白写。
+
+**做法**：新增 `src/platform/android_pure.rs`（无条件编译），搬入
+`mod api`（AOSP 常量）/ `Insets` / `SystemBars` / `SystemBarBehavior` /
+`DisplayCutoutMode` / `Orientation` / `DisplayOrientation` / `VireoWindowLevel` /
+`SAFETY_MASK` / `to_logical` + 那 9 个测试。`android.rs` 用
+`pub use super::android_pure::{...}` 回导，公开 API 路径不变。
+参照同目录 `android_text_input`（同一个动机）。
+
+**搬迁保真**：用 difflib 逐行对比「从 android.rs 删除的行」与「新文件的内容」，
+归一化 4 处有意的可见性放宽（`fn` → `pub(crate) fn`，因为搬走后 JNI 那半边调不到
+私有方法）后 —— **只有 3 处差异**：文件头文档、一处分隔注释、一处断言修正（见下）。
+其余 499 行逐字节一致。
+
+**搬完立刻发现：一个测试是坏的。**
+
+```
+test platform::android_pure::tests::safety_mask_includes_display_cutout ... FAILED
+assertion `left != right` failed: IME 不应混进安全区，走独立 getter
+```
+
+`assert_ne!(SAFETY_MASK & api::IME, 0, "IME 不应混进安全区")` —— 断言的是
+「IME **在**安全区里」，与它自己的提示语**正好相反**。正确写法是
+`assert_eq!(SAFETY_MASK & api::IME, 0, ...)`。
+
+生产代码一直是对的（`SAFETY_MASK = STATUS|NAVIGATION|CAPTION|CUTOUT`），
+只有断言写反了。**因为这个测试从来没跑过，所以这个反向断言存活至今。**
+
+这条正是「先搬出来跑一遍」的价值：不是「搬完多几个测试」，而是**搬完立刻暴露了
+一个潜伏的测试缺陷**。若当初有 CI 跑 Android target 的 test，第一天就会发现。
+
+同批修了另外两个搬迁副作用：
+1. re-export 一开始被插到模块 `//!` 文档头**之前**，导致 Android target 编译报
+   `expected outer doc comment`（桌面不编译该模块所以看不出来）→ 已移到文档头之后
+2. 新模块里指向 `WindowExtAndroid::*` / `super::android` 的 intra-doc link 在桌面
+   必然悬空（那些 item 被 cfg 门控）→ 改成代码 span
+
+**验证**：test --lib 260 passed（9 个从「不跑」变成「跑且通过」）；
+桌面 + Android target 均零 warning；cargo doc 零警告；模板 Android 检查通过

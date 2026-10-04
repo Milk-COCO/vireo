@@ -92,3 +92,14 @@ pub mod android_text_input;
 /// 背景与方案取舍见模块文档。
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod android_lifecycle;
+
+/// Android 平台 API 的**纯逻辑**部分（`Insets` / `SystemBars` bitmask / AOSP
+/// 常量 / 各枚举 / 安全区换算）。
+///
+/// **无条件编译**，为的是让其中的单测能在 `cargo test --lib`（桌面）里跑到 ——
+/// `android.rs` 整个被 `cfg(target_os = "android")` 门控，它内部的
+/// `#[cfg(test)] mod tests` 在开发机上**从未执行过**。
+///
+/// 分界标准与逐项归属见该模块文档。
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod android_pure;

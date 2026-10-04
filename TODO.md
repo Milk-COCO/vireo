@@ -90,29 +90,6 @@ emoji（`🦊🎵😀👨‍👩‍👧‍👦`）看输出。
 
 ---
 
-### `android.rs` 的 8 个单测在桌面上跑不到
-
-**现状**：`src/platform/android.rs` 整个是 `#[cfg(target_os = "android")]`
-（`platform/mod.rs` 里门控），所以 `cargo test --lib` 里那 8 个
-`#[cfg(test)]` 测试**从未在开发机上执行过** —— 只有跑 Android target 的 test
-才会跑。
-
-**后果**：那些测试验证的是纯逻辑（Insets 计算、SystemBars bitmask、
-Android 常量与 AOSP 对齐、`SAFETY_MASK` 组成等），完全不需要 JVM。
-但它们跟着模块一起被门控掉了，等于**白写**。
-
-**怎么修**：照 `android_text_input.rs` 的做法 —— 把纯逻辑部分抽到
-`src/platform/android_pure.rs`（无条件编译），Android 相关代码引用它。
-参考 `platform/mod.rs` 里 `android_text_input` 的注释写法。
-
-**为什么还没做**：需要先分清 `android.rs` 1780 行里哪些是纯逻辑、哪些碰 JNI。
-`Insets` / `SystemBars` / `DisplayCutoutMode` / `Orientation` / `VireoWindowLevel`
-的 `to_android`/`from_android` 应该是纯逻辑；`read_insets_logical` /
-`post_to_java_thread` / 所有 `JniErr` 是 JNI。是一次纯搬运，但要有回归保障
-（搬完先确认 8 个测试真的跑起来了 —— 现在连「它们能过」都不知道）。
-
----
-
 ## 非 Android
 
 （暂无）
