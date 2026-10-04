@@ -29,7 +29,9 @@
 //! 字符中间，panic 或切出乱码 —— Slint 就在这上面崩过（issue #7203）。
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 /// Android `InputType` 位常量（逐个核实自 `android-activity` `src/input.rs`）。
 mod api {
@@ -59,6 +61,13 @@ mod api {
     pub const FLAG_NO_FULLSCREEN: u32 = 0x0200_0000;
     /// `EditorInfo.IME_FLAG_NO_ACCESSORY_ACTION`（0x20000000）
     pub const FLAG_NO_ACCESSORY_ACTION: u32 = 0x2000_0000;
+    /// `EditorInfo.IME_FLAG_NO_EXTRACT_UI`（0x10000000）
+    ///
+    /// AOSP 文档说它「可能被弃用，推荐改用 `NO_FULLSCREEN`」，但两者语义**不等价**：
+    /// `NO_FULLSCREEN` 是「请求不要进全屏模式」，`NO_EXTRACT_UI` 是「不要显示
+    /// extracted-text UI」。当输入法**无视** `NO_FULLSCREEN` 时（实测 HyperOS 搜狗
+    /// 横屏就是），只有 `NO_EXTRACT_UI` 还能直接把那块白条关掉。
+    pub const FLAG_NO_EXTRACT_UI: u32 = 0x1000_0000;
 }
 
 /// vireo 固定下发的 `imeOptions` 位。
@@ -87,7 +96,18 @@ mod api {
 ///
 /// 注意：`IME_FLAG_NO_FULLSCREEN` 的文档明确写着「不是保证，某些输入法可能忽略」，
 /// 所以它是 best-effort —— 若某个输入法无视它，仍可能出现 extract 条。
-pub const IME_OPTIONS: u32 = api::FLAG_NO_FULLSCREEN | api::FLAG_NO_ACCESSORY_ACTION;
+///
+/// # 为什么还要 `NO_EXTRACT_UI`（真机实测后补）
+///
+/// HyperOS + 搜狗横屏实测：**无视** `NO_FULLSCREEN`，照样进 extract mode，
+/// 顶部弹全宽白条 + 框架「完成」按钮，且 IME 窗口 `MATCH_PARENT` 吃掉整屏
+/// → `ime()` inset 恒为 0、manifest 的 `adjustResize` 形同虚设
+/// （可见区只剩顶部 128 物理像素）。加上 `NO_EXTRACT_UI` 后白条消失。
+///
+/// 两个 flag 语义不等价，不能互相替代：`NO_FULLSCREEN` 是「别进全屏模式」，
+/// `NO_EXTRACT_UI` 是「别显示 extracted-text UI」。前者被无视时只有后者管用。
+pub const IME_OPTIONS: u32 =
+    api::FLAG_NO_FULLSCREEN | api::FLAG_NO_EXTRACT_UI | api::FLAG_NO_ACCESSORY_ACTION;
 
 // ---------------------------------------------------------------------------
 // 下标换算（纯函数）
@@ -353,17 +373,63 @@ impl InputType {
 // 软键盘显隐
 // ---------------------------------------------------------------------------
 
-// 「用户已请求显示键盘」——`show_soft_input` 需要记这个，因为
-// `text_input_state` 只有在 IME 真正接管后才有内容。
-static IME_WANTED: AtomicBool = AtomicBool::new(false);
+// 「用户已请求显示键盘」+ 「上次请求时刻」打包在一个原子量里：
+// bit0 = want，bit8.. = 毫秒时间戳（相对进程内某个固定基准）。
+//
+// 为什么要去重：`show_soft_input` / `hide_soft_input` 最终都要 post 到 **Java 主线程**。
+// 在帧回调里每帧无条件调用会用 ImeTracker / handler 队列把主线程淹掉——
+// 实测模板每帧 `hide_soft_input()` 直接 `Input dispatching timed out`
+// （`Waited 5000ms for FocusEvent(hasFocus=false)`）被系统 ANR 杀掉。
+static IME_STATE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn set_ime_wanted(want: bool) {
-    IME_WANTED.store(want, Ordering::Release);
+/// 同一请求被抑制的时间戳窗口（仅用于诊断 / 将来做节流，当前不做周期性重发）。
+pub(crate) const IME_DEDUPE_WINDOW_MS: u64 = 200;
+
+fn now_ms() -> u64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// 返回**这次请求是否需要真正下发到 Java 主线程**（纯跳变去重）。
+///
+/// 只在 `want` 与上次不同才返回 `true`。`show_soft_input` / `hide_soft_input` 都用
+/// 这一条：帧回调里每帧无条件调用会用 ImeTracker / handler 队列把 Java 主线程淹掉
+/// —— 实测模板每帧 `hide_soft_input()` 直接 `Input dispatching timed out`
+/// （`Waited 5000ms for FocusEvent(hasFocus=false)`）被系统 ANR 杀掉。
+///
+/// # 为什么**不能**加「周期性重发」兜底
+///
+/// 曾为「用户按返回键收起键盘 → `want` 陈旧 → 键盘再也弹不出」加过 200ms 重发窗口，
+/// 结果是**每 200ms 就重新 post 一次 `show`**。输入法每次收到 show 都会重置组合态，
+/// 真机症状：① 输入字符时候选词和 preedit 一闪即消；② 按输入法的收起按钮会在
+/// 200ms 内被重新拉起，用户按不掉（除非点到 vireo 其他区域让 `want` 变 false）。
+///
+/// 组合态是**易碎**的：显示动作本身就会清掉它。因此这里只做跳变去重，
+/// 「键盘被系统收起后如何恢复」交给调用方显式重置（见 `WindowExtAndroid::show_soft_input`
+/// 文档），而不是靠引擎周期性骚扰输入法。
+pub(crate) fn set_ime_wanted(want: bool) -> bool {
+    let now = now_ms();
+    let prev = IME_STATE.load(Ordering::Acquire);
+    let prev_want = prev & 1 != 0;
+    if prev_want == want {
+        return false;
+    }
+    IME_STATE.store((now << 8) | u64::from(want), Ordering::Release);
+    true
+}
+
+/// 强制把「用户是否请求显示键盘」重置为 `false`。
+///
+/// 仅供测试构造「陈旧意图」场景；生产路径用
+/// [`WindowExtAndroid::hide_soft_input`]（它会把 `want` 打成 false）代替。
+#[cfg(test)]
+pub(crate) fn reset_ime_wanted() {
+    IME_STATE.store(now_ms() << 8, Ordering::Release);
 }
 
 /// 应用是否请求过显示软键盘（「请求值」，不代表 IME 真的在显示）。
 pub fn ime_wanted() -> bool {
-    IME_WANTED.load(Ordering::Acquire)
+    IME_STATE.load(Ordering::Acquire) & 1 != 0
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +662,13 @@ mod tests {
         );
         assert_eq!(api::FLAG_NO_FULLSCREEN, 0x0200_0000);
         assert_ne!(
+            IME_OPTIONS & api::FLAG_NO_EXTRACT_UI,
+            0,
+            "还必须带 IME_FLAG_NO_EXTRACT_UI —— HyperOS 搜狗横屏实测无视 \
+             NO_FULLSCREEN，只认这个才关得掉 extract 白条"
+        );
+        assert_eq!(api::FLAG_NO_EXTRACT_UI, 0x1000_0000);
+        assert_ne!(
             IME_OPTIONS & api::FLAG_NO_ACCESSORY_ACTION,
             0,
             "vireo 自绘输入 UI，不需要输入法自带的功能按钮（「执行」的来源）"
@@ -613,5 +686,59 @@ mod tests {
         assert_ne!(bits & 0x0008_0000, 0, "NO_SUGGESTIONS");
         assert_eq!(bits & 0x0010_0000, 0, "绝不能开转写候选");
         assert_eq!(bits & 0x0000_8000, 0, "绝不能开自动纠错");
+    }
+
+    #[test]
+    fn ime_requests_dedupe_on_transition() {
+        // `show_soft_input` / `hide_soft_input` 靠这个返回值决定要不要 post 到
+        // Java 主线程。帧回调里每帧无条件调用会淹掉主线程 → ANR
+        //（实测 `Waited 5000ms for FocusEvent(hasFocus=false)`）。
+        set_ime_wanted(false); // 建立基线，避免与全局状态互相影响
+
+        // 纯跳变去重（`hide` 走这条）：相同意图永不重复 post。
+        assert!(!set_ime_wanted(false), "初始已是隐藏意图，不应下发");
+        assert!(set_ime_wanted(true), "false→true 是跳变");
+        assert!(!set_ime_wanted(true), "重复 true（hide 语义）必须去重");
+        assert!(ime_wanted(), "请求值应被记住");
+        assert!(set_ime_wanted(false), "true→false 是跳变");
+        assert!(!ime_wanted());
+        assert!(!set_ime_wanted(false), "回到隐藏后再次抑制");
+    }
+
+    #[test]
+    fn ime_request_is_never_repeated_while_state_unchanged() {
+        // 回归：曾用 200ms 窗口做「周期性重发」，导致输入法每 200ms 重置一次组合态
+        // ——真机症状是候选词 / preedit 一闪即消、且用户按不掉输入法收起键。
+        // 组合态易碎，**任何重复 show 都是破坏**，所以必须是纯跳变去重：
+        // 同状态无论过多久都返回 false。
+        set_ime_wanted(false); // 基线
+        assert!(set_ime_wanted(true), "false→true 下发");
+        assert!(!set_ime_wanted(true), "立刻重复：必须抑制");
+        assert!(!set_ime_wanted(true), "下一帧重复：必须抑制");
+
+        // 时间流逝也不能让重复请求重新下发（不存在周期性重发）。
+        std::thread::sleep(std::time::Duration::from_millis(IME_DEDUPE_WINDOW_MS + 20));
+        assert!(
+            !set_ime_wanted(true),
+            "超过窗口也**不得**重新下发 —— 周期性重发会清掉 preedit / 候选词"
+        );
+
+        assert!(set_ime_wanted(false), "true→false 下发");
+    }
+
+    #[test]
+    fn reset_ime_wanted_allows_show_again_after_user_dismissed() {
+        // 用户用系统收起键把键盘收了：我们观测不到，`want` 陈旧为 true。
+        // 正确恢复 = reset + show，而不是靠引擎周期性重发去骚扰输入法。
+        set_ime_wanted(false);
+        assert!(set_ime_wanted(true));
+        assert!(!set_ime_wanted(true), "陈旧状态下重复 show 被跳过");
+
+        reset_ime_wanted();
+        assert!(!ime_wanted(), "reset 后请求值应为 false（键盘确实没显示）");
+        assert!(
+            set_ime_wanted(true),
+            "reset 后 show 必须能真正下发，否则键盘再也弹不出来"
+        );
     }
 }

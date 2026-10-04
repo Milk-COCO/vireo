@@ -251,6 +251,23 @@ pub(crate) fn map_modifiers(mods: &winit::keyboard::ModifiersState) -> Modifiers
     m
 }
 
+/// 逻辑像素触摸坐标 → `VireoWindow` 内部 `mouse_pos` 字段的**物理像素**。
+///
+/// `mouse_pos` 字段按约定存物理像素（`WindowEvent::CursorMoved` 给的就是物理），
+/// 而 [`map_touch_event`] 的产物**已经是逻辑像素**。两条路径的坐标空间必须在这里
+/// 对齐，否则 `mouse_pos()` 的 `.physical()` / `.logical()` 双表示会一边对一边错。
+///
+/// 历史上这里出过两次错：① 触摸完全不写 `mouse_pos`，Android 上恒 `(-1,-1)`；
+/// ② 又除了第二遍 scale，`tap(844,551)` 在 scale 2.8125 下变成 `(300,196)` → `(37.9,24.8)`。
+pub(crate) fn touch_logical_to_mouse_pos(lx: f32, ly: f32, scale_factor: f64) -> (f32, f32) {
+    let sf = if scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    ((lx as f64 * sf) as f32, (ly as f64 * sf) as f32)
+}
+
 pub(crate) fn map_touch_event(touch: &winit::event::Touch, scale_factor: f64) -> TouchEvent {
     // 除数护栏：`scale_factor <= 0` 会产出 inf/NaN 坐标。
     // 实际路径上 `dpi_override` 非正值已被 `dpi.rs` 视为 None（走系统 scale），
@@ -436,5 +453,38 @@ mod tests {
         // 但除法路径值得挡一下。
         let e = map_touch_event(&touch_at(300.0, 150.0), 0.0);
         assert!(e.x.is_finite() && e.y.is_finite(), "不能产生 inf/NaN");
+    }
+
+    #[test]
+    fn touch_to_mouse_pos_round_trips_through_scale() {
+        // `mouse_pos` 字段存物理，`TouchEvent` 存逻辑 —— 两者必须能互转，
+        // 否则 `mouse_pos()` 的 `.physical()`/`.logical()` 双表示会一边对一边错。
+        // 真机 tap 物理 (844,551)、scale 2.8125 → 逻辑 (300.1,195.9)。
+        let sf = 2.8125;
+        let logical = touch_logical_to_mouse_pos(300.1, 195.9, sf);
+        assert!(
+            (logical.0 - 844.0).abs() < 1.0 && (logical.1 - 551.0).abs() < 1.0,
+            "逻辑 (300.1,195.9) 应还原成物理 (844,551)，实得 {logical:?}"
+        );
+
+        // 完整链路：winit 物理 touch → map_touch_event（逻辑）→ mouse_pos（物理）。
+        let e = map_touch_event(&touch_at(844.0, 551.0), sf);
+        let back = touch_logical_to_mouse_pos(e.x, e.y, sf);
+        assert!(
+            (back.0 - 844.0).abs() < 1.0 && (back.1 - 551.0).abs() < 1.0,
+            "往返后应回到原始物理坐标，实得 {back:?}"
+        );
+        // 关键回归：逻辑值不能被二次除法缩小 2.8125 倍（历史 bug）。
+        assert!(
+            (e.x - 300.1).abs() < 1.0,
+            "map_touch_event 之后必须已是逻辑坐标，实得 {}",
+            e.x
+        );
+    }
+
+    #[test]
+    fn touch_to_mouse_pos_scale_zero_does_not_panic() {
+        let p = touch_logical_to_mouse_pos(300.0, 150.0, 0.0);
+        assert!(p.0.is_finite() && p.1.is_finite(), "不能产生 inf/NaN");
     }
 }

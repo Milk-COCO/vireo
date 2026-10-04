@@ -733,9 +733,31 @@ pub trait WindowExtAndroid {
     ///
     /// 内部用 `show_implicit = false`：游戏没有聚焦的 View，隐式请求永不发生，
     /// 传隐式会导致键盘永远不弹。getter见 [`ime_wanted`](ime_wanted)。
+    ///
+    /// # 可以每帧调，但不能周期性重发
+    ///
+    /// 调用按「请求值是否变化」去重，只在真正要弹时才 post 一次到 Java 主线程。
+    /// 帧回调里每帧无条件 post 会把主线程淹掉 → `Input dispatching timed out` ANR。
+    ///
+    /// **引擎不会周期性重发**（曾加过 200ms 重发窗口，副作用是输入法每次收到
+    /// show 都重置组合态：候选词 / preedit 一闪即消，且用户按不掉收起键）。
+    ///
+    /// # 用户用系统按钮收起键盘后怎么办
+    ///
+    /// 键盘被收起时我们**观测不到**（`android-activity` 既不给 IME 可见性也不给
+    /// 会话状态），`want` 会变陈旧，之后的 `show_soft_input()` 会被跳变去重跳过。
+    /// 判定与恢复：
+    ///
+    /// - 判断键盘是否还在：看 [`WindowExtAndroid::ime_insets`] 的 `bottom`，
+    ///   大于 0 即键盘占着屏幕。
+    /// - 想重新拉起：先 [`WindowExtAndroid::hide_soft_input`]（把陈旧意图清成
+    ///   false）再 [`WindowExtAndroid::show_soft_input`]，两次都是跳变，都会真下发。
     fn show_soft_input(&self) -> Result<(), VireoError>;
 
     /// 收起软键盘。
+    ///
+    /// **可以每帧调**：纯跳变去重，初始意图即「未请求显示」，所以未聚焦时
+    /// 每帧调用**不会**产生任何 Java 主线程 post。
     fn hide_soft_input(&self) -> Result<(), VireoError>;
 
     /// 声明这里期望输入什么（`EditorInfo.inputType`），决定输入法的候选栏形态。
@@ -1204,18 +1226,29 @@ impl WindowExtAndroid for VireoWindow {
 
     fn show_soft_input(&self) -> Result<(), VireoError> {
         let app = self.require_android("show_soft_input")?;
-        set_ime_wanted(true);
-        // `show_implicit = false`（flags = 0）= **强制显示**。
-        // 传 `true` 会带上 `SHOW_IMPLICIT`，语义是「仅当输入法被隐式请求时才显示」——
-        // 而游戏里没有聚焦的 View，永远不会有隐式请求，键盘就永远不弹（实测）。
-        app.show_soft_input(false);
+        // 纯跳变去重，且**永不周期性重发** —— 输入法每次收到 show 都会重置组合态，
+        // 真机上就是「候选词 / preedit 一闪即消」+「用户按不掉收起键」。
+        if set_ime_wanted(true) {
+            // `show_implicit = false`（flags = 0）= **强制显示**。
+            // 传 `true` 会带上 `SHOW_IMPLICIT`，语义是「仅当输入法被隐式请求时才显示」——
+            // 而游戏里没有聚焦的 View，永远不会有隐式请求，键盘就永远不弹（实测）。
+            app.show_soft_input(false);
+        }
         Ok(())
     }
 
     fn hide_soft_input(&self) -> Result<(), VireoError> {
         let app = self.require_android("hide_soft_input")?;
-        set_ime_wanted(false);
-        app.hide_soft_input(false);
+        // 纯跳变去重：初始 `want` 就是 false（没请求显示），键盘本来就没显示，
+        // 帧回调里每帧 `hide_soft_input()` 也不会 post 一次 —— 这正是
+        // 模板在未聚焦时每帧调它导致 ANR 的那一条路径。
+        //
+        // 这里也是「清掉陈旧请求值」的天然时机：调用方按文档说的
+        // 「hide 再 show」把键盘拉回来时，本函数负责把 `want` 打成 false，
+        // 于是紧接着的 `show_soft_input()` 是跳变、会真正下发。
+        if set_ime_wanted(false) {
+            app.hide_soft_input(false);
+        }
         Ok(())
     }
 

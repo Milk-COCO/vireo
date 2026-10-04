@@ -84,6 +84,51 @@
 
 ### Fixed / 修复
 
+- Android：`vireo_macro` 依赖指向 crates.io 而非仓库内的 `vireo_macro/`，导致本地宏
+  改动**完全不生效**（改源码后构建 0.65s 不重编、宏内 `eprintln!` 一次不打印）。
+  模板 `cdylib` 因此缺 `android_main` 导出符号，真机 `dlopen failed: cannot locate
+  symbol "android_main"` 直接崩。改为 `vireo_macro = { path = "vireo_macro", version = "0.1" }`。
+- Android：帧回调里每帧调用 `show_soft_input` / `hide_soft_input` 会把 Java 主线程
+  handler 淹掉，真机 **5 秒 ANR**（`Input dispatching timed out` /
+  `Waited 5000ms for FocusEvent(hasFocus=false)`），系统随后 `send 9` 杀进程。
+  根因是这两个 API 无条件 `post` 到主线程，且已有 `IME_WANTED` 状态却没用来去重。
+  现在两者都是**纯跳变去重**（未聚焦时每帧调用**零** post，同状态重复调用永不重复
+  post），均可安全每帧调用。实测未聚焦时 `ImeTracker` 会话数从数百个降到 3 个。
+  「用户用系统按钮收起键盘」这一观测不到的状态不靠引擎周期性重发兜底（见下条），
+  而是在文档里给出显式恢复方式：`hide_soft_input()` 再 `show_soft_input()`。
+- Android：**重复 `show_soft_input` 会清掉输入法的组合态**。为兜底「键盘被收起后
+  请求值陈旧」曾加 200ms 重发窗口，真机症状：① 输入字符时候选词与 preedit 一闪即消；
+  ② 按输入法的收起键会在 200ms 内被重新拉起，只有点到 vireo 其他区域（`focused=false`
+  走 hide）才停。组合态易碎，**任何重复 show 都是破坏**，故重发窗口已完全移除。
+- Android：触摸坐标被**双重换算**。`WinitEvent::Touch` 里存的已是逻辑像素
+  （`host.rs` 收到事件时按有效 scale 除过），`apply_input_event` 又除了一遍 scale ——
+  HyperOS(scale 2.8125) 上 `tap(844,551)` 变成 `(37.9,24.8)`，任何命中判断都失效，
+  表现为「点输入框键盘不弹」。另外触摸**完全不更新** `mouse_pos`，而 Android 上点击
+  不产生 `CursorMoved`，该字段恒为 `(-1,-1)`。现在触摸点也写入 `mouse_pos`（按
+  `CursorMoved` 的约定存物理像素），新增 `touch_logical_to_mouse_pos` 纯函数 +
+  往返测试锁死两个坐标空间的契约。
+- Android：输入法无视 `IME_FLAG_NO_FULLSCREEN`，横屏进入 AOSP **fullscreen extract
+  mode**，顶部弹全宽白条 + 框架字符串按钮，IME 窗口 `MATCH_PARENT` 吃掉整屏 →
+  `ime_insets.bottom` 恒为 0、`adjustResize` 形同虚设。该 flag 的 AOSP 文档本就写明
+  「不是保证，某些输入法可能忽略」，而 `IME_FLAG_NO_EXTRACT_UI`（`0x10000000`）与它
+  **语义不等价**（前者「别显示 extracted-text UI」，后者「别进全屏模式」），
+  前者被无视时只有后者管用，故一并下发。白条随之消失。
+- Android：`gradle -PndkVersion=` 被静默忽略。`project.findProperty('ndkVersion')`
+  撞上 AGP 注入的同名约定属性（AGP 9.1 默认 NDK 恰好是 `28`），于是去找不存在的
+  `sdk/ndk/28`。改用 `gradle.startParameter.projectProperties`（只含命令行 `-P`）。
+  另注：PowerShell 调 `.bat` 会在 `=` 后首个 `.` 截断参数，需写成
+  `'-PndkVersion=28.2.13676358'`。
+
+### Changed / 变更
+
+- `vireo_macro` 生成的 Android 入口改为 `pub extern "C" fn android_main`
+  （原为 Rust ABI 的 `pub fn`；`#[no_mangle]` 本就足够导出，此项是 ABI 正确性改进）。
+- Android 模板补上缺失的 gradle wrapper（`gradlew` / `gradlew.bat` /
+  `gradle-wrapper.jar`）——README 一直让用户跑 `./gradlew`，但脚本并不存在，
+  模板此前并非真正「可复制」。
+
+### Fixed / 修复
+
 - Android 字体：全量加载 `/system/fonts`（真机 230 个文件）会把装饰体带进字体库，
   cosmic-text 默认家族 `"Arial"` 在 Android 命中不到 → 回退到「排序后第一个 face」
   → 实测**所有文字全大写、比分数字画不出来**。改为**文件名白名单**（正文字体前缀

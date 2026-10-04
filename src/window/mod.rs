@@ -226,7 +226,10 @@ pub struct VireoWindow {
     renderer: Mutex<crate::render::Renderer>,
     pub inner: Arc<winit::window::Window>,
     pub gpu: Arc<GpuContext>,
-    /// 最近一次 CursorMoved 的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
+    /// 最近一次指针的**物理像素**位置。逻辑/物理双表示走 [`Self::mouse_pos`]。
+    ///
+    /// 触摸设备的触摸点（`Started` / `Moved`）也写这里 —— Android 上点击
+    /// **不产生** `CursorMoved`，只靠鼠标事件会让指针位置恒为 `(-1, -1)`。
     pub(crate) mouse_pos: Mutex<(f32, f32)>,
     /// 最近一次观测到的**物理像素**窗口尺寸（真实来源）。逻辑尺寸 = 物理 ÷
     /// [`Self::layout_scale`] 现算（f64 除法，无截断；`PixelSize` 快照会因 scale
@@ -1197,22 +1200,34 @@ impl VireoWindow {
                 *self.input.cursor_inside.lock() = false;
             }
             WinitEvent::Touch { event, .. } => {
-                let sf = self
-                    .applied_dpi_override
-                    .lock()
-                    .unwrap_or(self.inner.scale_factor());
-                let tx = (event.x as f64 / sf) as f32;
-                let ty = (event.y as f64 / sf) as f32;
+                // `event` 来自 `map_touch_event`，**已经是 vireo 逻辑像素**
+                // （`app/host.rs` 收到 `WindowEvent::Touch` 时就按有效 scale
+                // 除过了）。这里**不能再除一次**。
                 match event.phase {
                     crate::input::TouchPhase::Started | crate::input::TouchPhase::Moved => {
                         self.input
                             .touches
                             .lock()
-                            .insert(event.id, (tx, ty, event.force));
+                            .insert(event.id, (event.x, event.y, event.force));
                     }
                     _ => {
                         self.input.touches.lock().remove(&event.id);
                     }
+                }
+                // 触摸点同时充当「指针位置」：Android 上点击只走
+                // `WindowEvent::Touch`，**没有** `CursorMoved`，于是 `mouse_pos`
+                // 恒为初始的 `(-1, -1)` —— 任何用指针位置做命中判断的代码在
+                // 触摸设备上永远不成立（实测模板点击输入框键盘不弹）。
+                //
+                // 只在 `Started` / `Moved` 更新：`Ended` / `Cancelled` 时手指已经
+                // 离开，把 `mouse_pos` 钉在旧位置会让「按住的按钮」视觉停在原地。
+                if matches!(
+                    event.phase,
+                    crate::input::TouchPhase::Started | crate::input::TouchPhase::Moved
+                ) {
+                    let sf = self.layout_scale();
+                    *self.mouse_pos.lock() =
+                        crate::input::touch_logical_to_mouse_pos(event.x, event.y, sf);
                 }
             }
             _ => {}

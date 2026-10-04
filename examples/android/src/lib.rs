@@ -22,13 +22,12 @@
 //!    中文可用（GameActivity 提供 `InputConnection`）。
 //! 3. **键盘避让**：键盘弹出时把输入框上移 `ime_insets.bottom`。
 
-// 这个 cdylib 的**唯一**入口是 `#[vireo::main]` 展开出的
-// `#[no_mangle] pub fn android_main`，AGDK 运行时按符号名查找它。
-// rustc 的 dead_code 分析看不到「JNI 按字符串找符号」这层间接引用，
-// 于是把 android_main 里用到的私有项全报成「未使用」（check 和 build 都会报）。
+// 这个 cdylib 的**唯一**入口是 `#[vireo::main]` 展开出的 `android_main`，AGDK
+// 在运行时按符号名查找它。rustc 的 dead_code 分析看不到「JNI 按字符串找符号」
+// 这层间接引用，于是把 android_main 里用到的私有项全报成「未使用」。
 //
-// 这不是笔误 —— 真机上代码确实在跑。对纯 JNI cdylib 来说，
-// 整个 crate 都是「只被 JNI 到达」，所以这里整 crate 放宽。
+// 这不是笔误 —— 真机上代码确实在跑。对纯 JNI cdylib 来说整个 crate 都是
+// 「只被 JNI 到达」，所以这里整 crate 放宽。
 #![allow(dead_code)]
 
 use vireo::prelude::*;
