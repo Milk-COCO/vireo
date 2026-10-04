@@ -152,7 +152,7 @@ unsafe impl Sync for SendRawWindowHandle {}
 /// `WindowAttributes` 在 Android 上基本全部忽略，运行期改 `Window.setAttributes`
 /// 也不会触发 WM 重算边框（实测改挖孔模式无效、窗口仍被 letterbox）。
 /// vireo 无法注入 manifest —— 清单与参考配置见
-/// [`crate::platform::android`](crate::platform::android) 模块文档的「建窗期属性」一节。
+/// ``crate::platform::android`` 模块文档的「建窗期属性」一节。
 pub struct WindowDesc {
     pub title: String,
     /// 初始客户区尺寸（每轴意图 [`Pp`]：`Dp` = vireo 逻辑像素，`Px` = 物理像素）。
@@ -171,13 +171,30 @@ pub struct WindowDesc {
     pub resizable: bool,
     pub fullscreen: Option<Fullscreen>,
     pub maximized: bool,
+    /// 建窗期是否可见。默认 `true`。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：半生效。** winit Android 后端会忽略 `WindowAttributes::with_visible`，
+    ///   所以本字段只能表达「建窗后要不要立刻 show」这一层；「建窗时先藏起来」
+    ///   由 [`preparable`](Self::preparable) 负责（见下）。
+    /// - Linux/Wayland 上合成器可以拒绝可见性请求。
     pub visible: bool,
     /// 创建时先隐藏，首帧渲染完成后再显示（`visible=true` 时）。默认 `true`——
     /// winit 建窗是先以默认尺寸+边框显示、再改尺寸/去边框，`preparable` 让窗口
     /// 第一次出现即「正确尺寸 + 无边框 + 已渲染内容」，消除 4 阶段闪烁。
     /// 设 `false` 回到旧行为（创建即显示，可能短暂闪烁）。
-    /// 注意：若窗口始终为 0×0 或立即关闭（命中 zero-size / closing / device-lost 早退分支），
-    /// `maybe_show_prepared_window` 不会被调用，窗口将保持隐藏而永不显示。
+    ///
+    /// ⚠️ 若窗口始终为 0×0 或立即关闭（命中 zero-size / closing / device-lost
+    /// 早退分支），`maybe_show_prepared_window` 不会被调用，窗口将**保持隐藏而永不显示**。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：意义有限。** 由于 winit Android 后端忽略 `with_visible`，
+    ///   这里「先隐藏」拿不到真正的隐藏效果；实际起作用的是「首帧后再
+    ///   `set_visible(true)`」。`GameActivity` 本身在创建后很快就会上屏，
+    ///   所以 Android 上 `preparable` 基本等于「不做任何事」。
+    ///   真正的消除闪烁手段是 manifest/theme 配好（见 `examples/android/`）。
     pub preparable: bool,
     pub transparent: bool,
     /// 窗口边框样式（标题栏 + resize 边框的组合语义）。默认 [`FrameStyle::Normal`]。

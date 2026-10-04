@@ -982,12 +982,21 @@ pub trait WindowExtAndroid {
     /// 但 `safe_area` 保持物理值。做「HUD 固定避开刘海」应该用这个。
     fn safe_area(&self) -> Insets;
 
-    /// **当前可见遮挡**：系统栏隐藏后即为 0；键盘弹出时会「吸收」底部安全区。
+    /// **当前可见遮挡**：系统栏隐藏后即为 0。
     ///
     /// = Android `getInsets(systemBars|displayCutout)`
-    /// = Flutter `padding` = `max(0, safe_area - ime_insets)`
     ///
     /// 单位是 vireo 逻辑像素。**布局跟随时应该用这个**。
+    ///
+    /// ⚠️ **它与键盘是独立的两个值，不是差集**。这里读的是
+    /// `systemBars|displayCutout` 且**不含** `ime`，所以它**不会**因为键盘弹出
+    /// 而自动变大或变小。某些 ROM 在键盘弹出时会顺带隐藏导航栏，那时这个值会
+    /// 变小 —— 但那是 ROM 行为，不是契约，别依赖。
+    ///
+    /// 换 Flutter 的说法：它大致等于 `MediaQuery.padding`，但**不是**
+    /// `max(0, safe_area - ime_insets)` 那个公式。照搬该公式会和本 getter
+    /// 得到不同的数。要「避开键盘」请把 [`ime_insets`](Self::ime_insets) 单独
+    /// 加进来，不要指望本值已经含了键盘。
     fn padding(&self) -> Insets;
 
     /// 软键盘等「完全遮挡」区域。
@@ -1090,8 +1099,13 @@ pub trait WindowExtAndroid {
 
     /// 窗口层级（`WindowManager.LayoutParams.type`）。
     ///
-    /// [`WindowLevel::Overlay`] 需要 `SYSTEM_ALERT_WINDOW` 权限**且**用户已授权，
-    /// 否则上抛 `Err`（`BadTokenException`）——见 [`WindowLevel`] 的权限说明。
+    /// ⚠️ [`WindowLevel::Overlay`] 需要 `SYSTEM_ALERT_WINDOW` 权限**且**用户已授权，
+    /// 否则系统抛 `BadTokenException`。但那个异常发生在**稍后的 UI 线程**上
+    /// （本方法是 fire-and-forget，见 trait 级说明），所以**不会**变成返回的 `Err` ——
+    /// `Ok(())` 只表示「请求已投递」。失败表现为 `log::warn!` 一行 + 层级没生效。
+    ///
+    /// 要确认是否真的生效，读 [`window_level`](Self::window_level)（活读
+    /// `LayoutParams.type`）—— 它返回 `None` 就是没设上。
     fn set_window_level(&self, level: WindowLevel) -> Result<(), VireoError>;
 
     /// 当前**实际**生效的窗口层级；`type` 是系统保留值时返回 `None`。

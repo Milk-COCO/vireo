@@ -22,7 +22,7 @@
 //!
 //! Android 上通过 `winit` 的 `android-game-activity` 后端 + `AGDK GameActivity` 运行，
 //! 因此**支持中文输入法**（`NativeActivity` 无 `InputConnection`，做不到）。
-//! 平台能力在 [`platform::android`]（仅该平台编译）：
+//! 平台能力在 ``platform::android``（仅该平台编译）：
 //!
 //! - **沉浸式 / 系统栏**：bitmask（可只隐藏状态栏）、滑动唤回行为
 //! - **安全区三值**：`safe_area`（物理最大遮挡）/ `padding`（当前可见遮挡）/

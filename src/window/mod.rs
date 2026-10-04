@@ -1376,6 +1376,13 @@ impl VireoWindow {
     }
 
     /// 设置窗口标题（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** Android 没有运行时窗口标题。Activity 标题是**建窗期**
+    ///   属性（manifest 的 `android:label`），改它要 `set_activity_label` 之类
+    ///   非 vireo 手段。移动端的对应概念是「最近任务列表里的名字」，同样只能在
+    ///   建窗期定。
     pub fn set_title(&self, title: &str) {
         let _ = self.event_tx.send(WinitEvent::SetTitle {
             handle: self.handle(),
@@ -1525,6 +1532,14 @@ impl VireoWindow {
     }
 
     /// 切换全屏模式（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit 的 Android 后端不实现全屏；移动端本来就是
+    ///   全屏 Activity，全屏/窗口化切换没有意义。沉浸式请用
+    ///   ``platform::android::WindowExtAndroid::set_system_bars``。
+    /// - macOS 上进入全屏会触发 Spaces 切换动画；系统级「隐藏其他窗口」需要
+    ///   `set_window_level` 之外的手段。
     pub fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) {
         let _ = self.event_tx.send(WinitEvent::SetFullscreen {
             handle: self.handle(),
@@ -1533,6 +1548,13 @@ impl VireoWindow {
     }
 
     /// 最大化窗口（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端忽略 `maximized`；移动端用
+    ///   `WindowDesc` 的朝向锁定 + `set_system_bars` 表达「全屏」诉求。
+    /// - 多数 Linux WM / macOS 的最大化是「WM 决定」的，可能被用户的主题忽略。
+    ///   验证方式：`is_maximized()` 读回。
     pub fn set_maximized(&self, maximized: bool) {
         let _ = self.event_tx.send(WinitEvent::SetMaximized {
             handle: self.handle(),
@@ -1541,6 +1563,14 @@ impl VireoWindow {
     }
 
     /// 最小化窗口（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端忽略最小化。
+    ///   注意这与「切后台」不同：Android 切后台由系统决定，vireo 收不到
+    ///   `MainEvent::Pause`（winit Android 后端吞掉了生命周期事件），
+    ///   所以也无法用本方法模拟。**这也是 vireo 目前无法自动降频的原因**，
+    ///   详见 `.opencode/android_audit.md` 的生命周期一节。
     pub fn set_minimized(&self, minimized: bool) {
         let _ = self.event_tx.send(WinitEvent::SetMinimized {
             handle: self.handle(),
@@ -1549,6 +1579,12 @@ impl VireoWindow {
     }
 
     /// 显示/隐藏窗口（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：可用**，但语义与桌面不同。winit Android 后端在 `with_visible`
+    ///   上有已知问题，所以 vireo 的 `WindowDesc::preparable`（默认开）改为
+    ///   「建窗时先隐藏 + 首次渲染成功后再显示」。见 [`WindowDesc::preparable`]。
     pub fn set_visible(&self, visible: bool) {
         let _ = self.event_tx.send(WinitEvent::SetVisible {
             handle: self.handle(),
@@ -1564,6 +1600,13 @@ impl VireoWindow {
     }
 
     /// 设置窗口层级（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端不实现 `WindowLevel`。
+    ///   Android 上要改窗口层级请用
+    ///   ``platform::android::WindowExtAndroid::set_window_level``
+    ///   （走 `WindowManager.LayoutParams.type`，需 `SYSTEM_ALERT_WINDOW` 权限）。
     pub fn set_window_level(&self, level: WindowLevel) {
         let _ = self.event_tx.send(WinitEvent::SetWindowLevel {
             handle: self.handle(),
@@ -1582,6 +1625,12 @@ impl VireoWindow {
     /// **Windows 圆角钳制/恢复**：进入 [`FrameStyle::Frameless`]（无边框）时
     /// DWM 无法圆角，圆角偏好被钳为 `Default`；切回 `Normal`/`HiddenTitlebar`
     /// 时自动恢复用户上次经 `set_corner_preference` 设置的偏好。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** Android 没有桌面式窗口边框；winit Android 后端忽略
+    ///   `with_decorations`。移动端的「边框」概念由
+    ///   `WindowDesc` 的 theme（AppCompat 子主题）决定。
     pub fn set_frame_style(&self, style: FrameStyle) {
         let mut frame_style_guard = self.frame_style.lock();
         let prev = *frame_style_guard;
@@ -1660,12 +1709,12 @@ impl VireoWindow {
     /// 游戏里没有聚焦的 Android View，永远不会有隐式请求 → **键盘永远不弹**，
     /// 而且**不返回任何错误**，看起来像「GameActivity 的 IME 不工作」。
     ///
-    /// 所以这里转发到 [`platform::android::WindowExtAndroid::show_soft_input`] /
+    /// 所以这里转发到 ``platform::android::WindowExtAndroid::show_soft_input`` /
     /// `hide_soft_input`（内部传 `show_implicit = false` 强制显示，真机验证有效）。
     ///
-    /// Android 上还需要先调 [`platform::android::WindowExtAndroid::set_input_type`]
+    /// Android 上还需要先调 ``platform::android::WindowExtAndroid::set_input_type``
     /// 声明输入类型（必须在弹键盘之前），且文本输入是**每帧轮询**
-    /// [`platform::android::WindowExtAndroid::text_input_state`] 而非事件驱动
+    /// ``platform::android::WindowExtAndroid::text_input_state`` 而非事件驱动
     /// —— Android 的 winit 不产生 `Ime` 事件。详见该模块文档。
     ///
     /// ## Platform-specific
@@ -2389,6 +2438,12 @@ impl VireoWindow {
     }
 
     /// 设置窗口图标（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** 应用图标由 manifest 的 `android:icon` 在**打包期**
+    ///   决定（res/mipmap 资源），运行时改不了。启动器图标、任务栏、最近任务
+    ///   用的都是那一张。
     pub fn set_icon(&self, icon: Icon) {
         let _ = self.event_tx.send(WinitEvent::SetIcon {
             handle: self.handle(),
@@ -2397,6 +2452,14 @@ impl VireoWindow {
     }
 
     /// 设置光标样式（通过 winit 线程异步操作）
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** 触摸设备没有「鼠标指针」这个概念。
+    ///   桌面的 hover 高亮在移动端应改用 `InputState` 的
+    ///   `InputState::cursor_pressed` / 触摸位置自己判断。
+    /// - Wayland 上自定义光标图片需要显式提供数据（如 `CursorIcon::from_rgba`），
+    ///   系统主题光标不被支持。
     pub fn set_cursor(&self, cursor: winit::window::Cursor) {
         let _ = self.event_tx.send(WinitEvent::SetCursor {
             handle: self.handle(),
