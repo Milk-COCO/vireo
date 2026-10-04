@@ -114,7 +114,7 @@ adb install -r build/outputs/apk/debug/android-debug.apk
 
 ---
 
-## 4. 五个必须知道的坑
+## 4. 八个必须知道的坑
 
 全部在真机上踩过、且都表现为「没有任何报错，只是行为不对」。
 
@@ -135,16 +135,39 @@ adb install -r build/outputs/apk/debug/android-debug.apk
 
 **正解**：`win.show_soft_input()` / `win.hide_soft_input()`（`platform::android`）。
 
-### 4.3 ⚠️ 别自己设 `ImeOptions`
+### 4.3 ⚠️ 横屏 extract mode：顶部全宽白条
 
-**症状**：输入框上方一条全宽白条 + 输入法工具条显示中文「执行」；
-`ime_insets.bottom` 恒为 0，`adjustResize` 失效。
+**症状**：横屏弹出键盘时，屏幕顶部一条**全宽白条** + 一个按钮（「执行」或
+「完成」）；`ime_insets.bottom` 恒为 0，`adjustResize` 形同虚设，
+可见区只剩顶部约 128 物理像素。白条会在没有正在组合的拼音时自行消失。
 
-**原因**：手动设 `ImeOptions` 会抹掉 `IME_FLAG_NO_FULLSCREEN`，
-AOSP 的 extract mode 接管，输入区变成系统自己的全屏编辑条。
+**可观测特征**：那个按钮的文案是**框架字符串**
+（`com.android.internal.R.string.ime_action_default`）—— 既不是 MIUI 画的，
+也不是输入法画的。这是判断「白条属于 extract mode 而非输入法候选栏」的依据。
 
-**正解**：什么都不设。vireo 内部固定发
-`IME_FLAG_NO_FULLSCREEN | IME_FLAG_NO_ACCESSORY_ACTION`（`0x22000000`）。
+**原因**：输入法进入 AOSP **fullscreen extract mode**，把 IME 窗口设成
+`MATCH_PARENT` 吃掉整屏。框架注释直言 *"In fullscreen mode, we never resize
+the underlying window"*。
+
+**正解**：vireo 内部固定发三个 flag：
+
+```
+IME_FLAG_NO_FULLSCREEN      | IME_FLAG_NO_EXTRACT_UI | IME_FLAG_NO_ACCESSORY_ACTION
+0x0200_0000                | 0x1000_0000           | 0x2000_0000
+```
+
+⚠️ **`IME_FLAG_NO_EXTRACT_UI` 不是冗余**。`IME_FLAG_NO_FULLSCREEN` 的 AOSP 文档
+明确写着「不是保证，某些输入法可能忽略」—— 实测 **HyperOS 搜狗横屏就是无视它**。
+两者语义不等价：
+
+| flag | 语义 |
+|---|---|
+| `NO_FULLSCREEN` | 「别进全屏模式」—— 被无视时毫无作用 |
+| `NO_EXTRACT_UI` | 「别显示 extracted-text UI」—— 直接命中那块白条 |
+
+**别自己设 `ImeOptions`**：AGSK 对 `imeOptions` 是**整体替换**而非按位或，
+手写会把 vireo 固定下发的位抹掉。用 vireo 的
+`set_input_type(InputType::Text)` 即可。
 
 ### 4.4 ⚠️ `targetSdk >= 35` 不是可选项
 
@@ -158,6 +181,54 @@ AOSP 的 extract mode 接管，输入区变成系统自己的全屏编辑条。
 
 刚 `onCreate` 就 `show_soft_input()` 在部分 ROM 上会被吞。每帧检查焦点、
 需要时重复调（vireo 的模板示例就是这么做的）。
+
+> **注意「每帧重复调」不等于「重复 post」**：vireo 内部按「请求值是否变化」
+> 去重，同状态重复调用**不会**真的 post 到 Java 主线程。所以每帧调是安全的。
+> 反过来，**引擎绝不会周期性重发** —— 输入法每次收到 `show` 都会重置组合态，
+> 重复 post 会让候选词 / preedit 一闪即消、且用户按不掉收起键。
+> 详见 [`src/platform/android_text_input.rs`](../../src/platform/android_text_input.rs)
+> 的 `set_ime_wanted` 文档。
+
+### 4.6 ⚠️ 键盘坐标换算被做了两次
+
+**症状**：点输入框键盘不弹；`adb shell input tap` 打哪都没反应。
+
+**原因**：`WindowEvent::Touch` 的坐标在 winit 层已按 scale 换算成逻辑像素，
+若你自己再除一次 scale，点位会被缩掉 2.8 倍（HyperOS scale=2.8125），
+所有命中判断都失效。
+
+**正解**：用 vireo 提供的坐标（`mouse_pos()` / `on_touch` 回调），它们已统一。
+若手写路径，注意 `mouse_pos` 存**物理**、`TouchEvent` 存**逻辑**。
+
+### 4.7 ⚠️ PowerShell 调 `.bat` 会截断含 `.` 的参数
+
+```powershell
+.\gradlew.bat assembleRelease -PndkVersion=28.2.13676358   # ❌ 被拆成
+                             #    -PndkVersion=28  +  任务名 .2.13676358
+.\gradlew.bat assembleRelease '-PndkVersion=28.2.13676358'  # ✅ 加引号
+```
+
+不加引号时会报「找不到 NDK: `sdk/ndk/28`」—— 这个报错**极具误导性**，
+真实原因是参数没传对。
+
+### 4.8 ⚠️ `UnsatisfiedLinkError: cannot locate symbol "android_main"`
+
+**症状**：APK 装得上、一点就崩，logcat 只有一行 JNI 错误。
+
+**原因**：`lib<rustCrate>.so` 里没有 `android_main` 这个导出符号。它由
+`#[vireo::main]` 展开产生，正常情况下一定存在。查：
+
+```bash
+"$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-nm.exe" \
+    -D --defined-only src/main/jniLibs/arm64-v8a/lib<rustCrate>.so | Select-String android_main
+```
+
+期望看到 `T android_main`。若只看到 `U android_main`（**未定义**），
+说明宏没被编译进来 —— 检查 vireo 的 `Cargo.toml` 里 `vireo_macro` 是不是
+写成了版本号（从 crates.io 拉，仓库里那份根本不参与构建）而不是 path 依赖。
+
+**判据速查**：`llvm-nm` 输出里 `T` = 已定义的代码段，`U` = 未定义（引用别人）。
+`U android_main` 说明 AGSK 胶水在找它，但 `.so` 里没有。
 
 ---
 
@@ -280,9 +351,9 @@ pwsh check-16kb.ps1 -NdkVersion 28.2.13676358 `
 | `INSTALL_FAILED_VERSION_DOWNGRADE` | 装过旧签名/更高 versionCode 的包，先 `adb uninstall` |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 同上，签名变了 |
 | gradle 卡在一个空白 UI 窗口 | gradle daemon 在下载依赖，不是失败。等，或 `--console=plain` 绕过 |
-| `UnsatisfiedLinkError` | `rustCrate` / `[lib] name` / `loadLibrary` 三处名字不一致 |
+| `UnsatisfiedLinkError` | `rustCrate` / `[lib] name` / `loadLibrary` 三处名字不一致，**或**缺 `android_main` 导出（见 §4.8）|
 | APK 里 `.so` 没被剥离（体积大） | NDK strip 工具缺失。功能正常，只是 APK 大 |
-| 键盘不弹 | 回看 §4.1 / §4.2 |
+| 键盘不弹 | 回看 §4.1 / §4.2，再看 §4.6（坐标可能被换算了两次）|
 | 内容被 letterbox | 回看 §4.4，检查 `targetSdk` |
 | `warning: struct/function ... is never used` | **正常，忽略**。见下 |
 

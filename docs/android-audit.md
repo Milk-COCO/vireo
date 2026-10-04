@@ -5,14 +5,20 @@
 > 方式：subagent 全量读源码 + 交叉核实 `winit 0.30.13` / `android-activity 0.6.1` 上游源码
 > **重要**：subagent 的两条「阻塞级」结论被我复核后**修正**（见 §2）
 
-## 状态：P0 / P1 已全部修复
+## 状态：P0 / P1 / P2 / P3 已全部修复
 
 | 阶段 | 状态 | commit |
 |---|---|---|
 | P0（3 项阻塞级）| ✅ 完成 | `bc0129d` |
 | P1（3 项）| ✅ 完成 | `a624cfb`（gradle 模板）/ `57e2907`（契约文档）|
-| P2（4 项）| 🔄 进行中 | 见 §5 修复计划表 |
-| P3（生命周期）| ✅ 完成 —— 用户否决折中方案后改走「Java 转发 + RegisterNatives」| 见下 |
+| P2（4 项）| ✅ 完成 | `74cfe98`（纯逻辑抽离）/ `703c6a8` |
+| P3（生命周期）| ✅ 完成 —— 用户否决折中方案后改走「Java 转发 + RegisterNatives」| `c769302` |
+| P4（真机暴露的连环 bug）| ✅ 完成 | `be01a82` / `c488a1d` |
+
+> **审计方法论教训**：桌面单测全绿 ≠ Android 能跑。P0~P3 全部「完成」时，
+> 模板装到真机上仍然 `dlopen failed` —— 四个 bug 里有三个**只靠读代码发现不了**
+> （依赖指向 crates.io、触摸坐标双重换算、输入法无视 `IME_FLAG_NO_FULLSCREEN`），
+> 必须真机跑起来才暴露。详见 §7。
 
 **想直接上手 Android？** 看 [`examples/android/README.md`](../examples/android/README.md) ——
 前置条件、三步出 APK、五个「静默失败」的坑。
@@ -185,13 +191,14 @@ subagent 说恒返回 `Some`。实际 `android.rs:1608-1622` 在无 AndroidApp �
 | **P1-1** | 缺陷 5+7：gradle 模板 + `AndroidManifest.xml` + `styles.xml`（**别放 windowFullscreen**）+ minSdk/targetSdk/AGP/NDK + **16KB page size** | **M** | ✅ `a624cfb` |
 | **P1-2** | 缺陷 3、4：`set_window_level` / `padding()` 文档与实现对齐 | **S** | ✅ `57e2907` |
 | **P1-3** | 缺陷 9、10：Android no-op API 补 `## Platform-specific` 段 | **S** | ✅ `57e2907` |
-| **P2-1** | 缺陷 14：`platform::android` 的纯逻辑抽到无条件编译模块，让 8 个单测能跑 | **M** | ☐ |
-| **P2-2** | 缺陷 8：`WindowLevel` → **`VireoWindowLevel`** 解 E0659 冲突（breaking，用户已定名）| **S** | 🔄 |
-| **P2-3** | 缺陷 11：`system_bars_visible()` → `effective_system_bars() -> SystemBars`（用户：改彻底，不并存）| **S** | 🔄 |
-| **P2-4** | 缺陷 12：Android 支持 `descriptor =`（强制 Vulkan）| **M** | 🔄 |
-| **P3** | 生命周期：`MainActivity.onPause/onResume` 经 JNI 转发 + 渲染 Thread 停摆 | **M** | ✅ 完成 |
-| **P3** | 生命周期真解（绕开 winit 吞事件）| **L** | ☐ |
-| **待验** | 缺陷 15：真机确认 emoji 是否能渲染（`NotoColorEmoji` 不在白名单）| **S** | ☐ |
+| **P2-1** | 缺陷 14：`platform::android` 的纯逻辑抽到无条件编译模块，让 8 个单测能跑 | **M** | ✅ `74cfe98`（后续又补 `FLAG_NO_EXTRACT_UI` 等，共 9 个）|
+| **P2-2** | 缺陷 8：`WindowLevel` → **`VireoWindowLevel`** 解 E0659 冲突（breaking，用户已定名）| **S** | ✅ `703c6a8` |
+| **P2-3** | 缺陷 11：`system_bars_visible()` → `effective_system_bars() -> SystemBars`（用户：改彻底，不并存）| **S** | ✅ `703c6a8` |
+| **P2-4** | 缺陷 12：Android 支持 `descriptor =`（强制 Vulkan）| **M** | ✅ `703c6a8` |
+| **P3** | 生命周期：`MainActivity.onPause/onResume` 经 JNI 转发 + 渲染 Thread 停摆 | **M** | ✅ `c769302` |
+| **P3** | 生命周期真解（绕开 winit 吞事件）| **L** | ✅ 同上（Java 转发即真解）|
+| **P4** | 真机暴露的 4 个连环 bug（宏依赖 / 触摸双重换算 / IME 重发 / extract 白条）| **M** | ✅ `be01a82` `c488a1d` |
+| **待验** | 缺陷 15：真机确认 emoji 是否能渲染（`NotoColorEmoji` 不在白名单）| **S** | ✅ **确认无法渲染**，见 `TODO.md` |
 
 ### P0 修复记录
 
@@ -372,3 +379,130 @@ Android 冻结后台进程。渲染线程是**自己**停的。
 > 教训：验证渲染**必须看像素**。logcat 只证明字符串提交了
 > （`[emoji] draw "..."` 正常打印），完全看不出有没有字形 ——
 > 中间差点据此得出「渲染正常」的错误结论。
+
+---
+
+## 8. 真机首装的四个连环 bug（`be01a82` / `c488a1d`）
+
+P0~P3 全部标记完成、桌面 265 测试全绿之后，模板装到真机上**第一件事就是崩**。
+这四个 bug 有三个**读代码发现不了**，是这次审计最值钱的产出。
+
+### 8.1 依赖指向 crates.io，仓库里的宏从未被编译（`be01a82`）
+
+**症状**：`UnsatisfiedLinkError: cannot locate symbol "android_main"`。
+
+**根因**：`vireo/Cargo.toml` 写的是 `vireo_macro = "0.1"`，cargo 从 **registry**
+解析。仓库里的 `vireo_macro/` 目录**一行都没编译过** —— 它是死代码。
+
+**为什么审计没发现**：审计读的是「宏有没有生成 `android_main`」—— 生成了，
+代码完全正确。问题在**依赖解析**，不在代码。
+
+**定位手法（可复用）**：
+
+| 手段 | 结果 |
+|---|---|
+| 改本地宏源码后构建 | **0.65s 一个 crate 都不重编** → cargo 压根不读它 |
+| 往宏里塞 `eprintln!` 打印展开结果 | **一次都没打印** → 宏从未被调用 |
+| 同文件手写同形状的探针函数 | 正常导出 → 排除「`no_mangle` 失效」等代码层猜测 |
+
+最后一条是关键：它把「宏生成的」与「手写的」放在同一文件同一 crate 里对比，
+一次就把问题锁死在「宏没被调用」，而不是在 ABI/属性写法上瞎猜。
+
+### 8.2 触摸坐标双重换算（`c488a1d`）
+
+**症状**：点输入框键盘不弹；`adb input tap` 打 10 个不同位置全部无效。
+
+**根因（两层）**：
+
+1. `WinitEvent::Touch.event` 存的**已经是逻辑像素**（`host.rs` 收到
+   `WindowEvent::Touch` 时按有效 scale 除过了），但 `apply_input_event`
+   **又除了一遍**。HyperOS（scale 2.8125）上 `tap(844,551)` → `(37.9,24.8)`。
+2. 触摸**完全不更新** `mouse_pos`，而 Android 上点击**不产生 `CursorMoved`**
+   （winit 在 `Window::Builder` 未启用 `with_cursor` 时不发），
+   该字段恒为初始的 `(-1,-1)`。模板用 `mouse_pos()` 做命中判断 → 永远不成立。
+
+**教训**：坐标系（物理 / 逻辑）在事件链上**跨了几个模块**，每个模块都可能
+再换算一次。修法不只是改这一行，而是把契约**显式化**：新增纯函数
+`touch_logical_to_mouse_pos` + 往返测试（`tap → map → mouse_pos` 必须回到原始
+物理坐标），让两个坐标空间的换算有单一入口。
+
+### 8.3 我自己引入的回归：200ms 重发窗口清掉组合态（`c488a1d`）
+
+**症状**：① 输入字符时候选词与 preedit 一闪即消；② 按输入法收起键会在
+200ms 内被重新拉起，只有点到 vireo 其他区域（`focused=false` 走 hide）才停。
+
+**根因**：修 §8.1 之前的 ANR 时（每帧 `hide_soft_input` post 淹掉 Java 主线程，
+5 秒 `Input dispatching timed out`）我加了跳变去重，但同时留了一个
+**200ms 周期性重发**兜底「用户收起键盘后请求值陈旧」。而**输入法每次收到
+`show` 都会重置组合态** —— 组合态是易碎的，任何重复 `show` 都是破坏。
+
+**教训**：去重时容易只想到「不去重会 ANR」，没想到「重复调用会破坏对方的
+内部状态」。这类「周期性兜底重试」在有内部状态的远端系统（输入法、IME、
+网络请求）上要格外小心。
+
+现在的语义：**纯跳变去重，永不周期性重发**；「键盘被收起」的恢复是文档化的
+显式两步 `hide_soft_input()` → `show_soft_input()`（两次都是跳变，都会真下发）。
+判断键盘是否还在用 `ime_insets().bottom`。
+
+> 附带一个反直觉现象：**去掉 `set_input_type()` 反而让 extract 白条更严重**
+> （按钮从「执行」变成更明显的「完成」）。这个对照实验一度让我误判成
+> 「是模板抹了 flag」，实际根因完全不同 —— 见下。
+
+### 8.4 输入法无视 `IME_FLAG_NO_FULLSCREEN`（`c488a1d`）
+
+**症状**：横屏弹出键盘时，屏幕顶部一条**全宽白条** + 一个框架字符串按钮。
+它会自行消失（没有正在组合的拼音时），所以看起来「像输入法自己的 UI」。
+
+**我误判了两次**：
+
+1. 第一次据 `dumpsys window` 里 `InputMethod` 窗口 frame 推断是「搜狗候选栏」——
+   候选栏确实属于输入法窗口，但那个 frame 覆盖整个下半屏，解释不了「顶部白条」。
+2. 第二次做对照实验（去掉 `set_input_type()`）发现白条**变严重**，于是误判成
+   「模板自己设了 ImeOptions 抹掉 flag」。
+
+**真相**：`android_text_input.rs` 的模块文档和 README §4.3 **早就写好了**这个
+机制和它的**可观测特征**：
+
+> 输入法在**横屏**下进入 AOSP 的 **fullscreen extract mode**，屏幕顶部弹出
+> 一条全宽白条 `input_method_extract_view`；按钮上的「执行」是**框架字符串**
+> `com.android.internal.R.string.ime_action_default` —— 属于 `com.android.internal`，
+> 既不是 MIUI 也不是输入法画的。**这正是本条 flag 缺失的可观测特征。**
+
+根因：HyperOS 搜狗横屏**无视** `IME_FLAG_NO_FULLSCREEN`。而该 flag 的 AOSP 文档
+本就写明「不是保证，某些输入法可能忽略」，即它是 best-effort。
+extract mode 下 IME 窗口被设成 `MATCH_PARENT` 吃掉整屏，框架注释直言
+*"In fullscreen mode, we never resize the underlying window"* → `ime_insets.bottom`
+恒为 0、manifest 里的 `adjustResize` 形同虚设（可见区只剩顶部 128 物理像素）。
+
+**修法**：`IME_FLAG_NO_EXTRACT_UI`（`0x10000000`）与 `NO_FULLSCREEN`
+**语义不等价** —— 前者是「别显示 extracted-text UI」，后者是「别进全屏模式」。
+前者被无视时只有后者管用，故一并下发。白条随之消失。
+
+**教训**：项目内文档里往往已经记着踩过的坑。**遇到疑似 bug 先 grep 自己的
+文档**，比在代码里推演快得多也更准。我这次先猜了两轮才对，浪费了大量时间。
+
+### 8.5 顺带修的构建链问题（`be01a82`）
+
+- **`-PndkVersion=` 被静默忽略**：`project.findProperty('ndkVersion')` 撞上
+  **AGP 注入的同名约定属性**（AGP 9.1 默认 NDK 恰好就是 `28`），于是去找不存在的
+  `sdk/ndk/28`。改用 `gradle.startParameter.projectProperties`（只含命令行 `-P`）。
+- **PowerShell 调 `.bat` 会在 `=` 后首个 `.` 截断参数**：
+  `-PndkVersion=28.2.13676358` 被拆成 `-PndkVersion=28` + 任务名 `.2.13676358`。
+  需写成 `'-PndkVersion=28.2.13676358'`。
+- **模板缺 gradle wrapper**：README 一直让用户跑 `./gradlew`，但 `gradlew` /
+  `gradlew.bat` / `gradle-wrapper.jar` **全都不存在**，模板并非真正「可复制」。
+
+### 8.6 现在的真机基线（25098RA98C / HyperOS / Android 16）
+
+| 项 | 结果 |
+|---|---|
+| 启动 | 正常，无 `UnsatisfiedLinkError` |
+| 渲染 | **60 fps**，850x384 |
+| JNI 注册 | 无 `Failed to register native method` |
+| 生命周期 | 46.4% → **0.0%** → 46.4%，进程全程存活 |
+| 中文 IME | 上下文字形正确，候选词与 preedit 稳定，按收起键不再被拉起 |
+| IME 请求频率 | 静置 5s 增量 **0** |
+| 16 KB 静态 | 两 ABI PASS（`PT_LOAD 0x4000`、`RELRO mod 0x0`）|
+
+> 未验：**16 KB 运行时**（当前设备 `PAGE_SIZE=4096`，需 16 KB 模拟器或真机，
+> 用户已决定搁置）、**emoji**（确认无法渲染，见 `TODO.md`）。
