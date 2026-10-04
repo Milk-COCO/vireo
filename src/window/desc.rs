@@ -145,6 +145,14 @@ pub struct SendRawWindowHandle(pub winit::raw_window_handle::RawWindowHandle);
 unsafe impl Send for SendRawWindowHandle {}
 unsafe impl Sync for SendRawWindowHandle {}
 
+/// 窗口创建参数。
+///
+/// **平台注意**：Android 上真正决定窗口形态的若干属性（朝向、`configChanges`、
+/// `windowSoftInputMode`、挖孔模式）是 **APK 构建期的 manifest 条目**，winit 的
+/// `WindowAttributes` 在 Android 上基本全部忽略，运行期改 `Window.setAttributes`
+/// 也不会触发 WM 重算边框（实测改挖孔模式无效、窗口仍被 letterbox）。
+/// vireo 无法注入 manifest —— 清单与参考配置见
+/// [`crate::platform::android`](crate::platform::android) 模块文档的「建窗期属性」一节。
 pub struct WindowDesc {
     pub title: String,
     /// 初始客户区尺寸（每轴意图 [`Pp`]：`Dp` = vireo 逻辑像素，`Px` = 物理像素）。

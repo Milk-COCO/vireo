@@ -563,16 +563,15 @@ pub(crate) fn run_blocking(
     let event_loop = EventLoop::new().unwrap();
     #[cfg(target_os = "android")]
     let event_loop = {
-        // 安卓的 `EventLoop` 必须绑定 `android_main` 传进的 app 句柄（非全局状态）。
         use winit::platform::android::EventLoopBuilderExtAndroid;
-        // clone 而非 take：`platform::android::WindowExtAndroid` 的 JNI 要在运行期
-        // 拿同一个 app 句柄（建窗时存进 `VireoWindow`），所以原值要留着。
-        let android_app = app
-            .inner
-            .android_app
-            .lock()
-            .clone()
-            .expect("安卓下请走 App::new_on_android（#[vireo::main] 已处理）");
+        // `AndroidApp` 是进程级单例，已由 `#[vireo::main]` 展开的 `android_main`
+        // 存进 `ANDROID_APP`。这里 clone 一份交给 winit（winit 只读不消费），
+        // 原值要留着 —— `platform::android::WindowExtAndroid` 的 JNI 在运行期
+        // 还要 clone 给每个 `VireoWindow`。
+        let android_app = super::android_app().cloned().expect(
+            "安卓下 AndroidApp 应已由 #[vireo::main] 的 android_main 存入 \
+             （若未走宏入口，说明进程没有经过 android_main）",
+        );
         EventLoop::builder()
             .with_android_app(android_app)
             .build()

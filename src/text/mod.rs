@@ -20,7 +20,8 @@ use crate::render::Pos;
 mod cache;
 pub use cache::ShapeCacheStats;
 
-#[cfg(target_os = "android")]
+// 模块本身无条件编译（白名单逻辑是纯函数，桌面也要能跑单测）；
+// 只有 `install` 及其 Android 专有依赖按 `target_os = "android"` 门控。
 mod android_fonts;
 pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
 mod context;

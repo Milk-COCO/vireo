@@ -86,9 +86,6 @@ pub struct AppInner {
     pub(crate) event_tx: Mutex<Option<mpsc::Sender<WinitEvent>>>,
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     pub(crate) event_loop_proxy: OnceLock<winit::event_loop::EventLoopProxy<()>>,
-    /// 安卓 `android_main` 传进的 app 句柄（仅安卓存在；`run_blocking` 建事件循环时 take）。
-    #[cfg(target_os = "android")]
-    pub(crate) android_app: Mutex<Option<crate::android::AndroidApp>>,
 }
 
 pub struct App {
@@ -148,6 +145,40 @@ pub(crate) enum DeferredTaskKind {
 
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// 安卓进程级 `AndroidApp` 句柄（仅安卓）。
+///
+/// `AndroidApp` 只能从 activity 的 `onCreate` 回调拿到（android-activity
+/// 不提供全局访问器），但它本身是**进程级单例** —— 一个进程一个 Activity，
+/// 生命周期等于进程。所以存进 `OnceLock` 即可：
+///
+/// - `#[vireo::main]` 展开的 `android_main` 只需「存句柄 → 调 [`App::new`]」，
+///   公开 API 上不必区分安卓 / 桌面两个构造器。
+/// - `run_blocking` 建 winit 事件循环、`WindowExtAndroid` 的 JNI 都从这里 clone 取用。
+///
+/// 代价是这个隐藏的进程级全局；换来的是用户侧只需要记住 `App::new` 一个入口。
+#[cfg(target_os = "android")]
+static ANDROID_APP: OnceLock<crate::android::AndroidApp> = OnceLock::new();
+
+/// 取进程级 `AndroidApp` 句柄（仅安卓；未经 `android_main` 入口时为 `None`）。
+#[cfg(target_os = "android")]
+pub(crate) fn android_app() -> Option<&'static crate::android::AndroidApp> {
+    ANDROID_APP.get()
+}
+
+/// 安卓进程入口（仅安卓）：`#[vireo::main]` 展开的 `android_main` 调这个。
+///
+/// 存下 [`crate::android::AndroidApp`] 后转 [`App::new`]，其余流程与桌面完全一致。
+#[doc(hidden)]
+#[cfg(target_os = "android")]
+pub fn android_main_entry<F, Fut>(android_app: crate::android::AndroidApp, main: F)
+where
+    F: FnOnce(App) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _ = ANDROID_APP.set(android_app);
+    App::new(main)
+}
+
 impl App {
     /// 进程入口（宏风格）：OS 主线程构造 `App`，`vireo-main` 线程跑用户 future，
     /// OS 主线程跑 winit 事件循环；阻塞到进程退出。
@@ -179,36 +210,27 @@ impl App {
         App::from_instance_descriptor(desc).run_entry(main)
     }
 
-    /// 安卓进程入口（仅安卓）：`#[vireo::main]` 展开的 `android_main` 调这个。
-    /// 存下 `AndroidApp`（`run_blocking` 建 winit 事件循环时 take 过去），
-    /// 日志走 `android_logger`（logcat 可见；桌面才用 `init_logger`），其余与 `new` 一致。
-    #[cfg(target_os = "android")]
-    pub fn new_on_android<F, Fut>(android_app: crate::android::AndroidApp, main: F)
-    where
-        F: FnOnce(App) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let _ = android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Info)
-                .with_tag("vireo"),
-        );
-        // 安卓上 stderr 进不了 logcat：panic 信息改走 log，否则闪退无日志可查。
-        std::panic::set_hook(Box::new(|info| {
-            log::error!("panic: {info}");
-        }));
-        let app = App::from_instance_descriptor(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-        );
-        *app.inner.android_app.lock() = Some(android_app);
-        app.run_entry(main)
-    }
-
     fn run_entry<F, Fut>(self, main: F)
     where
         F: FnOnce(App) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        // 安卓上 stderr 进不了 logcat，必须走 `android_logger`（logcat 可见）。
+        // 桌面**不自动初始化** logger：仍由用户在 `main` 首行显式调
+        // [`crate::init_logger`]，保持 `RUST_LOG` 的既有语义。
+        #[cfg(target_os = "android")]
+        {
+            let _ = android_logger::init_once(
+                android_logger::Config::default()
+                    .with_max_level(log::LevelFilter::Info)
+                    .with_tag("vireo"),
+            );
+            // panic 信息改走 log，否则闪退无日志可查。
+            std::panic::set_hook(Box::new(|info| {
+                log::error!("panic: {info}");
+            }));
+        }
+
         let channels = self.init_run_channels();
         let app = self.clone();
         main::spawn(app.clone(), main);
@@ -306,8 +328,6 @@ impl App {
                 event_tx: Mutex::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
-                #[cfg(target_os = "android")]
-                android_app: Mutex::new(None),
             }),
         }
     }

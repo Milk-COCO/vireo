@@ -108,9 +108,10 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
     // 注入——用户代码通过它访问 `App`。无论原签名是否 async，都包成 async 块。
     let body = quote! { |#param_ident| async move #block };
 
-    // 安卓没有 `fn main`：同一份用户源码在安卓 target 下展开为 NativeActivity
-    // 入口 `android_main`（`android-native-activity` 胶水层按符号名查找），
-    // 经 `App::new_on_android` 把 `AndroidApp` 交给 winit 事件循环。`descriptor`
+    // 安卓没有 `fn main`：同一份用户源码在安卓 target 下展开为
+    // GameActivity 胶水层按符号名查找的入口 `android_main`，
+    // 由 `vireo::app::android_main_entry` 把 `AndroidApp` 存进进程级单例后转
+    // `App::new` —— 与桌面走同一个构造器，公开 API 上不区分平台。`descriptor`
     // 属性暂不支持安卓（显式报错，不静默吞掉）。
     if let Some(desc) = args.descriptor {
         let entry = quote! { vireo::App::with_descriptor(#desc, #body) };
@@ -133,7 +134,7 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
         #[cfg(target_os = "android")]
         #[unsafe(no_mangle)]
         pub fn android_main(app: vireo::android::AndroidApp) {
-            vireo::App::new_on_android(app, #body);
+            vireo::app::android_main_entry(app, #body);
         }
     })
 }

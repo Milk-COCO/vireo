@@ -339,7 +339,7 @@ pub struct VireoWindow {
     /// 窗口能力整批实施时一并实现）。
     focusable: Mutex<bool>,
     /// Android `AndroidApp` 句柄，供 [`crate::platform::android::WindowExtAndroid`]
-    /// 做 JNI（系统栏 / 安全区 / 挖孔模式）。`App::new_on_android` 建窗时 clone 进来，
+    /// 做 JNI（系统栏 / 安全区 / 挖孔模式）。建窗时从进程级 `ANDROID_APP` clone 进来，
     /// `None` = 非 Android 启动路径。
     #[cfg(target_os = "android")]
     pub(crate) android_app: Option<crate::android::AndroidApp>,

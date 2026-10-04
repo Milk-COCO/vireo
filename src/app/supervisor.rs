@@ -100,7 +100,7 @@ pub(crate) fn apply_winit_event_one(
                 app.event_loop_proxy.get().cloned(),
                 handle,
                 #[cfg(target_os = "android")]
-                app.inner.android_app.lock().clone(),
+                crate::app::android_app().cloned(),
             );
             vw.set_max_fps(app.max_fps());
             vw.set_drag_cap(app.drag_cap());

@@ -47,9 +47,18 @@ objc2-foundation = { version = "0.3" }
 objc2-core-foundation = { version = "0.3" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-winit = { version = "0.30", features = ["android-native-activity"] }
+# `android-game-activity` 而非 `android-native-activity`：后者没有 InputConnection，
+# 只能收软键盘的物理按键事件（仅 ASCII），中文输入不可能。
+# GameActivity 提供 GameTextInput（含 `TextInputState`：text / selection /
+# compose_region），且 winit 会把 `InputEvent::TextEvent` 投递给我们 —— 之前
+# winit 自己把它丢进 `warn!("Unknown android_activity input event")`，现在
+# vireo 直接从 `AndroidApp::text_input_state(false)` 取，不再依赖 winit 转发。
+# 代价：activity 基类换成 `com.google.androidgamesdk.GameActivity`（AppCompatActivity
+# 子类），构建链必须走 gradle + `androidx.games:games-activity:4.4.0`，
+# `xbuild`/`cargo-apk` 不再适用（详见 `.opencode/android_design_review.md` §7.4）。
+winit = { version = "0.30", features = ["android-game-activity"] }
 android_logger = "0.13"
-# 与 android-activity 0.6（winit 的 android-native-activity 后端）同版本，
+# 与 android-activity 0.6（winit 的 android-game-activity 后端）同版本，
 # 避免同一进程内出现两份 jni。vireo 只经 `vm_as_ptr` / `activity_as_ptr`
 # 拿裸指针自行建 JavaVM，不跨 crate 传 jni 类型。
 jni = "0.22.4"

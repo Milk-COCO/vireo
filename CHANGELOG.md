@@ -35,27 +35,62 @@
 - 粒子 `fade_mid` 包络中点（`Option<f32>`，默认 None = smoothstep；设值后 fade_out 段
   改线性三点 `1.0 → mid → 0.0`，与时长正交，`clamp 0..1`；`fade_in` 恒 smoothstep）。
   Particle fade-out midpoint shaping (linear 3-point vs smoothstep).
-- Android 平台支持：`App::new_on_android` ＋ `#[vireo::main]` 生成 `android_main`
-  （NativeActivity 入口）；Android 上自动加载 `/system/fonts` 修复
-  `no default font found` panic；`requested_maximum_frame_latency` 可配。
-  Android support: NativeActivity entry point + Android system font loading.
+- Android 平台支持：`#[vireo::main]` 在安卓 target 下生成 GameActivity 胶水层
+  按符号名查找的 `android_main` 入口，`AndroidApp` 存进进程级单例后转 `App::new`
+  —— 与桌面同一构造器，公开 API 不区分平台；Android 上按文件名白名单加载系统
+  正文字体，修复 `no default font found` panic；`requested_maximum_frame_latency` 可配。
+  - **Android 后端从 `android-native-activity` 换成 `android-game-activity`**：
+    前者没有 `InputConnection`，软键盘只能以物理按键事件送ASCII，**中文输入不可能**
+    （android-activity 把 native_activity 的 `set_text_input_state` 写成 `// NOP`）。
+    GameActivity 提供 `GameTextInput`（`TextInputState`：text / selection /
+    compose_region），真机已确认输入法 `onStartInput` 正常连上。
+  - **构建链随之改变**：`GameActivity extends AppCompatActivity`，theme 必须是
+    AppCompat 子主题，且需要 `androidx.games:games-activity:4.4.0` 这个 gradle AAR
+    —— `xbuild` / `cargo-apk` 没有 gradle 依赖支持，**不再适用**。改用
+    `cargo ndk` 编 cdylib + gradle 打包。版本号对齐官方模板
+    `rust-mobile/rust-android-examples` 的 `agdk-winit-wgpu`（AGP 9.1.0 / Gradle 9.3.1）。
+  - 附带解决**内容进不去挖孔**：`xbuild` 内置 NDK 拒绝 `target_sdk_version ≥ 34`
+    （`ndk doesn't support sdk version`），导致 targetSdk 偏低、
+    `windowLayoutInDisplayCutoutMode` 被系统忽略。gradle 下 targetSdk 35 正常，
+    真机实测窗口从 `2264×1080`（letterbox）恢复为 `2392×1080` 全宽。
+  Android support: GameActivity entry point (CJK IME capable) + Android system fonts.
 - `vireo::platform::android::WindowExtAndroid`（`#[cfg(target_os = "android")]`，
   不进 prelude）：系统 UI 显隐 / 滑动唤回行为、安全区三值模型、挖孔模式、
-  运行期朝向、常亮、屏幕亮度。
+  运行期朝向、常亮、屏幕亮度、窗口层级。
   - 安全区三值：`safe_area`（物理最大遮挡，忽略可见性）/ `padding`（当前可见遮挡，
     键盘会吸收底部）/ `ime_insets`（键盘）＋`cutouts()`（摄像头物理矩形）。
     坐标系左上 y-down，单位 vireo 逻辑像素。设计参考 Flutter `MediaQuery` 三值模型
     （Unity 单值 `safeArea` 与 Godot 4.4→4.5 都在这个歧义上出过 bug）。
   - `SystemBars` 是 bitmask（可只隐藏状态栏或导航栏），`SystemBarBehavior` 只提供
     Android 31+ 真正支持的两档（不提供 API 30 已废弃的僵尸枚举）。
+  - `WindowLevel`（`LayoutParams.type`）按 Android 语义重新表达为
+    `Normal / Overlay / SystemAlert / AttachedDialog`，**不硬套** winit 四档
+    （Android 没有「置底」）。`Overlay` 需 `SYSTEM_ALERT_WINDOW` 权限＋用户授权。
   - 平台强制行为已在 doc 注明：targetSdk 35+ 强制 edge-to-edge、API 36 无法退出；
     桌面窗口化模式 caption bar 永远可见。
   - setter 一律返回 `Result`（不静默 no-op），getter 打日志返回零值（每帧热路径）。
     Rust 生态此前无任何安全区 / 沉浸式 API（winit 0.30 的
     `WindowExtAndroid` 只有 2 个方法）。
-    Android system UI / safe-area / cutout control (first of its kind in Rust).
+  - 模块 doc 新增「建窗期属性」一节：`screenOrientation` / `configChanges` /
+    `windowSoftInputMode` / 挖孔 style 全是 **APK 构建期 manifest 条目**，winit 的
+    `WindowAttributes` 在 Android 上全部忽略，运行期改 `Window.setAttributes` 也不
+    触发 WM 重算边框（实测挖孔模式无效）——附参考 manifest 片段。
+  - 模块 doc 新增「三个刻意缺席的方法」：`set_ime_purpose` /
+    `set_ime_cursor_area` / `fullscreen`+`Frameless` 在 Android 的语义差异与
+    不提供的原因（前者须与文本输入后端一起做，后者 Android 无对应概念）
+    —— 说明而非静默 no-op。
+    Android system UI / safe-area / cutout / window-level control
+    (first of its kind in Rust).
 
 ### Fixed / 修复
+
+- Android 字体：全量加载 `/system/fonts`（真机 230 个文件）会把装饰体带进字体库，
+  cosmic-text 默认家族 `"Arial"` 在 Android 命中不到 → 回退到「排序后第一个 face」
+  → 实测**所有文字全大写、比分数字画不出来**。改为**文件名白名单**（正文字体前缀
+  AND 字体扩展名双条件），只解析已知的正文字体文件，其余一概不碰；同时钉死 fontdb
+  三个 generic 家族。顺带省掉 200+ 次字体解析的启动开销。桌面因恰好装了 Arial
+  一直没暴露。
+  Android fonts: full-dir scan pulled decorative faces in; whitelist text fonts instead.
 
 - 无焦点时自动退出挂起：窗口已关闭但进程不退。根因是 winit 0.30 Windows 的
   `exit()` 只置标志不唤醒等待者，而 `run_app` 的退出检查点全在无限 park 返回之后，

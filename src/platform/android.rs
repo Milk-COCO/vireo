@@ -40,6 +40,87 @@
 //!   [`WindowExtAndroid::system_bars_visible`] 查实际效果。
 //! - **桌面窗口化模式下 caption bar 永远可见**，即使开了沉浸式（Android 大屏行为）。
 //! - Android 官方明确「**不要在个人设备上永久隐藏系统栏**」，沉浸式应给用户滑动唤回。
+//!
+//! # 建窗期属性：vireo 管不了，必须写进 manifest
+//!
+//! 上面所有 API 都是**运行期**的。但 Android 上真正决定窗口形态的属性绝大多数是
+//! **APK 构建期**的 manifest 条目，**vireo 作为库无法注入**——原因不是偷懒：
+//!
+//! - 这些条目写在 APK 的 `AndroidManifest.xml` 里，由**系统进程**在拉起我们的
+//!   Activity **之前**读取并施加（决定窗口朝向、是否 letterbox、键盘弹出时怎么 resize）。
+//! - vireo 只能通过 `WindowAttributes` 传给 winit，而 winit 在 Android 上
+//!   **基本全部忽略** `WindowAttributes`。
+//! - 即使运行期改 `Window.setAttributes`，也**不会触发 WM 重算窗口边框**——
+//!   实测：改 `layoutInDisplayCutoutMode` 后窗口仍被 letterbox
+//!   （物理 `2264×1080` vs 屏幕 `2392×1080`，差的 `128px` 正好是挖孔区）。
+//!
+//! 涉及的条目：
+//!
+//! | manifest 条目 | 作用 | 备注 |
+//! |---|---|---|
+//! | `android:screenOrientation` | 朝向 | 纯竖屏 app 必填 |
+//! | `android:configChanges` | 自行处理旋转/密度变化 | 不填则旋转时 Activity 重建 |
+//! | `android:windowSoftInputMode` | 键盘弹出时是否 resize | 见下，**对文字输入影响最大** |
+//! | `<style>` 的 `android:windowLayoutInDisplayCutoutMode` | 内容是否延伸到挖孔区 | 见下 |
+//!
+//! ## `windowSoftInputMode`
+//!
+//! - `adjustResize`（游戏常用）：键盘弹出时窗口变小 → 配合本模块的
+//!   `WindowExtAndroid::ime_insets()` 做布局避让。
+//! - `adjustPan` / `adjustNothing`（编辑类常用）：窗口不动，由系统平移/遮挡。
+//!
+//! 三种都**不会**让 vireo 拿到输入法的文本——那是 IME 后端的事，见 crate 文档的
+//! 文本输入一节。
+//!
+//! ## 挖孔（`windowLayoutInDisplayCutoutMode`）
+//!
+//! - `never`：不延伸 → 挖孔区黑边（**vireo 当前的实测状态**）。
+//! - `shortEdges` / `always`（API 30+）：内容延伸到挖孔区。
+//!
+//! 需要写在 `<style>` 里（`Theme.Vireo` 之类），且**要求 `targetSdk ≥ 35`**；
+//! `targetSdk < 35` 时该属性被系统忽略。走 `xbuild` 时默认 target SDK 够新，
+//! 但注意 `xbuild` **不支持显式设置 `target_sdk_version`**（内置 NDK 报
+//! `ndk doesn't support sdk version`），所以只能吃默认值。
+//!
+//! # 三个刻意缺席的方法
+//!
+//! | API | Android 状况 | vireo 的处理 |
+//! |---|---|---|
+//! | `set_ime_purpose` | Android **有**语义（`EditorInfo.inputType`），GameActivity 提供 `GameActivity_setImeEditorInfoFields` 可写 | **暂不提供**。它必须和 `TextInputState` 一起做（同一个 IME 会话），单独给一个 setter 用户无法验证效果；等文本输入后端就位后一并加 |
+//! | `set_ime_cursor_area` | Android **有** `Window.setCursorAnchorInfo`（API 21+），但候选窗位置最终由输入法实现决定，不保证生效 | **不提供**。JNI 通道现成，但收益不确定、无法验证，不值得占公开 API 面 |
+//! | `fullscreen(Borderless)` / `frame_style(Frameless)` | Android **无**「窗口模式」概念：全屏由系统栏显隐表达，无边框则自己画 UI | 用户意图用 [`set_system_bars`](WindowExtAndroid::set_system_bars) 覆盖 |
+//!
+//! > **注意**：本节曾写着「`set_ime_purpose` 无处可写，因为 NativeActivity 从不创建
+//! > InputConnection」。切换到 GameActivity 后**该结论已失效** —— 现在
+//! > InputConnection 存在（真机已确认搜狗输入法 `onStartInput` 连上），这条待办
+//! > 的阻塞已解除，只是尚未实现。
+//!
+//! 反过来，桌面 `WindowLevel` 的 `AlwaysOnBottom` 在 Android **没有**对应档
+//! （低于 `TYPE_APPLICATION` 的都是系统保留窗口），所以 [`WindowLevel`] 是按
+//! Android 的 `LayoutParams.type` 重新表达的，不是硬套 winit 四档。
+//!
+//! ## 参考 manifest
+//!
+//! ```xml
+//! <activity android:name=".MainActivity"
+//!           android:screenOrientation="landscape"
+//!           android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+//!           android:windowSoftInputMode="adjustResize"
+//!           android:exported="true">
+//!   <meta-data android:name="android.app.lib_name" android:value="pong" />
+//! </activity>
+//! ```
+//!
+//! 对应 `xbuild` 的 `manifest.yaml`：
+//!
+//! ```yaml
+//! manifest:
+//!   activities:
+//!     - name: .MainActivity
+//!       screenOrientation: landscape
+//!       configChanges: orientation|screenSize|screenLayout|keyboardHidden|density|uiMode
+//!       windowSoftInputMode: adjustResize
+//! ```
 
 use crate::error::VireoError;
 use crate::math::Rect;
@@ -75,6 +156,25 @@ mod api {
     pub const CUTOUT_MODE_SHORT_EDGES: i32 = 1;
     /// `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS`
     pub const CUTOUT_MODE_ALWAYS: i32 = 2;
+
+    // `WindowManager.LayoutParams.type` —— 数值取自 AOSP `WindowManager.java`：
+    // TYPE_APPLICATION = 2；
+    // TYPE_APPLICATION_ATTACHED_DIALOG = FIRST_SUB_WINDOW(1000) + 3；
+    // TYPE_SYSTEM_ALERT = FIRST_SYSTEM_WINDOW(2000) + 3；
+    // TYPE_APPLICATION_OVERLAY = FIRST_SYSTEM_WINDOW(2000) + 38（API 26 新增）。
+    /// `WindowManager.LayoutParams.TYPE_APPLICATION`（普通应用窗口；系统默认值）
+    pub const TYPE_APPLICATION: i32 = 2;
+    /// `TYPE_APPLICATION_ATTACHED_DIALOG`（附着对话框）
+    pub const TYPE_APPLICATION_ATTACHED_DIALOG: i32 = 1003;
+    /// `TYPE_SYSTEM_ALERT`（系统弹窗级；**API 26 起废弃**，官方要求改用
+    /// [`TYPE_APPLICATION_OVERLAY`]）
+    pub const TYPE_SYSTEM_ALERT: i32 = 2003;
+    /// `TYPE_APPLICATION_OVERLAY`（悬浮窗，API 26+）。
+    ///
+    /// 需要 manifest 的 `android.permission.SYSTEM_ALERT_WINDOW`，**且**用户已在
+    /// 「显示在其他应用上层」设置里授权；未授权时 `Window.setAttributes` 会抛
+    /// `WindowManager.BadTokenException`。
+    pub const TYPE_APPLICATION_OVERLAY: i32 = 2038;
 
     /// `ActivityInfo.SCREEN_ORIENTATION_*`
     pub const REQ_UNSPECIFIED: i32 = 0;
@@ -370,6 +470,59 @@ pub enum DisplayOrientation {
     Unknown,
     Portrait,
     Landscape,
+}
+
+/// 窗口层级（`WindowManager.LayoutParams.type`）。
+///
+/// # 权限
+///
+/// [`WindowLevel::Overlay`] 需要 manifest 声明
+/// `android.permission.SYSTEM_ALERT_WINDOW`，**且**用户已在系统「显示在其他应用
+/// 上层」里授权。未授权时 [`WindowExtAndroid::set_window_level`] 会失败
+/// （`WindowManager.BadTokenException`）——vireo 不代用户跳授权设置页。
+///
+/// # 与 winit `WindowLevel` 的关系
+///
+/// winit 的 `WindowLevel { Normal, AlwaysOnTop, AlwaysOnBottom, AbovePro }` 是
+/// X11/Win32 概念，Android 没有「置底」这一档（`type` 越小越靠下，但低于
+/// `TYPE_APPLICATION` 的都是系统保留窗口）。所以这里按 Android 的 `type`
+/// 重新表达，不硬套 winit 的四档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowLevel {
+    /// 普通应用窗口（`TYPE_APPLICATION`）。系统默认值。
+    #[default]
+    Normal,
+    /// 悬浮窗：盖在所有 Activity 窗口之上，但在状态栏/输入法之下
+    /// （`TYPE_APPLICATION_OVERLAY`，API 26+）。**需权限，见上。**
+    Overlay,
+    /// 系统弹窗级（`TYPE_SYSTEM_ALERT`）。**API 26 起已废弃**，
+    /// 官方文档要求非系统应用改用 [`WindowLevel::Overlay`]；保留仅为兼容老系统。
+    SystemAlert,
+    /// 附着对话框（`TYPE_APPLICATION_ATTACHED_DIALOG`）：按顶层窗口布局，
+    /// 而不是作为容器子窗口。
+    AttachedDialog,
+}
+
+impl WindowLevel {
+    fn to_android(self) -> i32 {
+        match self {
+            Self::Normal => api::TYPE_APPLICATION,
+            Self::Overlay => api::TYPE_APPLICATION_OVERLAY,
+            Self::SystemAlert => api::TYPE_SYSTEM_ALERT,
+            Self::AttachedDialog => api::TYPE_APPLICATION_ATTACHED_DIALOG,
+        }
+    }
+
+    /// 未知 `type`（系统保留窗口 / 被别的库改过）→ `None`，由调用方决定回落。
+    fn from_android(v: i32) -> Option<Self> {
+        match v {
+            api::TYPE_APPLICATION => Some(Self::Normal),
+            api::TYPE_APPLICATION_OVERLAY => Some(Self::Overlay),
+            api::TYPE_SYSTEM_ALERT => Some(Self::SystemAlert),
+            api::TYPE_APPLICATION_ATTACHED_DIALOG => Some(Self::AttachedDialog),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +1081,18 @@ pub trait WindowExtAndroid {
 
     /// 屏幕亮度。`None` = 跟随系统；`Some(v)`，`v ∈ [0.0, 1.0]`。
     fn set_screen_brightness(&self, brightness: Option<f32>) -> Result<(), VireoError>;
+
+    /// 窗口层级（`WindowManager.LayoutParams.type`）。
+    ///
+    /// [`WindowLevel::Overlay`] 需要 `SYSTEM_ALERT_WINDOW` 权限**且**用户已授权，
+    /// 否则上抛 `Err`（`BadTokenException`）——见 [`WindowLevel`] 的权限说明。
+    fn set_window_level(&self, level: WindowLevel) -> Result<(), VireoError>;
+
+    /// 当前**实际**生效的窗口层级；`type` 是系统保留值时返回 `None`。
+    ///
+    /// 与 [`WindowExtAndroid::display_cutout_mode`] 一致走活读（`LayoutParams.type`），
+    /// 不走本地缓存——层级有可能被平台或第三方库改掉。
+    fn window_level(&self) -> Option<WindowLevel>;
 }
 
 impl WindowExtAndroid for VireoWindow {
@@ -1304,6 +1469,69 @@ impl WindowExtAndroid for VireoWindow {
         });
         Ok(())
     }
+
+    fn set_window_level(&self, level: WindowLevel) -> Result<(), VireoError> {
+        self.require_android("set_window_level")?;
+        let raw = level.to_android();
+        self.post_to_java_thread("set_window_level", move |env, activity| {
+            let window = get_window(env, activity)?;
+            let attrs = env
+                .call_method(
+                    window.as_ref(),
+                    jni_str!("getAttributes"),
+                    jni_sig!("()Landroid/view/WindowManager$LayoutParams;"),
+                    &[],
+                )?
+                .l()?;
+            if attrs.is_null() {
+                return Err(JniErr::Null("Window.getAttributes"));
+            }
+            env.set_field(
+                &attrs,
+                jni_str!("type"),
+                jni_sig!("I"),
+                jni::objects::JValue::Int(raw),
+            )?;
+            // 未授权 SYSTEM_ALERT_WINDOW 时这里抛 BadTokenException，
+            // 经 post_to_java_thread → `set_window_level` 上抛给调用方。
+            env.call_method(
+                window.as_ref(),
+                jni_str!("setAttributes"),
+                jni_sig!("(Landroid/view/WindowManager$LayoutParams;)V"),
+                &[jni::objects::JValue::Object(&attrs)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn window_level(&self) -> Option<WindowLevel> {
+        let app = match self.android_app() {
+            Ok(a) => a,
+            Err(e) => return warn_getter("window_level", e),
+        };
+        match with_activity(app, |env, activity| {
+            let window = get_window(env, activity)?;
+            let attrs = env
+                .call_method(
+                    window.as_ref(),
+                    jni_str!("getAttributes"),
+                    jni_sig!("()Landroid/view/WindowManager$LayoutParams;"),
+                    &[],
+                )?
+                .l()?;
+            if attrs.is_null() {
+                return Ok(None);
+            }
+            let v = env
+                .get_field(&attrs, jni_str!("type"), jni_sig!("I"))?
+                .i()?;
+            Ok(WindowLevel::from_android(v))
+        }) {
+            Ok(v) => v,
+            Err(e) => warn_getter("window_level", e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1407,6 +1635,34 @@ mod tests {
         );
         assert_eq!(api::FLAG_KEEP_SCREEN_ON, 0x80);
         assert_eq!(api::BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, 2);
+    }
+
+    #[test]
+    fn window_level_android_codes_match_aosp() {
+        // 数值直接对应 AOSP `WindowManager.java`，改错会静默变成系统保留窗口。
+        assert_eq!(api::TYPE_APPLICATION, 2);
+        // FIRST_SUB_WINDOW(1000) + 3
+        assert_eq!(api::TYPE_APPLICATION_ATTACHED_DIALOG, 1003);
+        // FIRST_SYSTEM_WINDOW(2000) + 3
+        assert_eq!(api::TYPE_SYSTEM_ALERT, 2003);
+        // FIRST_SYSTEM_WINDOW(2000) + 38
+        assert_eq!(api::TYPE_APPLICATION_OVERLAY, 2038);
+
+        // 四个档位与 android 常数一一对应，且 round-trip 无损
+        for lvl in [
+            WindowLevel::Normal,
+            WindowLevel::Overlay,
+            WindowLevel::SystemAlert,
+            WindowLevel::AttachedDialog,
+        ] {
+            assert_eq!(WindowLevel::from_android(lvl.to_android()), Some(lvl));
+        }
+        assert_eq!(WindowLevel::default(), WindowLevel::Normal);
+
+        // 系统保留 type（如 TYPE_PHONE=2002 / TYPE_STATUS_BAR=2000）不应被误认
+        assert_eq!(WindowLevel::from_android(2002), None);
+        assert_eq!(WindowLevel::from_android(2000), None);
+        assert_eq!(WindowLevel::from_android(1), None); // TYPE_BASE_APPLICATION
     }
 
     #[test]
