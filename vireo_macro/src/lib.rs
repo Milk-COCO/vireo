@@ -69,7 +69,9 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
         ));
     }
 
-    let ItemFn { vis, sig, block, .. } = input;
+    let ItemFn {
+        vis, sig, block, ..
+    } = input;
     let ret = &sig.output;
 
     // 参数形式：无参数 → 注入 `app`；单参数 → 用其绑定名注入。两种写法等价。
@@ -121,7 +123,7 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
             }
             #[cfg(target_os = "android")]
             #[unsafe(no_mangle)]
-            pub fn android_main(app: vireo::android::AndroidApp) {
+            pub extern "C" fn android_main(app: vireo::android::AndroidApp) {
                 vireo::app::android_main_entry_with_descriptor(app, #desc, #body);
             }
         });
@@ -135,7 +137,7 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
         }
         #[cfg(target_os = "android")]
         #[unsafe(no_mangle)]
-        pub fn android_main(app: vireo::android::AndroidApp) {
+        pub extern "C" fn android_main(app: vireo::android::AndroidApp) {
             vireo::app::android_main_entry(app, #body);
         }
     })

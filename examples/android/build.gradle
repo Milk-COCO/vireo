@@ -39,14 +39,25 @@ def rustAbis = [
 // ---- NDK 选择--------------------------------------------------------------
 // 优先级：`-PndkVersion=` > 环境变量 > `local.properties` 的 ndk.dir。
 //
-// ⚠️ **为什么要给这个开关**：不是为了 16 KB（那个由 cargo-ndk ≥ 4.0.0 自动
-// 补 `-Wl,-z,max-page-size=16384` 解决，NDK r26 也合规，见 README §5），而是为了
+// ⚠️ **为什么要给这个开关**：**不是为了 16 KB**。16 KB 由 `.cargo/config.toml` 里
+// 显式传的 `-Wl,-z,max-page-size=16384` **和 `-Wl,-z,common-page-size=16384`** 解决
+// （cargo-ndk 不会注入后者；缺了它 NDK r28 编出的 `PT_GNU_RELRO` 末尾按 4 KB 对齐，
+// 实测 `mod 0x1000` 不合规，见 README §5 + `check-16kb.ps1`）。这个开关是为了
 // **可复现**：不设 `ANDROID_NDK_HOME` / `NDK_HOME` / `local.properties` 时，
 // `cargo-ndk` 会**自动挑 SDK 里版本号最高的 NDK** —— 换台机器、SDK 装了个新的，
 // 同一份代码就编出不同的二进制。显式锁定才可复现：
 //
 //     ./gradlew assembleRelease -PndkVersion=28.2.13676358
-def ndkVersion = project.findProperty('ndkVersion')
+//
+// ⚠️ **PowerShell 里要加引号**：`& .\gradlew.bat assembleRelease -PndkVersion=28.2.13676358`
+// 会被 cmd 在 `=` 后的首个 `.` 处把参数截断（实测拆成 `-PndkVersion=28` +
+// 任务名 `.2.13676358`）。写成 `'-PndkVersion=28.2.13676358'` 才完整。
+//
+// ⚠️ **不能用 `project.findProperty('ndkVersion')`**：AGP 会往 project 上注入一个
+// 同名的约定属性（AGP 9.1 默认 NDK 恰好就是 `28`），`findProperty` 读到的是它，
+// `-PndkVersion=` 反而被无视 → 去找不存在的 `sdk/ndk/28`。
+// `gradle.startParameter.projectProperties` 只含命令行 `-P` 传进来的键，干净。
+def ndkVersion = gradle.startParameter.projectProperties['ndkVersion']
 
 def localProps = new Properties()
 def lpFile = file('local.properties')
