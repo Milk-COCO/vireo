@@ -86,6 +86,11 @@ pub struct AppInner {
     pub(crate) event_tx: Mutex<Option<mpsc::Sender<WinitEvent>>>,
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     pub(crate) event_loop_proxy: OnceLock<winit::event_loop::EventLoopProxy<()>>,
+    /// 生命周期回调：`on_paused` 与 `on_resumed`。
+    ///
+    /// 只由**渲染线程**在观察到状态变化后调用（`thread::run_thread_loop`），
+    /// 所以回调里可以安全地用 `App` / `DrawBatch`，不必自己做跨线程同步。
+    pub(crate) lifecycle_cbs: Mutex<LifecycleCbs>,
 }
 
 pub struct App {
@@ -145,6 +150,48 @@ pub(crate) enum DeferredTaskKind {
 
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// `on_paused` / `on_resumed` 回调表：`(paused, resumed)`。
+///
+/// 元素是 `Arc` 而非 `Box` —— 派发时要先把锁释放再逐个调用，否则「回调里再注册
+/// 一个回调」会自锁。
+type LifecycleCbs = (
+    Vec<Arc<dyn Fn() + Send + Sync>>,
+    Vec<Arc<dyn Fn() + Send + Sync>>,
+);
+
+impl AppInner {
+    /// 由渲染线程在观察到生命周期状态变化后调用。
+    ///
+    /// 单个回调 panic 不会打断渲染循环 —— 与 `on_tick` 的处理一致。
+    pub(crate) fn fire_lifecycle_callbacks(&self) {
+        let (paused, resumed) = {
+            let cbs = self.lifecycle_cbs.lock();
+            if cbs.0.is_empty() && cbs.1.is_empty() {
+                return;
+            }
+            // clone Arc 而不是持锁调用：回调完全可能在里面注册新回调。
+            (cbs.0.clone(), cbs.1.clone())
+        };
+        let fire = |cbs: &[Arc<dyn Fn() + Send + Sync>]| {
+            for cb in cbs {
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()))
+                {
+                    log::error!(
+                        "vireo: lifecycle callback panicked: {}",
+                        crate::app::supervisor::panic_payload_to_string(payload)
+                    );
+                }
+            }
+        };
+        if crate::platform::android_lifecycle::is_paused() {
+            fire(&paused);
+        } else {
+            fire(&resumed);
+        }
+    }
+}
+
 /// 安卓进程级 `AndroidApp` 句柄（仅安卓）。
 ///
 /// `AndroidApp` 只能从 activity 的 `onCreate` 回调拿到（android-activity
@@ -175,6 +222,9 @@ where
     F: FnOnce(App) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
+    // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
+    crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);
     let _ = ANDROID_APP.set(android_app);
     App::new(main)
 }
@@ -195,6 +245,9 @@ pub fn android_main_entry_with_descriptor<F, Fut>(
     F: FnOnce(App) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
+    // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
+    crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);
     let _ = ANDROID_APP.set(android_app);
     App::with_descriptor(desc, main)
 }
@@ -348,6 +401,7 @@ impl App {
                 event_tx: Mutex::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
+                lifecycle_cbs: Mutex::new((Vec::new(), Vec::new())),
             }),
         }
     }
@@ -605,6 +659,49 @@ impl App {
 
     pub fn init_duration(&self) -> f64 {
         self.init_duration
+    }
+
+    // ---- 生命周期（Android 有效，其余平台恒「未暂停」）--------------------
+
+    /// App 当前是否处于**暂停**（Android 上 = activity 在后台）。
+    ///
+    /// # 它替你做了什么
+    ///
+    /// `true` 期间整条渲染 Thread **完全停摆** —— 不跑 `on_tick`、不 `draw`、
+    /// 不 acquire/present。所以你不需要（也不该）在 `on_tick` 里自己判断：
+    /// **恢复时会自动补上停摆期间漏掉的帧逻辑**，`on_tick` 里的代码照常写。
+    ///
+    /// # 平台
+    ///
+    /// - **Android**：`MainActivity.onPause()` → JNI → 本标志。
+    ///   需要 `MainActivity.java` 照 `examples/android/` 那样声明并调用两个
+    ///   native 方法；没声明时本值恒 `false`（= 旧的「后台仍全速」行为），
+    ///   并在 logcat 打一条 warn 说明怎么改。
+    /// - **其它平台**：恒 `false`。桌面对应概念是
+    ///   [`VireoWindow::focused`](crate::window::VireoWindow::focused)。
+    ///
+    /// ⚠️ Android 的 `onPause` 对**短暂**中断也会触发（锁屏、部分弹窗、
+    /// 分屏切换）。这是 Unity `OnApplicationPause` 同样的语义；如果你需要
+    /// 「彻底离开才算」，得自己在 `on_paused` 里配合 `on_stopped` 之类的额外判定。
+    pub fn is_paused(&self) -> bool {
+        crate::platform::android_lifecycle::is_paused()
+    }
+
+    /// 注册「进入暂停」回调。
+    ///
+    /// 在**渲染线程**上、且在恢复之后调用（回调需要能碰 `App`，所以不能直接在
+    /// UI 线程的 JNI 回调里跑）。
+    ///
+    /// 典型用途：保存游戏进度、释放音频、停止网络轮询。
+    /// 注意它是**恢复时**才拿到通知，所以「暂停时要做的紧急收尾」请直接写在
+    /// `on_tick` 里判 `is_paused()`。
+    pub fn on_paused(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.lifecycle_cbs.lock().0.push(Arc::new(cb));
+    }
+
+    /// 注册「恢复」回调。语义/线程见 [`on_paused`](Self::on_paused)。
+    pub fn on_resumed(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.lifecycle_cbs.lock().1.push(Arc::new(cb));
     }
 
     pub fn set_max_fps(&self, fps: Option<u32>) {

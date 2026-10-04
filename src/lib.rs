@@ -30,6 +30,9 @@
 //! - **挖孔**：构建期 `windowLayoutInDisplayCutoutMode` + `targetSdk ≥ 35`
 //! - **文本输入**：UTF-16↔UTF-8 下标换算、`InputType` 6 档、状态回填
 //! - 朝向锁定 / 常亮 / 屏幕亮度 / 窗口层级
+//! - **生命周期**：`App::is_paused` / `on_paused` / `on_resumed`（需在
+//!   `MainActivity.java` 里转发 `onPause`/`onResume`，见 `examples/android/`）——
+//!   winit 的 Android 后端不发这些事件，暂停期间整条渲染线程会完全停摆
 //!
 //! ⚠️ **构建链与桌面不同**：需要 `cargo ndk` + gradle 工程（`GameActivity` 是
 //! `AppCompatActivity` 子类，theme 必须是 AppCompat 子主题，并依赖

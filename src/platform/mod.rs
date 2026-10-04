@@ -83,3 +83,12 @@ pub mod android;
 /// `android` 模块不存在。
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod android_text_input;
+
+/// Android 生命周期桥（`onPause` / `onResume` → 暂停渲染）。
+///
+/// **无条件编译**：渲染线程要在所有平台上读 `is_paused`，而桌面恒为 `false`。
+/// 只有 JNI 绑定那部分是 `cfg(target_os = "android")`。
+///
+/// 背景与方案取舍见模块文档。
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod android_lifecycle;

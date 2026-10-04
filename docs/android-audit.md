@@ -12,7 +12,7 @@
 | P0（3 项阻塞级）| ✅ 完成 | `bc0129d` |
 | P1（3 项）| ✅ 完成 | `a624cfb`（gradle 模板）/ `57e2907`（契约文档）|
 | P2（4 项）| 🔄 进行中 | 见 §5 修复计划表 |
-| P3（生命周期）| ⏸ **用户已否决折中方案**，待重新设计 | — |
+| P3（生命周期）| ✅ 完成 —— 用户否决折中方案后改走「Java 转发 + RegisterNatives」| 见下 |
 
 **想直接上手 Android？** 看 [`examples/android/README.md`](../examples/android/README.md) ——
 前置条件、三步出 APK、五个「静默失败」的坑。
@@ -189,7 +189,7 @@ subagent 说恒返回 `Some`。实际 `android.rs:1608-1622` 在无 AndroidApp �
 | **P2-2** | 缺陷 8：`WindowLevel` → **`VireoWindowLevel`** 解 E0659 冲突（breaking，用户已定名）| **S** | 🔄 |
 | **P2-3** | 缺陷 11：`system_bars_visible()` → `effective_system_bars() -> SystemBars`（用户：改彻底，不并存）| **S** | 🔄 |
 | **P2-4** | 缺陷 12：Android 支持 `descriptor =`（强制 Vulkan）| **M** | 🔄 |
-| **P3** | 生命周期：~~降低默认 max_fps + `focused()` 当暂停代理~~ | — | ❌ **用户否决** |
+| **P3** | 生命周期：`MainActivity.onPause/onResume` 经 JNI 转发 + 渲染 Thread 停摆 | **M** | ✅ 完成 |
 | **P3** | 生命周期真解（绕开 winit 吞事件）| **L** | ☐ |
 | **待验** | 缺陷 15：真机确认 emoji 是否能渲染（`NotoColorEmoji` 不在白名单）| **S** | ☐ |
 
@@ -236,3 +236,64 @@ README 两份同步加「平台支持」小节。
    同一条数据有 callback 和 polling 两条路，一条对一条错是最容易被漏的情况。
 3. **文档与实现矛盾是独立缺陷**，且往往比实现 bug 更贵 —— 实现 bug 一次运行就暴露，
    文档 bug 会持续误导所有后来人（包括未来的作者自己）。
+### P3 修复记录：生命周期（方案 B）
+
+**被否决的折中方案**：Android 上把默认 `max_fps` 降到 30 + 用 `focused()` 当暂停代理。
+用户否决，理由成立 —— 它**用错误的信号代替正确的信号**：
+
+- 用户没切后台时也只跑 30fps，对音游是致命的判定精度损失
+- 切后台时**仍然跑 30fps** —— 根本没解决问题，只是把功耗从 100% 降到 12.5%
+- 等于「承认检测不到，但让所有人替没检测到的人买单」
+
+**采纳的方案 B：`MainActivity.java` 转发 + `RegisterNatives`。**
+
+三条路的对比：
+
+| 方案 | 成本 | 问题 |
+|---|---|---|
+| 降默认 max_fps | 几行 | 没解决问题（如上） |
+| Rust 侧注册 `ActivityLifecycleCallbacks` | 大 | 要用 `java.lang.reflect.Proxy` 动态实现接口，回调在 UI 线程 |
+| **Java 侧转发** | 小 | `MainActivity` 本来就是用户代码 |
+
+关键点：`MainActivity.java` 是 vireo 构建产物里的宿主类（`examples/android/`），
+加两个 override 是零成本，换来的是**真正准确**的生命周期信号。
+
+**为什么用 `RegisterNatives` 而不是 JNI 命名约定**：命名约定要求符号形如
+`Java_<包名>_<类名>_<方法名>`，把 Java 包名编进 Rust 导出名 —— 用户改
+`applicationId` 就得同步改 Rust 常量，忘了只在运行时找不到符号（无编译错）。
+`RegisterNatives` 直接传**函数指针**，Java 侧只声明
+`private static native void nativeOnPause();`（与包名无关），Rust 侧在运行时把
+「方法名 + 签名 → 函数指针」交给 JVM。所以也不需要 `#[no_mangle]` 导出。
+
+**绑定时机**：`android_main` 期间（`app::android_main_entry`）—— 那时
+`MainActivity` 已被 AGSK 加载，而 `onResume`/`onPause` 必然在 `onCreate` 之后。
+
+**取类的方式**：用 `env.get_object_class(activity)` 取 **Activity 实例的实际类**，
+不写死包名 `findClass` —— 用户改 applicationId / 类名都不影响绑定。
+
+**新增 API**（`src/app/mod.rs`）：
+
+- `App::is_paused() -> bool` — 任意线程可读；桌面恒 `false`
+- `App::on_paused(cb)` / `App::on_resumed(cb)` — 渲染线程上触发
+
+**渲染侧**（`src/thread.rs`）：`paused` 期间整条 Thread **完全停摆** —— 不跑
+`on_tick`、不 `draw`、不 acquire/present。省下的是**全部** CPU+GPU，而不只是降帧率。
+
+**lost-wakeup 防护**：`set_paused` 必须**持 `WAKE` 的锁**再写标志。否则渲染线程
+可能刚好在「检查到 paused=true」与「注册进 condvar 等待」之间被通知掉通知，
+于是永久阻塞 —— 表现为「切回前台后画面再也不动」。
+
+**多 Thread 去重**：每次真实状态变化 `GEN` +1，各 Thread 各自跟踪已处理的代号，
+于是每次变更每个 loop 恰好触发一次回调。
+
+**设计取舍（已写进 API 文档）**：
+1. 回调在**恢复时**才触发（回调要能碰 `App`，不能在 UI 线程跑）。所以「暂停瞬间
+   的紧急收尾」要写在 `on_tick` 里判 `is_paused()`。
+2. `onPause` 对短暂中断也触发（锁屏、部分弹窗、分屏切换）—— 同 Unity
+   `OnApplicationPause` 语义。
+3. 绑定失败只 `log::warn!`（不 panic）：用户可能没照模板写 `MainActivity.java`，
+   此时退化成旧行为（后台仍全速），warn 里写清怎么改。
+
+**仍未覆盖**：`onStop` / `onDestroy` / `onSaveInstanceState` / `onTrimMemory`。
+需要的话照 `nativeOnPause` 的写法自己加（Rust 侧只要在
+`register_native_methods` 的表里多一行 + 一个 `extern "system" fn`）。

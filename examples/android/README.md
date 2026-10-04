@@ -217,27 +217,67 @@ AGDK 在运行时**按符号名字符串**查找它。rustc 的 dead_code 分析
 - **preedit（拼音候选）在部分 ROM 上拿不到**。搜狗小米版只 commit 不
   setComposingText，`text_input_state().compose` 恒为 `None`。能正常上屏汉字，
   只是拿不到候选串。
-- **生命周期事件拿不到**。winit 的 Android 后端吞掉 `MainEvent::Pause/Stop/Resume/...`，
-  所以没有 `on_paused` / `on_resumed`。后台应用不会自动降帧。
+- **只处理了 `onPause` / `onResume`**。winit 的 Android 后端把 Activity 回调
+  都注册了但**只发 `Resume`/`Start`**，所以 `onStop`、`onDestroy`、`onSaveInstanceState`、
+  `onTrimMemory` 这些 vireo 都收不到 —— 它们只能由你的 `MainActivity.java` 转发，
+  而 vireo 目前只为前两个绑了 native 方法。需要更多就照 `nativeOnPause` 的写法自己加。
+- **16 KB page size 未保证**（NDK 版本限制，见 §5）。
 - **R8/混淆默认关**。`minifyEnabled false`，原因见 `proguard-rules.pro`。
 - 只验证了 **arm64-v8a + Vulkan**。32 位 ABI 和 GLES 后端未测。
 
 ---
 
-## 8. vireo 自身的已知 Android 缺口
+## 8. 生命周期：`onPause` / `onResume` 转发（别删）
 
-模板之外，vireo 库还有这些（完整清单见 `.opencode/android_audit.md`）：
+winit 的 Android 后端**注册了** Activity 生命周期回调，但除 `Resume`/`Start` 外
+**全部不发事件** —— `MainEvent::Pause` / `Stop` 在 Android 侧永远不会被构造。
+所以 vireo 默认**收不到「我进后台了」**，切后台后继续全速渲染，直到被系统杀进程。
 
-- **生命周期拿不到**：winit 的 Android 后端吞掉 `MainEvent::Pause/Stop/Resume/...`，
-  所以没有 `on_paused` / `on_resumed`，后台应用不会自动降帧。
+`MainActivity.java` 里那两个 `native` 方法就是补这个洞的：vireo 在运行时用
+`RegisterNatives` 把它们绑到 Rust 侧，于是有了真正的暂停信号。
+
+```java
+private static native void nativeOnPause();
+private static native void nativeOnResume();
+
+@Override protected void onPause()  { nativeOnPause();  super.onPause(); }
+@Override protected void onResume() { super.onResume(); nativeOnResume(); }
+```
+
+Rust 侧能拿到的东西：
+
+```rust
+app.is_paused();                 // 任意线程可读；桌面恒 false
+app.on_paused(|| save_progress());  // 渲染线程上、恢复之后触发
+app.on_resumed(|| resume_audio());
+```
+
+**`paused` 期间整条渲染 Thread 完全停摆** —— 不跑 `on_tick`、不 `draw`、
+不 acquire/present。所以 `on_tick` 里的代码照常写，不用自己判 `is_paused()`。
+
+三点注意：
+
+1. **回调在「恢复时」才触发**，因为回调要能碰 `App`，不能在 UI 线程的 JNI 回调里跑。
+   所以「暂停瞬间要做的紧急收尾」请写在 `on_tick` 里判 `is_paused()`。
+2. **`onPause` 对短暂中断也触发**（锁屏、部分弹窗、分屏切换）—— 和 Unity
+   `OnApplicationPause` 同样的语义。
+3. **没照抄这段也能跑**，只是退化成旧行为（后台仍全速）+ logcat 一条 warn。
+
+---
+
+## 9. vireo 自身的已知 Android 缺口
+
+模板之外，vireo 库还有这些（完整清单见 [`docs/android-audit.md`](../../docs/android-audit.md)）：
+
 - **emoji 不保证渲染**：Android 字体白名单只收正文字体，`NotoColorEmoji` 不在其中。
   cosmic-text 需要显式加载彩色位图字体，vireo 暂未做。
 - **`cutouts()` 部分 ROM 恒空**：运行时 `set_display_cutout_mode` 是空操作，
   只能靠 manifest/style（见 §4.4）。
 - **16 KB 未保证**：见 §5。
 
-## 9. 相关文档
+## 10. 相关文档
 
 - `vireo::platform::android` 的 API doc（`src/platform/android.rs` 顶部）
+- `vireo::platform::android_lifecycle` 的模块文档（生命周期桥的设计取舍）
+- [`docs/android-audit.md`](../../docs/android-audit.md) —— Android 适配完整性审计
 - `.opencode/android_ime_verification.md` —— IME 真机验证全过程与 logcat 证据
-- `.opencode/android_audit.md` —— Android 适配完整性审计与已知缺口

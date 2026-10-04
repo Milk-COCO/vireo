@@ -399,6 +399,9 @@ pub(crate) fn run_thread_loop(
     let result: std::thread::Result<()> = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut runtimes: Vec<LoopRuntime> = loops.into_iter().map(LoopRuntime::new).collect();
         let mut tick_deadline: Option<std::time::Instant> = None;
+        // 本 loop 已处理过的生命周期变更代号；0 是初始值且 GEN 也从 0 起，
+        // 所以首个 tick 不会误触发回调（此时还没有任何 pause/resume 发生过）。
+        let mut lifecycle_gen = crate::platform::android_lifecycle::generation();
         while !state.done.load(Ordering::Acquire) {
             // 动态追加的运行期 loop（跨线程安全）。
             {
@@ -433,6 +436,31 @@ pub(crate) fn run_thread_loop(
                     let _ = tx.send(WinitEvent::Wake);
                 }
                 break;
+            }
+            // ---- 生命周期暂停闸门 --------------------------------------------
+            // Android 上 activity 进后台时（winit 不转发 `MainEvent::Pause`，信号由
+            // `platform::android_lifecycle` 经 `MainActivity.onPause` 的 JNI 转发送来），
+            // 整条 Thread 停在这里，不再 `drive_loops` —— 也就是不再 `on_tick`、不再
+            // `draw`、不再 acquire/present。切后台时能省下的是**全部** CPU+GPU，
+            // 而不只是把帧率调低。
+            //
+            // 「触发用户回调」放在恢复之后而不是暂停时：暂停信号来自 UI 线程，
+            // 而用户的回调要在 vireo 自己的线程上跑（要能碰 `App` / `DrawBatch`）。
+            // 于是这里只记代号，等 resumed 时再补发 on_paused —— 见下方 transition。
+            if crate::platform::android_lifecycle::is_paused() {
+                crate::platform::android_lifecycle::wait_while_paused(&state.done);
+                if state.done.load(Ordering::Acquire) || device_lost.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            // 生命周期状态变化 → 补发回调。多 Thread 各自跟踪代号，
+            // 因此每次变更每个 loop 恰好触发一次。
+            {
+                let g = crate::platform::android_lifecycle::generation();
+                if g != lifecycle_gen {
+                    lifecycle_gen = g;
+                    app.inner.fire_lifecycle_callbacks();
+                }
             }
             let any = match drive_loops(&mut runtimes, &app, &fps_stats) {
                 Ok(any) => any,

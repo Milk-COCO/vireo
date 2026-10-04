@@ -1748,7 +1748,7 @@ impl VireoWindow {
     /// 设置 IME 候选窗/组合窗跟随光标的矩形区域（位置 + 大小）。
     ///
     /// 在文本光标移动时调用，位置/大小均为逻辑或物理坐标（见 winit
-    /// [`Position`](winit::dpi::Position) / [`Size`](winit::dpi::Size)）。
+    /// `winit::dpi::Position` / `winit::dpi::Size`）。
     ///
     /// 1:1 封装 winit [`Window::set_ime_cursor_area`](winit::window::Window::set_ime_cursor_area)。
     /// 内部由 winit 排队到窗口线程执行，任意线程可调用。
