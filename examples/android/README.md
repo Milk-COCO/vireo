@@ -30,7 +30,7 @@ vireo 在 Android 上**必须**用 `AGDK GameActivity`，因为 `NativeActivity`
 | JDK | **17+** | AGP 9 的硬要求。报 `Unsupported class file major version` 就是还在用 11 |
 | Android SDK Platform | **35** | `compileSdk = 35` |
 | Android SDK Build-Tools | 35.x | |
-| NDK | 26.x 可用，**16KB 需 r28+** | 见 §5 |
+| NDK | 26.x 可用，**建议 28+** | 见 §5。不是 16 KB 的硬性要求 |
 | cargo-ndk | 4.x | `cargo install cargo-ndk` |
 | Gradle | 9.x | 或直接用 `gradle` 命令 |
 
@@ -38,7 +38,7 @@ vireo 在 Android 上**必须**用 `AGDK GameActivity`，因为 `NativeActivity`
 
 ```bash
 export ANDROID_HOME=/path/to/sdk          # 或 ANDROID_SDK_ROOT
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
 ```
 
 > 没有 Android Studio 也能做，本模板就是为了纯命令行准备的。
@@ -95,6 +95,10 @@ adb install -r build/outputs/apk/debug/android-debug.apk
 > `gradlew` 二进制 wrapper（`gradlew` / `gradle-wrapper.jar`）**没有**提交进仓库
 > （jar 是二进制且与版本绑定）。用 `gradle wrapper` 生成一次，或直接用你 PATH 上的
 > `gradle` 命令 —— 等价。
+>
+> ⚠️ **NDK 版本别靠环境变量撞对**：没设 `ANDROID_NDK_HOME` / `NDK_HOME` /
+> `local.properties` 时，`cargo-ndk` 会**自动取 SDK 里版本号最高的 NDK**。
+> 想可复现地锁定，用 `-PndkVersion=`（见 §5）或写进 `local.properties` 的 `ndk.dir`。
 
 ### 拷去自己的项目时要改的 4 处
 
@@ -159,25 +163,113 @@ AOSP 的 extract mode 接管，输入区变成系统自己的全屏编辑条。
 
 ## 5. 16 KB page size（Android 15+）
 
-Google Play 从 2025-11 起要求 16 KB 对齐。
+Google Play 截止 **2027-02-01**：此后 app 更新不支持 16 KB page size 就无法发布。
+官方指南：<https://developer.android.com/guide/practices/page-sizes>
 
-本工程已做（**必要但不充分**）：
+### 判据有两条，而且官方工具只查其中一条
 
-```gradle
-packaging { jniLibs { useLegacyPackaging = false } }   // extractNativeLibs=false
+| # | 判据 | 不满足的后果 |
+|---|---|---|
+| 1 | 每个 `PT_LOAD` 的 `p_align >= 0x4000` | 加载失败 |
+| 2 | **`PT_GNU_RELRO` 的 `(VirtAddr + MemSiz) % 0x4000 == 0`** | **运行时 segfault** |
+
+⚠️ Google 官方的 `check_elf_alignment.sh` **只查第 1 条**
+（`grep LOAD | awk '{print $NF}' | head -1` —— 连第二个 LOAD 都不看）。
+**RELRO 那条在官方文档里是独立的手工步骤，脚本不给。** 所以它会给假绿灯。
+
+### 这两条由两个不同的 linker 开关控制
+
+这是整件事的坑点：
+
+| 开关 | 控制 | Android clang driver 默认（r26 / r28） |
+|---|---|---|
+| `-z max-page-size` | `PT_LOAD` 的 `p_align` | 4096 / **16384** |
+| `-z common-page-size` | **RELRO 段末边界** | **两个版本都不注入**（用 lld 默认 4096） |
+
+后果：RELRO 的**起点**随 LOAD 按 16384 对齐，**终点**却只按 4096 对齐 ——
+`(起点 + RELRO 大小) % 0x4000` 等于取决于 RELRO 内容大小，**约 1/4 概率才是 0**。
+
+### 本模板的做法：两个 flag 显式传
+
+`.cargo/config.toml`（本目录）：
+
+```toml
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
 ```
 
-还缺的是 **NDK r28+**（r28 起默认 `-z max-page-size=16384`）。
-本模板验证时用 NDK 26.3，**16 KB 未保证**。上架前请：
+**`common-page-size` 那一行才是关键** —— driver 从不注入它，RELRO 合规全靠它。
+`max-page-size` 也显式传，是为了不依赖「r28 driver 默认值」和
+「cargo-ndk 只给 NDK ≤ 27 补 flag」这两个外部事实（NDK r29+ 或 cargo-ndk
+改判定条件都不会打我们）。
 
-```bash
-# 升 NDK 到 r28+，重编
-adb shell getconf PAGE_SIZE                    # 设备实际 page size
-zipalign -c -P 16 -v 4 build/outputs/apk/release/*.apk
+**代价：`.so` 体积零增长**（padding 落在本就存在的零填充区），
+RELRO `MemSiz` 最多多 12 KB 未映射 guard 区，运行时无性能影响。
+
+### 为什么不能只靠「用 NDK r28+」
+
+实测（同一个 cdylib，仅切 NDK）：
+
+| NDK | 是否有 cargo-ndk 补 flag | RELRO end | `mod 0x4000` |
+|---|---|---|---|
+| 26.3（补 `max-page-size`） | 是 | `0xe0000` | `0x0` ✅ **运气** |
+| 28.2（driver 默认） | 不需要 | `0xe1000` | `0x1000` ❌ |
+
+而只要给 `.data.rel.ro` 加 4 KB，NDK 26 那个 ✅ 立刻翻成 ❌。**所以「NDK 26 能过」
+是 1/4 的巧合，不是它更合规。** 加上本模板的 flag 后，两个 NDK 都稳定通过：
+
+| | LOAD | RELRO end | `mod 0x4000` |
+|---|---|---|---|
+| NDK 26 + 本模板 flag | `0x4000` ×4 | `0xe0000` | `0x0` ✅ |
+| NDK 28 + 本模板 flag | `0x4000` ×4 | `0xe4000` | `0x0` ✅ |
+| x86_64 + 本模板 flag | `0x4000` ×4 | `0xf0000` | `0x0` ✅ |
+
+与 NDK 版本**无关**了。
+
+> ⚠️ **环境变量 `RUSTFLAGS` 会覆盖 `.cargo/config.toml` 全部内容**
+> （cargo 语义：设了 `RUSTFLAGS` 就忽略 `target.*.rustflags`），且**没有任何提示**。
+> 排查 16 KB 问题前先确认 `echo $RUSTFLAGS` 是空的。
+
+### 一键检查
+
+```powershell
+.\gradlew assembleRelease -PndkVersion=28.2.13676358
+pwsh check-16kb.ps1 -NdkVersion 28.2.13676358 `
+     -Apk build\outputs\apk\release\<你的>.apk
 ```
+
+它查**两条**判据（官方脚本只查一条），非零退出码表示有不合规项。
+
+### 仍然欠着的
+
+1. **16 KB 环境实测** —— 静态全绿 ≠ 真机不炸。需要 Android 15 的
+   "Google APIs Experimental 16 KB Page Size ARM64 v8a" 模拟器镜像或 16 KB 真机：
+   ```bash
+   adb shell getconf PAGE_SIZE     # 期望 16384
+   ```
+2. **AAB** —— 本模板只出 APK。若改发 `.aab`，bundletool **不会**自动 zipalign：
+   ```bash
+   bundletool dump config --bundle=app-release.aab | Select-String alignment
+   #   期望 PAGE_ALIGNMENT_16K；PAGE_ALIGNMENT_4K 会导致 Play 侧安装失败
+   ```
+
+`resources.arsc` / `classes.dex` **不需要** 16 KB 对齐（官方未要求，
+`zipalign -P 16` 也只对 `.so` 做页对齐）。
+
+### 顺带：NDK 版本本身仍建议 28+
+
+与 16 KB 无关的三条理由：
+
+1. **r26 及更低的 `libc++_shared.so` 是 4 KB 对齐的真实地雷** —— 一旦给项目加
+   `cc`/`cxx` 依赖就会打进一个 4 KB 的 `.so`。本模板**没链** C++ 运行库
+   （`NEEDED` 只有 `liblog/libdl/libandroid/libc`），侥幸避开。
+2. r28 起不再定义 `PAGE_SIZE` 宏 —— 纯 Rust 天然免疫，加了 C 依赖会提前编译失败。
+3. 官方推荐路径，future-proof。
 
 ---
-
 ## 6. 常见问题
 
 | 现象 | 原因 / 解法 |

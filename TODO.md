@@ -65,38 +65,75 @@ NVIDIA/AMD/Intel GPU 上是能跑 wgpu 应用的。
 
 ## Android
 
-### 16 KB page size 未保证（上架门槛，非优化）
+### 16 KB page size：已修，两处真问题（2026-10-06）
 
-**现状**：`examples/android/build.gradle` 已配
-`packaging { jniLibs { useLegacyPackaging = false } }`，这是 16 KB 对齐的**必要
-非充分**条件。缺的是 **NDK r28+**（r28 起默认 `-z max-page-size=16384`）。
-真机验证时用的是 NDK **26.3**，所以**未保证**。
+这一条翻来覆去改了三次，最终结论如下 —— **之前两版都是错的**。
 
-**为什么重要**：Google Play 从 2025-11 起要求所有新提交/更新的 APK 必须
-16 KB 对齐。这不是「优化」，是**上架门槛** —— 不过就发不出去。
+#### 真问题 1：判据有两条，官方工具只查一条
 
-**为什么不能现在做**：升 NDK 后需要重新出一版 APK 并**真机验证**（`.so` 变大、
-Vulkan 驱动差异都要实测）。属于独立的工程动作，不该插在 Android 适配收尾里。
+Google 要求两条：
 
-**做之前需要**：
-- NDK r28+（`sdkmanager "ndk;28.x.y"`，或装 Android Studio 的 SDK Manager）
-- 一台真机
-- 验证命令：
-  ```bash
-  # 升 NDK 后重编
-  cargo ndk -t arm64-v8a build --release --lib
-  ./gradlew assembleRelease --console=plain
+| # | 判据 | 不满足后果 |
+|---|---|---|
+| 1 | 每个 `PT_LOAD` 的 `p_align >= 0x4000` | 加载失败 |
+| 2 | **`PT_GNU_RELRO` 的 `(VirtAddr + MemSiz) % 0x4000 == 0`** | **运行时 segfault** |
 
-  adb shell getconf PAGE_SIZE                     # 设备实际 page size
-  zipalign -c -P 16 -v 4 build/outputs/apk/release/*.apk
-  ```
-- 若 `zipalign -c` 报未对齐，检查 `useLegacyPackaging = false` 是否生效、
-  以及 AGP 是否 ≥ 8.5.1（模板用的 9.1.0，满足）
+**官方 `check_elf_alignment.sh` 只查第 1 条**（`grep LOAD | awk '{print $NF}' | head -1`
+—— 连第二个 LOAD 都不看）。RELRO 那条是文档里独立的手工步骤。**所以官方工具会给假绿灯。**
 
-**相关**：`examples/android/README.md` §5
+#### 真问题 2：RELRO 由 `common-page-size` 控制，而 driver 从不注入它
+
+| 开关 | 控制 | driver 默认（r26 / r28） |
+|---|---|---|
+| `-z max-page-size` | `PT_LOAD` 的 `p_align` | 4096 / **16384** |
+| `-z common-page-size` | **RELRO 段末边界** | **两个都不注入**（lld 默认 4096） |
+
+RELRO 起点随 LOAD 按 16384 对齐、终点只按 4096 对齐 ⇒
+`(起点 + RELRO 大小) % 0x4000` **约 1/4 概率才是 0**。
+
+**所以「NDK r28+ 就合规」是错的**，而且更隐蔽的是
+**「cargo-ndk ≥ 4.0.0 会补 flag 所以 NDK 26 也合规」也是错的** ——
+它只补 `max-page-size`（判据 1），不补 `common-page-size`（判据 2）。
+NDK26 当时能过是**运气**：给 `.data.rel.ro` 加 4 KB 就立刻翻成 FAIL。
+
+#### 已修
+
+`examples/android/.cargo/config.toml`（新增）对两个 64 位 target 显式传**两个** flag。
+代价：`.so` 体积**零增长**（padding 落在本就存在的零填充区）。
+
+实测（同一 cdylib）：
+
+| | LOAD | RELRO end | `mod 0x4000` |
+|---|---|---|---|
+| 修复前 NDK26 | `0x4000`×4 | `0xe0000` | `0x0` ✅ **运气** |
+| 修复前 NDK28 | `0x4000`×4 | `0xe1000` | `0x1000` ❌ |
+| **修复后 NDK26** | `0x4000`×4 | `0xe0000` | `0x0` ✅ |
+| **修复后 NDK28** | `0x4000`×4 | `0xe4000` | `0x0` ✅ |
+| **修复后 x86_64** | `0x4000`×4 | `0xf0000` | `0x0` ✅ |
+
+`zipalign -c -P 16 -v 4`（release APK）→ `Verification succesful`。
+
+新增 `examples/android/check-16kb.ps1`：**两条判据都查**，非零退出码拦出包。
+（真机验证时它抓出 `jniLibs/` 里还是修复前的旧 `.so`，脚本本身有效。）
+
+#### 仍然欠着的
+
+1. **16 KB 环境实测** —— 静态全绿 ≠ 真机不炸。需要 Android 15 的
+   "Google APIs Experimental 16 KB Page Size ARM64 v8a" 模拟器镜像或 16 KB 真机。
+   ```bash
+   adb shell getconf PAGE_SIZE     # 期望 16384
+   ```
+2. **AAB 验证** —— 模板只出 APK。改发 `.aab` 时 bundletool **不会**自动 zipalign：
+   ```bash
+   bundletool dump config --bundle=app-release.aab | Select-String alignment
+   #   须 PAGE_ALIGNMENT_16K
+   ```
+
+**Play 截止日期是 2027-02-01**（不是之前写的 2025-11，那是旧表述）。
+
+**相关**：`examples/android/README.md` §5（含完整原理与验证清单）
 
 ---
-
 ### `onStop` / `onDestroy` / `onSaveInstanceState` / `onTrimMemory` 未转发
 
 **现状**：vireo 只为 `onPause` / `onResume` 绑了 JNI（见

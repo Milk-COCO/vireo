@@ -1,0 +1,59 @@
+# Android 64 位链接参数 —— 16 KB page size 合规
+#
+# # 为什么需要这个文件
+#
+# Google Play 要求 16 KB page size（`developer.android.com/guide/practices/page-sizes`），
+# 官方列了两条独立判据：
+#
+#   1. ELF `p_align >= 0x4000`（每个 PT_LOAD）
+#   2. **RELRO 段 `(VirtAddr + MemSiz) % 0x4000 == 0`**
+#
+# 第 2 条不满足会在 16 KB 设备上**运行时 segfault**。
+#
+# 陷阱在于：这两条由**两个不同的 linker 开关**控制，而 Android 的 clang driver
+# 只注入其中一个：
+#
+# | 开关 | 控制什么 | driver 默认（r26 / r28） |
+# |---|---|---|
+# | `-z max-page-size` | PT_LOAD 的 `p_align` | 4096 / **16384** |
+# | `-z common-page-size` | **RELRO 段末边界** | **两个都是 lld 默认的 4096** |
+#
+# 也就是说：RELRO 的**起点**随 LOAD 按 16384 对齐，**终点**却按 4096 对齐 ——
+# `(起点 + 大小) % 0x4000` 的结果取决于 RELRO 内容大小，**约 1/4 概率才是 0**。
+#
+# `cargo-ndk ≥ 4.0.0` 会给 NDK ≤ 27 补 `max-page-size=16384`（只解决第 1 条），
+# 但**它不补 `common-page-size`**（那个分支只在 `major <= 22`）。
+#
+# 所以：**只靠「NDK r28+」或「靠 cargo-ndk 补 flag」都可能过不了第 2 条**，
+# 而且是随机过 —— 加一个依赖、升一次 wgpu、换个 rustc 版本都可能翻面。
+#
+# 官方工具 `check_elf_alignment.sh` 只看 LOAD 对齐（`head -1` 取第一个 PT_LOAD），
+# **不检查 RELRO**，所以它会给假绿灯。
+#
+# # 代价
+#
+# 实测（vireo 的真实 cdylib，含 wgpu）：`.so` **体积零增长**，
+# padding 落在本就存在的零填充区；RELRO `MemSiz` 最多多 12 KB 的未映射 guard 区，
+# 运行时无性能影响。
+
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    # ↑ r28 driver 已默认给 16384，显式传是为了不依赖「driver 默认值」这个外部事实
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+    # ↑ driver **从不**注入这个 —— RELRO 合规完全靠它。**这才是关键那一行。**
+]
+
+[target.x86_64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
+
+# ⚠️ 用 `[target.*]` 而不是 `[build] rustflags`：`[build]` 会同时作用到 host 的
+# build script / proc-macro 链接，把 `-z common-page-size` 传给 MSVC/gnu host
+# linker 无意义。
+#
+# ⚠️ **环境变量 `RUSTFLAGS` 会覆盖掉本文件全部内容**（cargo 语义：设了 RUSTFLAGS
+# 就忽略 target.*.rustflags）。如果你在环境里设了 RUSTFLAGS，这里静默失效 ——
+# 构建日志不会有任何提示。排查 16 KB 问题时先确认 `echo $RUSTFLAGS` 是空的。

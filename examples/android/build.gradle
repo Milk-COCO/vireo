@@ -36,7 +36,47 @@ def rustAbis = [
     'x86_64'   : 'x86_64-linux-android',
 ]
 
-def ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('NDK_HOME')
+// ---- NDK 选择--------------------------------------------------------------
+// 优先级：`-PndkVersion=` > 环境变量 > `local.properties` 的 ndk.dir。
+//
+// ⚠️ **为什么要给这个开关**：不是为了 16 KB（那个由 cargo-ndk ≥ 4.0.0 自动
+// 补 `-Wl,-z,max-page-size=16384` 解决，NDK r26 也合规，见 README §5），而是为了
+// **可复现**：不设 `ANDROID_NDK_HOME` / `NDK_HOME` / `local.properties` 时，
+// `cargo-ndk` 会**自动挑 SDK 里版本号最高的 NDK** —— 换台机器、SDK 装了个新的，
+// 同一份代码就编出不同的二进制。显式锁定才可复现：
+//
+//     ./gradlew assembleRelease -PndkVersion=28.2.13676358
+def ndkVersion = project.findProperty('ndkVersion')
+
+def localProps = new Properties()
+def lpFile = file('local.properties')
+if (lpFile.exists()) {
+    lpFile.withInputStream { localProps.load(it) }
+}
+
+def ndkHome = null
+if (ndkVersion) {
+    def base = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+    if (!base) {
+        throw new GradleException(
+            "传了 -PndkVersion=${ndkVersion} 但没有 ANDROID_HOME / ANDROID_SDK_ROOT 环境变量，\n" +
+            "无法定位 SDK 目录。也可以直接 export ANDROID_NDK_HOME 指向具体 NDK。")
+    }
+    ndkHome = file("${base}/ndk/${ndkVersion}").absolutePath
+    if (!file(ndkHome).exists()) {
+        throw new GradleException(
+            "找不到 NDK: ${ndkHome}\n" +
+            "装它：sdkmanager \"ndk;${ndkVersion}\"")
+    }
+    logger.lifecycle("NDK (来自 -PndkVersion): ${ndkHome}")
+} else {
+    ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('NDK_HOME') ?: localProps.getProperty('ndk.dir')
+    if (ndkHome) {
+        logger.lifecycle("NDK (来自环境/local.properties): ${ndkHome}")
+    } else {
+        logger.lifecycle("NDK: 未指定 —— cargo-ndk 会自动取SDK 里版本号最高的那个（不同机器结果可能不同）。建议 -PndkVersion=<ver> 锁定。")
+    }
+}
 
 rustAbis.each { abi, triple ->
     tasks.register("cargoNdkBuild-${abi}", Exec) {
