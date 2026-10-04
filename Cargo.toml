@@ -57,6 +57,11 @@ objc2-core-foundation = { version = "0.3" }
 # 子类），构建链必须走 gradle + `androidx.games:games-activity:4.4.0`，
 # `xbuild`/`cargo-apk` 不再适用（详见 `.opencode/android_design_review.md` §7.4）。
 winit = { version = "0.30", features = ["android-game-activity"] }
+# 直接依赖只为拿到 `input::{InputType, TextInputAction, ImeOptions, TextSpan}`
+# —— 这些类型是 `set_ime_purpose` / 回填光标位置的入参，winit 不 re-export。
+# 与 winit 拉进来的同一个 0.6 系列，cargo 会统一成一份（版本不一致会编译失败，
+# 属于安全的响亮失败，不会静默产生两份 AndroidApp 类型）。
+android-activity = { version = "0.6", features = ["game-activity"] }
 android_logger = "0.13"
 # 与 android-activity 0.6（winit 的 android-game-activity 后端）同版本，
 # 避免同一进程内出现两份 jni。vireo 只经 `vm_as_ptr` / `activity_as_ptr`

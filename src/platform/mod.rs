@@ -77,3 +77,12 @@ pub mod macos {}
 #[cfg(target_os = "android")]
 /// Android 专用扩展（系统 UI 显隐、安全区、挖孔模式、窗口属性）。
 pub mod android;
+
+/// Android 文本输入（IME）数据模型与 UTF-16↔UTF-8 换算。
+///
+/// **无条件编译**（换算逻辑是纯函数，需要在桌面 `cargo test --lib` 里真跑起来；
+/// 挂进 `android` 的话单测永不执行）。桌面非 test 构建下部分项无人调用，
+/// 故模块内有 `allow(dead_code)`。由 [`android`] re-export，非安卓那边
+/// `android` 模块不存在。
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod android_text_input;

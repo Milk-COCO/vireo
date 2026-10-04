@@ -82,18 +82,17 @@
 //! 但注意 `xbuild` **不支持显式设置 `target_sdk_version`**（内置 NDK 报
 //! `ndk doesn't support sdk version`），所以只能吃默认值。
 //!
-//! # 三个刻意缺席的方法
+//! # 两个刻意缺席的方法
 //!
 //! | API | Android 状况 | vireo 的处理 |
 //! |---|---|---|
-//! | `set_ime_purpose` | Android **有**语义（`EditorInfo.inputType`），GameActivity 提供 `GameActivity_setImeEditorInfoFields` 可写 | **暂不提供**。它必须和 `TextInputState` 一起做（同一个 IME 会话），单独给一个 setter 用户无法验证效果；等文本输入后端就位后一并加 |
 //! | `set_ime_cursor_area` | Android **有** `Window.setCursorAnchorInfo`（API 21+），但候选窗位置最终由输入法实现决定，不保证生效 | **不提供**。JNI 通道现成，但收益不确定、无法验证，不值得占公开 API 面 |
 //! | `fullscreen(Borderless)` / `frame_style(Frameless)` | Android **无**「窗口模式」概念：全屏由系统栏显隐表达，无边框则自己画 UI | 用户意图用 [`set_system_bars`](WindowExtAndroid::set_system_bars) 覆盖 |
 //!
-//! > **注意**：本节曾写着「`set_ime_purpose` 无处可写，因为 NativeActivity 从不创建
-//! > InputConnection」。切换到 GameActivity 后**该结论已失效** —— 现在
-//! > InputConnection 存在（真机已确认搜狗输入法 `onStartInput` 连上），这条待办
-//! > 的阻塞已解除，只是尚未实现。
+//! 曾经缺席的 `set_input_type` **现已实现**（`EditorInfo.inputType`）。
+//! 它先前被列为「无处可写」，理由是「NativeActivity 从不创建 InputConnection」——
+//! 切换到 GameActivity 后该前提不成立（真机已确认搜狗输入法 `onStartInput` 连上），
+//! 该阻塞已解除。
 //!
 //! 反过来，桌面 `WindowLevel` 的 `AlwaysOnBottom` 在 Android **没有**对应档
 //! （低于 `TYPE_APPLICATION` 的都是系统保留窗口），所以 [`WindowLevel`] 是按
@@ -126,6 +125,13 @@ use crate::error::VireoError;
 use crate::math::Rect;
 use crate::window::VireoWindow;
 use jni::{jni_sig, jni_str};
+
+// 文本输入的数据模型与换算放在无条件编译的兄弟模块（便于桌面跑单测），
+// 这里 re-export，用户仍从 `vireo::platform::android::*` 取。
+use crate::platform::android_text_input::set_ime_wanted;
+pub use crate::platform::android_text_input::{
+    InputType, TextInputState, TextSpan, byte_to_utf16, ime_wanted, utf16_to_byte,
+};
 
 /// Android API level 常量（稳定值，见 `android.view.WindowInsets.Type` 等）。
 mod api {
@@ -1093,6 +1099,36 @@ pub trait WindowExtAndroid {
     /// 与 [`WindowExtAndroid::display_cutout_mode`] 一致走活读（`LayoutParams.type`），
     /// 不走本地缓存——层级有可能被平台或第三方库改掉。
     fn window_level(&self) -> Option<WindowLevel>;
+
+    // ---- 文本输入（IME）------------------------------------------------
+
+    /// 弹出软键盘（**强制显示**）。
+    ///
+    /// 内部用 `show_implicit = false`：游戏没有聚焦的 View，隐式请求永不发生，
+    /// 传隐式会导致键盘永远不弹。getter见 [`ime_wanted`](ime_wanted)。
+    fn show_soft_input(&self) -> Result<(), VireoError>;
+
+    /// 收起软键盘。
+    fn hide_soft_input(&self) -> Result<(), VireoError>;
+
+    /// 声明这里期望输入什么（`EditorInfo.inputType`），决定输入法的候选栏形态。
+    ///
+    /// **必须在 [`WindowExtAndroid::show_soft_input`] 之前调**（IME 会话建立时
+    /// 才读这个字段）。中文务必用 [`InputType::Text`]（默认档，带拼音转写候选）。
+    fn set_input_type(&self, purpose: InputType) -> Result<(), VireoError>;
+
+    /// 拉取一次 IME 状态快照。**每帧轮询，不是事件驱动** —— Android 的
+    /// `MainEvent` 里没有文本输入通知，只能 diff。
+    ///
+    /// 下标已从 Android 的 **UTF-16** 换算成 **UTF-8 字节**（见
+    /// [`TextInputState`] 模块文档），可直接切片。
+    fn text_input_state(&self) -> Option<TextInputState>;
+
+    /// 把状态回填给 IME（光标/选区/文本）。
+    ///
+    /// 不做的话：用户点击输入框移动光标后 IME 的状态会失步，
+    /// **下一次输入可能重复插入全部文本**（rib 在 winit PR #4451 上实测过）。
+    fn set_text_input_state(&self, state: &TextInputState) -> Result<(), VireoError>;
 }
 
 impl WindowExtAndroid for VireoWindow {
@@ -1531,6 +1567,74 @@ impl WindowExtAndroid for VireoWindow {
             Ok(v) => v,
             Err(e) => warn_getter("window_level", e),
         }
+    }
+
+    // ---- 文本输入 ------------------------------------------------------
+
+    fn show_soft_input(&self) -> Result<(), VireoError> {
+        let app = self.require_android("show_soft_input")?;
+        set_ime_wanted(true);
+        // `show_implicit = false`（flags = 0）= **强制显示**。
+        // 传 `true` 会带上 `SHOW_IMPLICIT`，语义是「仅当输入法被隐式请求时才显示」——
+        // 而游戏里没有聚焦的 View，永远不会有隐式请求，键盘就永远不弹（实测）。
+        app.show_soft_input(false);
+        Ok(())
+    }
+
+    fn hide_soft_input(&self) -> Result<(), VireoError> {
+        let app = self.require_android("hide_soft_input")?;
+        set_ime_wanted(false);
+        app.hide_soft_input(false);
+        Ok(())
+    }
+
+    fn set_input_type(&self, purpose: InputType) -> Result<(), VireoError> {
+        let app = self.require_android("set_input_type")?;
+        let input_type =
+            android_activity::input::InputType::from_bits_truncate(purpose.to_android());
+        // IME_ACTION_UNSPECIFIED：vireo 自绘输入 UI，不让输入法替我们决定
+        // 「完成/发送」这类语义。
+        let action = android_activity::input::TextInputAction::Unspecified;
+        // **必须**带 `IME_FLAG_NO_FULLSCREEN`，否则输入法在横屏下进入 AOSP 的
+        // fullscreen extract mode，顶部弹全宽白条 +「执行」按钮，且 `ime()` inset
+        // 恒为 0。详见 `IME_OPTIONS` 的文档（这正是本行曾经传 `empty()` 的后果）。
+        let options = android_activity::input::ImeOptions::from_bits_truncate(
+            crate::platform::android_text_input::IME_OPTIONS,
+        );
+        app.set_ime_editor_info(input_type, action, options);
+        Ok(())
+    }
+
+    fn text_input_state(&self) -> Option<TextInputState> {
+        let app = self.android_app().ok()?;
+        //顶层 `AndroidApp::text_input_state()` 已经内部固定 `take = false`
+        //（见 android-activity `src/lib.rs:1088` 的注释："guaranteed to return
+        // Some if take is false so we can unwrap here"），所以：
+        // -不会抢走android-activity 给 winit 投递 `InputEvent::TextEvent` 的标记；
+        // - 返回值直接是 `TextInputState`（不是 Option）。
+        let raw = app.text_input_state();
+        Some(TextInputState::from_android_utf16(
+            raw.text,
+            raw.selection.start,
+            raw.selection.end,
+            raw.compose_region.map(|c| (c.start, c.end)),
+        ))
+    }
+
+    fn set_text_input_state(&self, state: &TextInputState) -> Result<(), VireoError> {
+        let app = self.require_android("set_text_input_state")?;
+        let (text, sel_start, sel_end, compose) = state.to_android_utf16();
+        let raw = android_activity::input::TextInputState {
+            text,
+            selection: android_activity::input::TextSpan {
+                start: sel_start,
+                end: sel_end,
+            },
+            compose_region: compose
+                .map(|(start, end)| android_activity::input::TextSpan { start, end }),
+        };
+        app.set_text_input_state(raw);
+        Ok(())
     }
 }
 
