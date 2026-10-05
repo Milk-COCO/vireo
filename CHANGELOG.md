@@ -96,6 +96,22 @@
 
 ### Fixed / 修复
 
+- **Android 12+ emoji 渲染为空白**（`🦊🎵😀🇨🇳👨‍👩‍👧👍🏽` 全部画不出来）。
+  `swash` 0.2.10 —— `cosmic-text` 0.19 唯一的字形光栅器 —— 按 **COLR version 0** 的
+  布局读表头，而 Android 12+ 的 `NotoColorEmoji.ttf` 是 **COLRv1**：该字段在 v1 布局里
+  是 `numBaseGlyphRecords` = 0，记录查找落空 → 回退到 `glyf` 轮廓 → 而这些 emoji 的
+  `glyf` 条目长度为 0 → 交回一个 `0×0` 位图 → 被当作「无需光栅化」**静默丢弃**（无 panic、
+  无日志）。上游 issue 五年零活动且 swash 已是末版，因此 vireo 内补了一条 COLRv1 光栅化
+  路径（`skrifa` 走 paint graph + `zeno` 光栅，两者**本来就在依赖树里，零新增依赖**），
+  仅在 swash 交回空位图时二次尝试。
+  修法选的是「读系统字体」而不是「打包一份 emoji 字体」：后者更省事，但会把所有平台的
+  emoji 锁死成同一套外观，抹掉平台原生风格。
+  COLRv1 rasterization for Android emoji: reads the platform's own colour font instead of
+  shipping one, so each OS keeps its native emoji design.
+- 顺带修掉 `glyphon` 图集扩容路径上一个会**静默吞字形**的隐患：
+  `InnerAtlas::grow()` 重建纹理后重光栅化每个缓存字形，此前对重光栅化结果不做任何校验，
+  失败时写入变成 no-op，字形指向空白区域且无任何日志。现在尺寸或内容类型与缓存记录不符
+  即淘汰该字形并归还打包槽位，下一帧重新光栅化。
 - Android 文档纠正：`MainEvent::LowMemory` 并非「在 Android 侧永远不会被构造」。
   winit 该区间里恰好有一个非 `warn!` 分支正常转发它，此前审计读了
   `mod.rs:245-297` 却漏看这一个 arm，把 `LowMemory` 连同其他一起归进「全部吞掉」，

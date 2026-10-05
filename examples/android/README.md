@@ -456,8 +456,13 @@ protected void onSaveInstanceState(Bundle outState) {
 
 模板之外，vireo 库还有这些（完整清单见 [`docs/android-audit.md`](../../docs/android-audit.md)）：
 
-- **emoji 不保证渲染**：Android 字体白名单只收正文字体，`NotoColorEmoji` 不在其中。
-  cosmic-text 需要显式加载彩色位图字体，vireo 暂未做。
+- ~~**emoji 不保证渲染**~~ ✅ **已修复**：Android 12+ 的 `NotoColorEmoji.ttf` 是
+  **COLRv1**，而 swash 0.2.10 只会读 COLR **v0** 布局（swash 已是末版，上游 issue 五年
+  零活动），于是 emoji 交回 `0×0` 被静默丢弃。vireo 内已用 `skrifa` + `zeno`（两者本来
+  就在依赖树里，零新增 crate）补上 COLRv1 光栅化。详见
+  [`.opencode/android_colrv1_plan.md`](../../.opencode/android_colrv1_plan.md)。
+  注意 emoji 字体需要在 Android 字体白名单里（`src/text/android_fonts.rs` 已含
+  `NotoColorEmoji`），否则 cosmic-text 根本排不到它。
 - **`cutouts()` 部分 ROM 恒空**：运行时 `set_display_cutout_mode` 是空操作，
   只能靠 manifest/style（见 §4.4）。
 - **16 KB 未保证**：见 §5。

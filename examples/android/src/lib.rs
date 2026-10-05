@@ -58,6 +58,9 @@ impl From<vireo::platform::android::Insets> for Edges {
 
 #[vireo::main]
 async fn main(app: App) {
+    // 不调这个的话 vireo 的 `log::warn!`（字体加载、IME、生命周期）全被丢弃。
+    vireo::init_logger();
+
     let idx = app.window(WindowDesc::new("Vireo Android", 1280, 720), None::<fn()>);
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
@@ -168,6 +171,55 @@ async fn main(app: App) {
             ime.l, ime.t, ime.r, ime.b
         ));
         hud.push_str(&format!("text    {typed:?}"));
+        // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）
+        let mut emoji_probe = String::from("\nemoji");
+        // 逐行测：单色 / 旗帜 / ZWJ 序列 / 肤色修饰
+        for (label, s) in [
+            ("fox", "🦊"),
+            ("note", "🎵"),
+            ("grin", "😀"),
+            ("flagCN", "🇨🇳"),
+            ("zwj-family", "👨‍👩‍👧"),
+            ("skin", "👍🏽"),
+        ] {
+            emoji_probe.push_str(&format!("  {label:<10} {s}"));
+            if label != "skin" {
+                emoji_probe.push('\n');
+            }
+        }
+        draw_text(
+            &mut batch.texts,
+            &emoji_probe,
+            Pos::new(80.0, 330.0),
+            TextDef {
+                font_size: 20.0,
+                ..Default::default()
+            },
+            TextOverride::new(),
+        );
+
+        // 字体加载摘要（Android 上 logcat 不可靠，看画面）
+        #[cfg(target_os = "android")]
+        {
+            // 字体加载摘要（Android 上 logcat 不可靠，看画面）
+            let mut line = String::new();
+            match vireo::text::android_fonts::loaded_summary() {
+                Some((files, faces, failed, fam)) => line.push_str(&format!(
+                    "fonts   {files} files -> {faces} faces ({failed} bad) default={fam}\n"
+                )),
+                None => line.push_str("fonts   (install() 未运行)\n"),
+            }
+            draw_text(
+                &mut batch.texts,
+                &line,
+                Pos::new(80.0, 500.0),
+                TextDef {
+                    font_size: 16.0,
+                    ..Default::default()
+                },
+                TextOverride::new(),
+            );
+        }
 
         draw_text(
             &mut batch.texts,

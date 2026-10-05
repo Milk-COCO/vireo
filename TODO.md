@@ -219,30 +219,81 @@ wgpu 也没有内存压力 API（只有被动报 `DeviceError::OutOfMemory`）�
 
 ---
 
-### emoji **确认无法渲染**（2026-10-06 真机实测）
+### ~~emoji 确认无法渲染~~ ✅ **已修复**（2026-10-05，COLRv1 自研光栅化）
 
-**实测结论**：小米 25098RA98C / HyperOS / Android 16，`draw_text` 画
-`🦊🎵😀👨‍👩‍👧`，**渲染成 6 个豆腐块**（带 X 的方框 = `.notdef` 字形）。
-拉丁字母 `EMOJI:` 正常。所以**不是「可能」，是真的不行**。
+**原实测结论（已作废）**：小米 25098RA98C / HyperOS / Android 16，`draw_text` 画
+`🦊🎵😀👨‍👩‍👧` 渲染不出来。**注意原文写的「6 个豆腐块」是错的——实际是完全空白**，
+不是 `.notdef` 方框。这个区别很重要：豆腐块说明 cmap 有映射但缺轮廓，空白说明连
+glyph 都没被真正画出来。
 
-**根因**：Android 正文字体白名单只收 `NotoSans` 前缀（+ `ttf/otf/ttc`），
-`NotoColorEmoji` 不在其中。即使在白名单里也不够 —— cosmic-text 需要
-**显式加载**彩色位图字体（CBDT/CBLC），vireo 的字体通道只走灰度 outline。
+**当时的根因判断也错了**（记录下来避免重犯）：
 
-**要做的话**：给 Android 字体加载加一条彩色字体通道。已知难点：
+| 原判断 | 实际 |
+|---|---|
+| 白名单只收 `NotoSans` 前缀，`NotoColorEmoji` 不在其中 | 白名单**不是根因**。把 `NotoColorEmoji` 加进白名单后字体确实加载了（`201 faces`），但 emoji 仍然空白 |
+| cosmic-text 需要显式加载 CBDT/CBLC 彩色位图 | 不需要。swash **本来就支持** CBDT/CBLC、sbix、COLRv0 —— 旗帜 🇨🇳 走 `NotoColorEmojiFlags.ttf` 的 CBDT 位图路径一直能画 |
+| 「glyphon 的 glyph atlas 是单通道（R8？）还是 RGBA」是个未知数 | 早已确定：`mask_atlas` 是 `R8Unorm`，`color_atlas` 是 `Rgba8UnormSrgb`，两条通道都在 |
 
-- `fontdb` 能解析 CBDT/CBLC 元数据，但 cosmic-text 的 rasterizer 产出灰度位图，
-  彩色位图得走它自己的 `swash`/纹理路径
-- glyphon 的 glyph atlas 是单通道（`R8`？）还是 RGBA，决定了改造成本
-- 要考虑 tint / 两色 emoji（`COLRv1`）—— Android 上是单色为主，优先级可低
+**真根因**：`swash 0.2.10` 按 **COLR v0 布局**读 COLR 表头（`scale/color.rs:26` 取
+v0 的记录数），而 Android 12+ 的 `NotoColorEmoji.ttf` 是 **COLRv1**，该字段在 v1 布局里
+是 `numBaseGlyphRecords` = 0 → 二分查找落空 → 回退到 `glyf` 轮廓 → 而这些 emoji 的
+`glyf` 条目长度为 0 → 产出 `Some(Image{0×0})` → glyphon 判 `SkipRasterization`
+**静默丢弃**。上游 issue [dfrg/swash#21](https://github.com/dfrg/swash/issues/21)
+2021 年开、五年零活动，swash 已是末版。
 
-**成本评估**：**不是小改动**。在确认「业务真的需要 emoji」之前不建议启动 ——
-音游 / 工具类 UI 里 emoji 通常不是必需项。**若不需要，这条可以永远不做。**
+**修法**：vireo 内用 `skrifa`（走 COLRv1 paint graph）+ `zeno`（光栅）自研一条路径，
+只在 swash 交回 0×0 时二次尝试。两个 crate **都已在依赖树里**（swash 依赖它们），
+**零新增 crate**。详见 `.opencode/android_colrv1_plan.md`。
 
-**验证方法已就绪**（下次要复现直接照抄）：在应用里 `draw_text` 画
-`"EMOJI: 🦊🎵😀👨‍👩‍👧"`，`adb shell screencap -p` 抓屏看是否豆腐块。
-判据是**像素**，不是 logcat —— logcat 只会告诉你字符串提交了，
-看不出有没有字形（这次就差点被 logcat 误导）。
+**为什么不用打包一份 emoji 字体**（更省事，但被否）：那会把所有平台的 emoji 锁死成同一套
+外观 —— 用户在 iOS 上看到 Noto 样式会觉得「不是本系统的 emoji」。路线选择与取舍见设计文档。
+
+**验证**：MuMu（Android 15 / x86_64）实机 `🦊🎵😀🇨🇳👨‍👩‍👧👍🏽` 全部渲染，
+保持 Android 原生 Noto Color Emoji 风格。回归测试在 `src/glyphon/colr.rs`
+（含 8 个 emoji 的 contact sheet 与 8× 放大图写到 `target/`，供肉眼核对形状）。
+
+---
+
+### Android 系统字体白名单：**用户无法自定义**（待做）
+
+**现状**（`src/text/android_fonts.rs`）：
+
+```rust
+pub const TEXT_FONT_PREFIXES: &[&str] = &[...];      // &'static [&'static str]
+const FONT_DIRS: &[&str] = &["/system/fonts", "/product/fonts"];  // 私有
+fn is_text_font_file(path: &Path) -> bool            // 私有
+pub(crate) fn install(font_system: &mut FontSystem)  // pub(crate)，外部调不到
+```
+
+白名单本身解决两个问题（**缺一不可**）：
+
+1. **正确性（主因）**：Android 上没有任何字体声明家族名 `"Arial"`，而 fontdb 的
+   `family_sans_serif` 默认就是 `"Arial"` → cosmic-text `query()` 返回 `None` →
+   回退到「排序后的第一个 face」→ 可能挑中装饰体。实测症状是**所有文字全大写、
+   数字完全消失**。只加载 Roboto 还不够，仍必须 `set_sans_serif_family` 钉死
+   generic 家族。
+2. **启动成本**：230 个字体文件 → 只解析 ~8~20 个。
+
+**为什么是缺口**：三样东西全是编译期固定的 ——
+`TEXT_FONT_PREFIXES` 是 `const` 不是 `static mut`（运行时改不了）、
+`install()` 是 `pub(crate)`（外部根本调不到）、
+`FONT_DIRS` 私有（扫哪些目录也定死）。
+结果是：**某台 OEM ROM 的正文字体命名不落在前缀表里 → 用户拿不到任何正文字体**，
+只能自己去 `adb push` 字体再 `GpuContext::load_font_file` 手工加载（这条逃生口是有的，
+但普通 app 用户不会也不能这么做）。
+
+**要做的最小改动**（按侵入性从低到高）：
+
+- A. 加 `pub fn install_with(font_system: &mut FontSystem, extra_prefixes: &[&str])`，
+  现有 `install()` 变成 `install_with(fs, &[])`。前缀表本身不必公开。
+- B. 顺带让扫描目录可配（现在只有 `/system/fonts` 和 `/product/fonts`；
+  app 私有字体目录、`/sdcard` 上的用户字体都扫不到）。
+- C. 是否需要一个 `App` 级 builder 钩子（让 app 在 `run` 之前装好）——
+  取决于 A/B 的调用时机是否够用。注意 `install()` 会改 `font_system.db_mut()`，
+  时机太晚会让已经 shape 过的文本缓存失效。
+
+**别顺手做的事**：不要把白名单放宽成「加载全部字体」。那会把装饰体重新放进字体库，
+正是第 1 条要防的事故（挑中 `AndroidClock.ttf` → 全大写 + 数字消失）。
 
 ---
 

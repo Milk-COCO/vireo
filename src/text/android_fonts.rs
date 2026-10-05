@@ -30,7 +30,7 @@
 //!
 //! 两步，缺一不可：
 //!
-//! 1. **文件名白名单**（[`is_text_font_file`]）：只解析各平台已知的**正文字体**
+//! 1. **文件名白名单**（`is_text_font_file`）：只解析各平台已知的**正文字体**
 //!    文件名，其余一概不碰。230 个文件 → 约 8~20 个，省掉 200+ 次字体解析，
 //!    也从根上不让装饰体进入字体库。
 //! 2. **钉死 generic 家族**（`set_sans_serif_family`）：fontdb 的
@@ -76,11 +76,30 @@ pub const TEXT_FONT_PREFIXES: &[&str] = &[
     "SourceHanSans",
     "HarmonyOS_Sans",
     "OPPO_Sans",
+    // 彩色 emoji 字体。前缀同时命中 `NotoColorEmoji.ttf` 与
+    // `NotoColorEmojiFlags.ttf`（旗帜 = 双区域指示符合成，缺后者旗帜画不出来）。
+    //
+    // 曲名 / 故事板需要 emoji，所以必须加载。三个要点：
+    //
+    // 1. **不会污染默认字体**。这些字体只含 emoji、不含拉丁字母；
+    //    [`PREFERRED_FAMILIES`] 里没有它们，所以 `set_sans_serif_family`
+    //    绝不会挑中 —— 这正是当初严格过滤要防的那类事故（挑中
+    //    `AndroidClock.ttf` 导致「全大写 + 数字消失」）。
+    // 2. **代价远小于预想**：真机实测 `NotoColorEmoji.ttf` 2.81 MB，
+    //    而**已经在加载**的 `NotoSansCJK-Regular.ttc` 有 32.4 MB。
+    //    此前文档写「10 MB+」是错的。
+    // 3. 走 glyphon 已有的彩色通道：`SwashContent::Color` →
+    //    `ContentType::Color` → `color_atlas`（RGBA8），与 `mask_atlas`
+    //    （R8）分开。不是新做的子系统。
+    "NotoColorEmoji",
 ];
 
 /// 优先挑选的 **家族名**（按顺序），用来钉死 fontdb 的三个 generic 家族。
 /// 注意与 [`TEXT_FONT_PREFIXES`]（文件名）区分：这里比的是字体内部声明的家族名。
-#[cfg(target_os = "android")]
+///
+/// 无条件编译（与白名单同理，靠模块级 `allow(dead_code)` 兜住非 Android 非 test 构建）：
+/// 「emoji 字体绝不能进这张表」是一条需要在桌面跑的安全约束，若 gate 掉
+/// `cargo test --lib` 就永远验证不了。
 const PREFERRED_FAMILIES: &[&str] = &[
     "Roboto",          // AOSP / Pixel
     "MiSans",          // 小米 / 澎湃
@@ -97,6 +116,25 @@ const PREFERRED_FAMILIES: &[&str] = &[
 /// 与 [`TEXT_FONT_PREFIXES`] 是 **AND** 关系：光前缀命中不够，光扩展名命中也不够。
 /// 后者挡掉 `Roboto-Regular.ttf.bak` 这类备份文件——前缀规则挡不住它们。
 pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
+
+/// `install()` 的结果摘要：`(白名单命中文件数, face 数, 读取失败数, 默认族)`。
+///
+/// 无条件编译，供 [`loaded_summary`] 在桌面单测里断言。
+static LOADED_SUMMARY: std::sync::Mutex<Option<(usize, usize, usize, String)>> =
+    std::sync::Mutex::new(None);
+
+/// 字体加载摘要，供应用层显示（模板 HUD 用的就是它）。
+///
+/// **为什么需要它**：Android 上诊断字体问题只能看像素/画面 —— env_logger 走
+/// android_logger 后端，tag 是进程名，logcat 按 tag 过滤极易错过，而
+/// 「加载了几个字体 / 默认族是哪个 / 有没有 emoji 字体」是排查豆腐块的第一线索。
+/// 把摘要挂到 `App` 上比让用户去翻 logcat 可靠得多。
+pub fn loaded_summary() -> Option<(usize, usize, usize, String)> {
+    LOADED_SUMMARY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 
 /// 文件名是否同时命中「正文字体前缀」与「字体扩展名」两个白名单。
 fn is_text_font_file(path: &Path) -> bool {
@@ -185,6 +223,13 @@ pub(crate) fn install(font_system: &mut FontSystem) {
             // 其余 generic 一并钉上，用户显式指定等宽/衬线族时也走 good font。
             db.set_monospace_family(family);
             db.set_serif_family(family);
+            // 记下加载摘要供 `loaded_summary()` 查询。**不能只靠 log**：Android 上
+            // env_logger 走 android_logger 后端，tag 是进程名，logcat 过滤极易错过，
+            // 而「到底加载了几个字体 / 有没有 emoji 字体」恰恰是排查豆腐块的第一线索。
+            LOADED_SUMMARY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace((file_count, face_count, failed, family.to_owned()));
             log::info!(
                 "vireo::text: android fonts loaded: {file_count} files -> {face_count} faces \
                  ({failed} unreadable), sans-serif default = {family:?}"
@@ -205,7 +250,7 @@ pub(crate) fn install(font_system: &mut FontSystem) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FONT_EXTENSIONS, TEXT_FONT_PREFIXES, is_text_font_file};
+    use super::{FONT_EXTENSIONS, PREFERRED_FAMILIES, TEXT_FONT_PREFIXES, is_text_font_file};
     use std::path::Path;
 
     #[test]
@@ -227,6 +272,34 @@ mod tests {
                 "{name} should be whitelisted"
             );
         }
+    }
+
+    #[test]
+    fn whitelist_accepts_emoji_fonts() {
+        // 曲名 / 故事板需要 emoji。彩色字体必须能进白名单，否则全是豆腐块。
+        for name in [
+            "NotoColorEmoji.ttf",
+            "NotoColorEmojiFlags.ttf", // 旗帜 emoji = 双区域指示符合成
+        ] {
+            assert!(
+                is_text_font_file(Path::new(name)),
+                "{name} should be whitelisted (emoji support)"
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_family_is_never_a_generic_default() {
+        // 回归防护：彩色 emoji 字体只含 emoji、不含拉丁字母。若它被选成
+        // sans-serif 默认族，症状就是当初那个「所有文字全大写、数字消失」。
+        // `install()` 只在 PREFERRED_FAMILIES 里挑，所以断言它不在那张表里即可。
+        const EMOJI_FAMILY: &str = "Noto Color Emoji";
+        assert!(
+            !PREFERRED_FAMILIES.contains(&EMOJI_FAMILY),
+            "emoji 字体绝不能成为 generic 默认族（它没有拉丁字形）"
+        );
+        // 反向保证：拉丁正文字族仍在表里。
+        assert!(PREFERRED_FAMILIES.contains(&"Roboto"));
     }
 
     #[test]

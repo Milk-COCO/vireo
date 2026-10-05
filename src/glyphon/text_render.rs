@@ -1,9 +1,11 @@
 use super::{
     ColorMode, ContentType, FontSystem, GlyphDetails, GlyphToRender, GpuCacheStatus, PrepareError,
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, RenderError, ResolvedGlyphArea, State,
-    SwashCache, SwashContent, TextArea, TextAtlas, Viewport, custom_glyph::CustomGlyphCacheKey,
+    SwashCache, SwashContent, TextArea, TextAtlas, Viewport, colr,
+    custom_glyph::CustomGlyphCacheKey,
 };
-use cosmic_text::{Color, SubpixelBin};
+use cosmic_text::{CacheKeyFlags, Color, SubpixelBin};
+use skrifa::MetadataProvider;
 use std::slice;
 use wgpu::{
     BindGroup, BlendState, Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT,
@@ -222,17 +224,12 @@ impl TextRenderer {
                     x,
                     y,
                     text_area.scale,
-                    width,
-                    height,
-                    x_bin,
-                    y_bin,
                     color,
                     glyph.metadata,
                     cache_key,
                     text_area.transform_index,
                     text_area.base_uv_rect,
                     bounds,
-                    glyph.id,
                     &mut rasterize_custom_glyph,
                 )? {
                     self.glyph_vertices.push(glyph_to_render);
@@ -538,13 +535,16 @@ fn zero_depth(_: usize) -> f32 {
     0f32
 }
 
-struct GetGlyphImageResult {
-    content_type: ContentType,
-    top: i16,
-    left: i16,
-    width: u16,
-    height: u16,
-    data: Vec<u8>,
+/// Pixels for one glyph, before atlas placement.
+///
+/// Produced by [`rasterize_glyph`], the single place glyphs get rasterized.
+pub(crate) struct RasterizedGlyph {
+    pub content_type: ContentType,
+    pub top: i16,
+    pub left: i16,
+    pub width: u16,
+    pub height: u16,
+    pub data: Vec<u8>,
 }
 
 struct GlyphMetadata {
@@ -582,7 +582,7 @@ fn prepare_glyph<R>(
     system: &mut GlyphSystem,
     metadata: GlyphMetadata,
     bounds: GlyphBounds,
-    get_glyph_image: impl FnOnce(&mut GlyphSystem, &mut R) -> Option<GetGlyphImageResult>,
+    get_glyph_image: impl FnOnce(&mut GlyphSystem, &mut R) -> Option<RasterizedGlyph>,
     mut metadata_to_depth: impl FnMut(usize) -> f32,
     mut rasterize_custom_glyph: R,
 ) -> Result<Option<GlyphToRender>, PrepareError>
@@ -797,22 +797,145 @@ fn glyph_bounds(
     }
 }
 
-fn glyph_image(
-    system: &mut GlyphSystem<'_>,
+/// Rasterize a single glyph into pixels.
+///
+/// This is the **only** place glyphs get rasterized. Both the prepare path and
+/// [`InnerAtlas::grow`](super::TextAtlas) route through it, so they cannot disagree.
+///
+/// It must stay a pure function of its inputs. `grow` recreates the atlas texture and
+/// re-rasterizes every cached glyph into it, then checks the result against the
+/// recorded size. Hidden state (caches keyed on anything mutable, time, randomness)
+/// would let the two calls disagree, leaving glyphs pointing at blank atlas regions —
+/// which fails silently: no panic, no log, the glyphs just disappear once the atlas
+/// outgrows its initial size.
+pub(crate) fn rasterize_glyph(
+    font_system: &mut FontSystem,
+    cache: &mut SwashCache,
+    key: GlyphonCacheKey,
+    scale_factor: f32,
+    rasterize_custom_glyph: &mut impl FnMut(
+        RasterizeCustomGlyphRequest,
+    ) -> Option<RasterizedCustomGlyph>,
+) -> Option<RasterizedGlyph> {
+    match key {
+        GlyphonCacheKey::Text(cache_key) => {
+            let image = cache.get_image_uncached(font_system, cache_key);
+
+            // swash hands back `Some(0x0)` for a glyph it could not resolve rather than
+            // `None`: a COLRv1 emoji (its COLR record count reads as zero) falls through
+            // to an empty `glyf` outline, and so do spaces and combining marks for
+            // unrelated reasons. Only the first case is worth a second opinion, and
+            // `colr_v1_fallback` bails out cheaply on the rest.
+            let unresolved = image
+                .as_ref()
+                .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0);
+            if unresolved && let Some(fallback) = colr_v1_fallback(font_system, cache_key) {
+                return Some(fallback);
+            }
+
+            let image = image?;
+
+            let content_type = match image.content {
+                SwashContent::Color => ContentType::Color,
+                SwashContent::Mask | SwashContent::SubpixelMask => ContentType::Mask,
+            };
+            Some(RasterizedGlyph {
+                content_type,
+                top: image.placement.top as i16,
+                left: image.placement.left as i16,
+                width: image.placement.width as u16,
+                height: image.placement.height as u16,
+                data: image.data,
+            })
+        }
+        GlyphonCacheKey::Custom(cache_key) => {
+            if cache_key.width == 0 || cache_key.height == 0 {
+                return None;
+            }
+
+            let input = RasterizeCustomGlyphRequest {
+                id: cache_key.glyph_id,
+                width: cache_key.width,
+                height: cache_key.height,
+                x_bin: cache_key.x_bin,
+                y_bin: cache_key.y_bin,
+                scale: scale_factor,
+            };
+
+            let output = (rasterize_custom_glyph)(input)?;
+            output.validate(&input, None);
+
+            Some(RasterizedGlyph {
+                content_type: output.content_type,
+                top: 0,
+                left: 0,
+                width: cache_key.width,
+                height: cache_key.height,
+                data: output.data,
+            })
+        }
+    }
+}
+
+/// Second opinion for a glyph swash declined.
+///
+/// Returns `None` unless the font really has a COLRv1 paint graph for the glyph, so the
+/// common case — a space, a zero-width joiner, a combining mark — costs one table lookup
+/// instead of a paint-graph walk.
+///
+/// The variation coordinates have to be exactly the ones `cosmic_text::swash::swash_image`
+/// feeds the swash scaler, because the glyph cache keys on `font_weight`: if the two paths
+/// resolved different locations, one cache key would yield two different images depending
+/// on which answered it.
+fn colr_v1_fallback(
+    font_system: &mut FontSystem,
     key: cosmic_text::CacheKey,
-) -> Option<GetGlyphImageResult> {
-    let image = system.cache.get_image_uncached(system.font_system, key)?;
-    let content_type = match image.content {
-        SwashContent::Color => ContentType::Color,
-        SwashContent::Mask | SwashContent::SubpixelMask => ContentType::Mask,
-    };
-    Some(GetGlyphImageResult {
-        content_type,
-        top: image.placement.top as i16,
-        left: image.placement.left as i16,
-        width: image.placement.width as u16,
-        height: image.placement.height as u16,
-        data: image.data,
+) -> Option<RasterizedGlyph> {
+    let font = font_system.get_font(key.font_id, key.font_weight)?;
+    let face_index = font_system
+        .db()
+        .face(font.id())
+        .map_or(0, |face| face.index);
+    let font_ref = skrifa::FontRef::from_index(font.data(), face_index).ok()?;
+    let glyph_id = skrifa::GlyphId::new(u32::from(key.glyph_id));
+    if !colr::has_colr_v1(&font_ref, glyph_id) {
+        return None;
+    }
+
+    // Only `wght`, and only when the font has that axis — this is exactly what
+    // `cosmic_text::swash::swash_image` hands the swash scaler.
+    let wght = skrifa::Tag::from_be_bytes(*b"wght");
+    let mut variations = Vec::new();
+    if let Some(axis) = font_ref.axes().get_by_tag(wght) {
+        let weight = f32::from(key.font_weight.0).clamp(axis.min_value(), axis.max_value());
+        variations.push(axis.normalize(weight));
+    }
+
+    // Same subpixel handling as `swash_image`: a pixel font rounds the bin to whole
+    // pixels, everything else keeps the quarter-pixel offset.
+    let (mut x, mut y) = (key.x_bin.as_float(), key.y_bin.as_float());
+    if key.flags.contains(CacheKeyFlags::PIXEL_FONT) {
+        x = x.round();
+        y = y.round();
+    }
+
+    let glyph = colr::rasterize(&colr::ColrRequest {
+        font_data: font.data(),
+        face_index,
+        glyph_id: key.glyph_id,
+        size_px: f32::from_bits(key.font_size_bits),
+        offset: (x, y),
+        fake_italic: key.flags.contains(CacheKeyFlags::FAKE_ITALIC),
+        variations: &variations,
+    })?;
+
+    Some(RasterizedGlyph {
+        content_type: ContentType::Color,
+        top: glyph.top,
+        left: glyph.left,
+        width: glyph.width,
+        height: glyph.height,
+        data: glyph.data,
     })
 }
 
@@ -851,7 +974,15 @@ where
             base_uv_rect,
         },
         bounds,
-        |system, _| glyph_image(system, physical_glyph.cache_key),
+        |system, rasterize_custom_glyph| {
+            rasterize_glyph(
+                system.font_system,
+                system.cache,
+                GlyphonCacheKey::Text(physical_glyph.cache_key),
+                scale,
+                rasterize_custom_glyph,
+            )
+        },
         metadata_to_depth,
         rasterize_custom_glyph,
     )
@@ -863,17 +994,12 @@ fn append_custom_glyph<R>(
     x: i32,
     y: i32,
     scale: f32,
-    width: u16,
-    height: u16,
-    x_bin: SubpixelBin,
-    y_bin: SubpixelBin,
     color: Color,
     metadata: usize,
     cache_key: GlyphonCacheKey,
     transform_index: u32,
     base_uv_rect: [f32; 4],
     bounds: GlyphBounds,
-    custom_glyph_id: u16,
     rasterize_custom_glyph: R,
 ) -> Result<Option<GlyphToRender>, PrepareError>
 where
@@ -894,32 +1020,14 @@ where
             base_uv_rect,
         },
         bounds,
-        move |_system, rasterize_custom_glyph_fn| -> Option<GetGlyphImageResult> {
-            if width == 0 || height == 0 {
-                return None;
-            }
-
-            let input = RasterizeCustomGlyphRequest {
-                id: custom_glyph_id,
-                width,
-                height,
-                x_bin,
-                y_bin,
+        move |system, rasterize_custom_glyph| -> Option<RasterizedGlyph> {
+            rasterize_glyph(
+                system.font_system,
+                system.cache,
+                cache_key,
                 scale,
-            };
-
-            let output = (rasterize_custom_glyph_fn)(input)?;
-
-            output.validate(&input, None);
-
-            Some(GetGlyphImageResult {
-                content_type: output.content_type,
-                top: 0,
-                left: 0,
-                width,
-                height,
-                data: output.data,
-            })
+                rasterize_custom_glyph,
+            )
         },
         zero_depth,
         rasterize_custom_glyph,

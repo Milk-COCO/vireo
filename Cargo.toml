@@ -24,6 +24,12 @@ wgpu = "30"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 parking_lot = "0.12"
+# COLRv1 光栅化。两者都已在依赖树里（swash 依赖 skrifa 0.44 + zeno 0.3.3），
+# 加上是为了直接调用，不引入新 crate。
+# `default-features = false` 必须写：skrifa 的 default 含 `autohint_shaping`，
+# 而 Cargo 的 feature 是全局合并的，不关掉会顺带给 swash 也打开。
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+zeno = "0.3.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

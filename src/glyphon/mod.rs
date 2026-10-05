@@ -5,6 +5,7 @@
 //! [etagere]: https://github.com/nical/etagere
 
 mod cache;
+mod colr;
 mod custom_glyph;
 mod error;
 mod text_atlas;

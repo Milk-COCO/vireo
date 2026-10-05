@@ -1,6 +1,7 @@
 use super::{
     Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus, RasterizeCustomGlyphRequest,
-    RasterizedCustomGlyph, State, SwashCache, text_render::GlyphonCacheKey,
+    RasterizedCustomGlyph, State, SwashCache,
+    text_render::{GlyphonCacheKey, rasterize_glyph},
 };
 use etagere::{Allocation, BucketedAtlasAllocator, size2};
 use lru::LruCache;
@@ -146,47 +147,51 @@ impl InnerAtlas {
             view_formats: &[],
         });
 
-        // Re-upload glyphs
+        // Re-upload glyphs.
+        //
+        // The texture was just recreated, so every glyph's pixels have to be written
+        // again. This re-rasterizes from the cache key instead of keeping a copy of
+        // the pixels, which is only sound because `rasterize_glyph` is pure — see its
+        // docs.
+        let mut stale: Vec<GlyphonCacheKey> = Vec::new();
         for (&cache_key, glyph) in &self.glyph_cache {
             let (x, y) = match glyph.gpu_cache {
                 GpuCacheStatus::InAtlas { x, y, .. } => (x, y),
                 GpuCacheStatus::SkipRasterization => continue,
             };
 
-            let (image_data, width, height) = match cache_key {
-                GlyphonCacheKey::Text(cache_key) => {
-                    let image = cache.get_image_uncached(font_system, cache_key).unwrap();
-                    let width = image.placement.width as usize;
-                    let height = image.placement.height as usize;
+            let image = rasterize_glyph(
+                font_system,
+                cache,
+                cache_key,
+                scale_factor,
+                &mut rasterize_custom_glyph,
+            );
 
-                    (image.data, width, height)
+            // A glyph that no longer rasterizes (its font left the font system, a
+            // custom rasterizer changed its mind) would leave its atlas region blank.
+            // So would one whose size changed — the write below is sized from the
+            // image, and would spill into whatever is packed next to it. Both mean
+            // the cache entry is now lying about what is in the texture, so drop it
+            // and let the next frame re-rasterize and re-place it.
+            let stale_entry = match &image {
+                None => true,
+                Some(image) => {
+                    image.content_type != self.kind.as_content_type()
+                        || image.width != glyph.width
+                        || image.height != glyph.height
                 }
-                GlyphonCacheKey::Custom(cache_key) => {
-                    let input = RasterizeCustomGlyphRequest {
-                        id: cache_key.glyph_id,
-                        width: cache_key.width,
-                        height: cache_key.height,
-                        x_bin: cache_key.x_bin,
-                        y_bin: cache_key.y_bin,
-                        scale: scale_factor,
-                    };
+            };
 
-                    let Some(rasterized_glyph) = (rasterize_custom_glyph)(input) else {
-                        panic!(
-                            "Custom glyph rasterizer returned `None` when it previously returned `Some` for the same input {:?}",
-                            &input
-                        );
-                    };
-
-                    // Sanity checks on the rasterizer output
-                    rasterized_glyph.validate(&input, Some(self.kind.as_content_type()));
-
-                    (
-                        rasterized_glyph.data,
-                        cache_key.width as usize,
-                        cache_key.height as usize,
-                    )
-                }
+            let Some(image) = image.filter(|_| !stale_entry) else {
+                log::warn!(
+                    "glyphon: dropping {:?} from the {:?} atlas: it no longer re-rasterizes \
+                     to the cached glyph; it will be drawn again next frame",
+                    cache_key,
+                    self.kind,
+                );
+                stale.push(cache_key);
+                continue;
             };
 
             state.queue.write_texture(
@@ -200,18 +205,27 @@ impl InnerAtlas {
                     },
                     aspect: TextureAspect::All,
                 },
-                &image_data,
+                &image.data,
                 TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(width as u32 * self.kind.num_channels() as u32),
+                    bytes_per_row: Some(image.width as u32 * self.kind.num_channels() as u32),
                     rows_per_image: None,
                 },
                 Extent3d {
-                    width: width as u32,
-                    height: height as u32,
+                    width: image.width as u32,
+                    height: image.height as u32,
                     depth_or_array_layers: 1,
                 },
             );
+        }
+
+        // Hand the dropped glyphs' atlas slots back to the packer.
+        for cache_key in stale {
+            if let Some(details) = self.glyph_cache.pop(&cache_key)
+                && let Some(allocation) = details.atlas_id
+            {
+                self.packer.deallocate(allocation);
+            }
         }
 
         self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
