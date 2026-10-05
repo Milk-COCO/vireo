@@ -134,26 +134,65 @@ NDK26 当时能过是**运气**：给 `.data.rel.ro` 加 4 KB 就立刻翻成 FA
 **相关**：`examples/android/README.md` §5（含完整原理与验证清单）
 
 ---
-### `onStop` / `onDestroy`（`onTrimMemory` / `onSaveInstanceState` 已有定论，见下）
+### ~~`onStop` / `onDestroy`~~ ✅ `onStop` **已完成**（`App::on_stopped` + `is_stopped`）
 
-**现状**：vireo 只为 `onPause` / `onResume` 绑了 JNI（见
-`src/platform/android_lifecycle.rs`）。
+`onDestroy` **仍不做**：`VireoWindow::close()` 走的是 vireo 自己那条路，Activity 真正
+结束时收不到通知，影响很小。
 
-**影响**：
-- `onStop` —— 「彻底离开」信号。现在只有 `onPause`，无法区分「短暂中断」
-  （锁屏、弹窗）与「真的走了」。若要「只在彻底离开时保存进度」就做不了。
-- `onDestroy` —— Activity 真正结束时收不到通知（`VireoWindow::close()` 走的是
-  自己那条路，所以影响较小）。
+#### 发现的硬约束：回调**不可能**在暂停期间触发
 
-**怎么做**：照 `nativeOnPause` 抄 4 步即可，这一条**成立**：
+原计划是「照 `nativeOnPause` 抄 4 步」。动手前先读了 `src/thread.rs` 的生命周期闸门，
+发现渲染线程在暂停期间**整体阻塞**（不 `on_tick`、不 `draw`、不 acquire/present，
+为的是后台 CPU+GPU 占用归零）。于是：
 
-1. `MainActivity.java` 加 `private static native void nativeOnStop();` + override
-2. `android_lifecycle.rs` 的 `register_native_methods` 表里多一行
-3. 一个 `extern "system" fn` 设对应的标志位
-4. `App` 上加对应的 `on_stopped` 回调
+- 暂停期间**没有任何用户代码在跑** → 「离开时立刻保存进度」**做不到**
+- 用户回调只能**恢复后补发**（`on_paused` 一直是这个语义）
+- 恢复后再读 `is_paused()` 已经是 `false`，**信息已丢**
 
-**但优先级不高**：`App::on_paused` 是**恢复后补发**的（`thread.rs:447-449`），
-确实分不清「短暂中断」与「彻底离开」——这是这条唯一的技术理由。
+所以「只在彻底离开时保存进度」这个原始诉求**本身不成立**，必须把 API 定位成
+「**区分两种暂停**」而不是「新的保存时机」。
+
+#### 因此用锁存，不用实时标志
+
+Android 回调顺序是 `onPause → onStop → … → onStart → onResume`，而 `onStart`
+紧挨 `onResume`，两者都在渲染线程被唤醒**之前**跑完。所以渲染线程醒来时读
+实时 `STOPPED` 读到的**已经是 false** —— 直接读会把「彻底离开」和「短暂中断」
+混成同一件事，而这恰恰是要解决的核心问题。
+
+改用**锁存** `SAW_STOP`：UI 线程在 `onStop` 置位，渲染线程恢复后**一次性消费**
+（消费即清零，于是每个暂停周期恰好上报一次）。
+
+#### 关键认知：渲染线程每个暂停周期只观察得到**一次**代号变化
+
+闸门在暂停期间把渲染线程整个挡住，所以它只在**恢复后**醒来，`GEN` 变化
+（pause / resume）它只见到 resume 那一次 —— 中间无论发生多少次 `onStop` 都看不见。
+这既说明不需要独立的 `STOP_GEN`，也说明锁存是唯一的信息载体。
+
+#### 早退顺序有坑
+
+`fire_lifecycle_callbacks` 原本在「没注册任何回调」时早退。现在 `on_stopped` 一张表
+可能是空的，若早退发生在消费锁存**之前**，`SAW_STOP` 会留在 true —— 下一个
+「没有 stop 的暂停」就会**误报一次彻底离开**。锁存是一次性事件而不是状态，
+必须先消费再考虑早退。
+
+#### 验证
+- `cargo test --lib` **293 passed**（+4：锁存跨 resume 仍可读且只报一次、
+  短暂中断不置锁存、连续多次 onStop 只报一次、桌面恒 `false`）
+- `cargo ndk -t arm64-v8a` / `-t x86_64` `check --lib` 通过
+- `gradlew assembleDebug '-PndkVersion=28.2.13676358'` BUILD SUCCESSFUL
+- ⚠️ **真机 Home 键往返未验证**：验证进行到一半，两台 MuMu 的 adb 连接开始无响应
+  （`adb shell echo` 都超时；`screencap` 早一步就已失灵，而它在本次会话早些时候是好的）。
+  判定为模拟器侧故障，与本次改动无关（`force-stop` 应用后仍挂）。**JNI 绑定与 Java
+  override 这一段尚无真机证据**，恢复后需补：`adb shell input keyevent 3` 回桌面
+  → 重新启动 → `adb logcat -d | findstr lifecycle`，应看到 paused 与 stopped 各一条。
+
+#### 踩坑（三处只有 Android target 才编到，桌面 `cargo test` 全绿）
+1. `jni_str!` 宏**要求字面量**，不能传 `const` 标识符 → 绑定表只能写字面量，与常量
+   脱钩；加 `JAVA_NAMES_MATCH_LITERALS` 编译期断言钉住（`PartialEq` 在 const 里还没
+   稳定，自己写了 `const fn bytes_eq` 逐字节比）。
+2. `AtomicBool::store` **不接受** `Acquire` / `AcqRel`（只有 `swap` 接受）。
+3. `LifecycleCbs` 从 2 元组变 3 元组后 `cbs.0/.1/.2` 只能靠记忆区分 → 改具名字段
+   结构体（`pub(crate)`，无 API 影响）。
 
 ---
 

@@ -394,31 +394,34 @@ AGDK 在运行时**按符号名字符串**查找它。rustc 的 dead_code 分析
 - **preedit（拼音候选）在部分 ROM 上拿不到**。搜狗小米版只 commit 不
   setComposingText，`text_input_state().compose` 恒为 `None`。能正常上屏汉字，
   只是拿不到候选串。
-- **只处理了 `onPause` / `onResume`**。winit 的 Android 后端把 Activity 回调
-  都注册了但**只发 `Resume`/`Start`**，所以 `onStop`、`onDestroy`、`onSaveInstanceState`、
+- **只处理了 `onPause` / `onResume` / `onStop`**。winit 的 Android 后端把 Activity 回调
+  都注册了但**只发 `Resume`/`Start`**，所以 `onDestroy`、`onSaveInstanceState`、
   `onTrimMemory` 这些 vireo 都收不到 —— 它们只能由你的 `MainActivity.java` 转发，
-  而 vireo 目前只为前两个绑了 native 方法。需要更多就照 `nativeOnPause` 的写法自己加。
+  而 vireo 只为前三个绑了 native 方法（`onStop` 对应 `App::on_stopped`，见 §8）。
+  需要更多就照 `nativeOnPause` 的写法自己加。
 - **16 KB page size 未保证**（NDK 版本限制，见 §5）。
 - **R8/混淆默认关**。`minifyEnabled false`，原因见 `proguard-rules.pro`。
 - 只验证了 **arm64-v8a + Vulkan**。32 位 ABI 和 GLES 后端未测。
 
 ---
 
-## 8. 生命周期：`onPause` / `onResume` 转发（别删）
+## 8. 生命周期：`onPause` / `onResume` / `onStop` 转发（别删）
 
 winit 的 Android 后端**注册了** Activity 生命周期回调，但除 `Resume`/`Start` 外
 **全部不发事件** —— `MainEvent::Pause` / `Stop` 在 Android 侧永远不会被构造。
 所以 vireo 默认**收不到「我进后台了」**，切后台后继续全速渲染，直到被系统杀进程。
 
-`MainActivity.java` 里那两个 `native` 方法就是补这个洞的：vireo 在运行时用
+`MainActivity.java` 里那几个 `native` 方法就是补这个洞的：vireo 在运行时用
 `RegisterNatives` 把它们绑到 Rust 侧，于是有了真正的暂停信号。
 
 ```java
 private static native void nativeOnPause();
 private static native void nativeOnResume();
+private static native void nativeOnStop();   // 可选，见下
 
 @Override protected void onPause()  { nativeOnPause();  super.onPause(); }
 @Override protected void onResume() { super.onResume(); nativeOnResume(); }
+@Override protected void onStop()    { nativeOnStop();    super.onStop(); }
 ```
 
 Rust 侧能拿到的东西：
@@ -427,22 +430,55 @@ Rust 侧能拿到的东西：
 app.is_paused();                 // 任意线程可读；桌面恒 false
 app.on_paused(|| save_progress());  // 渲染线程上、恢复之后触发
 app.on_resumed(|| resume_audio());
+
+app.is_stopped();                // activity 当前是否不可见；桌面恒 false
+app.on_stopped(|| mark_really_left());  // 只在「本次暂停含 onStop」时触发
 ```
 
 **`paused` 期间整条渲染 Thread 完全停摆** —— 不跑 `on_tick`、不 `draw`、
 不 acquire/present。所以 `on_tick` 里的代码照常写，不用自己判 `is_paused()`。
 
-三点注意：
+### `onStop` 用来区分「短暂中断」与「彻底离开」
+
+`onPause` 覆盖大量**短暂**中断，`onStop` 才对应「不可见」：
+
+| 场景 | `onPause` | `onStop` |
+|---|---|---|
+| 半透明弹窗 / 权限对话框盖在上面 | ✅ | ❌ |
+| 回桌面 / 切别的 app | ✅ | ✅ |
+| 锁屏 | ✅ | ✅ |
+
+> ⚠️ **别拿 `is_stopped()` 判断「刚才那次暂停算不算彻底离开」** —— 它是**实时**
+> 查询，恢复后已经翻回 `false`（`onStart` 紧跟 `onResume` 跑完，渲染线程才被唤醒）。
+> 要判断就用 `on_stopped` 回调。
+
+`nativeOnStop` 是**可选**的：不声明 / 不调用只是 `on_stopped` 永不触发，
+其它生命周期行为不受影响。
+
+四点注意：
 
 1. **回调在「恢复时」才触发**，因为回调要能碰 `App`，不能在 UI 线程的 JNI 回调里跑。
    所以「暂停瞬间要做的紧急收尾」请写在 `on_tick` 里判 `is_paused()`。
 2. **`onPause` 对短暂中断也触发**（锁屏、部分弹窗、分屏切换）—— 和 Unity
-   `OnApplicationPause` 同样的语义。
+   `OnApplicationPause` 同样的语义。要区分就用 `on_stopped`。
 3. **没照抄这段也能跑**，只是退化成旧行为（后台仍全速）+ logcat 一条 warn。
 4. ⚠️ **它不能替代 `onSaveInstanceState`**：正因为回调在恢复后才发，
    **进程在后台被系统杀掉时，vireo 侧一个回调都不会触发**。要保游戏状态，
    在你自己的 `MainActivity.java` 里 override `onSaveInstanceState(Bundle)`
    存起来（见下）。
+
+### 想在 logcat 里看生命周期事件
+
+`init_logger()` 走 env_logger，**默认 level 是 error**，而 vireo 的诊断日志都在
+info/warn 级 —— 不设 `RUST_LOG` 的话 logcat 里一片空白。模板里演示了：
+
+```rust
+std::env::set_var("RUST_LOG", "info");   // 必须在 init_logger() 之前
+vireo::init_logger();
+```
+
+（`env_logger` 初始化时只读一次。正式项目建议按 `BuildConfig.DEBUG` 开关，
+别把 info 留在 release。）
 
 ### 保状态：只能用户自己在 Java 侧做
 

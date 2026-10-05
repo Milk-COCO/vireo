@@ -11,6 +11,13 @@
   解决「未收录的 ROM 拿不到任何正文字体 → 所有文字全大写、数字消失」。
   三个字段缺一不可：只加前缀不钉家族名，症状照旧。
   Android font scanning is now user-configurable (whitelist was compile-time fixed).
+- Android `onStop` 生命周期：`App::on_stopped` 回调 + `App::is_stopped()` /
+  `android_lifecycle::is_stopped()`。只对「暂停期间 activity 变得不可见」的
+  暂停触发，用来区分「半透明弹窗 / 权限对话框」这类短暂中断与「回桌面 / 锁屏」
+  这类彻底离开（`onPause` 两者都触发）。
+  与 `on_paused` 同样在**恢复后**于渲染线程补发 —— 渲染线程在暂停期间整体阻塞，
+  「离开时立刻保存进度」做不到，那必须走用户自己的 `onSaveInstanceState`。
+  Android `onStop` lifecycle: distinguish a brief interruption from a real departure.
 - GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
   （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
   GPU particle path: baked spawn params + VS integration over `camera.time`.

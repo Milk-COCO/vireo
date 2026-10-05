@@ -193,27 +193,50 @@ pub(crate) enum DeferredTaskKind {
 
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// `on_paused` / `on_resumed` 回调表：`(paused, resumed)`。
+/// `on_paused` / `on_resumed` / `on_stopped` 回调表。
 ///
 /// 元素是 `Arc` 而非 `Box` —— 派发时要先把锁释放再逐个调用，否则「回调里再注册
 /// 一个回调」会自锁。
-type LifecycleCbs = (
-    Vec<Arc<dyn Fn() + Send + Sync>>,
-    Vec<Arc<dyn Fn() + Send + Sync>>,
-);
+///
+/// 用具名字段而非元组：三张表元素类型完全相同，元组下 `cbs.0` / `cbs.1` / `cbs.2`
+/// 只能靠记忆区分，加第三个时尤其容易拿错。
+pub(crate) struct LifecycleCbs {
+    paused: Vec<Arc<dyn Fn() + Send + Sync>>,
+    resumed: Vec<Arc<dyn Fn() + Send + Sync>>,
+    stopped: Vec<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl LifecycleCbs {
+    fn empty() -> Self {
+        Self {
+            paused: Vec::new(),
+            resumed: Vec::new(),
+            stopped: Vec::new(),
+        }
+    }
+
+    fn all_empty(&self) -> bool {
+        self.paused.is_empty() && self.resumed.is_empty() && self.stopped.is_empty()
+    }
+}
 
 impl AppInner {
     /// 由渲染线程在观察到生命周期状态变化后调用。
     ///
     /// 单个回调 panic 不会打断渲染循环 —— 与 `on_tick` 的处理一致。
     pub(crate) fn fire_lifecycle_callbacks(&self) {
-        let (paused, resumed) = {
+        // ⚠️ 必须**先**消费锁存再考虑早退：`on_stopped` 一个回调都没注册时，
+        // 早退会把 `SAW_STOP` 留在 true，下一个「无 stop 的暂停」就会误报一次
+        // 「彻底离开」。锁存是「每个暂停周期恰好一次」的一次性事件，不是状态。
+        let saw_stop = crate::platform::android_lifecycle::take_saw_stop();
+
+        let cbs = {
             let cbs = self.lifecycle_cbs.lock();
-            if cbs.0.is_empty() && cbs.1.is_empty() {
+            if cbs.all_empty() {
                 return;
             }
             // clone Arc 而不是持锁调用：回调完全可能在里面注册新回调。
-            (cbs.0.clone(), cbs.1.clone())
+            (cbs.paused.clone(), cbs.resumed.clone(), cbs.stopped.clone())
         };
         let fire = |cbs: &[Arc<dyn Fn() + Send + Sync>]| {
             for cb in cbs {
@@ -227,10 +250,16 @@ impl AppInner {
                 }
             }
         };
+
         if crate::platform::android_lifecycle::is_paused() {
-            fire(&paused);
+            fire(&cbs.0);
         } else {
-            fire(&resumed);
+            fire(&cbs.1);
+        }
+        // 「彻底离开」是附加信号：只在暂停期间发生过 onStop 的那次才发，
+        // 且排在 paused/resumed 之后（后者先到，用户可以先做通用收尾）。
+        if saw_stop {
+            fire(&cbs.2);
         }
     }
 }
@@ -444,7 +473,7 @@ impl App {
                 event_tx: Mutex::new(None),
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
-                lifecycle_cbs: Mutex::new((Vec::new(), Vec::new())),
+                lifecycle_cbs: Mutex::new(LifecycleCbs::empty()),
                 memory_warning_cbs: Mutex::new(Vec::new()),
                 memory_warn_gen: std::sync::atomic::AtomicU64::new(0),
             }),
@@ -726,8 +755,9 @@ impl App {
     ///   [`VireoWindow::focused`](crate::window::VireoWindow::focused)。
     ///
     /// ⚠️ Android 的 `onPause` 对**短暂**中断也会触发（锁屏、部分弹窗、
-    /// 分屏切换）。这是 Unity `OnApplicationPause` 同样的语义；如果你需要
-    /// 「彻底离开才算」，得自己在 `on_paused` 里配合 `on_stopped` 之类的额外判定。
+    /// 分屏切换）。这是 Unity `OnApplicationPause` 同样的语义；要「彻底离开
+    /// （不可见）才算」，用 [`on_stopped`](Self::on_stopped) —— 它只对发生过
+    /// `onStop` 的那次暂停触发。
     pub fn is_paused(&self) -> bool {
         crate::platform::android_lifecycle::is_paused()
     }
@@ -741,12 +771,55 @@ impl App {
     /// 注意它是**恢复时**才拿到通知，所以「暂停时要做的紧急收尾」请直接写在
     /// `on_tick` 里判 `is_paused()`。
     pub fn on_paused(&self, cb: impl Fn() + Send + Sync + 'static) {
-        self.lifecycle_cbs.lock().0.push(Arc::new(cb));
+        self.inner.lifecycle_cbs.lock().paused.push(Arc::new(cb));
     }
 
     /// 注册「恢复」回调。语义/线程见 [`on_paused`](Self::on_paused)。
     pub fn on_resumed(&self, cb: impl Fn() + Send + Sync + 'static) {
-        self.lifecycle_cbs.lock().1.push(Arc::new(cb));
+        self.inner.lifecycle_cbs.lock().resumed.push(Arc::new(cb));
+    }
+
+    /// 注册「彻底离开」回调 —— 只在**暂停期间 activity 变得不可见**（`onStop`）时触发。
+    ///
+    /// # 与 `on_paused` 的区别
+    ///
+    /// Android 上 `onPause` 覆盖大量**短暂**中断（半透明弹窗、权限对话框），
+    /// `onStop` 才是「不可见」。本回调只对后者触发：
+    ///
+    /// | 场景 | `on_paused` | `on_stopped` |
+    /// |---|---|---|
+    /// | 半透明弹窗 / 权限对话框 | ✅ | ❌ |
+    /// | 回桌面 / 切别的 app | ✅ | ✅ |
+    /// | 锁屏 | ✅ | ✅ |
+    ///
+    /// # 时机：**恢复之后**（与 [`on_paused`](Self::on_paused) 同理）
+    ///
+    /// 渲染线程在暂停期间**整体阻塞**（不 `on_tick`、不 `draw`，为的是后台
+    /// CPU+GPU 占用归零），所以任何回调都只能恢复后补发。要判断「刚才那次暂停
+    /// 算不算彻底离开」，用本回调，**不要**用 [`is_stopped`](Self::is_stopped) ——
+    /// 恢复后那个查询已经翻回 `false`。
+    ///
+    /// # ⚠️ 不能用它做「离开时立刻保存进度」
+    ///
+    /// 阻塞期间没有任何用户代码在跑，**进程在后台被系统杀掉时不会有任何回调**。
+    /// 「离开时持久化」必须由用户在自己的 `MainActivity.onSaveInstanceState`
+    /// 里做（vireo 侧无可序列化状态，见 `TODO.md` 的 `onSaveInstanceState` 条目）。
+    ///
+    /// 需要 `MainActivity.java` 额外声明并转发 `nativeOnStop()`；未声明时
+    /// 本回调永不触发（= 不影响其它生命周期行为）。
+    pub fn on_stopped(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.inner.lifecycle_cbs.lock().stopped.push(Arc::new(cb));
+    }
+
+    /// activity 当前是否**不可见**（Android `onStop` 状态）。
+    ///
+    /// 其它平台恒 `false`。
+    ///
+    /// ⚠️ **恢复后已翻回 `false`** —— 渲染线程在暂停期间整体阻塞，醒来时
+    /// `onStart` 已跑完。要判断「刚才那次暂停算不算彻底离开」，用
+    /// [`on_stopped`](Self::on_stopped)，不要用这个查询。
+    pub fn is_stopped(&self) -> bool {
+        crate::platform::android_lifecycle::is_stopped()
     }
 
     /// 注册「系统内存吃紧」回调。

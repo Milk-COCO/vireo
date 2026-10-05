@@ -30,6 +30,8 @@
 // 「只被 JNI 到达」，所以这里整 crate 放宽。
 #![allow(dead_code)]
 
+use std::sync::atomic::Ordering;
+
 use vireo::prelude::*;
 
 /// 安全区四边（逻辑像素）。
@@ -56,6 +58,27 @@ impl From<vireo::platform::android::Insets> for Edges {
     }
 }
 
+/// 生命周期回调计数（HUD 用来肉眼确认 `on_paused` / `on_stopped` 各自触发了几次）。
+#[derive(Default)]
+struct LifeCounters {
+    paused: std::sync::atomic::AtomicU32,
+    stopped: std::sync::atomic::AtomicU32,
+}
+
+// 回调要 `'static + Send + Sync`，所以手动 clone（两个 AtomicU32 本身 Sync）。
+impl Clone for LifeCounters {
+    fn clone(&self) -> Self {
+        Self {
+            paused: std::sync::atomic::AtomicU32::new(
+                self.paused.load(Ordering::Relaxed),
+            ),
+            stopped: std::sync::atomic::AtomicU32::new(
+                self.stopped.load(Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
 // `fonts = ...` 在 `App` 构造**之前**求值，这是宏路径下唯一能定制 Android 系统字体
 // 白名单的时机（`App::new()` 内部就建好了 TextContext 并跑完字体 install()，而本函数体
 // 是在那之后才执行的）。
@@ -78,10 +101,44 @@ impl From<vireo::platform::android::Insets> for Edges {
     c.extra_families.push("Source Sans Pro".to_owned());
 })]
 async fn main(app: App) {
+    // `init_logger` 走 env_logger，**默认 level 是 error** —— 而 vireo 自己的诊断
+    // （Android 字体扫描结果、JNI 绑定失败警告）都在 info/warn 级，不设的话
+    // logcat 里什么都看不到，只能靠屏幕上的 HUD。这里显式打开 info，
+    // 排查字体 / 生命周期问题时 `adb logcat -s vireoandroid` 就够用。
+    //
+    // ⚠️ 必须**在** `init_logger()` 之前设：env_logger 在初始化时读一次 RUST_LOG。
+    // 正式项目里建议改成读 `BuildConfig.DEBUG` 或自己的开关，别把 info 留在 release。
+    std::env::set_var("RUST_LOG", "info");
+
     // 不调这个的话 vireo 的 `log::warn!`（字体加载、IME、生命周期）全被丢弃。
     vireo::init_logger();
 
     let idx = app.window(WindowDesc::new("Vireo Android", 1280, 720), None::<fn()>);
+
+    // ---- 生命周期：on_paused vs on_stopped ---------------------------------
+    // 两者都在**恢复之后**于渲染线程补发（暂停期间渲染线程整体阻塞，什么都不跑）。
+    // 区别是 on_stopped 只在「那次暂停期间 activity 变得不可见（onStop）」时触发，
+    // 半透明弹窗 / 权限对话框只走 onPause，不走 onStop。
+    //
+    // 实机验证：adb shell input keyevent 3（HOME）回桌面，再启动回来，
+    // 然后 `adb logcat -d | findstr lifecycle` —— 应看到 paused 与 stopped 各一条。
+    let life = LifeCounters::default();
+    {
+        let life = life.clone();
+        // 花括号必需：`fetch_add` 返回旧值（u32），`move || expr` 会让闭包返回类型
+        // 变成 u32，不满足回调要求的 `Fn()`。
+        app.on_paused(move || {
+            life.paused.fetch_add(1, Ordering::Relaxed);
+            log::info!("vireo-android lifecycle: paused (resume 后补发)");
+        });
+    }
+    {
+        let life = life.clone();
+        app.on_stopped(move || {
+            life.stopped.fetch_add(1, Ordering::Relaxed);
+            log::info!("vireo-android lifecycle: stopped = 彻底离开（本次暂停含 onStop）");
+        });
+    }
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
@@ -189,6 +246,12 @@ async fn main(app: App) {
         hud.push_str(&format!(
             "ime     {:.0},{:.0}  {:.0},{:.0}\n",
             ime.l, ime.t, ime.r, ime.b
+        ));
+        // 生命周期回调计数。按 Home 回桌面再回来 → paused+1 且 stopped+1。
+        hud.push_str(&format!(
+            "life    paused={} stopped={}\n",
+            life.paused.load(Ordering::Relaxed),
+            life.stopped.load(Ordering::Relaxed),
         ));
         hud.push_str(&format!("text    {typed:?}"));
         // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）

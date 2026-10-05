@@ -27,21 +27,24 @@ public class MainActivity extends GameActivity {
     }
 
     // ---------------------------------------------------------------------
-    // 生命周期转发（**别删这两行**）
+    // 生命周期转发（**别删这三行**）
     //
     // winit 的 Android 后端把 onPause / onStop 这些回调注册了，但**不发事件**——
     // MainEvent::Pause / Stop 在 Android 侧永远不会被构造。所以 vireo 收不到
     // 「我进后台了」，切后台后会继续全速渲染直到被系统杀进程。
     //
-    // 这两个 native 方法由 vireo 在运行时用 RegisterNatives 绑到固定的 C 符号上，
+    // 这三个 native 方法由 vireo 在运行时用 RegisterNatives 绑到固定的 C 符号上，
     // 所以**方法名不能改**，但包名 / 类名随便改（绑定用的是 Activity 实例的实际类）。
     //
-    // 绑不上时 vireo 会在 logcat 打一条 warn，说明照抄这段即可；
+    // nativeOnStop 是可选的：不声明 / 不调用时只是 `App::on_stopped` 永不触发，
+    // 其它生命周期行为不受影响。绑不上时 vireo 会在 logcat 打一条 warn；
     // 绑不上时的行为 = 旧行为（后台仍全速），不会崩。
     // ---------------------------------------------------------------------
     private static native void nativeOnPause();
 
     private static native void nativeOnResume();
+
+    private static native void nativeOnStop();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,5 +68,16 @@ public class MainActivity extends GameActivity {
         // 恢复放在 super 之后：此时窗口已可见，渲染线程被唤醒后画的第一帧
         // 才不会出现「黑一下再上内容」。
         nativeOnResume();
+    }
+
+    @Override
+    protected void onStop() {
+        // 与 onPause 的区别：onStop 只在 activity **不可见**时触发
+        // （半透明弹窗 / 权限对话框只走 onPause）。vireo 用它区分
+        // 「短暂中断」与「彻底离开」—— App::on_stopped 只对走过这里的暂停触发。
+        //
+        // 顺序与 onPause 一致：先转给 vireo 再 super。
+        nativeOnStop();
+        super.onStop();
     }
 }

@@ -19,3 +19,7 @@ crate-type = ["cdylib"]
 #   vireo = "0.1"                          # crates.io
 #   vireo = { git = "https://github.com/..." }
 vireo = { path = "../.." }
+
+# 与 vireo 用同一个 log 实现（vireo 的 `log::info!` / `log::warn!` 全走它）。
+# 不写版本号让它跟 vireo 解析到同一版本，否则两套 logger 各写各的、级别过滤会打架。
+log = "0.4"
