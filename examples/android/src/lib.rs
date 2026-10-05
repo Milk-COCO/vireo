@@ -203,10 +203,8 @@ async fn main(app: App) {
         {
             // 字体加载摘要（Android 上 logcat 不可靠，看画面）
             let mut line = String::new();
-            match vireo::text::android_fonts::loaded_summary() {
-                Some((files, faces, failed, fam)) => line.push_str(&format!(
-                    "fonts   {files} files -> {faces} faces ({failed} bad) default={fam}\n"
-                )),
+            match vireo::text::android_fonts::report() {
+                Some(r) => line.push_str(&format!("fonts   {r}\n")),
                 None => line.push_str("fonts   (install() 未运行)\n"),
             }
             draw_text(

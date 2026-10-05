@@ -117,20 +117,62 @@ const PREFERRED_FAMILIES: &[&str] = &[
 /// 后者挡掉 `Roboto-Regular.ttf.bak` 这类备份文件——前缀规则挡不住它们。
 pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
 
-/// `install()` 的结果摘要：`(白名单命中文件数, face 数, 读取失败数, 默认族)`。
+/// `install()` 的结果摘要。
 ///
-/// 无条件编译，供 [`loaded_summary`] 在桌面单测里断言。
-static LOADED_SUMMARY: std::sync::Mutex<Option<(usize, usize, usize, String)>> =
-    std::sync::Mutex::new(None);
+/// 无条件编译（桌面单测 / 非 Android 上 `report()` 恒 `None`）。
+///
+/// HUD / 日志排查 Android 字体问题时是第一手线索：env_logger 走 android_logger
+/// 后端难查，`report()` 可把「加载了几个文件 / 几个 face / 有没有失败 / 默认族是谁」
+/// 直接显示在屏幕上。
+///
+/// # Platform
+///
+/// 仅在 `target_os = "android"` 的 `TextContext::new()` 路径里有实际值；其它平台
+/// （或 `install()` 尚未执行完）`report()` 恒返回 `None`。
+///
+/// # Examples
+///
+/// ```no_run
+/// if let Some(r) = vireo::text::android_fonts::report() {
+///     log::info!("android fonts: {r}");
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct AndroidFontsReport {
+    /// 白名单命中的字体文件数（`/system/fonts` + `/product/fonts`）。
+    pub files: usize,
+    /// 解析成功并加载到 fontdb 的 face 数（.ttc 会拆成多个）。
+    pub faces: usize,
+    /// 读取失败的文件数（TTC 分片或权限问题不影响整体可用性）。
+    pub failed: usize,
+    /// 钉死的 generic 家族名；`None` = 一个正文字族都没命中
+    /// （症状：全大写文字、数字消失）。
+    pub default_family: Option<String>,
+}
 
-/// 字体加载摘要，供应用层显示（模板 HUD 用的就是它）。
+impl std::fmt::Display for AndroidFontsReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // key=value 便于 logcat / log 检索；default 缺失显式标 <none> 而非空。
+        write!(
+            f,
+            "files={} faces={} failed={} default={}",
+            self.files,
+            self.faces,
+            self.failed,
+            self.default_family.as_deref().unwrap_or("<none>")
+        )
+    }
+}
+
+static LOADED_REPORT: std::sync::Mutex<Option<AndroidFontsReport>> = std::sync::Mutex::new(None);
+
+/// 字体安装摘要；未初始化时 `None`（非 Android 或 `install()` 尚未执行完）。
 ///
-/// **为什么需要它**：Android 上诊断字体问题只能看像素/画面 —— env_logger 走
-/// android_logger 后端，tag 是进程名，logcat 按 tag 过滤极易错过，而
-/// 「加载了几个字体 / 默认族是哪个 / 有没有 emoji 字体」是排查豆腐块的第一线索。
-/// 把摘要挂到 `App` 上比让用户去翻 logcat 可靠得多。
-pub fn loaded_summary() -> Option<(usize, usize, usize, String)> {
-    LOADED_SUMMARY
+/// 与 `install` 的生命周期绑定：Android 上 `TextContext::new()`
+/// 完成后恒为 `Some`，即便白名单里没有命中任何正文字体（此时 `default_family`
+/// 为 `None`）。
+pub fn report() -> Option<AndroidFontsReport> {
+    LOADED_REPORT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
@@ -223,13 +265,18 @@ pub(crate) fn install(font_system: &mut FontSystem) {
             // 其余 generic 一并钉上，用户显式指定等宽/衬线族时也走 good font。
             db.set_monospace_family(family);
             db.set_serif_family(family);
-            // 记下加载摘要供 `loaded_summary()` 查询。**不能只靠 log**：Android 上
+            // 记下加载摘要供 `report()` 查询。**不能只靠 log**：Android 上
             // env_logger 走 android_logger 后端，tag 是进程名，logcat 过滤极易错过，
             // 而「到底加载了几个字体 / 有没有 emoji 字体」恰恰是排查豆腐块的第一线索。
-            LOADED_SUMMARY
+            LOADED_REPORT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .replace((file_count, face_count, failed, family.to_owned()));
+                .replace(AndroidFontsReport {
+                    files: file_count,
+                    faces: face_count,
+                    failed,
+                    default_family: Some(family.to_owned()),
+                });
             log::info!(
                 "vireo::text: android fonts loaded: {file_count} files -> {face_count} faces \
                  ({failed} unreadable), sans-serif default = {family:?}"
@@ -237,7 +284,17 @@ pub(crate) fn install(font_system: &mut FontSystem) {
         }
         None => {
             // 一个都没命中：保持 fontdb 默认，但必须说清楚，否则用户看到的
-            // 「大写 + 无数字」现象无从排查。
+            // 「大写 + 无数字」现象无从排查。即便如此也要落摘要，
+            // 否则 report() 的 None 会与「install() 没跑」混成一类。
+            LOADED_REPORT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace(AndroidFontsReport {
+                    files: file_count,
+                    faces: face_count,
+                    failed,
+                    default_family: None,
+                });
             log::warn!(
                 "vireo::text: android no known UI font family among {face_count} faces \
                  from {file_count} whitelisted files ({failed} unreadable); \
