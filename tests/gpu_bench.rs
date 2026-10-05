@@ -2620,3 +2620,143 @@ fn texture_repeat_wraps() {
         "setter Repeat 右半应 wrap 回红：{cl:?}/{cr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// COLRv1：emoji 端到端 + atlas grow 回归
+// ---------------------------------------------------------------------------
+//
+// 背景见 `.opencode/android_colrv1_plan.md`：swash 0.2.10 按 COLR v0 布局读表头，
+// Android 12+ 的 `NotoColorEmoji.ttf`（COLRv1）交回 `0×0` 被静默丢弃。
+// vireo 在 swash 交回空位图时用自研的 `skrifa + zeno` 路径二次尝试。
+
+/// 这台机器上可用的 COLRv1 字体（路径，pinned 家族名）。
+///
+/// `seguiemj.ttf` 本身就是 COLRv1，且它的 v0 记录不覆盖测试字形 —— swash 对它们
+/// 返回 `None`，所以桌面同样走 COLRv1 路径。没有可用字体时调用方直接 return（跳过）。
+fn colr_v1_test_font() -> Option<(&'static str, &'static str)> {
+    const CANDIDATES: &[(&str, &str)] = &[
+        (r"C:\Windows\Fonts\seguiemj.ttf", "Segoe UI Emoji"),
+        (
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "Apple Color Emoji",
+        ),
+        (
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "Noto Color Emoji",
+        ),
+    ];
+    CANDIDATES
+        .iter()
+        .copied()
+        .find(|(path, _)| std::path::Path::new(path).exists())
+}
+
+/// COLRv1 端到端：`draw_text` 画 emoji → 图集 → shader → 像素回读，可见。
+///
+/// 判据是「空白 vs 非空白」：没有 COLRv1 路径时，shaping 能排到字形、
+/// swash 交回 `0×0`、`SkipRasterization` 静默丢弃 → 区域全空。
+/// 显式 pin 家族，避免回退到其他字体的单色字形造成假阳性。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn colr_v1_emoji_visible_end_to_end() {
+    let Some((path, family)) = colr_v1_test_font() else {
+        eprintln!("skipping: no COLRv1 font on this machine");
+        return;
+    };
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.load_font_file(path).expect("load COLRv1 test font");
+    let canvas = OffscreenCanvas::new(&gpu, 400, 300);
+
+    let def = TextDef::default()
+        .font_size(64.0)
+        .with_family(Family::Name(family));
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "😀",
+        Pos::new(100.0, 200.0),
+        def,
+        TextOverride::from_color(WHITE),
+    );
+
+    canvas.draw(Some(BLACK), &[&b]);
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 400, 100, 120, 200, 220),
+        "COLRv1 emoji 应可见（若回退到旧路径，该区域全空）"
+    );
+}
+
+/// COLRv1 + atlas grow：逼图集扩容后，原有字形仍可见。
+///
+/// `InnerAtlas::grow` 重建纹理并把每个缓存字形重光栅化写回去。旧代码对此不做任何
+/// 校验 —— 重光栅化失败或尺寸不符时写入变成 no-op，字形指向空白区域且无日志。
+/// 本测试先画一个 emoji（进图集），再用一批又大又多的不同字形逼出至少一次 grow，
+/// 最后重画第一个 emoji 并验证仍可见。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn colr_v1_atlas_grow_keeps_glyphs() {
+    let Some((path, family)) = colr_v1_test_font() else {
+        eprintln!("skipping: no COLRv1 font on this machine");
+        return;
+    };
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.load_font_file(path).expect("load COLRv1 test font");
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    // 8 个经单元测试确认走 COLRv1 的字形（见 src/glyphon/colr.rs）。
+    const EMOJI: &[char] = &[
+        '😀', '🍑', '🌈', '🦄', '🎵', '🍭', '👀', '🐛',
+    ];
+
+    let probe = |canvas: &OffscreenCanvas| {
+        let def = TextDef::default()
+            .font_size(64.0)
+            .with_family(Family::Name(family));
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "😀",
+            Pos::new(100.0, 200.0),
+            def,
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+        region_has_color(&canvas.read_pixels(), 900, 100, 120, 200, 220)
+    };
+
+    assert!(probe(&canvas), "grow 前：emoji 应可见");
+
+    // 洪水：8 字形 × 3 尺寸（64/128/200px）= 24 个不同的大号彩色字形，
+    // 同一帧进图集，总量远超初始 256² color atlas，必然触发 grow。
+    // （全部同 generation，LRU 驱逐不适用，只能 grow。）
+    let mut flood = DrawBatch::new();
+    for (row, size) in [64.0, 128.0, 200.0].iter().enumerate() {
+        let def = TextDef::default()
+            .font_size(*size)
+            .with_family(Family::Name(family));
+        for (col, ch) in EMOJI.iter().enumerate() {
+            let mut s = String::new();
+            s.push(*ch);
+            draw_text(
+                &mut flood.texts,
+                &s,
+                Pos::new(20.0 + col as f32 * 100.0, 100.0 + row as f32 * 220.0),
+                def.clone(),
+                TextOverride::from_color(WHITE),
+            );
+        }
+    }
+    canvas.draw(Some(BLACK), &[&flood]);
+
+    assert!(
+        probe(&canvas),
+        "grow 后：emoji 仍应可见（若重光栅化失败，该区域变空）"
+    );
+}
