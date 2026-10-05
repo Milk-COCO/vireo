@@ -4,6 +4,7 @@
 //! [cosmic-text]: https://github.com/pop-os/cosmic-text
 //! [etagere]: https://github.com/nical/etagere
 
+mod blend;
 mod cache;
 mod colr;
 mod custom_glyph;

@@ -1188,7 +1188,23 @@ fn composite(backdrop: &mut Canvas, source: &Canvas, mode: CompositeMode) {
                     dst[channel] = dst[channel].saturating_add(src[channel]);
                 }
             }
-            _ => source_over(dst, src),
+            // The 15 modes that aren't Porter-Duff: separable blend + HSL blend.
+            // Each goes through the unified formula in blend.rs.
+            CompositeMode::Screen
+            | CompositeMode::Overlay
+            | CompositeMode::Darken
+            | CompositeMode::Lighten
+            | CompositeMode::ColorDodge
+            | CompositeMode::ColorBurn
+            | CompositeMode::HardLight
+            | CompositeMode::SoftLight
+            | CompositeMode::Difference
+            | CompositeMode::Exclusion
+            | CompositeMode::Multiply
+            | CompositeMode::HslHue
+            | CompositeMode::HslSaturation
+            | CompositeMode::HslColor
+            | CompositeMode::HslLuminosity => super::blend::composite_with_blend(dst, src, mode),
         }
     }
 }

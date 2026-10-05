@@ -2711,9 +2711,7 @@ fn colr_v1_atlas_grow_keeps_glyphs() {
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
     // 8 个经单元测试确认走 COLRv1 的字形（见 src/glyphon/colr.rs）。
-    const EMOJI: &[char] = &[
-        '😀', '🍑', '🌈', '🦄', '🎵', '🍭', '👀', '🐛',
-    ];
+    const EMOJI: &[char] = &['😀', '🍑', '🌈', '🦄', '🎵', '🍭', '👀', '🐛'];
 
     let probe = |canvas: &OffscreenCanvas| {
         let def = TextDef::default()
@@ -2840,8 +2838,7 @@ fn colr_v1_perf_cold_vs_warm() {
         let t = Instant::now();
         canvas.draw(Some(BLACK), &[&b]);
         loop {
-            if let Ok(wgpu::PollStatus::QueueEmpty) =
-                canvas.gpu().device.poll(wgpu::PollType::Poll)
+            if let Ok(wgpu::PollStatus::QueueEmpty) = canvas.gpu().device.poll(wgpu::PollType::Poll)
             {
                 break;
             }
@@ -2861,8 +2858,7 @@ fn colr_v1_perf_cold_vs_warm() {
         let t = Instant::now();
         canvas.draw(Some(BLACK), &[&b]);
         loop {
-            if let Ok(wgpu::PollStatus::QueueEmpty) =
-                canvas.gpu().device.poll(wgpu::PollType::Poll)
+            if let Ok(wgpu::PollStatus::QueueEmpty) = canvas.gpu().device.poll(wgpu::PollType::Poll)
             {
                 break;
             }
