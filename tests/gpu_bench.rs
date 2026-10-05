@@ -2760,3 +2760,147 @@ fn colr_v1_atlas_grow_keeps_glyphs() {
         "grow 后：emoji 仍应可见（若重光栅化失败，该区域变空）"
     );
 }
+
+/// COLRv1 首帧 vs 稳态帧耗时。
+///
+/// COLRv1 光栅化只在图集 miss（首见某个 glyph+字号组合）时发生；
+/// 稳态时全部命中缓存，理论上跟纯文本一样快。
+/// 测量方法：同一批 8 个 emoji × 13 个字号 = 104 个 cache key，
+/// 首帧跑一次（104 次冷光栅化），再跑一次（全命中）。
+/// 对照组：同形状的 8 个 ASCII 字母 × 13 字号（走 swash 轮廓路径）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn colr_v1_perf_cold_vs_warm() {
+    let Some((path, family)) = colr_v1_test_font() else {
+        eprintln!("skipping: no COLRv1 font on this machine");
+        return;
+    };
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    gpu.load_font_file(path).expect("load COLRv1 test font");
+    let canvas = OffscreenCanvas::new(&gpu, 900, 700);
+
+    // 8 个确认走 COLRv1 的字形 × 13 个字号 = 104 个独立 cache key。
+    const EMOJI: &[char] = &['😀', '🍑', '🌈', '🦄', '🎵', '🍭', '👀', '🐛'];
+    const SIZES: &[f32] = &[
+        16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 48.0, 56.0, 64.0, 72.0, 80.0, 96.0,
+    ];
+
+    let build_colr = |b: &mut DrawBatch| {
+        for (row, ch) in EMOJI.iter().enumerate() {
+            for (size_i, size) in SIZES.iter().enumerate() {
+                let def = TextDef::default()
+                    .font_size(*size)
+                    .with_family(Family::Name(family));
+                let mut s = String::new();
+                s.push(*ch);
+                draw_text(
+                    &mut b.texts,
+                    &s,
+                    Pos::new(10.0 + size_i as f32 * 60.0, 20.0 + row as f32 * 40.0),
+                    def,
+                    TextOverride::from_color(WHITE),
+                );
+            }
+        }
+    };
+
+    // 对照组：8 个 ASCII 字符 × 同样 13 个字号，走 swash 轮廓路径。
+    const ASCII: &[char] = &['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    let build_ascii = |b: &mut DrawBatch| {
+        for (row, ch) in ASCII.iter().enumerate() {
+            for (size_i, size) in SIZES.iter().enumerate() {
+                let def = TextDef::default()
+                    .font_size(*size)
+                    .with_family(Family::Name(family));
+                let mut s = String::new();
+                s.push(*ch);
+                draw_text(
+                    &mut b.texts,
+                    &s,
+                    Pos::new(10.0 + size_i as f32 * 60.0, 20.0 + row as f32 * 40.0),
+                    def,
+                    TextOverride::from_color(WHITE),
+                );
+            }
+        }
+    };
+
+    let mut cold = Vec::new();
+    let mut warm = Vec::new();
+    let mut ascii_cold = Vec::new();
+    let mut ascii_warm = Vec::new();
+
+    // emoji 冷/热
+    for _ in 0..3 {
+        let mut b = DrawBatch::new();
+        build_colr(&mut b);
+        let t = Instant::now();
+        canvas.draw(Some(BLACK), &[&b]);
+        loop {
+            if let Ok(wgpu::PollStatus::QueueEmpty) =
+                canvas.gpu().device.poll(wgpu::PollType::Poll)
+            {
+                break;
+            }
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        if cold.is_empty() {
+            cold.push(ms);
+        } else {
+            warm.push(ms);
+        }
+    }
+
+    // ASCII 冷/热
+    for _ in 0..3 {
+        let mut b = DrawBatch::new();
+        build_ascii(&mut b);
+        let t = Instant::now();
+        canvas.draw(Some(BLACK), &[&b]);
+        loop {
+            if let Ok(wgpu::PollStatus::QueueEmpty) =
+                canvas.gpu().device.poll(wgpu::PollType::Poll)
+            {
+                break;
+            }
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        if ascii_cold.is_empty() {
+            ascii_cold.push(ms);
+        } else {
+            ascii_warm.push(ms);
+        }
+    }
+
+    let cold_avg = cold.iter().sum::<f64>() / cold.len() as f64;
+    let warm_avg = warm.iter().sum::<f64>() / warm.len() as f64;
+    let ascii_cold_avg = ascii_cold.iter().sum::<f64>() / ascii_cold.len() as f64;
+    let ascii_warm_avg = ascii_warm.iter().sum::<f64>() / ascii_warm.len() as f64;
+
+    println!(
+        "  COLRv1 emoji x104: cold {:.3} ms, warm {:.3} ms",
+        cold_avg, warm_avg
+    );
+    println!(
+        "  ASCII x104:        cold {:.3} ms, warm {:.3} ms",
+        ascii_cold_avg, ascii_warm_avg
+    );
+
+    // 稳态时 COLRv1 应退化到跟 ASCII 同量级（只是 draw 一批贴图 quad）。
+    // 若 warm 是 ascii_warm 的 10 倍以上，说明 atlas 缓存没生效或 COLRv1 每帧都重跑。
+    assert!(
+        warm_avg < ascii_warm_avg * 10.0,
+        "COLRv1 稳态耗时 {warm_avg:.3}ms 异常（ASCII {ascii_warm_avg:.3}ms 的 10 倍以上）—— \
+         atlas 缓存可能没生效"
+    );
+
+    // 冷热差异即 COLRv1 光栅化成本（104 个字形的总和）。
+    // 给一个宽松上限：即使最坏情况也不该是秒级。
+    assert!(
+        cold_avg < 500.0,
+        "104 个 COLRv1 字形冷光栅化应 < 500ms，实际 {cold_avg:.3}ms"
+    );
+}
