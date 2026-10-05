@@ -99,6 +99,20 @@ adb install -r build/outputs/apk/debug/android-debug.apk
 > ⚠️ **NDK 版本别靠环境变量撞对**：没设 `ANDROID_NDK_HOME` / `NDK_HOME` /
 > `local.properties` 时，`cargo-ndk` 会**自动取 SDK 里版本号最高的 NDK**。
 > 想可复现地锁定，用 `-PndkVersion=`（见 §5）或写进 `local.properties` 的 `ndk.dir`。
+>
+> ⚠️ **PowerShell 里 `-PndkVersion=` 必须加引号**：
+>
+> ```powershell
+> .\gradlew.bat assembleDebug '-PndkVersion=28.2.13676358'   # ✅
+> .\gradlew.bat assembleDebug -PndkVersion=28.2.13676358     # ❌ 被 cmd 截断
+> ```
+>
+> 不加引号时 cmd 会在 `=` 后**首个 `.`** 处把参数切开，拆成
+> `-PndkVersion=28` + 任务名 `.2.13676358`。症状**不是**「找不到 NDK」，而是
+> gradle 在配置阶段报一堆看似无关的 AGP 错误
+> （`Android Gradle Plugin has been applied at the root build file … specify compileSdk`），
+> 跟 `build.gradle` 里的 `compileSdk = 35` 一点关系都没有 —— 很容易照着去改
+> SDK 版本，改半天。bash / zsh 不受此影响，不用加引号。
 
 ### 拷去自己的项目时要改的 4 处
 
