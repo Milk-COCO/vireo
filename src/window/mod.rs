@@ -204,6 +204,15 @@ pub(crate) enum WinitEvent {
     /// 内部唤醒哨兵：由 `main_done` 置位点 / 渲染线程检测设备丢失或 loop 结束时发送，
     /// 用于唤醒阻塞在 `rx.recv()` 的 supervisor 重新判定退出条件。无业务载荷。
     Wake,
+    /// 跨平台内存压力通知（winit `Event::MemoryWarning`）。
+    ///
+    /// Android 来自 `onTrimMemory`、iOS 来自 `UIApplicationDidReceiveMemoryWarningNotification`
+    /// —— winit 是**唯一**正常转发 Android 生命周期事件的那个（见
+    /// `platform_impl/android/mod.rs:265-267`），所以这条**不需要 JNI**。
+    ///
+    /// **无业务载荷**：AGSK 的 C glue 只 `LOGV` 打印 level 后写无 payload 的
+    /// `APP_CMD_LOW_MEMORY`，拿不到具体 level。
+    MemoryWarning,
 }
 
 /// 窗口实例 —— 渲染线程独占，持有 surface/renderer/input 与完整帧循环。

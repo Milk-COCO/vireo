@@ -91,6 +91,49 @@ pub struct AppInner {
     /// 只由**渲染线程**在观察到状态变化后调用（`thread::run_thread_loop`），
     /// 所以回调里可以安全地用 `App` / `DrawBatch`，不必自己做跨线程同步。
     pub(crate) lifecycle_cbs: Mutex<LifecycleCbs>,
+    /// `on_memory_warning` 回调表。只由**渲染线程**在观察到代号变化后调用。
+    pub(crate) memory_warning_cbs: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    /// 内存警告代号。winit/owner 线程收到 `Event::MemoryWarning` 时
+    /// `fetch_add`（见 `note_memory_warning`），渲染线程比对后补发回调 ——
+    /// 与 `android_lifecycle::GEN` 同一套「跨线程代号 + 渲染线程补发」模式。
+    memory_warn_gen: std::sync::atomic::AtomicU64,
+}
+
+impl AppInner {
+    /// 由 supervisor 在收到 winit `Event::MemoryWarning` 时调用（winit/owner 线程）。
+    ///
+    /// 真正的回调在渲染线程 fire（见 [`fire_memory_warnings`](Self::fire_memory_warnings)），
+    /// 这里只推进代号。
+    pub(crate) fn note_memory_warning(&self) {
+        self.memory_warn_gen
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// 当前内存警告代号；渲染线程用它判断「有没有新警告没处理」。
+    pub(crate) fn memory_warn_gen(&self) -> u64 {
+        self.memory_warn_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 由渲染线程在观察到代号变化后调用。单回调 panic 不打断渲染循环。
+    pub(crate) fn fire_memory_warnings(&self) {
+        let cbs = {
+            let cbs = self.memory_warning_cbs.lock();
+            if cbs.is_empty() {
+                return;
+            }
+            // clone Arc 而不是持锁调用：回调完全可能注册新回调。
+            cbs.clone()
+        };
+        for cb in &cbs {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())) {
+                log::error!(
+                    "vireo: memory warning callback panicked: {}",
+                    crate::app::supervisor::panic_payload_to_string(payload)
+                );
+            }
+        }
+    }
 }
 
 pub struct App {
@@ -402,6 +445,8 @@ impl App {
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
                 lifecycle_cbs: Mutex::new((Vec::new(), Vec::new())),
+                memory_warning_cbs: Mutex::new(Vec::new()),
+                memory_warn_gen: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -704,6 +749,32 @@ impl App {
         self.lifecycle_cbs.lock().1.push(Arc::new(cb));
     }
 
+    /// 注册「系统内存吃紧」回调。
+    ///
+    /// 来源是跨平台的 winit [`Event::MemoryWarning`](winit::event::Event::MemoryWarning)：
+    /// Android 来自 `onTrimMemory`，iOS 来自
+    /// `UIApplicationDidReceiveMemoryWarningNotification`。**零 JNI** —— winit 是
+    /// 唯一把 Android 生命周期事件正常转发出来的那个，所以这条不需要写
+    /// `MainActivity.java`。
+    ///
+    /// 在**渲染线程**上触发（与 [`on_paused`](Self::on_paused) 同理：回调要能碰
+    /// `App` / `DrawBatch`）。单个回调 panic 不会打断渲染循环。
+    ///
+    /// # 这不是「vireo 帮你防 OOM」
+    ///
+    /// 回调触发时能做的清理，vireo 侧只有 **glyph atlas**
+    /// （`TextContext.text_atlas`，其 `trim()` 已存在但从不自动调用）。
+    /// **显存大头是用户贴图，而 vireo 结构上释放不了** —— `App.textures` 是
+    /// append-only 的 `Vec<Arc<Texture>>`，只有 `load_texture` 没有移除 API。
+    /// 对贴图密集型应用，请在自己的回调里决定丢弃什么。
+    ///
+    /// 拿不到 Android 的具体 level（`TRIM_MEMORY_*`）：AGSK 的 C glue 只
+    /// `LOGV` 打印后写无 payload 的 `APP_CMD_LOW_MEMORY`。但响应动作在所有
+    /// level 上是同一个，缺失不构成阻塞。
+    pub fn on_memory_warning(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.inner.memory_warning_cbs.lock().push(Arc::new(cb));
+    }
+
     pub fn set_max_fps(&self, fps: Option<u32>) {
         *self.max_fps.lock() = fps;
     }
@@ -744,3 +815,36 @@ mod main;
 mod supervisor;
 
 pub(crate) use crate::app::supervisor::{panic_payload_to_string, supervisor_loop};
+
+#[cfg(test)]
+mod tests {
+
+    /// 内存警告代号必须单调递增，且渲染线程能靠它判断「有没有新警告」。
+    ///
+    /// 这套「winit/owner 线程推进代号 + 渲染线程比对后补发」的模式与
+    /// `android_lifecycle::GEN` 相同，是跨线程把回调搬到渲染线程执行的手段
+    /// —— 回调要能碰 `App` / `DrawBatch`，不能在 winit 线程跑。
+    ///
+    /// 用裸 `AtomicU64` 测而不是 `AppInner`：`AppInner` 构造需要真实 GPU
+    /// （要 adapter/device/queue），单测里造不出来，但代号逻辑本身不依赖它。
+    #[test]
+    fn memory_warning_generation_is_monotonic() {
+        let cell = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(
+            cell.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "初始为 0"
+        );
+
+        let mut last = 0u64;
+        for i in 1..=8u64 {
+            cell.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let g = cell.load(std::sync::atomic::Ordering::Acquire);
+            assert!(g > last, "代号必须严格递增（第 {i} 次）");
+            last = g;
+        }
+        assert_eq!(last, 8);
+        // 渲染线程靠 `g != tracked` 判断；未变化时不该误触发。
+        assert_eq!(cell.load(std::sync::atomic::Ordering::Acquire), last);
+    }
+}

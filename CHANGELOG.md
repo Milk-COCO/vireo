@@ -82,7 +82,30 @@
     Android system UI / safe-area / cutout / window-level control
     (first of its kind in Rust).
 
+### Added / 新增
+
+- `App::on_memory_warning(cb)` —— 跨平台内存压力回调（winit `Event::MemoryWarning`，
+  Android 来自 `onTrimMemory`、iOS 来自 memory warning notification）。在**渲染线程**
+  上触发，单个回调 panic 不打断渲染循环。**零 JNI**：winit 是唯一把 Android 生命周期
+  事件正常转发出来的那个（`MainEvent::LowMemory`，`platform_impl/android/mod.rs:265-267`），
+  其余 `Stop` / `Destroy` / `SaveState` 都是 `warn!("TODO")`。
+  拿不到 Android 的具体 level（AGSK 的 C glue 只 `LOGV` 打印后写无 payload 的
+  `APP_CMD_LOW_MEMORY`），但响应动作在所有 level 上相同。
+  ⚠️ 这**不是「vireo 帮你防 OOM」**：vireo 侧能回收的只有 glyph atlas，
+  显存大头（用户贴图）因 `App.textures` 是 append-only 而**结构上释放不了**。
+
 ### Fixed / 修复
+
+- Android 文档纠正：`MainEvent::LowMemory` 并非「在 Android 侧永远不会被构造」。
+  winit 该区间里恰好有一个非 `warn!` 分支正常转发它，此前审计读了
+  `mod.rs:245-297` 却漏看这一个 arm，把 `LowMemory` 连同其他一起归进「全部吞掉」，
+  且该错误结论在仓库里复制了 5 处（`android_lifecycle.rs` 模块文档 / README /
+  TODO / 审计报告）。同时纠正「`onSaveInstanceState` 需要 `android_os_Bundle` JNI
+  绑定」—— `StateSaver::store(&[u8])` 是纯字节接口，Bundle 由 AGSK 处理，
+  真实阻塞只是 winit 吞事件。
+- 测试：`android_text_input` 的三个 `IME_STATE` 测试加了串行锁。此前它们共享
+  进程级全局量却依赖 cargo 默认串行执行，并行下会互相污染（`cargo test --lib`
+  偶发 FAILED，单跑必过）。
 
 - Android：`vireo_macro` 依赖指向 crates.io 而非仓库内的 `vireo_macro/`，导致本地宏
   改动**完全不生效**（改源码后构建 0.65s 不重编、宏内 `eprintln!` 一次不打印）。

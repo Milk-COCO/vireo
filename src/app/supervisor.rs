@@ -325,6 +325,8 @@ pub(crate) fn apply_winit_event_one(
             }
         }
         WinitEvent::Wake => {}
+        // 内存压力不是某个窗口的事，走 App 级计数；渲染线程在旁边 fire 回调。
+        WinitEvent::MemoryWarning => app.inner.note_memory_warning(),
     }
 }
 

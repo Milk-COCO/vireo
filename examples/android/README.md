@@ -425,6 +425,30 @@ app.on_resumed(|| resume_audio());
 2. **`onPause` 对短暂中断也触发**（锁屏、部分弹窗、分屏切换）—— 和 Unity
    `OnApplicationPause` 同样的语义。
 3. **没照抄这段也能跑**，只是退化成旧行为（后台仍全速）+ logcat 一条 warn。
+4. ⚠️ **它不能替代 `onSaveInstanceState`**：正因为回调在恢复后才发，
+   **进程在后台被系统杀掉时，vireo 侧一个回调都不会触发**。要保游戏状态，
+   在你自己的 `MainActivity.java` 里 override `onSaveInstanceState(Bundle)`
+   存起来（见下）。
+
+### 保状态：只能用户自己在 Java 侧做
+
+vireo 是**渲染库不是引擎** —— 你的谱面进度、分数、设置根本不在 vireo 里，
+它手上只有 `Arc<wgpu::Texture>` / `Surface` / `Device` 这类句柄（存不了）和
+每帧重建的 `DrawBatch`（存了也没意义）。所以：
+
+```java
+@Override
+protected void onSaveInstanceState(Bundle outState) {
+    nativeSaveGameState();              // 你自己的 native，照 nativeOnPause 的注册思路
+    // 或者纯 Java 侧存：SharedPreferences / outState.putXxx(...)
+    super.onSaveInstanceState(outState);
+}
+```
+
+顺带说明：winit 其实**注册了** `onSaveInstanceState`，android-activity 也提供了
+`StateSaver::store(&[u8])` 这个纯字节接口（**不需要** `Bundle` JNI 绑定），
+但 winit 在 `platform_impl/android/mod.rs:276-280` 把事件 `warn!` 掉了 ——
+所以 vireo 拿不到，这条路在当前依赖版本下走不通。
 
 ---
 

@@ -440,6 +440,10 @@ pub fn ime_wanted() -> bool {
 mod tests {
     use super::*;
 
+    /// 这三个测试共享进程级 `IME_STATE`，必须串行跑否则互相污染
+    /// （cargo test 默认多线程并行）。
+    static IME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ---- 下标换算 ----
 
     #[test]
@@ -690,6 +694,7 @@ mod tests {
 
     #[test]
     fn ime_requests_dedupe_on_transition() {
+        let _guard = IME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `show_soft_input` / `hide_soft_input` 靠这个返回值决定要不要 post 到
         // Java 主线程。帧回调里每帧无条件调用会淹掉主线程 → ANR
         //（实测 `Waited 5000ms for FocusEvent(hasFocus=false)`）。
@@ -707,6 +712,7 @@ mod tests {
 
     #[test]
     fn ime_request_is_never_repeated_while_state_unchanged() {
+        let _guard = IME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 回归：曾用 200ms 窗口做「周期性重发」，导致输入法每 200ms 重置一次组合态
         // ——真机症状是候选词 / preedit 一闪即消、且用户按不掉输入法收起键。
         // 组合态易碎，**任何重复 show 都是破坏**，所以必须是纯跳变去重：
@@ -728,6 +734,7 @@ mod tests {
 
     #[test]
     fn reset_ime_wanted_allows_show_again_after_user_dismissed() {
+        let _guard = IME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 用户用系统收起键把键盘收了：我们观测不到，`want` 陈旧为 true。
         // 正确恢复 = reset + show，而不是靠引擎周期性重发去骚扰输入法。
         set_ime_wanted(false);

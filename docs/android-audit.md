@@ -113,20 +113,54 @@ subagent 说恒返回 `Some`。实际 `android.rs:1608-1622` 在无 AndroidApp �
 
 ## 4. 结构性缺口（不是 bug，是「没做」）
 
-### 4.1 生命周期 ⚠️ 最大缺口
+### 4.1 生命周期
 
 | 能力 | 状态 |
 |---|---|
-| `on_paused` / `on_resumed` | ❌ 无。winit 只在 `InitWindow`/`TerminateWindow` 发 `Suspended`/`Resumed` |
-| 后台节流 | ❌ 无。`AppInner.max_fps` 默认 `Some(240)`（`app/mod.rs:318`），渲染循环**自驱动** → **切后台仍 240fps 空转**，Android 判耗电。`render_advice()` 会因 `focused()==false` 返回 `Unthrottled`，但**引擎明确不自动限速** |
-| `LowMemory` | ❌ `Runner` 未实现 `memory_warning` |
-| 状态保存恢复 | ❌ winit `MainEvent::SaveState` 直接 `warn!("TODO")` |
+| `on_paused` / `on_resumed` | ✅ `c769302` —— Java 转发 + `RegisterNatives`，渲染线程真停摆 |
+| 后台节流 | ✅ 同上（`thread.rs:450-455` 暂停闸门，实测后台 CPU 0.0%）|
+| `LowMemory` | ⚠️ winit **已**转发为跨平台 `Event::MemoryWarning`，vireo 只差 `Runner::memory_warning` 一个方法（零 JNI）|
+| `onStop` / `onDestroy` | ❌ winit `warn!("TODO")`，需照 `nativeOnPause` 加 JNI |
+| 状态保存恢复 | ❌ 不做 —— 见下 |
 
-**技术障碍（重要）**：winit Android 后端把
-`MainEvent::Pause/Stop/Resume/Start/Destroy/SaveState/LowMemory/InsetsChanged/ContentRectChanged`
-**全部吞掉**（`winit-0.30.13/src/platform_impl/android/mod.rs:245-297`，只有 `warn!("TODO: ...")`）。
-**vireo 想拿也拿不到**，除非绕开 winit 的事件循环。
-→ 建议先做折中版（Android 下降低默认 `max_fps`，或用 `focused()` 当暂停代理），真解另立专项。
+**技术障碍（已修正）**：~~winit 把 `Pause/Stop/Resume/Start/Destroy/SaveState/
+LowMemory/InsetsChanged/ContentRectChanged` 全部吞掉~~ —— **这句话是错的**，
+而且是**行号级可证的错误**：它引用的
+`winit-0.30.13/src/platform_impl/android/mod.rs:245-297` 区间里恰好包含唯一
+那个能正常工作的分支：
+
+```rust
+MainEvent::LowMemory => {
+    callback(event::Event::MemoryWarning, self.window_target());   // ← 唯一的例外
+},
+MainEvent::Pause  => { self.running = false; }   // 构造了，只是不转发
+MainEvent::Stop | Destroy | SaveState => { warn!("TODO: ..."); }   // 确实被吞
+```
+
+审计读了那个区间但**漏看了这一个非 `warn!` 分支**，把 `LowMemory` 归进了
+「全部吞掉」。这个错误结论当时在仓库里**复制了 5 处**。教训：断言「某上游
+把 X 全部吞掉」之前，先把整个 match 逐个 arm 看完 —— 一个例外就足以推翻结论。
+
+**状态保存恢复为什么不做**（`onSaveInstanceState`）：
+
+1. **vireo 没有可序列化的状态**。`App.textures` / `offscreens` / `windows` /
+   `gpu` 全是 `Arc<...>` 包着 `wgpu::Texture` / `Surface` / `Device` 句柄；
+   `DrawBatch` 技术上可序列化但**毫无意义** —— 它是每帧从零重建的命令缓冲，
+   存它等于存「上一帧画了什么」，恢复后第一帧就覆盖。
+2. **用户游戏状态不在 vireo 里**。这是引擎层职责（Godot/Unity 在这层存
+   `SceneTree`），vireo 是渲染库，在这一层之下。
+3. **技术上被 winit 堵死**：`SaveState` 被 `warn!` 掉、`StateLoader` 被丢弃，
+   绕过需绕开 winit 整个事件循环（架构级改造）。
+
+> **纠正 TODO.md 的一个误判**：原写「`onSaveInstanceState` 需要 `android_os_Bundle`
+> JNI 绑定 + 自定义 `Parcelable`，不是照抄能解决的」—— **Bundle 那部分完全错了**。
+> `StateSaver::store(&[u8])`（`android-activity-0.6.1/src/game_activity/mod.rs:50-88`）
+> 是**纯字节接口**，AGSK 的 recallback 自己负责写 Bundle。真实阻塞**只**是 winit 吞事件。
+
+⚠️ **一条必须写进文档的现有限制**：`App::on_paused` 是**恢复后才补发**的
+（`thread.rs:447-449`：回调需在渲染线程且要能碰 `App`）。所以
+**进程在后台被系统杀掉时，vireo 侧零回调** —— `on_paused` 不能替代
+`onSaveInstanceState`。要保状态只能由用户在 `MainActivity.java` 里 override。
 
 ### 4.2 分发 / 构建
 

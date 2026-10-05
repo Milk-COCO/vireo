@@ -402,6 +402,8 @@ pub(crate) fn run_thread_loop(
         // 本 loop 已处理过的生命周期变更代号；0 是初始值且 GEN 也从 0 起，
         // 所以首个 tick 不会误触发回调（此时还没有任何 pause/resume 发生过）。
         let mut lifecycle_gen = crate::platform::android_lifecycle::generation();
+        // 同上：内存警告代号，每个 loop 各自跟踪，保证每次变更恰好补发一次。
+        let mut mem_warn_gen = app.inner.memory_warn_gen();
         while !state.done.load(Ordering::Acquire) {
             // 动态追加的运行期 loop（跨线程安全）。
             {
@@ -460,6 +462,15 @@ pub(crate) fn run_thread_loop(
                 if g != lifecycle_gen {
                     lifecycle_gen = g;
                     app.inner.fire_lifecycle_callbacks();
+                }
+            }
+            // 内存压力同理：winit/owner 线程只推进代号，回调在渲染线程补发
+            // （回调要能碰 `App` / `DrawBatch`，不能在 winit 线程跑）。
+            {
+                let g = app.inner.memory_warn_gen();
+                if g != mem_warn_gen {
+                    mem_warn_gen = g;
+                    app.inner.fire_memory_warnings();
                 }
             }
             let any = match drive_loops(&mut runtimes, &app, &fps_stats) {

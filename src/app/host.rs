@@ -281,6 +281,19 @@ impl Runner {
 }
 
 impl ApplicationHandler for Runner {
+    /// 跨平台内存压力通知（Android `onTrimMemory` / iOS memory warning）。
+    ///
+    /// **零 JNI**：winit 是唯一把 Android 生命周期事件**正常转发**出来的那个
+    /// —— `MainEvent::LowMemory => Event::MemoryWarning`
+    /// （`winit-0.30.13/src/platform_impl/android/mod.rs:265-267`），其余
+    /// `Stop` / `Destroy` / `SaveState` 都是 `warn!("TODO")`。
+    ///
+    /// 这里只推进代号，真正的回调由渲染线程在观察到代号变化后 fire
+    /// （见 `AppInner::fire_memory_warnings`）。
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        self.send(WinitEvent::MemoryWarning);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.created {
             return;

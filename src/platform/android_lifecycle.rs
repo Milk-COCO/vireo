@@ -2,9 +2,12 @@
 //!
 //! # 为什么需要这个模块
 //!
-//! winit 的 Android 后端**注册了** Activity 生命周期回调，但除 `Resume` / `Start` 外
-//! **其余全部不发事件** —— `MainEvent::Pause` / `Stop` / `Destroy` / `LowMemory` /
-//! `SaveState` 这些变体在 Android 侧永远不会被构造。
+//! winit 的 Android 后端**注册了** Activity 生命周期回调，但绝大多数变体
+//! **不发事件**给应用 —— `MainEvent::Stop` / `Destroy` / `SaveState` 走的都是
+//! `warn!("TODO: ...")`，`Pause` 也只是设 `self.running = false` 不转发。
+//! （唯一例外是 `LowMemory`：winit `platform_impl/android/mod.rs:265-267`
+//! 把它转成了跨平台的 `Event::MemoryWarning`，所以内存警告**不需要**本模块的
+//! JNI 桥，`Runner::memory_warning` 接一下即可。）
 //!
 //! 结果：vireo 收不到「我进后台了」，切后台后继续全速渲染，直到被系统杀进程。
 //!

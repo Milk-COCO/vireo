@@ -134,33 +134,88 @@ NDK26 当时能过是**运气**：给 `.data.rel.ro` 加 4 KB 就立刻翻成 FA
 **相关**：`examples/android/README.md` §5（含完整原理与验证清单）
 
 ---
-### `onStop` / `onDestroy` / `onSaveInstanceState` / `onTrimMemory` 未转发
+### `onStop` / `onDestroy`（`onTrimMemory` / `onSaveInstanceState` 已有定论，见下）
 
 **现状**：vireo 只为 `onPause` / `onResume` 绑了 JNI（见
-`src/platform/android_lifecycle.rs`）。winit 的 Android 后端把这四个也注册了但
-不发事件，所以 vireo 收不到。
+`src/platform/android_lifecycle.rs`）。
 
 **影响**：
 - `onStop` —— 「彻底离开」信号。现在只有 `onPause`，无法区分「短暂中断」
   （锁屏、弹窗）与「真的走了」。若要「只在彻底离开时保存进度」就做不了。
-- `onSaveInstanceState` —— **进程被系统杀掉后状态无法恢复**。对游戏是硬伤：
-  用户切后台被回收，回来后进度丢失。
-- `onTrimMemory` —— 内存吃紧时无法主动释放资源（贴图、shape 缓存）。
 - `onDestroy` —— Activity 真正结束时收不到通知（`VireoWindow::close()` 走的是
   自己那条路，所以影响较小）。
 
-**做之前需要**：确认哪些真的需要。`onSaveInstanceState` 优先级最高
-（数据丢失），`onTrimMemory` 次之（OOM 崩溃），`onStop` / `onDestroy` 较低。
+**怎么做**：照 `nativeOnPause` 抄 4 步即可，这一条**成立**：
 
-**怎么加**（照 `nativeOnPause` 抄）：
 1. `MainActivity.java` 加 `private static native void nativeOnStop();` + override
 2. `android_lifecycle.rs` 的 `register_native_methods` 表里多一行
 3. 一个 `extern "system" fn` 设对应的标志位
 4. `App` 上加对应的 `on_stopped` 回调
 
-`onSaveInstanceState` 特殊：参数是 `Bundle`，跨 JNI 传需要 `android_os_Bundle`，
-比无参方法麻烦；且 `Bundle` 跨 JNI 需要序列化策略（`Bundle.putAll` + 一个
-自定义 `Parcelable`）。**这条要单独设计，不是照抄能解决的。**
+**但优先级不高**：`App::on_paused` 是**恢复后补发**的（`thread.rs:447-449`），
+确实分不清「短暂中断」与「彻底离开」——这是这条唯一的技术理由。
+
+---
+
+### ~~`onTrimMemory`~~ ✅ **已完成**（`App::on_memory_warning`，零 JNI）
+
+⚠️ **原判断错了，已纠正**：此前多处写「winit 把 `LowMemory` 也吞掉了」——
+**不对**。winit 是**唯一**把它正常转发的：
+
+```rust
+// winit-0.30.13/src/platform_impl/android/mod.rs:265-267
+MainEvent::LowMemory => {
+    callback(event::Event::MemoryWarning, self.window_target());
+},
+```
+
+`Runner` 只实现了 `resumed` / `about_to_wait` / `window_event`，
+**没实现 `memory_warning`**，所以被 winit 的默认空实现吞掉。
+**不需要任何 JNI / Java 改动。**
+
+**做完能得到什么**：跨平台 `App::on_memory_warning` 回调（iOS 侧同样生效，
+`ios/event_loop.rs:248-253` 也转 `MemoryWarning`）。
+
+**做完不能承诺什么**：**这不是「防 OOM」**。vireo 能回收的只有 glyph atlas
+（`TextContext.text_atlas`，`trim()` 已存在但从不调用，初始 256²、可 grow）；
+**显存大头是用户贴图，而 vireo 结构上释放不了** —— `App.textures` 是
+append-only 的 `Mutex<Vec<Arc<Texture>>>`，`load_texture` 只 push，
+**全仓没有任何移除 API**。对贴图密集型游戏，单做这个回调不防 OOM。
+wgpu 也没有内存压力 API（只有被动报 `DeviceError::OutOfMemory`）。
+
+**若要真正防 OOM**，前置条件是先给 `App` 加贴图移除/驱逐 API，那是更大的改动，
+且属于资源管理器范畴 —— `docs/android-audit.md` 已把「资源管理器」列进明确不做。
+
+**另注**：走 winit 只能拿到**布尔**「吃紧了」，拿不到 level —— AGSK 的 C glue
+（`android_native_app_glue.c:483-486`）只 `LOGV` 打印 level，然后写无 payload 的
+`APP_CMD_LOW_MEMORY`。想要 level 必须回 Java override + JNI。**不推荐**：响应动作
+在所有 level 上是同一个，level 缺失不构成阻塞。
+
+---
+
+### `onSaveInstanceState`：**不做**（已定论，勿再议）
+
+三条理由：
+
+1. **vireo 没有可序列化的状态**。`App.textures` / `offscreens` / `windows` /
+   `gpu` 全是 `Arc<...>` 包着 `wgpu::Texture` / `Surface` / `Device` 句柄。
+   `DrawBatch` 技术上可序列化但**毫无意义** —— 它是每帧从零重建的命令缓冲。
+2. **用户游戏状态不在 vireo 里**。这是引擎层职责，vireo 是渲染库，在这一层之下。
+3. **技术上被 winit 堵死**。`SaveState` 被 `warn!("TODO")`、
+   `StateLoader` 被直接丢弃（`mod.rs:272-280`），绕过需绕开 winit 整个事件循环。
+
+> **纠正一个旧误判**：此前写「`onSaveInstanceState` 需要 `android_os_Bundle` JNI
+> 绑定 + 自定义 `Parcelable`」—— **Bundle 那部分完全错了**。
+> `StateSaver::store(&[u8])`（`android-activity-0.6.1/src/game_activity/mod.rs:50-88`）
+> 是**纯字节接口**，AGSK 的 recallback 自己写 Bundle。真实阻塞**只**是 winit 吞事件。
+
+**用户该怎么做**：在**自己的** `MainActivity.java` 里 override
+`onSaveInstanceState(Bundle)`，调自己的 native 方法存游戏状态（照
+`nativeOnPause` 的 `RegisterNatives` 思路，与 vireo 无关）。恢复同理在 Java 侧做。
+
+⚠️ **必须知道的现有限制**：`App::on_paused` 是**恢复后才补发**的，
+所以**进程在后台被系统杀掉时，vireo 侧零回调** ——
+`on_paused` **不能替代** `onSaveInstanceState`。
 
 ---
 
