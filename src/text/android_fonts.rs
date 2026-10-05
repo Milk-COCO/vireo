@@ -45,6 +45,18 @@
 //! （小米 `MiSansVF.ttf`、华为 `HarmonyOS_Sans_SC_Regular.ttf`…），
 //! 前缀匹配能在过滤掉装饰体的同时覆盖各家。扩充白名单只需往 [`TEXT_FONT_PREFIXES`] 加一项。
 //!
+//! # 白名单是编译期固定的 —— 用户怎么绕
+//!
+//! 三张表（[`TEXT_FONT_PREFIXES`] 文件名 / `FONT_DIRS` 目录 /
+//! `PREFERRED_FAMILIES` 家族名）都是 `const`，加上 `install()` 是
+//! `pub(crate)`，用户在**没听说过的 ROM** 上会同时撞到三个问题：正文字体文件
+//! 不被扫描、字体文件不在系统目录、字体家族名不在优先表里。三者最终都表现为
+//! 「所有文字全大写、数字消失」。
+//!
+//! [`configure`] 把这三张表从编译期挪到运行期（进程级，须在 `App::new()` 之前调用）。
+//! 这是唯一的用户侧逃生口；`load_font_file` 那条路能加字体文件但**钉不死
+//! generic 家族**，救不了这个症状。
+//!
 //! 模块**无条件编译**（只有 `install` 及其 Android 依赖按 target 门控），
 //! 这样白名单逻辑能在桌面真跑单测 —— 若整体 gate 掉，`cargo test --lib`
 //! 一个都跑不到（本平台其他 `cfg` 门控模块就有这个盲区）。
@@ -117,6 +129,109 @@ const PREFERRED_FAMILIES: &[&str] = &[
 /// 后者挡掉 `Roboto-Regular.ttf.bak` 这类备份文件——前缀规则挡不住它们。
 pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
 
+/// 用户可追加的字体扫描配置。
+///
+/// 三个字段各自解决 [`TEXT_FONT_PREFIXES`] / `FONT_DIRS` / `PREFERRED_FAMILIES`
+/// 编译期固定带来的三类缺口。**三者都需要**——只补前缀修不好症状，见
+/// [`AndroidFontConfig::extra_families`]。
+///
+/// 三张内置表覆盖 AOSP/Pixel、小米、华为、OPPO、通用 Noto/思源，已知的主流
+/// OEM 都在内。真正的缺口是**没听说过的 ROM**：某台设备的正文字体命名既不落在
+/// 前缀表里、字体文件也不在系统目录里，用户就只能自己 `adb push` 再
+/// [`GpuContext::load_font_file`](crate::gpu::GpuContext::load_font_file)
+/// 手工加载——而那条路**钉不死 generic 家族**，于是「所有文字全大写、数字消失」
+/// 照旧。本配置就是把那三张表从编译期挪到运行期。
+///
+/// # 生效时机（重要）
+///
+/// 必须在 **`App::new()` 之前**调用 [`configure`]。`install()` 是从
+/// `App::new()` → `GpuContext::new()` → `TextContext::new()` 一路急切调下来的，
+/// 中间**没有**任何留给用户的时机（用户既拿不到 `FontSystem` 句柄，也没有
+/// 构造器钩子）。等 `App::new()` 返回再调 = 什么都不生效，且不报错。
+///
+/// 配置是**进程级**的，与 [`report()`] 用的全局同源。
+///
+/// # Examples
+///
+/// ```no_run
+/// use vireo::text::android_fonts;
+///
+/// android_fonts::configure(|c| {
+///     // 自带字体打进 APK 后从 app 私有目录加载
+///     c.extra_dirs.push("/data/data/com.example.app/fonts".into());
+///     c.extra_prefixes.push("GameFont".to_owned());
+///     // 必须显式钉家族名，否则 generic 仍指向不存在的 "Arial"
+///     c.extra_families.push("Game Font".to_owned());
+/// });
+/// let app = vireo::App::new();
+/// # let _ = app;
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AndroidFontConfig {
+    /// 额外的字体**文件名**前缀，与 [`TEXT_FONT_PREFIXES`] 取并集。
+    ///
+    /// 比的是文件名（`path.file_name()` 的前缀），不是字体内部声明的家族名。
+    /// 与 `FONT_EXTENSIONS` 仍是 AND 关系。
+    pub extra_prefixes: Vec<String>,
+
+    /// 额外的字体扫描目录，与内置的 `/system/fonts`、`/product/fonts` 取并集。
+    ///
+    /// 用于 app 私有目录（`/data/data/<pkg>/fonts`）或用户从 `/sdcard` 放进来的
+    /// 字体。递归深度与内置目录一致（3 层）。目录不存在时静默跳过，与内置
+    /// 目录同策略。
+    pub extra_dirs: Vec<std::path::PathBuf>,
+
+    /// 额外的**优先家族名**，排在 `PREFERRED_FAMILIES` **之前**。
+    ///
+    /// # 为什么必须能设这个（而不是只设前缀）
+    ///
+    /// 目标症状是「所有文字全大写、数字消失」，成因**不是**字体文件没加载，
+    /// 而是 `PREFERRED_FAMILIES` 全 miss → `set_sans_serif_family` 没被调用
+    /// → fontdb 的 `family_sans_serif` 仍是默认的 `"Arial"` → Android 上没有
+    /// 字体声明 `"Arial"` → `query` 返回 `None` → 回退到「排序后第一个 face」
+    /// → 可能是装饰体。**只加前缀不钉家族，症状一模一样。**
+    ///
+    /// # 为什么排在前面而不是追加到最后
+    ///
+    /// 追加只能服务「我的 ROM 内置表全 miss」这一种场景。而「我想把 app 自带的
+    /// 字体设成默认字体」同样常见——此时 Roboto 几乎必然存在，追加的规则永远
+    /// 轮不到。排在前面两种场景都成立：内置字体可用但用户显式指定时听用户的，
+    /// 内置全 miss 时用户的规则就是唯一的兜底。
+    ///
+    /// 代价：填错成装饰体家族名会抢走默认位置。但那是**显式要求**（与
+    /// `load_font_file` 后指定家族名同性质），不算引擎的责任。
+    pub extra_families: Vec<String>,
+}
+
+static CONFIG: std::sync::Mutex<AndroidFontConfig> = std::sync::Mutex::new(AndroidFontConfig {
+    extra_prefixes: Vec::new(),
+    extra_dirs: Vec::new(),
+    extra_families: Vec::new(),
+});
+
+/// 追加 Android 字体扫描配置（进程级，**必须在 `App::new()` 之前**调用）。
+///
+/// 闭包形式：一次调用可改多个字段，避免多次调用之间的顺序困惑。
+/// 可重复调用（增量合并，不会互相覆盖）。
+///
+/// 幂等性：同一次进程里先 configure 再 `App::new()` 是唯一正确用法；
+/// `App::new()` 之后再调用**静默无效**（见 [`AndroidFontConfig`] 的「生效时机」）。
+///
+/// 非 Android 平台上本函数可正常调用，只是配置永远不会被读取（`install()` 按
+/// target 门控），这样 app 代码可以跨平台免 `cfg` 编译。
+pub fn configure(f: impl FnOnce(&mut AndroidFontConfig)) {
+    let mut cfg = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut cfg);
+}
+
+/// 当前生效的配置快照（拷贝）。
+///
+/// 主要给测试与诊断用：确认 [`configure`] 确实写进去了。正常代码路径下应该
+/// 读 [`report`] 而不是它。
+pub fn current_config() -> AndroidFontConfig {
+    CONFIG.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// `install()` 的结果摘要。
 ///
 /// 无条件编译（桌面单测 / 非 Android 上 `report()` 恒 `None`）。
@@ -178,14 +293,21 @@ pub fn report() -> Option<AndroidFontsReport> {
         .clone()
 }
 
-/// 文件名是否同时命中「正文字体前缀」与「字体扩展名」两个白名单。
-fn is_text_font_file(path: &Path) -> bool {
+/// 文件名是否命中「正文字体前缀」（内置 [`TEXT_FONT_PREFIXES`] 与用户
+/// `extra_prefixes` 取并集）**且**命中 [`FONT_EXTENSIONS`]。
+///
+/// `extra_prefixes` 显式传参而非读全局 [`CONFIG`]：本函数是纯判定逻辑，
+/// 可在桌面单测里覆盖「用户前缀」这条分支而不必与其它测试抢全局锁。
+fn is_text_font_file_with(path: &Path, extra_prefixes: &[String]) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .map(|name| {
             let stem_ok = TEXT_FONT_PREFIXES
                 .iter()
-                .any(|prefix| name.starts_with(prefix));
+                .any(|prefix| name.starts_with(prefix))
+                || extra_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix.as_str()));
             let ext_ok = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -199,21 +321,32 @@ fn is_text_font_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 只按内置白名单判定的便捷包装 —— **仅测试用**。
+///
+/// 生产路径一律走 [`is_text_font_file_with`]（带用户前缀）。本包装存在的意义是
+/// 让「内置表的行为」在测试里有一个不含用户配置的入口。标 `cfg(test)` 而非靠
+/// 模块级 `allow(dead_code)`：Android 非 test 构建没有那个 allow，留着会真的
+/// 报 dead_code。
+#[cfg(test)]
+fn is_text_font_file(path: &Path) -> bool {
+    is_text_font_file_with(path, &[])
+}
+
 /// 递归收集白名单字体文件。`depth` 是防符号链接成环的深度上限
 /// （AOSP 字体目录实际是平的，留 3 层足够）。
 #[cfg(target_os = "android")]
-fn collect_font_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+fn collect_font_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, extra_prefixes: &[String]) {
     if depth == 0 {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return; // 目录不存在（老系统 / 无 product 分区）
+        return; // 目录不存在（老系统 / 无 product 分区 / 用户写错路径）
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_font_files(&path, out, depth - 1);
-        } else if is_text_font_file(&path) {
+            collect_font_files(&path, out, depth - 1, extra_prefixes);
+        } else if is_text_font_file_with(&path, extra_prefixes) {
             out.push(path);
         }
     }
@@ -221,17 +354,25 @@ fn collect_font_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 
 /// Android 上安装系统字体：按文件名白名单加载正文字体，
 /// 并把 cosmic-text 的 generic 家族钉到 [`PREFERRED_FAMILIES`] 中第一个已加载的。
+///
+/// 用户配置（[`configure`]）在此生效：**目录**取并集、**前缀**取并集、
+/// **家族名**排在 [`PREFERRED_FAMILIES`] 之前。
 #[cfg(target_os = "android")]
 pub(crate) fn install(font_system: &mut FontSystem) {
+    let cfg = current_config();
     let db = font_system.db_mut();
 
     let mut files = Vec::new();
     for dir in FONT_DIRS {
-        collect_font_files(Path::new(dir), &mut files, 3);
+        collect_font_files(Path::new(dir), &mut files, 3, &cfg.extra_prefixes);
+    }
+    for dir in &cfg.extra_dirs {
+        collect_font_files(dir, &mut files, 3, &cfg.extra_prefixes);
     }
     // 排序保证 face 插入顺序确定 → cosmic-text 的兜底选择也确定（否则依赖
     // readdir 顺序，跨设备不可复现）。
     files.sort();
+    files.dedup(); // 目录重叠时（如用户把系统目录又填进 extra_dirs）不重复加载
     let file_count = files.len();
 
     let mut failed = 0usize;
@@ -250,10 +391,36 @@ pub(crate) fn install(font_system: &mut FontSystem) {
         .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
         .collect();
 
-    let picked = PREFERRED_FAMILIES
+    // 用户家族名排在内置之前（理由见 AndroidFontConfig::extra_families）。
+    let picked = cfg
+        .extra_families
         .iter()
         .find(|want| families.iter().any(|have| have == *want))
-        .copied();
+        .cloned()
+        .or_else(|| {
+            PREFERRED_FAMILIES
+                .iter()
+                .find(|want| families.iter().any(|have| have == *want))
+                .map(|s| (*s).to_owned())
+        });
+
+    // 用户配置的实际生效情况打进日志：report() 只报结果，用户配置没生效时
+    // （写错前缀 / 目录不存在 / 家族名拼错）只能靠这里判断是没设还是设错了。
+    if !cfg.extra_prefixes.is_empty()
+        || !cfg.extra_dirs.is_empty()
+        || !cfg.extra_families.is_empty()
+    {
+        log::info!(
+            "vireo::text: android font config: {} extra prefix(es) {:?}, \
+             {} extra dir(s) {:?}, {} extra family/families {:?}",
+            cfg.extra_prefixes.len(),
+            cfg.extra_prefixes,
+            cfg.extra_dirs.len(),
+            cfg.extra_dirs,
+            cfg.extra_families.len(),
+            cfg.extra_families,
+        );
+    }
 
     match picked {
         Some(family) => {
@@ -261,13 +428,19 @@ pub(crate) fn install(font_system: &mut FontSystem) {
             // `Family::SansSerif`，对应 fontdb 的 `family_sans_serif`（默认 "Arial"）。
             // Android 没有字体声明 "Arial" → query None → 回退到「排序后第一个
             // face」，白名单再干净也拦不住（见模块文档「做法」第 2 步）。
-            db.set_sans_serif_family(family);
+            db.set_sans_serif_family(&family);
             // 其余 generic 一并钉上，用户显式指定等宽/衬线族时也走 good font。
-            db.set_monospace_family(family);
-            db.set_serif_family(family);
+            db.set_monospace_family(&family);
+            db.set_serif_family(&family);
+            log::info!(
+                "vireo::text: android fonts loaded: {file_count} files -> {face_count} faces \
+                 ({failed} unreadable), sans-serif default = {family:?}"
+            );
             // 记下加载摘要供 `report()` 查询。**不能只靠 log**：Android 上
             // env_logger 走 android_logger 后端，tag 是进程名，logcat 过滤极易错过，
             // 而「到底加载了几个字体 / 有没有 emoji 字体」恰恰是排查豆腐块的第一线索。
+            //
+            // 日志放在前面正是为了让下面的 `family` 能直接 move 而不用 clone。
             LOADED_REPORT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -275,12 +448,8 @@ pub(crate) fn install(font_system: &mut FontSystem) {
                     files: file_count,
                     faces: face_count,
                     failed,
-                    default_family: Some(family.to_owned()),
+                    default_family: Some(family),
                 });
-            log::info!(
-                "vireo::text: android fonts loaded: {file_count} files -> {face_count} faces \
-                 ({failed} unreadable), sans-serif default = {family:?}"
-            );
         }
         None => {
             // 一个都没命中：保持 fontdb 默认，但必须说清楚，否则用户看到的
@@ -307,8 +476,19 @@ pub(crate) fn install(font_system: &mut FontSystem) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FONT_EXTENSIONS, PREFERRED_FAMILIES, TEXT_FONT_PREFIXES, is_text_font_file};
+    use super::{
+        AndroidFontConfig, FONT_EXTENSIONS, PREFERRED_FAMILIES, TEXT_FONT_PREFIXES, configure,
+        current_config, is_text_font_file, is_text_font_file_with,
+    };
     use std::path::Path;
+
+    /// 触碰全局 `CONFIG` 的测试共用这把锁。
+    ///
+    /// cargo 默认多线程并行跑测试，而这些测试都要「保存 → 改 → 读 → 还原」，
+    /// 并发时后一个测试的 `saved` 会捕到前一个测试的中间态，还原时互相覆盖。
+    /// 判别逻辑（`is_text_font_file_with`）刻意做成纯函数、不读全局，正是为了
+    /// 把需要这把锁的测试压到最少。
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn whitelist_accepts_known_text_fonts() {
@@ -416,5 +596,100 @@ mod tests {
             sorted.dedup();
             assert_eq!(sorted.len(), list.len(), "entries must be unique");
         }
+    }
+
+    #[test]
+    fn extra_prefixes_extend_the_whitelist_without_loosening_it() {
+        let extra = vec!["MyOEMFont".to_owned(), "OtherVendor".to_owned()];
+        // 用户前缀让「内置表没有的正文字体」通过
+        for name in [
+            "MyOEMFont-Regular.ttf",
+            "MyOEMFont-Bold.otf",
+            "OtherVendorCJK.ttc",
+        ] {
+            assert!(
+                is_text_font_file_with(Path::new(name), &extra),
+                "{name} should pass with a user prefix"
+            );
+            // 不给 extra 时必须拒绝 —— 这才证明是前缀在起作用，而不是规则本来就松
+            assert!(
+                !is_text_font_file(Path::new(name)),
+                "{name} must NOT pass without the user prefix"
+            );
+        }
+        // 关键安全性质：用户前缀**只加不减**，装饰体仍然被拒
+        for name in [
+            "ComingSoon.ttf",
+            "AndroidClock.ttf",
+            "DancingScript-Regular.ttf",
+            "CutiveMono.ttf",
+            "GoogleDroidlogo.ttf",
+        ] {
+            assert!(
+                !is_text_font_file_with(Path::new(name), &extra),
+                "{name} must NOT pass even with user prefixes (decorative)"
+            );
+        }
+        // 扩展名门槛对用户前缀同样生效
+        assert!(!is_text_font_file_with(
+            Path::new("MyOEMFont.ttf.bak"),
+            &extra
+        ));
+    }
+
+    #[test]
+    fn configure_writes_all_three_tables() {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = current_config();
+        configure(|c| {
+            c.extra_prefixes.push("GameFont".to_owned());
+            c.extra_dirs.push("/data/data/com.example.app/fonts".into());
+            c.extra_families.push("Game Font".to_owned());
+        });
+        let got = current_config();
+        // 还原，避免影响同进程内其它潜在读者
+        configure(|c| *c = saved.clone());
+
+        assert_eq!(got.extra_prefixes, vec!["GameFont".to_owned()]);
+        assert_eq!(
+            got.extra_dirs,
+            vec![std::path::PathBuf::from("/data/data/com.example.app/fonts")]
+        );
+        assert_eq!(got.extra_families, vec!["Game Font".to_owned()]);
+        assert_eq!(current_config(), saved, "restore must be exact");
+    }
+
+    #[test]
+    fn configure_is_additive_across_calls() {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = current_config();
+        configure(|c| c.extra_prefixes.push("Aaa".to_owned()));
+        configure(|c| c.extra_prefixes.push("Bbb".to_owned()));
+        let got = current_config();
+        configure(|c| *c = saved.clone());
+        assert_eq!(
+            got.extra_prefixes,
+            vec!["Aaa".to_owned(), "Bbb".to_owned()],
+            "repeated configure calls must merge, not overwrite"
+        );
+    }
+
+    #[test]
+    fn default_config_is_empty_and_means_builtin_behavior() {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = current_config();
+        configure(|c| *c = AndroidFontConfig::default());
+        let got = current_config();
+        assert_eq!(got, AndroidFontConfig::default());
+        // 空配置必须等价于纯内置行为：即 is_text_font_file 的无 extra 版本
+        assert!(!is_text_font_file_with(
+            Path::new("MyOEMFont.ttf"),
+            &got.extra_prefixes
+        ));
+        assert!(is_text_font_file_with(
+            Path::new("Roboto-Regular.ttf"),
+            &got.extra_prefixes
+        ));
+        configure(|c| *c = saved);
     }
 }

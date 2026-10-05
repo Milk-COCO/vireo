@@ -481,6 +481,60 @@ protected void onSaveInstanceState(Bundle outState) {
   只能靠 manifest/style（见 §4.4）。
 - **16 KB 未保证**：见 §5。
 
+---
+
+## 9.5 自定义系统字体扫描（`#[vireo::main(fonts = ..)]`）
+
+vireo 在 Android 上按**文件名白名单**加载系统字体（只加载正文字体，不加载
+`ComingSoon.ttf` / `AndroidClock.ttf` 那类装饰体 —— 挑中它们会导致「所有文字全大写、
+数字消失」）。内置表覆盖 AOSP/Pixel、小米、华为、OPPO、通用 Noto/思源。
+
+**没听说过的 ROM** 若正文字体命名不落在内置表里，用户原本只能自己 `adb push` 字体
+再 `GpuContext::load_font_file` 手工加载，而那条路**钉不死 generic 家族**，救不了
+那个症状。现在三张表都能在运行期追加：
+
+```rust
+#[vireo::main(fonts = |c| {
+    // ① 额外扫描目录（app 私有目录 / /sdcard 上的用户字体）
+    c.extra_dirs.push("/data/data/com.example.app/fonts".into());
+    // ② 额外文件名前缀（与内置表取并集；扩展名门槛照旧）
+    c.extra_prefixes.push("GameFont".to_owned());
+    // ③ 额外优先家族名 —— **必须显式钉**，否则 generic 仍指向 fontdb 默认的
+    //    "Arial"，Android 上无人声明它 → 回退到「排序后第一个 face」
+    c.extra_families.push("Game Font".to_owned());
+})]
+async fn main(app: App) { /* .. */ }
+```
+
+| 字段 | 修什么 | 不设会怎样 |
+|---|---|---|
+| `extra_prefixes` | 字体**文件**不被扫描 | 字体根本没加载 |
+| `extra_dirs` | 字体不在 `/system/fonts`、`/product/fonts` | 同上 |
+| `extra_families` | 字体加载了但**家族名**不在优先表 | **症状照旧**：全大写 + 数字消失 |
+
+> ⚠️ **`fonts = ..` 必须在 `App` 构造前求值**，宏已经保证了这点。
+> 原因：`App::new()` 内部就建好了 `TextContext` 并跑完字体 install，而**用户 main
+> 函数体是在那之后才被执行的** —— 所以宏属性是唯一时机。
+> 手写 `App::new(...)`（不用宏）时，在它之前调
+> `vireo::text::android_fonts::configure(|c| { .. })`；调用晚了**静默无效**。
+
+> 家族名排在**内置表之前**：Roboto 在绝大多数设备上都存在，追加的规则永远轮不到。
+> 代价是填错成装饰体家族名会抢走默认位置 —— 但那是显式要求，与
+> `load_font_file` 后指定家族名同性质。
+
+本模板的 `src/lib.rs` 里带了一段实测可跑的 `configure`（把 MuMu 上真实存在、
+但不在内置表里的 `SourceSansPro` 设成默认字体）。看 HUD 底行的 `fonts` 行：
+
+```
+配置前： files=193 faces=201 failed=0 default=Roboto
+配置后： files=199 faces=207 failed=0 default=Source Sans Pro
+```
+
+生效情况也会打进 `log::info!`，但**默认 log level 是 `error`**，`logcat` 里看不到 ——
+排查字体问题看 HUD 的 `fonts` 行，那才是可靠通道。
+
+---
+
 ## 10. 相关文档
 
 - `vireo::platform::android` 的 API doc（`src/platform/android.rs` 顶部）

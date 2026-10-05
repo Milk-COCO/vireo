@@ -254,46 +254,80 @@ v0 的记录数），而 Android 12+ 的 `NotoColorEmoji.ttf` 是 **COLRv1**，�
 
 ---
 
-### Android 系统字体白名单：**用户无法自定义**（待做）
+### ~~Android 系统字体白名单：用户无法自定义~~ ✅ **已完成**（`configure` + 宏属性）
 
-**现状**（`src/text/android_fonts.rs`）：
+**原缺口**：三张表全是编译期固定的 —— `TEXT_FONT_PREFIXES` 是 `const` 不是
+`static mut`（运行时改不了）、`install()` 是 `pub(crate)`（外部根本调不到）、
+`FONT_DIRS` 私有（扫哪些目录也定死）。结果是：**某台 OEM ROM 的正文字体命名不落在
+前缀表里 → 用户拿不到任何正文字体**，只能自己去 `adb push` 字体再
+`GpuContext::load_font_file` 手工加载（这条逃生口是有的，但普通 app 用户不会也不能
+这么做）。
+
+#### 方案 A（`install_with(fs, extra_prefixes)`）**不可行** —— 已否决
+
+原计划的 A 是「加 `pub fn install_with(font_system, extra_prefixes)`」。**实测行不通**：
+调用链是 `App::new()` → `GpuContext::new()` → `TextContext::new()` → `install()`，
+**全部急切**。用户既拿不到 `FontSystem` 句柄（它在 `TextContext` 内部），
+也没有任何「`App::new()` 之前」的构造器钩子。公开 `install_with` 对用户毫无用处。
+
+App 级 builder 同样做不到 —— 要它就得把 `GpuContext` 创建从 `App::new()` 推迟到 `run()`，
+那是更大的重构。
+
+→ 改为**进程级全局配置**，在 `App` 构造前设置（与既有的 `report()` 全局同源）。
+
+#### 但宏路径连「构造前」都没有 —— 这是第二轮发现
+
+`#[vireo::main]` 展开成 `App::new(|app| async move { ... })`：**用户函数体是在
+`App::new()` 内部才被调用的**，而那时 `install()` 早已跑完。也就是说，
+Android 模板（也是官方推荐的 Android 入口）**根本没有 `configure()` 的调用时机**。
+
+→ 给宏加一个在 `App` 构造前求值的属性，与既有的 `descriptor = ...` 同构：
 
 ```rust
-pub const TEXT_FONT_PREFIXES: &[&str] = &[...];      // &'static [&'static str]
-const FONT_DIRS: &[&str] = &["/system/fonts", "/product/fonts"];  // 私有
-fn is_text_font_file(path: &Path) -> bool            // 私有
-pub(crate) fn install(font_system: &mut FontSystem)  // pub(crate)，外部调不到
+#[vireo::main(fonts = |c| {
+    c.extra_dirs.push("/data/data/com.example.app/fonts".into());
+    c.extra_prefixes.push("GameFont".to_owned());
+    c.extra_families.push("Game Font".to_owned());
+})]
+async fn main(app: App) { .. }
 ```
 
-白名单本身解决两个问题（**缺一不可**）：
+手写 `App::new(...)`（不用宏）时可直接 `android_fonts::configure(..)`。
 
-1. **正确性（主因）**：Android 上没有任何字体声明家族名 `"Arial"`，而 fontdb 的
-   `family_sans_serif` 默认就是 `"Arial"` → cosmic-text `query()` 返回 `None` →
-   回退到「排序后的第一个 face」→ 可能挑中装饰体。实测症状是**所有文字全大写、
-   数字完全消失**。只加载 Roboto 还不够，仍必须 `set_sans_serif_family` 钉死
-   generic 家族。
-2. **启动成本**：230 个字体文件 → 只解析 ~8~20 个。
+#### 三个字段都需要，缺一修不好症状
 
-**为什么是缺口**：三样东西全是编译期固定的 ——
-`TEXT_FONT_PREFIXES` 是 `const` 不是 `static mut`（运行时改不了）、
-`install()` 是 `pub(crate)`（外部根本调不到）、
-`FONT_DIRS` 私有（扫哪些目录也定死）。
-结果是：**某台 OEM ROM 的正文字体命名不落在前缀表里 → 用户拿不到任何正文字体**，
-只能自己去 `adb push` 字体再 `GpuContext::load_font_file` 手工加载（这条逃生口是有的，
-但普通 app 用户不会也不能这么做）。
+`extra_prefixes` / `extra_dirs` / `extra_families` 各修一个缺口。**只加前缀不够** ——
+目标症状「所有文字全大写、数字消失」的成因**不是**字体文件没加载，而是
+`PREFERRED_FAMILIES` 全 miss → `set_sans_serif_family` 没被调用 → fontdb 的
+`family_sans_serif` 仍是默认 `"Arial"` → Android 上无人声明 `"Arial"` → `query`
+返回 `None` → 回退到「排序后第一个 face」→ 可能挑中装饰体。
+字体文件加载了但家族名没钉死，症状一模一样。
 
-**要做的最小改动**（按侵入性从低到高）：
+**家族名排在内置表之前**（而不是追加到最后）：追加只能服务「我的 ROM 内置表全 miss」
+一种场景；而「我想把 app 自带字体设为默认字体」同样常见，此时 Roboto 几乎必然存在，
+追加的规则永远轮不到。排在前面两种场景都成立。代价是填错成装饰体家族名会抢走
+默认位置，但那是显式要求，与 `load_font_file` 后指定家族名同性质。
 
-- A. 加 `pub fn install_with(font_system: &mut FontSystem, extra_prefixes: &[&str])`，
-  现有 `install()` 变成 `install_with(fs, &[])`。前缀表本身不必公开。
-- B. 顺带让扫描目录可配（现在只有 `/system/fonts` 和 `/product/fonts`；
-  app 私有字体目录、`/sdcard` 上的用户字体都扫不到）。
-- C. 是否需要一个 `App` 级 builder 钩子（让 app 在 `run` 之前装好）——
-  取决于 A/B 的调用时机是否够用。注意 `install()` 会改 `font_system.db_mut()`，
-  时机太晚会让已经 shape 过的文本缓存失效。
+#### 验证
+- `cargo test --lib` **289 passed**（+4：用户前缀只加不减、`configure` 三表写入、
+  重复调用增量合并、空配置等价于内置行为）
+- `cargo ndk -t arm64-v8a check --lib` / `-t x86_64` 通过
+  （**桌面编译抓不到 Android-only 代码**，第一版就漏了个 `family` move 错误，
+  是靠这条抓出来的）
+- **MuMu 实机**：内置表外但真实存在的 `SourceSansPro-*.ttf`（6 个文件）经
+  `extra_prefixes` + `extra_families` 加载后，HUD 从
+  `files=193 faces=201 default=Roboto` 变成
+  `files=199 faces=207 default=Source Sans Pro`；CJK 与 emoji 未受影响
+- `gradlew assembleDebug '-PndkVersion=28.2.13676358'` BUILD SUCCESSFUL
 
-**别顺手做的事**：不要把白名单放宽成「加载全部字体」。那会把装饰体重新放进字体库，
-正是第 1 条要防的事故（挑中 `AndroidClock.ttf` → 全大写 + 数字消失）。
+#### 仍然不做
+- **不把白名单放宽成「加载全部字体」**：那会把装饰体重新放进字体库，正是第 1 条要防的
+  事故（挑中 `AndroidClock.ttf` → 全大写 + 数字消失）。用户前缀**只加不减**，
+  有单测固化「装饰体仍然被拒」这一安全性质。
+- **不加「加载失败的文件列表」到 `report()`**：默认 log level 是 `error`，
+  `log::info!` 不输出，logcat 查不到 —— HUD 才是可靠诊断通道。用户配置的实际生效
+  情况（几个前缀 / 几个目录 / 几个家族）打进 `log::info!`，`report()` 保持用户
+  已确认过的形状不变。
 
 ---
 

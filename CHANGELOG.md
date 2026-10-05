@@ -4,6 +4,13 @@
 
 ### Added / 新增
 
+- Android 系统字体扫描可定制：`#[vireo::main(fonts = |c| { .. })]` 宏属性 +
+  `vireo::text::android_fonts::configure`（进程级，须在 `App` 构造前调用），
+  可追加 `extra_prefixes`（文件名前缀）/ `extra_dirs`（扫描目录）/
+  `extra_families`（优先家族名，排在内置表之前）。
+  解决「未收录的 ROM 拿不到任何正文字体 → 所有文字全大写、数字消失」。
+  三个字段缺一不可：只加前缀不钉家族名，症状照旧。
+  Android font scanning is now user-configurable (whitelist was compile-time fixed).
 - GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
   （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
   GPU particle path: baked spawn params + VS integration over `camera.time`.

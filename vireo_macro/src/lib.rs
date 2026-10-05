@@ -15,6 +15,13 @@
 //! （见 `vireo::App::new` 文档）。loop panic 经 `ThreadHandle` 以 `Err` 交付，
 //! 不会留下冻住的窗口与僵尸进程。
 //!
+//! 属性（可组合）：
+//! - `descriptor = <expr>`：自定义 wgpu `InstanceDescriptor`。
+//! - `fonts = |&mut AndroidFontConfig| { .. }`：Android 系统字体白名单定制。
+//!   **必须在 `App` 构造前求值** —— 而用户函数体是在 `App::new()` 内部才执行的，
+//!   所以宏路径下这是唯一时机（手写 `App::new(...)` 时可改用
+//!   `vireo::text::android_fonts::configure`）。
+//!
 //! 两种用户写法都支持：
 //! - `async fn main() { ... app.window(...) ... }`：`app` 由宏注入（闭包参数），向后兼容。
 //! - `async fn main(app: App) { ... app.window(...) ... }`：`app` 为显式参数，更直观；
@@ -25,27 +32,52 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Ident, ItemFn, Result, Token};
 
-/// `#[vireo::main]` 的可选属性：`descriptor = <InstanceDescriptor 表达式>`。
+/// `#[vireo::main]` 的可选属性（可组合、顺序任意）：
+///
+/// - `descriptor = <InstanceDescriptor 表达式>`
+/// - `fonts = |&mut AndroidFontConfig| { .. }` —— 在 `App` 构造**之前**跑，
+///   用于 Android 系统字体白名单定制（见 `vireo::text::android_fonts`）。
 struct MainArgs {
     descriptor: Option<Expr>,
+    fonts: Option<Expr>,
 }
 
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut descriptor = None;
-        if !input.is_empty() {
+        let mut fonts = None;
+        while !input.is_empty() {
             let key: Ident = input.parse()?;
-            if key != "descriptor" {
-                return Err(syn::Error::new(
-                    key.span(),
-                    "未知属性，仅支持 `descriptor = <expr>`",
-                ));
+            match key.to_string().as_str() {
+                "descriptor" => {
+                    if descriptor.is_some() {
+                        return Err(syn::Error::new(key.span(), "`descriptor` 重复指定"));
+                    }
+                    input.parse::<Token![=]>()?;
+                    descriptor = Some(input.parse::<Expr>()?);
+                }
+                "fonts" => {
+                    if fonts.is_some() {
+                        return Err(syn::Error::new(key.span(), "`fonts` 重复指定"));
+                    }
+                    input.parse::<Token![=]>()?;
+                    fonts = Some(input.parse::<Expr>()?);
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "未知属性 `{other}`，仅支持 `descriptor = <expr>` 与 `fonts = <expr>`"
+                        ),
+                    ));
+                }
             }
-            input.parse::<Token![=]>()?;
-            let expr: Expr = input.parse()?;
-            descriptor = Some(expr);
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<Token![,]>()?;
         }
-        Ok(MainArgs { descriptor })
+        Ok(MainArgs { descriptor, fonts })
     }
 }
 
@@ -110,6 +142,14 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
     // 注入——用户代码通过它访问 `App`。无论原签名是否 async，都包成 async 块。
     let body = quote! { |#param_ident| async move #block };
 
+    // `fonts = <expr>` 必须在 `App` 构造**之前**求值：`App::new()` 内部就会
+    // 建 `GpuContext` → `TextContext` → Android 系统字体 install()，用户函数体
+    // 是在那**之后**才被调用的（宏把 body 包成闭包交给 App::new）。所以宏路径下
+    // 用户自己没有任何「App 构造前」的时机，只能靠这个属性。
+    let fonts_setup = args.fonts.map(|f| {
+        quote! { vireo::text::android_fonts::configure(#f); }
+    });
+
     // 安卓没有 `fn main`：同一份用户源码在安卓 target 下展开为
     // GameActivity 胶水层按符号名查找的入口 `android_main`，
     // 由 `vireo::app::android_main_entry` 把 `AndroidApp` 存进进程级单例后转
@@ -119,11 +159,13 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
         return Ok(quote! {
             #[cfg(not(target_os = "android"))]
             #vis fn main() #ret {
+                #fonts_setup
                 #entry;
             }
             #[cfg(target_os = "android")]
             #[unsafe(no_mangle)]
             pub extern "C" fn android_main(app: vireo::android::AndroidApp) {
+                #fonts_setup
                 vireo::app::android_main_entry_with_descriptor(app, #desc, #body);
             }
         });
@@ -133,11 +175,13 @@ fn expand(input: ItemFn, args: MainArgs) -> Result<proc_macro2::TokenStream> {
     Ok(quote! {
         #[cfg(not(target_os = "android"))]
         #vis fn main() #ret {
+            #fonts_setup
             #entry;
         }
         #[cfg(target_os = "android")]
         #[unsafe(no_mangle)]
         pub extern "C" fn android_main(app: vireo::android::AndroidApp) {
+            #fonts_setup
             vireo::app::android_main_entry(app, #body);
         }
     })

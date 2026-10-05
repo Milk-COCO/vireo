@@ -56,7 +56,27 @@ impl From<vireo::platform::android::Insets> for Edges {
     }
 }
 
-#[vireo::main]
+// `fonts = ...` 在 `App` 构造**之前**求值，这是宏路径下唯一能定制 Android 系统字体
+// 白名单的时机（`App::new()` 内部就建好了 TextContext 并跑完字体 install()，而本函数体
+// 是在那之后才执行的）。
+//
+// 这里演示三件事：
+//   1. `extra_prefixes` —— 内置白名单外的前缀。`SourceSansPro` 是本机
+//      `/system/fonts` 里真实存在的正文字体，且**不**被任何内置前缀命中
+//      （内置只有 `SourceHanSans`，两者不是同一个字体），所以加了它就能看出
+//      files/faces 计数变化。
+//   2. `extra_families` —— 必须显式钉家族名。只加前缀不改默认族的话，generic 仍指向
+//      fontdb 默认的 "Arial"，Android 上没有字体声明它 → query 返回 None → 回退到
+//      「排序后第一个 face」，可能挑中装饰体（症状：全大写 + 数字消失）。
+//   3. 排在内置 `PREFERRED_FAMILIES` **之前** —— Roboto 在本机存在，不排在前面
+//      这条规则就永远轮不到。
+//
+// HUD 底行的 `fonts` 行会变成 `default=Source Sans Pro`，据此确认配置生效。
+// 真机上把 `CarroisGothicSC` 换进来能看出更明显的字形变化。
+#[vireo::main(fonts = |c| {
+    c.extra_prefixes.push("SourceSansPro".to_owned());
+    c.extra_families.push("Source Sans Pro".to_owned());
+})]
 async fn main(app: App) {
     // 不调这个的话 vireo 的 `log::warn!`（字体加载、IME、生命周期）全被丢弃。
     vireo::init_logger();
