@@ -91,7 +91,17 @@ impl Assets {
 
     /// 列出子目录下的条目名（不含子目录自身，不递归）。
     ///
-    /// `dir` 用 `/` 分隔；`""` 表示根。安卓上会过滤掉 `"."` / `".."`。
+    /// `dir` 用 `/` 分隔；`""` 表示根。
+    ///
+    /// # Platform-specific
+    ///
+    /// - **Android：只列文件，**不列子目录**。底层 `AAssetDir` 的语义就是
+    ///   「枚举该目录下的文件」，**没有**「有哪些子目录」的概念。实测 MuMu /
+    ///   Android 15 上 `assets/` 里有 `logo.png` 与 `notes/hello.txt`，
+    ///   `list("")` 返回 `["logo.png"]` —— `notes` 不出现，尽管它确实存在且
+    ///   `read("notes/hello.txt")` 能读。所以**不能靠 `list` 遍历资源树**，
+    ///   要遍历就得自己维护一份资源清单。
+    /// - **其它平台**：列全部条目（含子目录名）。
     ///
     /// # 错误
     ///
@@ -99,6 +109,7 @@ impl Assets {
     /// - [`VireoError::Other`]：其它 IO / 平台失败
     ///
     /// 条目**顺序不保证** —— 桌面是 `read_dir` 顺序，安卓是 zip 内顺序。
+    /// 安卓上目录存在但列不出时返回**空 vec 而非 `Err`**（见实现注释）。
     pub fn list(&self, dir: &str) -> Result<Vec<String>, VireoError> {
         let norm = normalize(dir).unwrap_or_default();
         list_impl(self.root.as_deref(), &norm)
@@ -235,21 +246,44 @@ fn exists_impl(_root: Option<&std::path::Path>, name: &str) -> bool {
 fn list_impl(_root: Option<&std::path::Path>, dir: &str) -> Result<Vec<String>, VireoError> {
     let notfound = || VireoError::AssetNotFound(dir.to_string());
     let app = crate::app::android_app().ok_or_else(notfound)?;
-    // 根目录在 AAssetDir 里的名字是 "."，不是 ""。
-    let cdir =
-        std::ffi::CString::new(if dir.is_empty() { "." } else { dir }).map_err(|_| notfound())?;
-    let mut d = app.asset_manager().open_dir(&cdir).ok_or_else(notfound)?;
-    let mut out = Vec::new();
-    for c in d.by_ref() {
-        let name = c.to_string_lossy().into_owned();
-        if name != "." && name != ".." {
-            out.push(name);
+    let am = app.asset_manager();
+
+    // 根目录的名字在不同 Android 版本上表现不一致（真机实测 MuMu/Android 15：
+    // `"."` 能打开但迭代出 0 条）。所以根目录两种写法都试，谁先给出条目用谁。
+    // ⚠️ 别在第一个候选后就 return —— 那样第二个候选永远轮不到（写错过一次）。
+    let candidates: &[&str] = if dir.is_empty() { &[".", ""] } else { &[dir] };
+
+    let mut fallback = Vec::new();
+    for cname_src in candidates {
+        let Ok(cname) = std::ffi::CString::new(*cname_src) else {
+            continue;
+        };
+        let Some(mut d) = am.open_dir(&cname) else {
+            continue;
+        };
+        // rewind()：ndk 文档示例是 open 后直接 collect()，那只对部分版本成立；
+        // 显式 rewind 对所有版本都是安全的幂等操作。
+        d.rewind();
+        let mut out = Vec::new();
+        for c in d.by_ref() {
+            let name = c.to_string_lossy().into_owned();
+            if name != "." && name != ".." {
+                out.push(name);
+            }
         }
+        if !out.is_empty() {
+            return Ok(out);
+        }
+        fallback = out;
     }
-    Ok(out)
+    // 目录确实存在但列不出（部分 ROM / 模拟器对 AAssetDir 支持不全）。
+    // 返空而不是 Err：调用方通常只是「有没有可选条目」，Err 会把
+    // 「不支持遍历」误报成「目录不存在」。
+    Ok(fallback)
 }
 
 /// 进程级资产根（桌面上由 [`App::set_asset_root`](crate::App::set_asset_root) 写入）。
+
 ///
 /// **是 `Mutex` 不是 `OnceLock`** —— 后者只能设一次，而 `set_asset_root` 的契约是
 /// 「重复调用以最后一次为准」。

@@ -24,18 +24,33 @@
 use crate::error::VireoError;
 use std::path::PathBuf;
 
-/// 目录名的默认来源：当前可执行文件的文件名（去扩展名）。
+/// 目录名的默认来源。
 ///
-/// 例：`target/release/my_game.exe` → `my_game`。
+/// **桌面**：当前可执行文件的文件名（去扩展名）。例：`my_game.exe` → `my_game`。
 ///
-/// 取不到（无 exe 路径）时退回 `"vireo-app"`。
+/// **安卓：固定返回 `"vireo-app"`** —— 这里**刻意不查** `current_exe()`。
+/// 安卓上 `std::env::current_exe()` 返回的是**宿主进程**路径，不是 App 自己的
+/// 可执行文件：`android_main` 由 zygote 里的 `app_process64` 承载，于是取到的
+/// 文件名恒为 `app_process64`（真机实测确认）。
+///
+/// 而且安卓上这个值**本来就没用** —— 三个目录都由系统从**包名**派生
+/// （`/data/user/0/<包名>/files` 等），拼不进去。所以给它一个有意义的值反而是
+/// 误导：用户读到 `storage_name()` 会以为它在生效。
 pub(crate) fn default_storage_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .map(|s| sanitize_dir_name(&s))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "vireo-app".to_string())
+    #[cfg(target_os = "android")]
+    {
+        // 恒定值，且明确文档化为「安卓忽略」。见函数文档。
+        return "vireo-app".to_string();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .map(|s| sanitize_dir_name(&s))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "vireo-app".to_string())
+    }
 }
 
 /// 把任意字符串压成安全的**单层**目录名。

@@ -97,6 +97,12 @@ vireo **刻意不做**「相对路径自动回退到 assets」：那会让同一
 三个可写目录在安卓上**都免权限**，也都**随卸载删除**。要让用户自己选存储位置，
 需走 SAF，**vireo 尚未实现**（见 `TODO.md`）。
 
+> ⚠️ **`assets.list()` 在安卓上只列文件、不列子目录** —— 底层 `AAssetDir` 就是这个
+> 语义，没有「有哪些子目录」的概念。真机实测：`assets/` 里放着 `logo.png` 和
+> `notes/hello.txt`，`list("")` 返回 `["logo.png"]`，`notes` 不出现（尽管
+> `read("notes/hello.txt")` 能读到）。**所以不能靠 `list` 遍历资源树**，
+> 要遍历就自己维护一份资源清单。
+
 #### APK 里 assets 的压缩存法（实测）
 
 APK 是 zip，每一项要么 STORED（不压缩）要么 DEFLATE（压缩）。这决定能不能走

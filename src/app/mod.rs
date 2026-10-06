@@ -785,10 +785,16 @@ impl App {
     ///
     /// 影响 [`data_dir`](Self::data_dir) / [`cache_dir`](Self::cache_dir) /
     /// [`external_data_dir`](Self::external_data_dir) 三者的末级分量。
-    /// 默认取可执行文件名（去扩展名）。
+    /// 桌面默认取可执行文件名。
     ///
     /// 名字会被压成**安全的单层路径分量**（分隔符替换为 `_`，`.`/`..`/空 退回
     /// `"vireo-app"`）—— 它要参与路径拼接，放任分隔符会写到意外位置。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op** —— 三个目录都由系统从**包名**派生
+    ///   （`/data/user/0/<包名>/files` 等），末级名字拼不进去。真机实测确认。
+    ///   桌面写这一行是安全的。
     pub fn set_storage_name(&self, name: impl AsRef<str>) {
         let mut g = self.storage_name.lock();
         *g = crate::storage::sanitize_dir_name(name.as_ref());

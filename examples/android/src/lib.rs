@@ -171,7 +171,7 @@ async fn main(app: App) {
             goal.store(true, Ordering::Release);
         });
     }
-// ---- 返回键：弹「退出游戏？」二段确认 --------------------------------------
+    // ---- 返回键：弹「退出游戏？」二段确认 --------------------------------------
     //
     // 不注册 `on_back` 也能跑，但返回键 = `Activity.finish()` 立即销毁进程 ——
     // 没确认、没存档。所以这里演示标准接法：**第一次按返回键拦住并弹确认，
@@ -235,7 +235,7 @@ async fn main(app: App) {
         }
     }
 
-// ---- 点左下角按钮：切 auto_pause（轮询触摸状态 + 边沿检测）----------------
+    // ---- 点左下角按钮：切 auto_pause（轮询触摸状态 + 边沿检测）----------------
     //
     // ⚠️ **轮询是「电平」语义，手指按住期间每帧都是 `Some`** —— 直接拿
     // `if let Some(tp) = win.touch_first()` 判定，会每帧重复触发（实测按钮
@@ -265,6 +265,11 @@ async fn main(app: App) {
     let mut io_report = String::new();
     io_report.push_str(&probe_assets(&app));
     io_report.push_str(&probe_dirs(&app));
+    // 同样打一份到 logcat：HUD 要肉眼读，logcat 能被 `adb logcat` / CI 抓，
+    // 且真机验证时这是唯一可靠通道（模拟器多屏时 screencap 常常抓错屏）。
+    for line in io_report.lines() {
+        log::info!("vireo-android: io | {line}");
+    }
     // 末级名字可改（默认取可执行文件名）。安卓下三个目录由系统从包名派生，
     // 这个名字在安卓上是 no-op —— 写在这里是为了让桌面行为可见。
     app.set_storage_name("vireo-android-template");
@@ -280,8 +285,11 @@ async fn main(app: App) {
 
         let fresh: Vec<vireo::input::TouchPoint> = {
             let pts = win.touches();
-            let fresh: Vec<vireo::input::TouchPoint> =
-                pts.iter().copied().filter(|p| !seen_ids.contains(&p.id)).collect();
+            let fresh: Vec<vireo::input::TouchPoint> = pts
+                .iter()
+                .copied()
+                .filter(|p| !seen_ids.contains(&p.id))
+                .collect();
             seen_ids = pts.iter().map(|p| p.id).collect();
             fresh
         };
@@ -339,9 +347,16 @@ async fn main(app: App) {
         draw_rectangle(&mut batch, Pos::new(bx, by), 300.0, 64.0, Some(GRAY));
         draw_text(
             &mut batch.texts,
-            if gate_on { "auto_pause: ON" } else { "auto_pause: off" },
+            if gate_on {
+                "auto_pause: ON"
+            } else {
+                "auto_pause: off"
+            },
             Pos::new(bx + 16.0, by + 18.0),
-            TextDef { font_size: 22.0, ..Default::default() },
+            TextDef {
+                font_size: 22.0,
+                ..Default::default()
+            },
             TextOverride::new(),
         );
 
@@ -546,25 +561,24 @@ async fn main(app: App) {
             if !ctx.app().is_stopped() {
                 // 半透明弹窗：还可见，继续画。真正不可见才停 —— 这正是
                 // 「短暂中断 vs 彻底离开」的价值所在。
-// 随包贴图：assets/logo.png 解码成功才会画出真图；读不到时 vireo 给出
-        // ffcc00/6699ff 棋盘（一眼能分辨「读不到」与「读到了」）。
-        if let Ok(t) = ctx.app().texture(asset_tex) {
-            let h = 96.0_f32.min(vh * 0.16);
-            let s = h / t.height.max(1) as f32;
-            batch.set_texture(Some(&*t));
-            draw_rectangle(
-                &mut batch,
-                Pos::new(vw - t.width as f32 * s - pad.r - 8.0, pad.t + 8.0),
-                t.width as f32 * s,
-                h,
-                Some(WHITE),
-            );
-            // 贴图画完必须清画笔状态，否则后面的形状会继续采样这张图
-            batch.set_texture(None);
-        }
+                // 随包贴图：assets/logo.png 解码成功才会画出真图；读不到时 vireo 给出
+                // ffcc00/6699ff 棋盘（一眼能分辨「读不到」与「读到了」）。
+                if let Ok(t) = ctx.app().texture(asset_tex) {
+                    let h = 96.0_f32.min(vh * 0.16);
+                    let s = h / t.height.max(1) as f32;
+                    batch.set_texture(Some(&*t));
+                    draw_rectangle(
+                        &mut batch,
+                        Pos::new(vw - t.width as f32 * s - pad.r - 8.0, pad.t + 8.0),
+                        t.width as f32 * s,
+                        h,
+                        Some(WHITE),
+                    );
+                    // 贴图画完必须清画笔状态，否则后面的形状会继续采样这张图
+                    batch.set_texture(None);
+                }
 
-        win.draw(BLACK, &[&batch]);
-
+                win.draw(BLACK, &[&batch]);
             }
             return true;
         }
@@ -585,9 +599,11 @@ async fn main(app: App) {
             // 故意先等 4 秒再进 wait：让条件在**进入等待之前**就成立 ——
             // 这是「通知早于等待不得丢唤醒」的真机版验证（单测里有对应那条）。
             std::thread::sleep(std::time::Duration::from_millis(4000));
-            let ok = ctx.app().wait_until(Some(std::time::Duration::from_secs(2)), || {
-                wait_goal.load(Ordering::Relaxed)
-            });
+            let ok = ctx
+                .app()
+                .wait_until(Some(std::time::Duration::from_secs(2)), || {
+                    wait_goal.load(Ordering::Relaxed)
+                });
             let dt = t0.elapsed();
             if ok {
                 life.wait_until_ok.fetch_add(1, Ordering::Relaxed);
@@ -646,16 +662,15 @@ fn probe_assets(app: &vireo::App) -> String {
         }
         Err(e) => s.push_str(&format!(" list=ERR({e})")),
     }
+    // 收尾换行：两段 probe 报告靠 '\n' 分隔，缺了会在 HUD 上粘成一行
+    s.push('\n');
     s
 }
 
 /// 探测三个可写目录 + 真写一次再读回。
 fn probe_dirs(app: &vireo::App) -> String {
     let mut s = format!("dirs   name={:?}\n", app.storage_name());
-    for (label, d) in [
-        ("data", app.data_dir()),
-        ("cache", app.cache_dir()),
-    ] {
+    for (label, d) in [("data", app.data_dir()), ("cache", app.cache_dir())] {
         match d {
             Ok(p) => match vireo::storage::ensure_dir(&p) {
                 Ok(()) => s.push_str(&format!("dir    {label:<8} {}\n", p.display())),
