@@ -313,6 +313,9 @@ pub(crate) fn wait_loop(
 /// Android 上由 panic hook 走 `log::error!`（logcat 可见），`main.rs` 的
 /// `catch_unwind` 收尾并把退出码置 1，不留僵尸进程。
 ///
+/// panic 消息本身是**英文**（与全仓 `panic!`/`expect`/`unreachable!` 一致 ——
+/// 诊断输出要进 crash log、被 grep、贴进 issue，英文更通用）；中文解释在这里。
+///
 /// # 纯函数、不 cfg 门控
 ///
 /// 刻意不加 `#[cfg(target_os = "android")]` —— 这样桌面 `cargo test --lib`
@@ -757,23 +760,24 @@ impl App {
         // **所有**平台都被调用，从而不必挂 `#[allow(dead_code)]`（那会掩盖
         // 「桌面真的没在用」这个事实），且桌面 `cargo test --lib` 能测到它。
         if cfg!(target_os = "android") && android_rejects_extra_window(already_requested) {
+            // 消息用英文：panic 是诊断输出（进 crash log / 被 grep / 贴进 issue），
+            // 与仓库其余 panic/expect/unreachable 一致。详细解释见
+            // `android_rejects_extra_window` 的文档（中文）。
             panic!(
-                "vireo: Android 上不支持创建第 {} 个窗口。\n\
-                 \n\
-                 根因（不是「Android 不方便」，是**一定会静默坏掉**）：\n\
-                 \x20 - winit Android 的 `WindowId` 是单元结构体（`struct WindowId;`，无字段），\
-                 所有窗口 id 完全相同 → vireo 的 `id_to_handle` 第二次 insert 覆盖第一次，\
-                 窗口 A 的触摸/按键/resize 全被路由到窗口 B。\n\
-                 \x20 - `Window::new` 忽略全部窗口属性（源码注释：\
-                 `// FIXME this ignores requested window attributes`）→ 两个 `Surface` \
-                 指向同一个 `SurfaceView`，两个 `Renderer` 抢同一 surface，会撞 wgpu 的 \
-                 \"Surface image is already acquired\"。\n\
-                 \n\
-                 Android 一个 Activity 只有一个 SurfaceView，多窗口 UI 在这个模型下\
-                 没有对应物，所以这里是**硬失败**而非降级。\n\
-                 \n\
-                 改法：把多窗口 UI 折进单窗口（自绘标签页 / 状态机切换内容），\
-                 或用 `App::offscreen` + `OffscreenCanvas` 自己合成。",
+                "vireo: cannot create window #{} on Android — only ONE window is \
+                 supported.\n\
+                 Root cause (it fails SILENTLY if allowed):\n\
+                 \x20 - winit's Android `WindowId` is a unit struct (`struct WindowId;`), so all \
+                 windows share one id; vireo's `id_to_handle` insert then overwrites the first \
+                 mapping and window A's input/resize events get routed to window B.\n\
+                 \x20 - `Window::new` ignores every requested window attribute (upstream: \
+                 `// FIXME this ignores requested window attributes`), so two `Surface`s point \
+                 at the same `SurfaceView` and two `Renderer`s fight over it — wgpu then \
+                 panics with \"Surface image is already acquired\".\n\
+                 An Android Activity has exactly one SurfaceView and there is no multi-window \
+                 equivalent in this model, so this is a hard failure rather than a fallback.\n\
+                 Fix: fold multi-window UI into a single window (self-drawn tabs / a state \
+                 machine), or composite with `App::offscreen` + `OffscreenCanvas`.",
                 already_requested + 1,
             );
         }
