@@ -1,8 +1,35 @@
-/// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
+// Android 上只能建**一个**窗口 —— 本示例的窗口 B 会被 vireo 拒绝（打
+// `log::error!`，且该 index 的 `window_ref` 恒 `Err`）。这不是 vireo 偷懒 ——
+// winit Android 的 `WindowId` 是单元结构体（所有窗口 id 相同 → 事件串台），
+// 且 `Window::new` 忽略全部窗口属性（两个 `Surface` 指向同一个 `SurfaceView`
+// → 两个 Renderer 抢同一 surface，撞 "Surface image is already acquired"）。
+//
+// 所以 Android 上第二个窗口的绘制分支会自动跳过（`window_ref` 走 `Err` 分支），
+// 不会崩，但也不会有第二个窗口。
+#[cfg(target_os = "android")]
+const _: () = {
+    // 编译期提示（比 eprintln 更早暴露问题，且不依赖运行时）。
+    // 用 `const _` 而不是裸 block：`#[cfg]` 裸块放在文件顶层也可，但这里
+    // 保持「编译期常量」的形式，风格上和下面 main 的 cfg 注解一致。
+    const _ANDROID_SINGLE_WINDOW: () = ();
+};
+
+#[cfg(target_os = "android")]
+fn android_single_window_notice() {
+    eprintln!(
+        "注意：Android 只支持一个窗口，本示例的窗口 B 会被 vireo 拒绝。\n\
+         多窗口 UI 请折进单窗口（自绘标签页），或用 OffscreenCanvas 自己合成。"
+    );
+}
+
 use vireo::prelude::*;
 
+/// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
 #[vireo::main]
 async fn main() {
+    #[cfg(target_os = "android")]
+    android_single_window_notice();
+
     let idx_a = app.window(
         WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
         Some(|| println!("窗口 A 已关闭")),

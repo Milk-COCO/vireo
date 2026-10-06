@@ -61,6 +61,15 @@ pub struct AppInner {
     pub windows: Mutex<Vec<Option<Arc<VireoWindow>>>>,
     alive_window_count: AtomicUsize,
     created_window_count: AtomicUsize,
+    /// 用户**请求**建窗的累计次数（不是成功创建的次数）。
+    ///
+    /// 用于 Android 单窗口限制的判定 —— 见 [`android_rejects_extra_window`]。
+    ///
+    /// 为什么不能拿 `created_window_count` 判：它在 supervisor 收到
+    /// `WindowCreated` 时才递增，而 `App::window()` 可以连着调两次 —— 那一刻
+    /// supervisor 还没处理第一个请求，`created_window_count` 仍是 0，守卫会漏。
+    /// 计数必须落在**请求侧**才没有这个竞态。
+    requested_window_count: AtomicUsize,
     pub gpu: Arc<GpuContext>,
     instance: Mutex<Option<wgpu::Instance>>,
     device_lost: Arc<AtomicBool>,
@@ -261,6 +270,49 @@ pub(crate) fn wait_loop(
             return true;
         }
     }
+}
+
+/// Android 上第 2+ 个窗口是否必须被拒绝。
+///
+/// # 为什么要拒绝（不是「Android 不方便」，是「一定会坏」）
+///
+/// winit 0.30.13 的 Android 后端有两个硬伤，叠加后**任何**第二个窗口都必然坏：
+///
+/// ```text
+/// winit-0.30.13/src/platform_impl/android/mod.rs
+///   :745   pub(crate) struct WindowId;              ← 单元结构体，无字段
+///   :783   pub(crate) fn new(el, _window_attrs) -> Result<Self, OsError> {
+///   :788       // FIXME this ignores requested window attributes
+///   :790       Ok(Self { app: ..., redraw_requester: ... })
+/// ```
+///
+/// 1. **`WindowId` 是单元结构体** → 所有 Android 窗口的 id **完全相同**。而 vireo
+///    靠 `id_to_handle: FxHashMap<WindowId, usize>` 做事件路由（`host.rs:295`
+///    `insert`），第二次 insert 会**覆盖**第一次 → 窗口 A 的触摸 / 按键 / resize
+///    全部被路由到窗口 B。
+/// 2. **`Window::new` 忽略所有窗口属性** → 两个 winit `Window` 各自
+///    `create_surface`，得到**两个 `Surface` 指向同一个 `SurfaceView`**。两个
+///    `Renderer` 对同一 surface 做 acquire→present，正是
+///    `.opencode/VIREO_OPT_NOTES.md` 第三十三 / 三十四轮花两轮才定位的
+///    「Surface image is already acquired」类崩溃。
+///
+/// 症状是**静默的**（无异常、无日志），画面表现为「两个窗口内容串了 / 莫名
+/// 崩溃」，极难定位。
+///
+/// # 为什么不「让它跑」
+///
+/// 修好第 1 条（自己造 id）也修不好第 2 条 —— Android 上一个 Activity 只有一个
+/// `SurfaceView`，多窗口 UI 在这个模型下没有对应物。要真支持得引入 Android 的
+/// 多窗口 / `SurfaceView` 拆分，那是另一个量级的工程。所以**明确拒绝**比
+/// 「跑起来但行为不可预测」好。
+///
+/// # 纯函数、不 cfg 门控
+///
+/// 刻意不加 `#[cfg(target_os = "android")]` —— 这样桌面 `cargo test --lib`
+/// 也能测到这条规则（Android-only 代码在桌面跑不到，是本项目反复踩的坑）。
+/// 调用点负责门控。
+pub(crate) fn android_rejects_extra_window(already_requested: usize) -> bool {
+    already_requested > 0
 }
 
 pub(crate) struct LifecycleCbs {
@@ -545,6 +597,7 @@ impl App {
                 windows: Mutex::new(Vec::new()),
                 alive_window_count: AtomicUsize::new(0),
                 created_window_count: AtomicUsize::new(0),
+                requested_window_count: AtomicUsize::new(0),
                 gpu,
                 instance: Mutex::new(Some(instance)),
                 device_lost,
@@ -649,6 +702,21 @@ impl App {
     /// `create_tx` 还是 `None`，会命中 `unreachable!` **panic**。
     /// 换句话说：`App::new()` + 手工驱动事件循环这条路当前不可用，
     /// 必须走 `#[vireo::main]` / `with_descriptor` / `vireo::platform::android`。
+    ///
+    /// # ⚠️ Android 上**只能建一个窗口**
+    ///
+    /// 第 2+ 次调用会打一条 `log::error!` 并**拒绝创建**（不发建窗请求），
+    /// 返回的 [`WindowIndex`] 永远不会有对应窗口 —— [`Self::window_ref`] 对它
+    /// 恒返回 `Err`。
+    ///
+    /// 不是「Android 不方便」，而是**一定会坏**：winit Android 的 `WindowId` 是
+    /// 单元结构体（所有窗口 id 相同 → 事件串台），且 `Window::new` 忽略全部
+    /// 窗口属性（两个 `Surface` 指向同一个 `SurfaceView` → 两个 `Renderer` 抢
+    /// 同一 surface，撞 "Surface image is already acquired"）。详见
+    /// [`android_rejects_extra_window`]。
+    ///
+    /// 多窗口 UI 在 Android 上折进单窗口（自绘标签页），或用
+    /// [`OffscreenCanvas`](crate::OffscreenCanvas) 自己合成。
     pub fn window(
         &self,
         mut desc: WindowDesc,
@@ -670,6 +738,31 @@ impl App {
         let handle = *self.next_handle.lock();
         *self.next_handle.lock() = handle + 1;
         let on_close = on_close.map(|f| Box::new(f) as Box<dyn FnOnce() + Send>);
+        // Android 单窗口限制 —— 见 [`android_rejects_extra_window`] 的完整说明
+        // （winit Android 的 `WindowId` 是单元结构体 + `Window::new` 忽略全部
+        // 属性，第二个窗口必然事件串台 + 两个 Renderer 抢同一 surface）。
+        //
+        // 计数放在**请求侧**：`created_window_count` 要等 supervisor 处理完
+        // 才递增，连着调两次 `window()` 时它还是 0，守卫会漏。
+        let already_requested = self.requested_window_count.fetch_add(1, Ordering::AcqRel);
+        // 用 `cfg!` 而不是 `#[cfg]`：分支仍被编译期消除，但让这个判定函数在
+        // **所有**平台都被调用，从而不必挂 `#[allow(dead_code)]`（那会掩盖
+        // 「桌面真的没在用」这个事实），且桌面 `cargo test --lib` 能测到它。
+        if cfg!(target_os = "android") && android_rejects_extra_window(already_requested) {
+            log::error!(
+                "vireo: 拒绝创建第 {} 个窗口 —— Android 只支持**一个**窗口。\n\
+                 根因：winit Android 的 `WindowId` 是单元结构体（所有窗口 id 相同，\
+                 事件会串台）且 `Window::new` 忽略全部窗口属性（两个 Surface 指向\
+                 同一个 SurfaceView，会撞 \"Surface image is already acquired\"）。\n\
+                 改法：把多窗口 UI 折进单窗口（如自绘标签页），或用 OffscreenCanvas。",
+                already_requested + 1,
+            );
+            // 故意**不**发 CreateWindowRequest、**不**动 pending_window_creates ——
+            // 那样退出门控（`pending_window_creates == 0`）才不会被卡住。
+            // 返回的 index 永远不会有对应窗口 → `window_ref(&idx)` 恒 `Err`，
+            // 用户的既有错误处理路径（`Err` 分支）能正常兜住。
+            return WindowIndex::new(handle);
+        }
         match self.create_tx.lock().as_ref().cloned() {
             Some(tx) => {
                 let _ = tx.send(CreateWindowRequest {
@@ -1255,6 +1348,47 @@ pub(crate) use crate::app::supervisor::{panic_payload_to_string, supervisor_loop
 
 #[cfg(test)]
 mod tests {
+    use super::android_rejects_extra_window;
+
+    // ---- Android 单窗口限制 ----
+
+    /// 首个窗口放行，第 2+ 个拒绝。
+    #[test]
+    fn android_allows_first_window_and_rejects_the_rest() {
+        assert!(
+            !android_rejects_extra_window(0),
+            "第一个窗口必须放行 —— 否则 Android 上什么都开不起来"
+        );
+        assert!(android_rejects_extra_window(1), "第二个必须拒绝");
+        assert!(android_rejects_extra_window(2));
+        assert!(android_rejects_extra_window(usize::MAX));
+    }
+
+    /// 拒绝时**不发建窗请求**是退出门控不被卡住的关键，所以判定必须只看
+    /// 「已经请求过几个」，而不是「创建成功几个」。
+    ///
+    /// 这里固化那个竞态的语义：`fetch_add` 的**返回值**是「本次之前已请求的
+    /// 个数」，所以第 1 次调用返回 0（放行）、第 2 次返回 1（拒绝）。
+    /// 若改成 `created_window_count`（supervisor 收到 WindowCreated 才递增），
+    /// 连着调两次时它还是 0 → 第 2 个窗口漏过守卫 → 静默串台。
+    #[test]
+    fn rejection_is_based_on_request_count_not_created_count() {
+        let requested = std::sync::atomic::AtomicUsize::new(0);
+        let mut accepted = 0usize;
+        // 模拟连着调 3 次 `App::window()`，中间**没有**任何 WindowCreated 回来。
+        for _ in 0..3 {
+            let already = requested.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if !android_rejects_extra_window(already) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(
+            accepted, 1,
+            "即使 supervisor 一个都没处理，也只能放行 1 个 —— \
+             靠 created_window_count 判会放行 3 个"
+        );
+        assert_eq!(requested.load(std::sync::atomic::Ordering::Acquire), 3);
+    }
 
     /// 内存警告代号必须单调递增，且渲染线程能靠它判断「有没有新警告」。
     ///
