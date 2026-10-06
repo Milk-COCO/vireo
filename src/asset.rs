@@ -192,6 +192,11 @@ fn read_impl(_root: Option<&std::path::Path>, name: &str) -> Result<Vec<u8>, Vir
     let mut buf = Vec::new();
     // 压缩 / 未压缩的资产都能读：`read` 内部按需解压。
     // 所以本模块**不依赖** build.gradle 的 `noCompress` 配置。
+    //
+    // 附：AGP **默认**把 `.png` / `.jpg` / `.wav` 等媒体类型存成 STORED（未压缩，
+    // 为了 mmap 性能），文本类才 DEFLATE。所以贴图走
+    // `open_file_descriptor()`（零拷贝）本来就能用；字体/文本只能 `read`。
+    // 实测见 `examples/android/README.md` 的「APK 里 assets 的压缩存法」。
     asset.read_to_end(&mut buf).map_err(|_| notfound())?;
     Ok(buf)
 }

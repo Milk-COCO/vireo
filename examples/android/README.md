@@ -97,6 +97,36 @@ vireo **刻意不做**「相对路径自动回退到 assets」：那会让同一
 三个可写目录在安卓上**都免权限**，也都**随卸载删除**。要让用户自己选存储位置，
 需走 SAF，**vireo 尚未实现**（见 `TODO.md`）。
 
+#### APK 里 assets 的压缩存法（实测）
+
+APK 是 zip，每一项要么 STORED（不压缩）要么 DEFLATE（压缩）。这决定能不能走
+mmap 直读（`Asset::open_file_descriptor()`，压缩项会失败）。实测本模板的产物：
+
+| APK 内条目 | 原始 | 压缩后 | 存法 |
+|---|---|---|---|
+| `assets/logo.png` | 40716 B | **40716 B** | **STORED（未压缩）** |
+| `assets/notes/hello.txt` | 327 B | 272 B | DEFLATE（压缩） |
+
+**AGP 默认把 `.png` / `.jpg` / `.wav` 等媒体类型存成未压缩**（为了 mmap 读取
+性能），文本类才压。所以：
+
+- **贴图**放 assets 里，`open_file_descriptor()` 零拷贝读取**本来就可用**，
+  不需要配 `noCompress`。
+- **字体 / 文本 / 自定义格式**会被压缩 —— 只能走 `read`，不能走 mmap。
+- vireo 的 [`Assets::read`](../../src/asset.rs) 一律用 `read`（内部按需解压），
+  **两种存法都能读**，所以对打包方式无要求。真要为大字体换 mmap 零拷贝，
+  才需要在 `build.gradle` 加 `androidResources { noCompress += ['ttf'] }`。
+
+验证方式（不需要真机）：
+
+```powershell
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($apk)
+$zip.Entries | ? { $_.FullName -like 'assets/*' } |
+  % { "{0} {1} -> {2}" -f $_.FullName, $_.Length, $_.CompressedLength }
+$zip.Dispose()
+```
+
 ---
 
 ## 3. 三步出 APK
@@ -445,6 +475,25 @@ pwsh check-16kb.ps1 -NdkVersion 28.2.13676358 `
 | 键盘不弹 | 回看 §4.1 / §4.2，再看 §4.6（坐标可能被换算了两次）|
 | 内容被 letterbox | 回看 §4.4，检查 `targetSdk` |
 | `warning: struct/function ... is never used` | **正常，忽略**。见下 |
+| gradle 报 ``Android Gradle Plugin has been applied at the root build file ... specify `compileSdk` `` | ⚠️ **这条报错是误导性的，别照着查 `compileSdk`** —— `build.gradle` 里明明写了 `compileSdk = 35`。它是**级联次生错误**：真正的原因在它上面，被 gradle 截断了。往上翻找 `Build file ... line: NN` 那条，本模板最常见的是 `build.gradle:73` 的「传了 `-PndkVersion=` 但没有 `ANDROID_HOME` / `ANDROID_SDK_ROOT`」。那条中文消息在 GBK 控制台里会**显示成乱码**，认不出就查环境变量 |
+
+
+### gradle 报 `compileSdk` 但 build.gradle 里明明写了 —— 怎么快速定位
+
+这是本模板最容易浪费时间的一个坑：**次生报错指向了完全无关的方向**。
+
+```text
+Build file '.../build.gradle' line: 73          ← 真正的错误在这一行
+* What went wrong:
+> 传了 -PndkVersion=... 但没有 ANDROID_HOME / ANDROID_SDK_ROOT 环境变量 ...   ← 乱码
+2: Task failed with an exception.
+* What went wrong:
+> Android Gradle Plugin has been applied at the root build file. ...
+  To continue with the plugin in the resolved and applied state, specify `compileSdk`   ← 假线索
+```
+
+判据：**看第一条 `What went wrong`，不要看最后一条**。gradle 在根项目配置失败后，
+会再跑一遍 AGP 的收尾检查并抛出它的通用提示，那条与真实原因无关。
 
 ### 关于 `dead_code` 警告
 

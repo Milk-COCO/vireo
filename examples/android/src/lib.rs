@@ -250,6 +250,28 @@ async fn main(app: App) {
     let mut seen_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
     let mut wait_tried = false;
+
+    // ---- 文件读写：随包资源 + 三个可写目录 ---------------------------------
+    //
+    // 安卓的「文件」有三个互不相通的世界，这是最常见的坑：
+    //   1. 随包资源 —— **不是路径**，是 APK 这个 zip 里的一项，std::fs 读不到
+    //   2. 内部私有目录 —— /data/user/0/<包名>/files，免权限
+    //   3. 外部 app 专属 —— /storage/emulated/0/Android/data/<包名>/files，免权限
+    //
+    // 三者**都随卸载删除**。要让用户自己选存储位置得走 SAF，vireo 尚未实现。
+    //
+    // 桌面开发时同一份代码用 `set_asset_root` 指到本地目录即可 —— 这就是
+    // `assets/` API 的全部意义：不是魔法，是把「资源根」显式化。
+    let mut io_report = String::new();
+    io_report.push_str(&probe_assets(&app));
+    io_report.push_str(&probe_dirs(&app));
+    // 末级名字可改（默认取可执行文件名）。安卓下三个目录由系统从包名派生，
+    // 这个名字在安卓上是 no-op —— 写在这里是为了让桌面行为可见。
+    app.set_storage_name("vireo-android-template");
+
+    // 随包贴图：证明 assets/logo.png 真的解码成功了（不是 missing 棋盘）。
+    let asset_tex = app.load_texture_asset("logo.png");
+
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
             Ok(w) => w,
@@ -443,6 +465,12 @@ async fn main(app: App) {
         ));
         hud.push_str("gate    点左下角方块 = 切 auto_pause");
         hud.push_str(&format!("text    {typed:?}"));
+        // 文件读写探测结果。安卓上重点看这三行：
+        //   assets  有值  = APK 里的 src/main/assets/ 读到了
+        //   dirs    三行   = 内部/外部/缓存目录都拿到了
+        //   save    roundtrip = 目录真的可写（不只是路径算得出来）
+        hud.push('\n');
+        hud.push_str(&io_report);
         // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）
         let mut emoji_probe = String::from("\nemoji");
         // 逐行测：单色 / 旗帜 / ZWJ 序列 / 肤色修饰
@@ -518,7 +546,25 @@ async fn main(app: App) {
             if !ctx.app().is_stopped() {
                 // 半透明弹窗：还可见，继续画。真正不可见才停 —— 这正是
                 // 「短暂中断 vs 彻底离开」的价值所在。
-                win.draw(BLACK, &[&batch]);
+// 随包贴图：assets/logo.png 解码成功才会画出真图；读不到时 vireo 给出
+        // ffcc00/6699ff 棋盘（一眼能分辨「读不到」与「读到了」）。
+        if let Ok(t) = ctx.app().texture(asset_tex) {
+            let h = 96.0_f32.min(vh * 0.16);
+            let s = h / t.height.max(1) as f32;
+            batch.set_texture(Some(&*t));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(vw - t.width as f32 * s - pad.r - 8.0, pad.t + 8.0),
+                t.width as f32 * s,
+                h,
+                Some(WHITE),
+            );
+            // 贴图画完必须清画笔状态，否则后面的形状会继续采样这张图
+            batch.set_texture(None);
+        }
+
+        win.draw(BLACK, &[&batch]);
+
             }
             return true;
         }
@@ -572,6 +618,70 @@ async fn main(app: App) {
     })
     .await
     .unwrap();
+}
+
+/// 探测随包资源（只读）。返回 HUD 用的一行文本。
+///
+/// 真机验证点：`assets/logo.png` 与 `assets/notes/hello.txt` 放在
+/// `src/main/assets/`（AGP 默认打进 APK，无需改 build.gradle）。
+/// 若这里报 `AssetNotFound`，先确认文件在**那个**目录，而不是项目根。
+fn probe_assets(app: &vireo::App) -> String {
+    let a = app.assets();
+    let mut s = format!("assets  root={:?} ", a.root());
+    match a.read("notes/hello.txt") {
+        Ok(b) => {
+            let first = String::from_utf8_lossy(&b)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            s.push_str(&format!("hello={}B「{first}」", b.len()));
+        }
+        Err(e) => s.push_str(&format!("hello=ERR({e})")),
+    }
+    match a.list("") {
+        Ok(mut n) => {
+            n.sort();
+            s.push_str(&format!(" list={n:?}"));
+        }
+        Err(e) => s.push_str(&format!(" list=ERR({e})")),
+    }
+    s
+}
+
+/// 探测三个可写目录 + 真写一次再读回。
+fn probe_dirs(app: &vireo::App) -> String {
+    let mut s = format!("dirs   name={:?}\n", app.storage_name());
+    for (label, d) in [
+        ("data", app.data_dir()),
+        ("cache", app.cache_dir()),
+    ] {
+        match d {
+            Ok(p) => match vireo::storage::ensure_dir(&p) {
+                Ok(()) => s.push_str(&format!("dir    {label:<8} {}\n", p.display())),
+                Err(e) => s.push_str(&format!("dir    {label:<8} mkdir ERR({e})\n")),
+            },
+            Err(e) => s.push_str(&format!("dir    {label:<8} ERR({e})\n")),
+        }
+    }
+    match app.external_data_dir() {
+        Some(p) => s.push_str(&format!("dir    external {}\n", p.display())),
+        None => s.push_str("dir    external 不可用\n"),
+    }
+
+    // 往返：写一个文件再读回来，证明目录真的可写（不只是路径能算出来）
+    let rt: Result<String, String> = (|| {
+        let dir = app.data_dir().map_err(|e| e.to_string())?.join("io-demo");
+        vireo::storage::ensure_dir(&dir).map_err(|e| e.to_string())?;
+        let f = dir.join("save.json");
+        std::fs::write(&f, br#"{"ok":true}"#).map_err(|e| e.to_string())?;
+        std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    })();
+    match rt {
+        Ok(v) => s.push_str(&format!("save   roundtrip {v}")),
+        Err(e) => s.push_str(&format!("save   ERR({e})")),
+    }
+    s
 }
 
 /// 画一圈安全区：四条边各一个半透明矩形。
