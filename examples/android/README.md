@@ -389,8 +389,14 @@ AGDK 在运行时**按符号名字符串**查找它。rustc 的 dead_code 分析
 
 ## 7. 已知限制
 
-- **emoji 不保证能渲染**。Android 字体白名单只收正文字体，`NotoColorEmoji`
-  不在其中。cosmic-text 需要显式加载彩色位图字体，vireo 暂未做。
+- ~~**emoji 不保证能渲染**~~ ✅ **已修复**：Android 12+ 的 `NotoColorEmoji.ttf` 是
+  **COLRv1**，而 swash 0.2.10 只会读 COLR **v0** 布局（swash 已是末版，上游 issue 五年
+  零活动），于是 emoji 交回 `0×0` 被静默丢弃。vireo 内已用 `skrifa` + `zeno`（两者本来
+  就在依赖树里，零新增 crate）补上 COLRv1 光栅化，`NotoColorEmoji` 也已进白名单。
+  真机验证 `🦊🎵😀🇨🇳👨‍👩‍👧👍🏽` 全部渲染，保持 Android 原生风格。详见
+  [`.opencode/android_colrv1_plan.md`](../../.opencode/android_colrv1_plan.md)。
+  残留缺口：负半径径向渐变的零半径截断重插值（规范要求但无字体使用）、可变彩色
+  字体未做真字体验证。
 - **preedit（拼音候选）在部分 ROM 上拿不到**。搜狗小米版只 commit 不
   setComposingText，`text_input_state().compose` 恒为 `None`。能正常上屏汉字，
   只是拿不到候选串。
@@ -399,9 +405,17 @@ AGDK 在运行时**按符号名字符串**查找它。rustc 的 dead_code 分析
   `onTrimMemory` 这些 vireo 都收不到 —— 它们只能由你的 `MainActivity.java` 转发，
   而 vireo 只为前三个绑了 native 方法（`onStop` 对应 `App::on_stopped`，见 §8）。
   需要更多就照 `nativeOnPause` 的写法自己加。
-- **16 KB page size 未保证**（NDK 版本限制，见 §5）。
+  （`onTrimMemory` 走的是另一条路：winit 把它转成了跨平台 `MemoryWarning`，
+  对应 `App::on_memory_warning`，零 JNI。）
+- **`on_insets_changed` 没做**：AndroidX 的 insets 变化通知不带值、且已被 winit 消费，
+  自做 JNI 回调需要动态代理。Godot / Unity 也都是纯 poll，`safe_area()` /
+  `padding()` / `ime_insets()` 逐帧读已经够用。
+- **16 KB page size 静态合规但运行时未实测**（两台 MuMu 的 `PAGE_SIZE` 都是 4096，
+  需要 16 KB 镜像或真机，见 §5）。
 - **R8/混淆默认关**。`minifyEnabled false`，原因见 `proguard-rules.pro`。
-- 只验证了 **arm64-v8a + Vulkan**。32 位 ABI 和 GLES 后端未测。
+- 只验证了 **arm64-v8a + x86_64 + Vulkan**。32 位 ABI 和 GLES 后端未测。
+- **`cutouts()` 部分 ROM 恒空**：运行时 `set_display_cutout_mode` 是空操作，
+  只能靠 manifest/style（见 §4.4）。
 
 ---
 
