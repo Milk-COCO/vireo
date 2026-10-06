@@ -1452,7 +1452,13 @@ impl VireoWindow {
         self.init_duration
     }
 
-    /// 获取窗口标题
+    /// 获取窗口标题。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：返回 `WindowDesc::title` 的原值**（Activity 标题本身是打包期
+    ///   manifest 的 `android:label`，vireo 拿不到也改不了，见
+    ///   [`Self::set_title`]）。所以它**不能**用来确认系统实际显示的标题。
     pub fn title(&self) -> String {
         self.inner.title()
     }
@@ -1476,6 +1482,13 @@ impl VireoWindow {
     /// 两参由调用点类型声明意图：`Pp::Px` = 物理像素，`Pp::Dp` = vireo 逻辑像素
     /// （裸数值默认 = `Pp::Dp`，`Some(dpi_override)` 下物理窗口 = 逻辑 × dpi；
     /// `None` 下按 OS 系统 DPI 换算）。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端不实现 `set_inner_size`；
+    ///   Android 窗口尺寸由 Activity 主题与系统窗口管理器决定。
+    ///   ⚠️ 但 `WindowDesc::size` / `WindowDesc::dpi_override` 是**建窗期**的，
+    ///   那两个在 Android 上有效（见 `create_attrs`），不要混淆。
     pub fn set_size<W: Into<Pp>, H: Into<Pp>>(&self, width: W, height: H) {
         let size = dim_to_winit_size(
             width.into(),
@@ -1552,6 +1565,9 @@ impl VireoWindow {
     /// 参数意图同 [`VireoWindow::set_size`]（裸数值 = vireo 逻辑像素 =
     /// `Pp::Dp`，受 `dpi_override` 影响）。
     /// ## Platform-specific
+    /// - **Android：no-op**（同 [`Self::set_size`]）—— winit Android 后端不实现
+    ///   `request_inner_size`，返回值恒 `None`，但这**不代表**失败被检出，
+    ///   只是「永远不生效」而已。
     /// - **iOS / Web**：仅主线程可用。
     pub fn request_resize<W: Into<Pp>, H: Into<Pp>>(
         &self,
@@ -1579,6 +1595,11 @@ impl VireoWindow {
 
     /// 设置最小窗口大小（通过 winit 线程异步操作）。
     /// 参数意图同 [`VireoWindow::set_size`]。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端不实现 `set_min_inner_size`。
+    ///   同 [`Self::set_max_size`]。
     pub fn set_min_size<W: Into<Pp>, H: Into<Pp>>(&self, width: Option<W>, height: Option<H>) {
         let size = match (width, height) {
             (Some(w), Some(h)) => Some(dim_to_winit_size(
@@ -1597,6 +1618,12 @@ impl VireoWindow {
 
     /// 设置最大窗口大小（通过 winit 线程异步操作）。
     /// 参数意图同 [`VireoWindow::set_size`]。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端不实现 `set_max_inner_size`。
+    ///   Android 上窗口尺寸由 Activity 主题与系统窗口管理器决定 ——
+    ///   要限制尺寸只能靠 app 侧的 `values/dimens.xml` 之类打包期资源。
     pub fn set_max_size<W: Into<Pp>, H: Into<Pp>>(&self, width: Option<W>, height: Option<H>) {
         let size = match (width, height) {
             (Some(w), Some(h)) => Some(dim_to_winit_size(
@@ -1674,7 +1701,13 @@ impl VireoWindow {
         });
     }
 
-    /// 获取焦点（通过 winit 线程异步操作）
+    /// 获取焦点（通过 winit 线程异步操作）。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op。** winit Android 后端不实现 `Window::focus_window`；
+    ///   Android 的焦点是 Activity / 输入法层面的概念。软键盘请用
+    ///   ``platform::android::WindowExtAndroid::show_soft_input``。
     pub fn focus(&self) {
         let _ = self.event_tx.send(WinitEvent::FocusWindow {
             handle: self.handle(),
@@ -1852,7 +1885,7 @@ impl VireoWindow {
     ///
     /// ## Platform-specific
     ///
-    /// - **仅 Wayland** 支持；Windows / X11 / macOS 等平台为 no-op。
+    /// - **仅 Wayland** 支持；Windows / X11 / macOS / **Android** 等平台为 no-op。
     pub fn set_ime_purpose(&self, purpose: winit::window::ImePurpose) {
         self.inner.set_ime_purpose(purpose);
     }
@@ -1861,7 +1894,10 @@ impl VireoWindow {
 
     /// 运行时切换窗口是否可调大小。
     /// ## Platform-specific
-    /// - 仅桌面有效；X11 下 Xfce 窗口管理器可能不生效。
+    /// - **Android 上无效**：winit Android 不实现该属性，调用静默 no-op
+    ///   （无返回值、无错误、无日志）。要在 Android 上固定窗口尺寸请用
+    ///   `WindowDesc::resizable(false)` —— 但那同样无效，见 [`WindowDesc::resizable`]。
+    /// - X11 下 Xfce 窗口管理器可能不生效。
     pub fn set_resizable(&self, resizable: bool) {
         self.inner.set_resizable(resizable);
     }
@@ -1877,6 +1913,8 @@ impl VireoWindow {
 
     /// 运行时设置标题栏启用的按钮（最小化/最大化/关闭）。
     /// ## Platform-specific
+    /// - **Android：no-op。** winit Android 后端不实现 `set_enabled_buttons`；
+    ///   Android 没有桌面式标题栏按钮（那三个按钮由系统按 targetSdk 自行决定）。
     /// - Wayland / X11 / Orbital 不支持。
     pub fn set_enabled_buttons(&self, buttons: WindowButtons) {
         self.inner.set_enabled_buttons(buttons);
@@ -1902,7 +1940,7 @@ impl VireoWindow {
     /// - Windows：经 `SetLayeredWindowAttributes`（自动补 `WS_EX_LAYERED` 扩展样式；
     ///   与 `WS_EX_TRANSPARENT` 无关，点击穿透请用 [`VireoWindow::set_cursor_hittest`]）。
     /// - macOS：经 `NSWindow.alphaValue`（需窗口已加入 key window / 已显示，alpha 才生效）。
-    /// - 其他平台：无操作。
+    /// - 其他平台（含 Android）：无操作。
     pub fn set_opacity(&self, opacity: f64) {
         let opacity = opacity.clamp(0.0, 1.0);
         if let Some(hwnd) = crate::platform::windows::win_hwnd(&self.inner) {
@@ -2150,6 +2188,8 @@ impl VireoWindow {
 
     /// 抓取/锁定光标。
     /// ## Platform-specific
+    /// - **Android：no-op。** winit Android 后端不实现光标抓取；触摸设备没有
+    ///   「把指针锁在屏幕内」这个概念。
     /// - macOS 不支持 `Confined`；X11 不支持 `Locked`。
     pub fn set_cursor_grab(&self, mode: CursorGrabMode) -> Result<(), ExternalError> {
         self.inner.set_cursor_grab(mode)
@@ -2177,35 +2217,35 @@ impl VireoWindow {
 
     /// 显示系统窗口菜单（右键标题栏 / Alt+Space 菜单）。
     /// ## Platform-specific
-    /// - **仅 Windows** 支持；其余平台 no-op。
+    /// - **仅 Windows** 支持；其余平台（含 Android）no-op。
     pub fn show_window_menu<P: Into<winit::dpi::Position>>(&self, position: P) {
         self.inner.show_window_menu(position);
     }
 
     /// 设置窗口是否响应光标命中测试（`false` = 鼠标事件穿透窗口）。
     /// ## Platform-specific
-    /// - 仅 Windows / X11 有效；其余平台恒 `NotSupported`。
+    /// - 仅 Windows / X11 有效；其余平台（含 Android）恒 `NotSupported`。
     pub fn set_cursor_hittest(&self, hittest: bool) -> Result<(), ExternalError> {
         self.inner.set_cursor_hittest(hittest)
     }
 
     /// 重置死键状态。切换输入法 / 输入状态后调用，避免后续字符被死键组合。
     /// ## Platform-specific
-    /// - 仅 macOS / Windows 有效；其余平台 no-op。
+    /// - 仅 macOS / Windows 有效；其余平台（含 Android）no-op。
     pub fn reset_dead_keys(&self) {
         self.inner.reset_dead_keys();
     }
 
     /// 窗口背景模糊（毛玻璃）。
     /// ## Platform-specific
-    /// - **仅 Wayland (kwin)** 有效；其余平台 no-op。
+    /// - **仅 Wayland (kwin)** 有效；其余平台（含 Android）no-op。
     pub fn set_blur(&self, blur: bool) {
         self.inner.set_blur(blur);
     }
 
     /// 禁止窗口内容被录屏 / 截屏捕获。
     /// ## Platform-specific
-    /// - **仅 macOS** 有效；其余平台 no-op。
+    /// - **仅 macOS** 有效；其余平台（含 Android）no-op。
     pub fn set_content_protected(&self, protected: bool) {
         self.inner.set_content_protected(protected);
     }
@@ -2250,7 +2290,8 @@ impl VireoWindow {
 
     /// 主显示器。
     /// ## Platform-specific
-    /// - Wayland / Web 恒 `None`。
+    /// - Wayland / Web 恒 `None`。Android 上由 `current_monitor()` 转发 winit，
+    ///   语义可用（多显示器下会随窗口迁移变化）。
     ///
     /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
     /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
@@ -2538,8 +2579,10 @@ impl VireoWindow {
     /// ## Platform-specific
     ///
     /// - **Android：no-op。** 触摸设备没有「鼠标指针」这个概念。
-    ///   桌面的 hover 高亮在移动端应改用 `InputState` 的
-    ///   `InputState::cursor_pressed` / 触摸位置自己判断。
+    ///   桌面的 hover 高亮在移动端应改用触摸状态自己判断 ——
+    ///   轮询 [`Self::touch_count`] / [`Self::touches`]，
+    ///   或用 `on_touch` 回调（注意触摸**不**模拟鼠标按键，
+    ///   [`Self::mouse_left`] 在触摸设备上恒为 `false`）。
     /// - Wayland 上自定义光标图片需要显式提供数据（如 `CursorIcon::from_rgba`），
     ///   系统主题光标不被支持。
     pub fn set_cursor(&self, cursor: winit::window::Cursor) {

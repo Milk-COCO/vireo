@@ -212,6 +212,17 @@
 
 ### Changed / 变更
 
+- **Android 平台限制文档债已清**：所有带 `## Platform-specific` 段的 `pub fn`
+  现在都明确标注了 Android 行为（`window/mod.rs` + `window/desc.rs` 共 47/47）。
+  本轮补齐 `set_resizable`（原本**完全没有**该段）/ `title` / `set_size` /
+  `set_min_size` / `set_max_size` / `focus` / `set_icon` / `set_cursor` /
+  `request_resize`，并在 `WindowDesc` 的字段 + builder 双份标注 `resizable` /
+  `fullscreen` / `maximized` / `icon` / `icon_from_path`。
+  这些 API 在 Android 上是**静默 no-op**（winit Android 后端不实现，
+  无报错无日志）—— 现在文档写明了，附带哪些 Android 上**确实可用**的对照
+  （如 `set_visible` 半生效、`primary_monitor` 可用）。顺带修正一处失效的
+  文档引用（`set_cursor` 指向不存在的 `InputState::cursor_pressed`）。
+  无行为变更。
 - `vireo_macro` 生成的 Android 入口改为 `pub extern "C" fn android_main`
   （原为 Rust ABI 的 `pub fn`；`#[no_mangle]` 本就足够导出，此项是 ABI 正确性改进）。
 - Android 模板补上缺失的 gradle wrapper（`gradlew` / `gradlew.bat` /

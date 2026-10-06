@@ -7,6 +7,11 @@
 
 ## 状态：P0 / P1 / P2 / P3 已全部修复
 
+> **文档债已清（2026-10-06）**：第 2.2 节列的「Android 上静默 no-op 但无文档」
+> 已全部补进 API 的 `## Platform-specific` 段 —— `src/window/mod.rs` + `src/window/desc.rs`
+> 里**所有**带 `## Platform-specific` 段的 `pub fn` 现在都提到 Android
+> （47/47，覆盖率校验过）。补齐的条目见下方「P3 文档债修复记录」。
+
 | 阶段 | 状态 | commit |
 |---|---|---|
 | P0（3 项阻塞级）| ✅ 完成 | `bc0129d` |
@@ -540,3 +545,76 @@ extract mode 下 IME 窗口被设成 `MATCH_PARENT` 吃掉整屏，框架注释�
 
 > 未验：**16 KB 运行时**（当前设备 `PAGE_SIZE=4096`，需 16 KB 模拟器或真机，
 > 用户已决定搁置）、**emoji**（确认无法渲染，见 `TODO.md`）。
+
+---
+
+## 9. P3 文档债修复记录（2026-10-06）
+
+第 2.2 节列的核心问题：`WindowDesc::fullscreen` / `set_fullscreen` /
+`frame_style(Frameless)` / `set_window_level` 等在 Android 是**静默 no-op**
+（winit Android 后端不实现，用户拿不到错误也没有文档提示）。
+
+### 做法：不照抄过期清单，逐个核实当前代码
+
+原清单只列了 4 个 API。实际扫了一遍「所有带 `## Platform-specific` 段的
+`pub fn` 是否提到 Android」，发现两个问题：
+
+1. **清单不完整** —— 另有 6 个 API 也没提（`set_resizable` / `set_icon` /
+   `set_cursor` / `set_title` / `set_visible` / `set_maximized` / `set_minimized`）。
+   其中 `set_resizable` 是**完全没有** `## Platform-specific` 段 —— 它是被
+   清单漏掉的，不是漏了文案。
+2. **清单已过期** —— 第 2.2 节说这些「无文档」，但实际 `set_title` /
+   `set_fullscreen` / `set_maximized` / `set_minimized` / `set_visible` /
+   `set_window_level` / `set_frame_style` / `set_icon` / `set_cursor` 的
+   `## Platform-specific` 段**早已有** Android 说明（应该是后续轮次补的，
+   但第 2.2 节没同步）。所以真正缺的是清单里没点到的那几个。
+
+**教训与本项目此前的模式一致**：报「缺口」前先扫全量 + 读当前代码，
+不要照抄旧清单或凭记忆。前面踩过同样的坑（winit 能力补全那轮，
+凭记忆列了一批 winit 0.30 **不存在**的 API）。
+
+### 本轮补齐的条目
+
+**`VireoWindow`（src/window/mod.rs）**
+
+| API | Android 行为 |
+|---|---|
+| `set_resizable` | no-op（原本**完全没有** `## Platform-specific` 段） |
+| `title` | 返回 `WindowDesc::title` 原值，**不能**用来确认系统显示的标题 |
+| `set_size` | no-op（并注明 `WindowDesc::size` / `dpi_override` 是建窗期的、**有效**，避免混淆） |
+| `set_min_size` / `set_max_size` | no-op |
+| `focus` | no-op（Android 焦点是 Activity / 输入法层面的概念） |
+| `set_icon` | no-op（补：manifest `android:icon` 打包期定） |
+| `set_cursor` | no-op（**修正一处错误引用**：原文写 `InputState::cursor_pressed`，该字段不存在，改为指向 `touch_count` / `touches` / `on_touch`，并说明触摸不模拟鼠标按键） |
+| `set_opacity` / `set_cursor_hittest` / `reset_dead_keys` / `set_blur` / `set_content_protected` | 在「其余平台」里补上 Android（原本只说"其他平台"） |
+| `request_resize` | no-op + **重要补充**：返回值恒 `None`，但这**不代表失败被检出**，只是「永远不生效」 |
+| `primary_monitor` | 明确 Android **可用**（原文只列 Wayland/Web 例外，容易误读成 Android 也不行） |
+
+**`WindowDesc`（src/window/desc.rs）** —— 结构体字段 + builder 双份：
+
+| API | Android 行为 |
+|---|---|
+| `resizable` | winit 忽略，值记下即丢 |
+| `fullscreen` / `maximized` | winit 忽略 |
+| `icon` / `icon_from_path` | winit 忽略；并特别标注 `icon_from_path` 的**文件读取仍会执行**，所以路径错照样 warn，别误当成可用 API |
+| `visible` | 半生效（指回字段文档的 `preparable` 说明） |
+
+字段上也加了 `⚠️` 行内标注 —— 只在 builder 的 doc 里写，字段直接被读时看不到。
+
+### 覆盖率校验
+
+`src/window/mod.rs` + `src/window/desc.rs` + `src/input.rs` + `src/offscreen.rs` +
+`src/texture.rs`：带 `## Platform-specific` 段的 `pub fn` 共 **47 个，
+提到 Android 的 47 个（0 遗漏）**。
+
+未加 `## Platform-specific` 段的 API 没动 —— 那是「本来就没有平台差异」
+的 API，凭空加段反而稀释信号。
+
+### 明确不做
+
+- **不给这些 no-op 加 `log::warn!`**：它们是「平台本来就不支持」，加了每次调用
+  都刷日志。且 `WindowDesc` 的字段被丢弃时甚至拿不到窗口上下文。真要诊断，
+  用户查本文档的表格即可。
+- **不把 no-op 改成 `Result`**：那要动签名（跨全仓 breaking），且语义上是
+  「Android 无此概念」，不是「调用失败」。现有 `Result` 方法（如
+  `set_cursor_hittest`）已经是 `NotSupported` 表达，风格一致。

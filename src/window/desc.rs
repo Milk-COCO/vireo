@@ -168,8 +168,12 @@ pub struct WindowDesc {
     pub position: Option<(Pp, Pp)>,
     /// 父窗口句柄（rwh_06，Windows/X11 子窗口）。`None` = 顶层窗口。
     pub parent_window: Option<SendRawWindowHandle>,
+    /// ⚠️ **Android 上被 winit 忽略**，本字段只是记下来然后丢弃
+    /// （无报错、无告警）。见 [`WindowDesc::resizable`]。
     pub resizable: bool,
+    /// ⚠️ **Android 上被 winit 忽略**。见 [`WindowDesc::fullscreen`]。
     pub fullscreen: Option<Fullscreen>,
+    /// ⚠️ **Android 上被 winit 忽略**。见 [`WindowDesc::maximized`]。
     pub maximized: bool,
     /// 建窗期是否可见。默认 `true`。
     ///
@@ -319,21 +323,48 @@ impl WindowDesc {
         self
     }
 
+    /// 建窗期是否允许用户调整窗口大小。默认 `true`。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：无效果。** winit Android 后端不实现 `with_resizable`，
+    ///   本 builder 只是把值记下来然后丢弃，不报错也不告警。移动端的窗口尺寸
+    ///   由 Activity 主题与系统决定，vireo 无法表达「禁止调整大小」。
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.resizable = resizable;
         self
     }
 
+    /// 建窗期是否全屏。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：无效果。** winit Android 后端不实现 `with_fullscreen`；
+    ///   且 Android Activity 本来就是全屏的。沉浸式（隐藏系统栏）请用
+    ///   [`crate::platform::android::WindowExtAndroid::set_system_bars`]。
     pub fn fullscreen(mut self, fullscreen: Fullscreen) -> Self {
         self.fullscreen = Some(fullscreen);
         self
     }
 
+    /// 建窗期是否最大化。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：无效果。** winit Android 后端忽略 `with_maximized`。
+    /// - 多数 Linux WM / macOS 的最大化由窗口管理器决定，可能被用户主题忽略；
+    ///   验证方式：运行后读 [`crate::VireoWindow::is_maximized`]。
     pub fn maximized(mut self, maximized: bool) -> Self {
         self.maximized = maximized;
         self
     }
 
+    /// 建窗期是否可见。默认 `true`。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：半生效**，见字段文档 [`Self::visible`]（winit 忽略
+    ///   `with_visible`，vireo 改走 `preparable` 路径）。
     pub fn visible(mut self, visible: bool) -> Self {
         self.visible = visible;
         self
@@ -365,6 +396,13 @@ impl WindowDesc {
 
     /// 设置窗口图标（最高优先级；不设则用库内置 vireo logo，与启动目录无关）。
     /// 任务栏图标另见 `vireo::platform::windows::WindowExtWindows::set_taskbar_icon`。
+    /// 建窗期窗口图标。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：无效果。** winit Android 后端忽略 `with_window_icon`；
+    ///   应用图标是**打包期** manifest 的 `android:icon`（res/mipmap 资源），
+    ///   启动器 / 任务栏 / 最近任务用的是那一张。运行时改不了。
     pub fn icon(mut self, icon: Icon) -> Self {
         self.window_icon = Some(icon);
         self
@@ -372,6 +410,11 @@ impl WindowDesc {
 
     /// 从图片文件加载窗口图标（PNG/JPG/BMP）。任一步失败（读文件/解码/
     /// `Icon` 构造）则打 `log::warn!` 并保持原图标不变。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：无效果**（同 [`Self::icon`]）—— 但**文件读取仍会执行**，
+    ///   所以路径错误依然会打 `log::warn!`，别把它当成 Android 上的可用 API。
     pub fn icon_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
         let path = path.as_ref();
         match std::fs::read(path)
