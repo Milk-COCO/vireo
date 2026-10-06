@@ -404,6 +404,23 @@ async fn main(app: App) {
             life.stopped.load(Ordering::Relaxed),
             life.destroyed.load(Ordering::Relaxed),
         ));
+        // 真实刷新率（Android 专用）。音游判定校准必须用它 —— winit 在 Android 上
+        // 给不出这个值（`video_modes()` 返回硬编码的 60Hz），详见
+        // `WindowExtAndroid::display_refresh_rate` 的文档。
+        //
+        // ⚠️ 这是【同步 JNI 查询】不是缓存读，别放进每帧热路径；这里每帧重读
+        // 是为了演示 DRR 设备上刷新率会变（真实项目在 init + on_resumed 读）。
+        #[cfg(target_os = "android")]
+        {
+            use vireo::platform::android::WindowExtAndroid;
+            hud.push_str(&format!(
+                "refresh {}\n",
+                match win.display_refresh_rate() {
+                    Some(h) => format!("{h:.1} Hz"),
+                    None => "N/A".to_string(),
+                }
+            ));
+        }
         hud.push_str(&format!(
             "gate    auto={} bg={} auto_frames={}\n",
             if ctx.app().auto_pause() { "ON " } else { "off" },

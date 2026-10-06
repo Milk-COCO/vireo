@@ -152,6 +152,12 @@ pub(crate) enum JniErr {
     Null(&'static str),
     NoActivity,
     Unsupported(&'static str),
+    /// Java 侧成功返回了，但值在语义上不可用（负数 / NaN / 非正）。
+    ///
+    /// 单独一类而不是复用 [`Self::Java`]：这类**没有异常**，日志里要能一眼看出
+    /// 是「值不对」而不是「调用失败」—— 排查方向完全不同（前者看 ROM 行为，
+    /// 后者看签名/类名）。
+    BadValue(&'static str, f64),
 }
 
 impl From<jni::errors::Error> for JniErr {
@@ -167,6 +173,7 @@ impl core::fmt::Debug for JniErr {
             Self::Null(what) => write!(f, "null java object: {what}"),
             Self::NoActivity => write!(f, "android activity unavailable"),
             Self::Unsupported(what) => write!(f, "unsupported on this api level: {what}"),
+            Self::BadValue(what, v) => write!(f, "{what} returned unusable value {v}"),
         }
     }
 }
@@ -618,6 +625,61 @@ pub trait WindowExtAndroid {
     /// [`set_display_cutout_mode`](Self::set_display_cutout_mode)。
     fn cutouts(&self) -> Vec<Rect>;
 
+    /// **显示器的实际刷新率**（Hz），取不到时 `None`。
+    ///
+    /// # 为什么需要这个（而不能直接问 winit）
+    ///
+    /// winit Android 后端的 `MonitorHandle::refresh_rate_millihertz()` 是
+    /// **写死的 `None`**：
+    ///
+    /// ```text
+    /// winit-0.30.13/src/platform_impl/android/mod.rs:1099
+    ///     pub fn refresh_rate_millihertz(&self) -> Option<u32> {
+    ///         // FIXME no way to get real refresh rate for now.
+    ///         None
+    ///     }
+    /// ```
+    ///
+    /// 而它的 `video_modes()` 更糟 —— 返回一个**硬编码的假值**：
+    ///
+    /// ```text
+    /// 同文件 :1104-1111
+    ///     // FIXME this is not the real refresh rate
+    ///     std::iter::once(VideoModeHandle { refresh_rate_millihertz: 60000, .. })
+    /// ```
+    ///
+    /// ⚠️ **别用 `video_modes()` 拿刷新率**：`VideoModeHandle` 已 re-export 进
+    /// prelude（`vireo::VideoModeHandle`），任何用户都能调到，然后在 90Hz / 120Hz
+    /// 手机上拿到**恒定的 60**。这类 bug 极难排查 —— 画面「差不多对」，只是判定
+    /// 系统性偏早/偏晚。
+    ///
+    /// 本方法走 Android 官方 API `Display.getRefreshRate()`（API 17+，
+    /// `minSdk = 31` 无需分档），是唯一能拿到真实值 的路子。
+    ///
+    /// # 用途与陷阱
+    ///
+    /// 音游的判定校准 / 时基对齐需要它。⚠️ **动态刷新率（DRR）设备上这个值会变**：
+    /// Android 上 60/90/120Hz 自适应很常见，且系统可能在中途切档（省电策略、
+    /// 内容适配）。所以：
+    ///
+    /// - 它是**当前**刷新率，不是设备上限。要「最高多少 Hz」得问
+    ///   `Display.getSupportedModes()`（本方法不提供）；
+    /// - **不要**在启动时读一次就永久缓存 —— 需要周期性复查，或至少在
+    ///   [`App::on_resumed`](crate::App::on_resumed) 时重新读。
+    ///
+    /// # 与桌面 API 的关系
+    ///
+    /// 桌面上等价信息是 `VireoWindow::current_monitor()` →
+    /// `refresh_rate_millihertz()`（winit 实测可用）。本方法是 Android 专用，
+    /// 因为只有这里 winit 拿不到。**跨平台代码请按平台分支**，别假设
+    /// `current_monitor()` 那条路在移动端也能用。
+    ///
+    /// # 线程
+    ///
+    /// 经 JNI 同步查询（含一次跨线程 attach），**不是**「不阻塞」的缓存读。
+    /// 每帧调用不合适；典型用法是初始化时 + 恢复时各读一次。
+    fn display_refresh_rate(&self) -> Option<f32>;
+
     // ---- 系统栏 ----
 
     /// 设置要**隐藏**哪些系统栏（集合外的保持系统默认可见）。
@@ -883,6 +945,63 @@ impl WindowExtAndroid for VireoWindow {
             Err(e) => {
                 warn_getter::<()>("cutouts", e);
                 Vec::new()
+            }
+        }
+    }
+
+    /// `Window.getWindowManager().getDefaultDisplay().getRefreshRate()`
+    ///
+    /// = Godot `DisplayServer.screen_get_refresh_rate()` / Unity
+    /// `Screen.currentResolution.refreshRateRatio`
+    ///
+    /// 为什么不用 `Activity.getWindow().getDecorView()` 那条路：`Display` 是从
+    /// `WindowManager` 拿的（`Context.getSystemService(WINDOW_SERVICE)` → 再
+    /// `getDefaultDisplay()`），DecorView 上没有这个方法。
+    ///
+    /// API 17+，`minSdk = 31` 无需分档。
+    fn display_refresh_rate(&self) -> Option<f32> {
+        let app = self.android_app().ok()?;
+        let res: JRes<f32> = with_activity(app, |env, activity| {
+            let service_name = env.new_string("window")?;
+            let window_manager = env
+                .call_method(
+                    activity,
+                    jni_str!("getSystemService"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                    &[jni::objects::JValue::Object(&service_name)],
+                )?
+                .l()?;
+            if window_manager.is_null() {
+                return Err(JniErr::Null("Context.getSystemService(window)"));
+            }
+            let display = env
+                .call_method(
+                    &window_manager,
+                    jni_str!("getDefaultDisplay"),
+                    jni_sig!("()Landroid/view/Display;"),
+                    &[],
+                )?
+                .l()?;
+            if display.is_null() {
+                return Err(JniErr::Null("WindowManager.getDefaultDisplay"));
+            }
+            let hz = env
+                .call_method(&display, jni_str!("getRefreshRate"), jni_sig!("()F"), &[])?
+                .f()?;
+            // ⚠️ 防御性过滤。`Display.getRefreshRate()` 契约上返回 > 0，但部分 ROM
+            // 在 Display 尚未 ready（早期启动 / 折叠屏展开中）会返回 0.0f。
+            // 放行 0 会让用户的判定校准算出「无限长的一帧」—— 必须当无效。
+            if !(hz.is_finite() && hz > 0.0) {
+                return Err(JniErr::BadValue("getRefreshRate", hz as f64));
+            }
+            Ok(hz)
+        });
+        // 复用既有 getter 风格：一条 warn + None（与 cutouts / orientation 一致）。
+        match res {
+            Ok(hz) => Some(hz),
+            Err(e) => {
+                warn_getter::<()>("display_refresh_rate", e);
+                None
             }
         }
     }
