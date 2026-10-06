@@ -16,6 +16,34 @@ use crate::platform::windows::win_hwnd;
 use crate::render::Renderer;
 use crate::window::{FrameStyle, WindowDesc, WinitEvent};
 
+/// `window_callbacks` 槽位上限 —— 只防「无效 WindowIndex 撑爆内存」这一种情况。
+///
+/// handle 来自 `App::next_handle` 单调分配，正常运行期窗口数远小于此。
+/// 回调注册走 `cb_tx`、建窗走 `create_tx`，**两个独立 channel 无顺序保证**，
+/// 所以回调可能先于建窗到达；到达时槽还不存在，我们**按 handle 提前建槽**
+/// （见 `about_to_wait` 里 drain `cb_rx` 的处理），这才是符合语义的修复 —— 回调
+/// 本来就只依赖 handle，不依赖窗口对象是否已创建。
+pub(crate) const MAX_CALLBACK_SLOTS: usize = 4096;
+
+/// 确保 `window_callbacks` 存在 `handle` 槽；返回 `false` 表示 handle 越界、
+/// 该注册应被丢弃。
+///
+/// 抽出独立函数是为了能脱离 EventLoop 做单测 —— drain 本身要 winit 事件循环，
+/// `cargo test --lib` 里跑不起来。
+pub(crate) fn ensure_callback_slot(
+    slots: &mut Vec<crate::input::InputCallbacks>,
+    handle: usize,
+) -> bool {
+    if slots.len() > handle {
+        return true; // 槽已存在
+    }
+    if handle >= MAX_CALLBACK_SLOTS {
+        return false; // 无效 WindowIndex，不扩容（否则一次误传就能吃掉 GB 内存）
+    }
+    slots.resize_with(handle + 1, crate::input::InputCallbacks::default);
+    true
+}
+
 /// winit 事件循环宿主（Runner）：运行在 OS 主线程上，负责创建窗口和转发事件。
 pub struct Runner {
     event_tx: mpsc::Sender<WinitEvent>,
@@ -335,6 +363,30 @@ impl ApplicationHandler for Runner {
             }
         }
         while let Ok((handle, mut reg)) = self.cb_rx.try_recv() {
+            // 回调注册**不要求窗口已存在** —— 它只是往「handle 槽」里追加闭包，
+            // 和窗口对象何时被创建无关。所以槽缺失时要**在这里建**，不能当成错误。
+            //
+            // 为什么必须建（实测必现的竞态，不是理论问题）：
+            //   `App::window()` 走 `create_tx`，而 `App::on_*()` 走 `cb_tx`
+            //   —— **两个独立 channel，跨 channel 没有顺序保证**。于是一轮
+            //   `about_to_wait` 里完全可能：先 drain `create_rx` 时创建请求还没进
+            //   （此刻 len=0），紧接着 drain `cb_rx` 却已收到回调 → 旧代码
+            //   `get_mut(handle)` 返回 `None` → **整个注册被静默丢弃，零日志**。
+            //   Android 的跨线程入口（用户 main 在 8347、winit 在 8335）下
+            //   `app.on_touch(idx, ..)` 写在 `app.run(..)` 之前必丢，已实测确认。
+            //
+            // 提前建槽是安全的：`window_callbacks` 只增不减（窗口关闭也不截断，
+            // 见本文件 `create_window` 是唯一的扩容点）。
+            if !ensure_callback_slot(&mut self.window_callbacks, handle) {
+                // 防无效 WindowIndex 撑爆内存（handle 是 App 单调分配的
+                // `next_handle`，正常远小于此上限）。
+                ::log::warn!(
+                    "vireo: dropping on_* registration for handle {handle}: \
+                     exceeds MAX_CALLBACK_SLOTS ({MAX_CALLBACK_SLOTS}); \
+                     该 WindowIndex 很可能无效（窗口未创建或已关闭）"
+                );
+                continue;
+            }
             if let Some(cbs) = self.window_callbacks.get_mut(handle) {
                 cbs.on_key_down.append(&mut reg.on_key_down);
                 cbs.on_key_up.append(&mut reg.on_key_up);
@@ -682,5 +734,68 @@ pub(crate) fn run_blocking(
     match supervisor.join() {
         Ok(()) => Ok(()),
         Err(payload) => Err(panic_payload_to_string(payload).into()),
+    }
+}
+
+#[cfg(test)]
+mod callback_slot_tests {
+    use super::{MAX_CALLBACK_SLOTS, ensure_callback_slot};
+
+    /// 核心回归：`app.on_*(idx, ..)` 写在 `app.window()` 之后但**窗口尚未创建**时
+    /// （即回调先于建窗到达），槽必须被建出来而不是被静默丢弃。
+    ///
+    /// 这不是理论场景 —— Android 跨线程入口下 `App::window()` 走 `create_tx`、
+    /// `on_*` 走 `cb_tx`，两个独立 channel 无顺序保证，实测必现。
+    #[test]
+    fn slot_is_created_when_callback_arrives_before_window() {
+        let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
+        assert_eq!(slots.len(), 0, "窗口还没建，此刻无槽");
+        assert!(ensure_callback_slot(&mut slots, 0), "建槽应成功");
+        assert_eq!(slots.len(), 1, "必须为 handle 0 建出槽");
+        assert!(slots.get_mut(0).is_some());
+    }
+
+    #[test]
+    fn slot_sparse_handle_resizes_to_cover_it() {
+        let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
+        assert!(ensure_callback_slot(&mut slots, 5));
+        assert_eq!(slots.len(), 6, "中间的空槽也要建出来（Vec 按 index 寻址）");
+    }
+
+    /// 已有槽**不能**重建 —— 否则会把已注册进去的回调清空
+    /// （`create_window` 与 drain 都会调它，重复调用是常态）。
+    #[test]
+    fn existing_slot_is_not_recreated() {
+        let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
+        assert!(ensure_callback_slot(&mut slots, 0));
+        // 假装有回调被 append 进去（这里只放一个可比较的标记：Vec 里的空回调无法区分，
+        // 所以改为断言「第二次调用后长度不变」，配合下一条的长度语义测试）。
+        let len_after_first = slots.len();
+        assert!(ensure_callback_slot(&mut slots, 0));
+        assert_eq!(slots.len(), len_after_first, "重复建槽不得扩容或截断");
+        // 已经能寻址到 0 号槽，且更小的 handle 同样命中已有区间。
+        assert!(ensure_callback_slot(&mut slots, 0));
+    }
+
+    /// 无效 WindowIndex（用户手传一个从未分配的 index）不得撑爆内存。
+    #[test]
+    fn oversized_handle_is_rejected_without_allocating() {
+        let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
+        assert!(
+            !ensure_callback_slot(&mut slots, MAX_CALLBACK_SLOTS),
+            "越界 handle 必须返回 false 让调用方丢弃"
+        );
+        assert_eq!(slots.len(), 0, "被拒的 handle 不能留下任何分配");
+
+        let huge = usize::MAX / 2;
+        assert!(!ensure_callback_slot(&mut slots, huge));
+        assert_eq!(slots.len(), 0);
+    }
+
+    #[test]
+    fn handle_exactly_at_cap_is_rejected_but_below_passes() {
+        let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
+        assert!(ensure_callback_slot(&mut slots, MAX_CALLBACK_SLOTS - 1));
+        assert!(!ensure_callback_slot(&mut slots, MAX_CALLBACK_SLOTS));
     }
 }

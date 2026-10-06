@@ -468,6 +468,51 @@ async fn main(app: App) { .. }
 
 ---
 
+### ~~触摸只能靠回调，无法轮询~~ ✅ **已完成**（`touches()` / `touch_count()` / `touch_first()` + `TouchPoint`）
+
+原状态：`InputState.touches` 只写不读且 `pub(crate)`，触摸**唯一**读法是 `on_touch`
+回调（在 winit 线程派发，要搬到渲染线程消费），鼠标式命中判定做不了。
+
+- `VireoWindow::touches() -> Vec<TouchPoint>`（按 `id` 升序）/ `touch_count()` /
+  `touch_first()`（与 `touches().first()` 逐位一致）；`TouchPoint { id, pos: PixelPos, force }`
+- 内核抽成 `input::touch_points_sorted` 纯函数（`VireoWindow::new` 需要 device，
+  `cargo test --lib` 构造不出来）+ `dpi::dp_of` / `dp_to_pixel_pos`
+- 单测 4 个：排序 / 逻辑值不被二次缩放 / 空集 / 非正 scale 不产 NaN
+
+**明确不做：让触摸模拟鼠标按键**（用户决定）。`mouse_left()` 在纯触摸设备上恒
+`false` —— 语义边界写进 `window/mod.rs` 的轮询 API 注释块。多指时「谁是鼠标」是主观
+约定，且会与真实鼠标设备行为混淆。
+
+**踩坑（实测）**：轮询是**电平**不是**边沿** —— 手指按住期间每帧都在结果里。按钮
+直接 `if touch_count() > 0 { 动作() }` 会每帧重复触发（实测 true→false→true 乱跳）。
+必须按 `id` 做帧间差分取「本帧新出现」的点。这条已写进 `touches()` 的文档示例和
+`TouchPoint` 的 doc。
+
+### ~~`on_*` 早于 `app.run()` 注册静默失效~~ ✅ **已完成**（host 侧按 handle 提前建槽）
+
+**我犯的错**：先判定根因是「`cb_tx` 只在 `App::run` 里赋值，所以 run 前是 `None`」，
+并据此写下「三个已发布示例键盘全失效」的结论 —— **两个都是错的**。
+
+- `init_run_channels()` 的唯一调用点是 `run_entry`（`app/mod.rs:458`），它
+  `spawn` 用户 main **之前**执行；`#[vireo::main]` 的每个示例都用这条路径，
+  所以 `cb_tx` 在用户代码跑起来时**一直是 `Some`**（诊断日志实测
+  `cb_tx=Some -> send`），桌面示例的键盘从来没失效过。
+- 真正的根因是**跨线程竞态**：`App::window()` 走 `create_tx`、`on_*` 走 `cb_tx`，
+  **两个独立 channel 跨 channel 没有顺序保证**。一轮 `about_to_wait` 里可以先
+  drain `create_rx` 时建窗请求还没进（`window_callbacks.len() == 0`），紧接着
+  drain `cb_rx` 却已收到回调 → `get_mut(handle)` 返回 `None` → **整个注册被静默
+  丢弃，零日志**。Android 入口下用户 main（tid 8347）与 winit（tid 8335）分属
+  不同线程，**必现**。
+
+修法不是 App 侧缓冲（那只是绕开），而是 host 侧按 handle 提前建槽 —— 回调注册本来
+就只依赖 `WindowIndex`（往「handle 槽」追加闭包），与窗口对象何时创建无关。
+`window_callbacks` 只增不减（窗口关闭也不截断），提前建槽安全。
+
+- `ensure_callback_slot` 抽成可测纯函数 + 单测 5 个（含「无效索引不得撑爆内存」
+  的 `MAX_CALLBACK_SLOTS` 上限）
+
+---
+
 ## 非 Android
 
 （暂无）

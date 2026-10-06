@@ -617,8 +617,23 @@ impl App {
         }
     }
 
-    /// 创建窗口（`run` 前同步入队、`run` 中异步发送到 winit 线程）。
-    /// 返回 `WindowIndex`，后续可经 `window_ref` 拿到 `VireoWindow`。
+    /// 创建窗口：把 [`WindowDesc`] 发给 winit 线程**异步**创建（DX12 下 `create_window`
+    /// 里的 `surface.configure` 会等 present queue 排空，所以绝不能在 winit 线程做
+    /// 同步创建再回头发事件）。
+    ///
+    /// 返回 `WindowIndex`；`VireoWindow` 对象要等 winit 线程建完才存在，用
+    /// [`Self::window_ref`] 取 —— **立即**调用会返回 `Err`（窗口还在队列里）。
+    ///
+    /// # 只能在 `#[vireo::main]` / [`App::with_descriptor`] 的用户体内调用
+    ///
+    /// 它依赖 `create_tx`，而该通道由 `run_entry` → `init_run_channels` 建立，
+    /// **早于**你的 `main` 体开始执行。所以「写 `app.window(..)` 在
+    /// `app.run(..)` 之前」是完全正常的（57 个示例都这么写）。
+    ///
+    /// ⚠️ 但如果你**绕过** `#[vireo::main]`、自己 `App::new()` 后直接调本方法，
+    /// `create_tx` 还是 `None`，会命中 `unreachable!` **panic**。
+    /// 换句话说：`App::new()` + 手工驱动事件循环这条路当前不可用，
+    /// 必须走 `#[vireo::main]` / `with_descriptor` / `vireo::platform::android`。
     pub fn window(
         &self,
         mut desc: WindowDesc,

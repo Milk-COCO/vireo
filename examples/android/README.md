@@ -211,8 +211,55 @@ IME_FLAG_NO_FULLSCREEN      | IME_FLAG_NO_EXTRACT_UI | IME_FLAG_NO_ACCESSORY_ACT
 若你自己再除一次 scale，点位会被缩掉 2.8 倍（HyperOS scale=2.8125），
 所有命中判断都失效。
 
-**正解**：用 vireo 提供的坐标（`mouse_pos()` / `on_touch` 回调），它们已统一。
-若手写路径，注意 `mouse_pos` 存**物理**、`TouchEvent` 存**逻辑**。
+**正解**：用 vireo 提供的坐标，它们已统一：
+
+| API | 坐标空间 |
+|---|---|
+| `mouse_pos()` | [`PixelPos`] 双表示（`.physical()` / `.logical()`） |
+| `on_touch` 回调的 [`TouchEvent`] | 逻辑像素 `f32` |
+| `touches()` / `touch_first()` 的 [`TouchPoint`] | [`PixelPos`] 双表示 |
+
+[`TouchPoint`] 的 `pos` 由**逻辑**值现算 `.px`（`dp_of`，`dpi.rs`）—— 不是
+`to_pixel_pos`。这两个方向相反，用错会再除一次 scale，是本项目反复出现的一类 bug
+（见 `input.rs` 里 `touch_logical_to_mouse_pos` 的历史注释）。
+
+### 4.6.1 ⚠️ 触摸**不会**模拟鼠标按键
+
+`mouse_left()` / `mouse_down()` 在纯触摸设备上**恒为 `false`** —— Android 上点击
+只走 `WindowEvent::Touch`，没有 `CursorMoved` / 鼠标按键事件；vireo 只把触摸**位置**
+写进 `mouse_pos`，**不写按键状态**。判断「手指是否按下」只能用：
+
+- **轮询**：`win.touch_count()` / `win.touches()` / `win.touch_first()`
+- **回调**：`app.on_touch(idx, ..)`（在 winit 线程派发）
+
+⚠️ **轮询是「电平」不是「边沿」**：手指按住期间每帧都在结果里。按钮这类
+「按一下触发一次」必须自己按 `id` 差分，否则会每帧重复触发（本例按钮曾
+true→false→true 乱跳）。见 `touches()` 的文档示例。
+
+### 4.6.2 ⚠️ `on_*` 回调**可以在 `app.run(..)` 之前**注册
+
+不需要挪进 run、也不需要标志位防重复注册。回调注册只依赖 `WindowIndex`（往
+「handle 槽」追加闭包），与窗口对象何时创建无关。
+
+早期版本这里必须挪进 run —— 因为 host drain `cb_rx` 时若槽还没建会 `get_mut`
+返回 `None` 而**静默丢弃注册**。根因是 `App::window()` 走 `create_tx`、
+`on_*` 走 `cb_tx`，**两个独立 channel 跨 channel 无顺序保证**，于是一轮
+`about_to_wait` 里可能出现「create 请求还没到（槽 len=0）但 cb 已收到」的窗口。
+Android 的跨线程入口（用户 main 与 winit 分属不同线程）下**必现**。现已改为
+drain 时按 handle 提前建槽（`host::ensure_callback_slot`）。
+
+### 4.6.3 ⚠️ `App::window()` 之后 `window_ref()` 立即调用返回 `Err`
+
+`app.window(desc)` 只是把 `WindowDesc` 发给 winit 线程**异步**创建
+（DX12 的 `surface.configure` 会等 present queue 排空，不能放在 winit 线程同步做）。
+`VireoWindow` 对象要等建完才存在。所以：
+
+```rust
+let idx = app.window(desc, None);
+// ❌ Err：窗口还在队列里
+if let Ok(win) = app.window_ref(&idx) { /* ... */ }
+// ✅ 在 app.run(..) 的闭包里取（首帧可能仍为 Err，用 return true 等下一帧）
+```
 
 ### 4.7 ⚠️ PowerShell 调 `.bat` 会截断含 `.` 的参数
 
@@ -575,8 +622,17 @@ wait  paused_wait=1 until_ok=1
 > 硬件按键喂给 `InputConnection`（logcat 里是 `gti.InputConnection: onKey`），
 > winit 的 `KeyboardInput` 收不到 —— 按键在真机上不可靠。
 >
-> 另：MuMu 上 `adb shell input tap` 注入的触摸**到不了应用**，所以按钮交互在
-> MuMu 上无法自动验证，需真机手动点。
+> **MuMu 上按钮交互可以自动验证**，但要用 `input motionevent` 而不是 `input tap`：
+>
+> ```powershell
+> adb shell input motionevent DOWN <x> <y>   # ⚠️ input tap 注入的坐标是 (0,0)
+> adb shell input motionevent UP   <x> <y>   #    → 命中判断必然落空
+> ```
+>
+> `input tap` 在 MuMu 上**事件能到达**（`TouchPhase::Started` 会触发），只是坐标
+> 丢失成 `(0,0)` —— 早期我误判成「注入事件到不了应用」，实际是坐标问题。
+> 用 `motionevent` 传真实坐标即可（屏幕 3840x2160、app 逻辑 1138x640、
+> scale 3.375；按钮在逻辑 `x 40..340 / y (h-120)..(h-120+64)`）。
 
 ### 想在 logcat 里看生命周期事件
 

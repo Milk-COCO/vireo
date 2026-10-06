@@ -173,21 +173,23 @@ async fn main(app: App) {
     }
     let life = life.clone();
 
-    // 触摸 → 按钮命中判定。Android 上点击只走 Touch 事件，鼠标按键状态恒 false
-    // （详见 run 循环里那段注释），所以必须走 on_touch。
+// 触摸 → 按钮命中判定。Android 上点击只走 Touch 事件，鼠标按键状态恒 false
+    // （详见 run 循环里那段注释）。
     //
-    // ⚠️⚠️ **必须在 `run()` 之后注册**，否则**静默失效**（无任何日志）：
-    // `def_app_ons!` 宏（`src/window/on.rs:25`）是
-    //     if let Some(tx) = self.cb_tx.lock().as_ref() { tx.send(..) }
-    // 而 `cb_tx` 只在 `init_run_channels()`（`src/app/mod.rs:487`）里被赋值 ——
-    // 也就是**进了 run 才有**。在 run 之前调 `app.on_touch(..)` 时它是 `None`，
-    // 整个 send 被跳过，回调凭空消失，连 warn 都不打。
+    // ⚠️ **不能用 `mouse_left()`**：Android 上点击只走 `WindowEvent::Touch`，
+    // **没有** `CursorMoved` / 鼠标按键事件（见 `window/mod.rs` 里「触摸点同时充当
+    // 指针位置」那段注释）。vireo 只把触摸**位置**写进 `mouse_pos`，**不写鼠标
+    // 按键状态** —— 所以 `mouse_left()` 在触摸设备上恒为 `false`。
     //
-    // 我为此连踩两个同类坑：先是 `window_ref(&idx).on_touch(..)`（窗口只是入队，
-    // `window_ref` 返回 `Err`），再是这个「早于 run」。两次都是**静默失效**。
+    // 触摸的两种正确读法（**都不需要**原子标志 + 回调跨线程搬运）：
     //
-    // 回调在 winit 线程派发，故只置原子标志，判定留给渲染线程。
-    let tap_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 1. **轮询（本例采用）** `win.touch_count()` / `win.touch_first()` / `win.touches()`
+    //    —— 渲染线程每帧直接读内部缓存，无跨线程搬运、无回调注册。
+    // 2. **回调** `app.on_touch(idx, ..)` —— 在 winit 线程派发，适合「事件驱动」
+    //    场景（把 Started 记进原子标志，渲染循环消费）。
+    //
+    // 1 和 2 之前只能选 2，因为当时**没有公开的 touch 轮询 API**
+    // （`InputState.touches` 只写不读）。现在有了，两者都能用。
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
@@ -199,40 +201,38 @@ async fn main(app: App) {
         }
     }
 
+// ---- 点左下角按钮：切 auto_pause（轮询触摸状态 + 边沿检测）----------------
+    //
+    // ⚠️ **轮询是「电平」语义，手指按住期间每帧都是 `Some`** —— 直接拿
+    // `if let Some(tp) = win.touch_first()` 判定，会每帧重复触发（实测按钮
+    // true→false→true 乱跳）。按钮要的是「按下那一瞬间」触发一次，所以必须自己
+    // 做**边沿**检测：**本帧出现、上一帧没有**的 touch id = 刚按下的手指。
+    //
+    // 这就是 `touch_*` 轮询 API 与 `on_touch` 回调的本质分工：
+    //   轮询 → 「此刻状态」，边沿要自己差分（省掉回调注册与跨线程搬运）
+    //   回调 → 「事件流」，自带 Started/Ended 边沿，但要搬到渲染线程
+    // 两条路都成立，按场景选。本例用轮询，因为按钮判定需要坐标 + 布局尺寸，
+    // 两样都在渲染线程现成可读。
+    let mut seen_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
     let mut wait_tried = false;
-    let mut touch_registered = false;
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
             Ok(w) => w,
             Err(_) => return true,
         };
 
-        // on_touch 首次注册（见上面「必须在 run 之后注册」的说明）。
-        // 只需一次，用标志位保证不重复注册。
-        if !touch_registered {
-            touch_registered = true;
-            let flag = tap_flag.clone();
-            ctx.app().on_touch(idx, move |t: &vireo::input::TouchEvent| {
-                if t.phase == vireo::input::TouchPhase::Started {
-                    flag.store(true, Ordering::Release);
-                }
-            });
-        }
-
-        // ---- 点左下角按钮：切 auto_pause（对比两条路径）----------------------
-        // ⚠️ **不能用 `mouse_left()`**：Android 上点击只走 `WindowEvent::Touch`，
-        // **没有** `CursorMoved` / 鼠标按键事件（见 `window/mod.rs` 里「触摸点同时
-        // 充当指针位置」那段注释）。vireo 只把触摸位置写进 `mouse_pos`，
-        // **不写鼠标按键状态** —— 所以 `mouse_left()` 在触摸设备上恒为 `false`。
-        // 我第一版就是这么写的，按钮点了没反应。
-        //
-        // 正确做法：用 `on_touch` 回调（在 winit 线程派发）把 `Started` 记进原子
-        // 标志，渲染循环每帧消费。注意 vireo 目前**没有公开的 touch 轮询 API**
-        // （`InputState.touches` 只写不读），所以这是唯一途径。
-        if tap_flag.swap(false, Ordering::AcqRel) {
-            let m = win.mouse_pos().logical();
+        let fresh: Vec<vireo::input::TouchPoint> = {
+            let pts = win.touches();
+            let fresh: Vec<vireo::input::TouchPoint> =
+                pts.iter().copied().filter(|p| !seen_ids.contains(&p.id)).collect();
+            seen_ids = pts.iter().map(|p| p.id).collect();
+            fresh
+        };
+        for tp in fresh {
+            let m = tp.pos.logical();
             // 判定必须与绘制用**同一个**尺寸来源（`layout_size`），否则窗口改尺寸后
-            // 按钮移动而点击区留在原地。`mouse_pos().logical()` 是 f64。
+            // 按钮移动而点击区留在原地。
             let sz = win.layout_size();
             let btn_y = sz.height.dp.0 - 120.0;
             if m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0 {
@@ -244,7 +244,8 @@ async fn main(app: App) {
                 );
             } else {
                 log::info!(
-                    "vireo-android: tap at logical ({:.0}, {:.0})，按钮在 y {:.0}..{:.0}",
+                    "vireo-android: touch#{} at logical ({:.0}, {:.0})，按钮在 y {:.0}..{:.0}",
+                    tp.id,
                     m.0,
                     m.1,
                     btn_y,

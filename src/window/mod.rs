@@ -1294,6 +1294,63 @@ impl VireoWindow {
         glam::camera::rh::proj::opengl::orthographic(0.0, w as f32, h as f32, 0.0, -1.0, 1.0)
     }
 
+    // ------ 触摸状态轮询 API ------
+    //
+    // ⚠️ **触摸不会模拟鼠标按键**：`mouse_left()` / `mouse_down()` 在纯触摸设备上
+    // **恒为 `false`**（Android 上点击只走 `WindowEvent::Touch`，没有
+    // `CursorMoved` / 鼠标按键事件；`mouse_pos()` 会更新，但按键状态不写）。
+    // 要判断「手指是否按下」必须用下面三个方法或 `on_touch` 回调。
+
+    /// 当前活跃触摸点列表，**按 [`TouchPoint::id`] 升序**。
+    ///
+    /// 手指按下即出现，上抬 / 取消即消失（与 [`TouchEvent`] 的 phase 互补，
+    /// 详见 [`TouchPoint`] 的分工表）。桌面无触摸输入时恒为空。
+    ///
+    /// 排序是刻意的：底层是 `HashMap`，迭代顺序随机 —— 不排序会让
+    /// 「取第一个点」类代码每帧拿到不同的手指。
+    ///
+    /// # ⚠️ 这是「电平」不是「边沿」
+    ///
+    /// 手指**按住**期间每帧都会出现在结果里。所以按钮这类「按一下触发一次」的
+    /// 交互不能直接 `if win.touch_count() > 0 { 动作() }` —— 那会每帧重复触发
+    /// （按钮状态会 true→false→true 乱跳）。要么自己在帧间对 `id` 做差分取
+    /// 「本帧新出现」的点，要么改用 [`Self::on_touch`] 回调（自带 `Started` 边沿）。
+    ///
+    /// ```ignore
+    /// let mut seen: std::collections::HashSet<u64> = Default::default();
+    /// let pts = win.touches();
+    /// let fresh: Vec<_> = pts.iter().filter(|p| !seen.contains(&p.id)).copied().collect();
+    /// seen = pts.iter().map(|p| p.id).collect();
+    /// for tp in fresh { /* 只触发一次 */ }
+    /// ```
+    ///
+    /// **不阻塞**：读 vireo 内部缓存，任何线程可调。
+    pub fn touches(&self) -> Vec<crate::input::TouchPoint> {
+        crate::input::touch_points_sorted(&self.input.touches.lock(), self.layout_scale())
+    }
+
+    /// 当前活跃触摸点数量（0 = 没有手指在窗口上）。
+    ///
+    /// 比 [`Self::touches`] 便宜（只取 `len`，不构造 `Vec`、不排序）；
+    /// 只关心「有没有手指按下」时用它。
+    ///
+    /// **不阻塞**：读 vireo 内部缓存，任何线程可调。
+    pub fn touch_count(&self) -> usize {
+        self.input.touches.lock().len()
+    }
+
+    /// `id` 最小的那个活跃触摸点（与 `touches().first()` **逐位一致** ——
+    /// 两者走同一个 [`crate::input::touch_points_sorted`]，一致性由构造保证）。
+    ///
+    /// 多指同时按下时**没有**「主指针」概念 —— 取最小 id 只是**确定性**保证
+    /// （同一帧内稳定），不代表它是最先按下的手指。要「主指针」语义请自行按
+    /// id / 位置 / 时间挑选。
+    pub fn touch_first(&self) -> Option<crate::input::TouchPoint> {
+        crate::input::touch_points_sorted(&self.input.touches.lock(), self.layout_scale())
+            .into_iter()
+            .next()
+    }
+
     /// 获取共享 GPU 上下文
     pub fn gpu(&self) -> &Arc<GpuContext> {
         &self.gpu

@@ -307,6 +307,30 @@ pub(crate) fn to_pixel_pos(x: f64, y: f64, scale: f64) -> PixelPos {
     }
 }
 
+/// 逻辑像素值（已知）+ 当前缩放 → [`Pixel`] 双表示（物理 = 逻辑 × scale）。
+///
+/// [`pixel_of`] 的**逆运算**。两者方向搞错是本项目反复出现的一类 bug
+/// （见 `input::touch_logical_to_mouse_pos` 的历史注释：曾把已除过 scale 的逻辑
+/// 坐标又除了第二遍，`tap(844,551)` 在 scale 2.8125 下变成 `(37.9,24.8)`）。
+///
+/// 什么时候用这个：**输入已经处于逻辑像素空间**时。当前唯一调用点是
+/// `VireoWindow::touches` —— `InputState.touches` 存的是 `map_touch_event`
+/// 产出的逻辑值（那里已 ÷ scale）。
+pub(crate) fn dp_of(v: f64, scale: f64) -> Pixel {
+    Pixel {
+        px: Px(if scale > 0.0 { v * scale } else { v }),
+        dp: Dp(v),
+    }
+}
+
+/// 逻辑像素坐标 → [`PixelPos`] 双表示。
+pub(crate) fn dp_to_pixel_pos(x: f64, y: f64, scale: f64) -> PixelPos {
+    PixelPos {
+        x: dp_of(x, scale),
+        y: dp_of(y, scale),
+    }
+}
+
 /// 物理像素尺寸 → [`PixelSize`] 双表示。
 pub(crate) fn to_pixel_size(w: f64, h: f64, scale: f64) -> PixelSize {
     PixelSize {

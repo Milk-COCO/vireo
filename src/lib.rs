@@ -226,6 +226,7 @@ pub mod prelude {
     pub use crate::input::ScrollDelta;
     pub use crate::input::TouchEvent;
     pub use crate::input::TouchPhase;
+    pub use crate::input::TouchPoint;
 
     pub use crate::app::App;
     pub use crate::window::AntiAliasing;

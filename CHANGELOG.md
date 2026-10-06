@@ -4,6 +4,26 @@
 
 ### Added / 新增
 
+- **触摸状态轮询 API**：`VireoWindow::touches() -> Vec<TouchPoint>` /
+  `touch_count()` / `touch_first()`，以及公开类型 `TouchPoint`
+  （`{ id, pos: PixelPos, force }`）。此前 `InputState.touches` 只写不读，
+  触摸**只能**靠 `on_touch` 回调，鼠标式命中判定做不了。
+  - `touches()` 按 `id` 升序（底层 `HashMap` 迭代顺序随机，不排序会让「取第一个点」
+    每帧拿到不同手指）；`touch_first()` 与 `touches().first()` 逐位一致。
+  - `pos` 用 `PixelPos` 双视图，与 `mouse_pos()` 同构；由逻辑值现算 `.px`
+    （`dpi::dp_of`，**不是** `to_pixel_pos` —— 方向相反，用错会再除一次 scale）。
+  - ⚠️ 轮询是**电平**语义：手指按住期间每帧都在结果里。「按一下触发一次」必须
+    自己按 `id` 差分，或改用 `on_touch` 的 `Started` 边沿。文档内有示例。
+  - 触摸**仍不**模拟鼠标按键：`mouse_left()` 在纯触摸设备上恒为 `false`。
+- **修复** `App::on_*(WindowIndex, ..)` 注册**静默失效**（零日志）：当回调先于
+  窗口创建到达时，host drain `cb_rx` 时 `window_callbacks.get_mut(handle)` 返回
+  `None`，整个注册被丢弃。根因是 `App::window()` 走 `create_tx`、`on_*` 走
+  `cb_tx`，**两个独立 channel 跨 channel 无顺序保证** —— 一轮 `about_to_wait` 里
+  可能「建窗请求还没进（槽 len=0）但回调已到」。Android 的跨线程入口下**必现**
+  （实测 pre-run 的 `app.on_touch(idx, ..)` 全部丢失；此前误判为「`cb_tx` 未就绪」，
+  实际它一直是 `Some`）。现在 drain 时按 handle 提前建槽（回调注册本就只依赖
+  `WindowIndex`，与窗口对象何时创建无关），并对超出 `MAX_CALLBACK_SLOTS` 的
+  无效索引告警丢弃。**`on_*` 现在可以在 `app.run(..)` 之前正常注册。**
 - Android 系统字体扫描可定制：`#[vireo::main(fonts = |c| { .. })]` 宏属性 +
   `vireo::text::android_fonts::configure`（进程级，须在 `App` 构造前调用），
   可追加 `extra_prefixes`（文件名前缀）/ `extra_dirs`（扫描目录）/

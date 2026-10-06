@@ -124,6 +124,69 @@ pub struct TouchEvent {
     pub force: Option<f64>,
 }
 
+/// **当前活跃**的触摸点（轮询用；对应回调见 [`TouchEvent`]）。
+///
+/// 由 [`crate::VireoWindow::touches`] / [`crate::VireoWindow::touch_first`] 返回。
+/// 生命周期与 [`InputState::touches`] 一致：手指按下即出现，上抬 / 取消即消失。
+///
+/// # 与 [`TouchEvent`] 的分工
+///
+/// | | [`TouchEvent`] | [`TouchPoint`] |
+/// |---|---|---|
+/// | 来源 | `on_touch` 回调（winit 线程） | 轮询 getter（任意线程） |
+/// | 含 phase | ✅（含 `Ended` / `Cancelled`） | ❌ **只含活跃点** |
+/// | 用途 | 「这一帧手指抬起/取消了」 | 「此刻有几根手指、按在哪」 |
+///
+/// 终态 phase（抬起/取消）**只存在于回调** —— 轮询看到某点消失时无法区分它是
+/// 正常抬起还是被系统取消；需要这个信息就用回调。
+///
+/// # ⚠️ 轮询是「电平」，不是「边沿」
+///
+/// 手指按住期间它**每帧都在** [`InputState::touches`] 里。所以「按一下触发一次」
+/// 的交互必须自己在帧间对 `id` 做差分（或用回调的 `Started`），
+/// 见 [`crate::VireoWindow::touches`] 的示例。
+///
+/// # 坐标空间
+///
+/// [`Self::pos`] 是 [`PixelPos`] 双表示，与 [`crate::VireoWindow::mouse_pos()`] 同构：
+/// 绘制坐标系里用 `.logical()`，命中测试/屏幕定位用 `.physical()`。
+/// （注意 [`Self::id`] 之外没有隐式单位 —— 和 vireo 其余位置 API 一致，
+/// 坐标意图在调用点通过 `.physical()` / `.logical()` 显式声明。）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TouchPoint {
+    /// 触摸点的唯一标识符（同一根手指在 Started→Moved→Ended 全程不变）。
+    pub id: u64,
+    /// 位置（物理 + 逻辑双表示）。
+    pub pos: crate::dpi::PixelPos,
+    /// 按压力度（0.0 ~ 1.0）；设备不报压力时为 `None`。
+    pub force: Option<f64>,
+}
+
+/// [`InputState::touches`] 快照 → [`TouchPoint`] 列表（按 `id` 升序）。
+///
+/// 抽成独立函数是为了能**脱离 GPU 窗口**做单测 —— `VireoWindow::new` 需要
+/// device/queue，`cargo test --lib` 里构造不出来。
+///
+/// 排序是刻意的：输入是 `HashMap`，迭代顺序随机 —— 不排序会让
+/// 「取第一个点」类代码每帧拿到不同的手指。
+pub(crate) fn touch_points_sorted(
+    map: &HashMap<u64, (f32, f32, Option<f64>)>,
+    scale: f64,
+) -> Vec<TouchPoint> {
+    let mut v: Vec<TouchPoint> = map
+        .iter()
+        .map(|(id, (x, y, force))| TouchPoint {
+            id: *id,
+            // map 里的坐标是 `map_touch_event` 产出的**逻辑**像素（那里已 ÷ scale）
+            // → 必须走 dp→PixelPos 方向，用 `to_pixel_pos` 会再除一次 scale。
+            pos: crate::dpi::dp_to_pixel_pos(*x as f64, *y as f64, scale),
+            force: *force,
+        })
+        .collect();
+    v.sort_unstable_by_key(|p| p.id);
+    v
+}
+
 // ------ InputCallbacks ------
 
 /// 输入事件回调集合（运行在 winit 线程，无需 +Send 约束）。
@@ -486,5 +549,65 @@ mod tests {
     fn touch_to_mouse_pos_scale_zero_does_not_panic() {
         let p = touch_logical_to_mouse_pos(300.0, 150.0, 0.0);
         assert!(p.0.is_finite() && p.1.is_finite(), "不能产生 inf/NaN");
+    }
+
+    // ---- touch_points_sorted（VireoWindow::touches 的可测内核）----
+
+    #[test]
+    fn touch_points_sorted_orders_by_id() {
+        let mut map = HashMap::new();
+        // 故意乱序插入：HashMap 迭代顺序随机，排序必须把它整回来。
+        map.insert(30u64, (3.0f32, 3.0f32, None));
+        map.insert(10, (1.0, 1.0, None));
+        map.insert(20, (2.0, 2.0, Some(0.5)));
+
+        let pts = touch_points_sorted(&map, 1.0);
+        assert_eq!(pts.len(), 3);
+        assert_eq!(
+            pts.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![10, 20, 30],
+            "必须按 id 升序，否则「取第一个」每帧拿到不同手指"
+        );
+        assert_eq!(pts[1].force, Some(0.5));
+        assert_eq!(pts[0].force, None);
+    }
+
+    #[test]
+    fn touch_points_sorted_keeps_logical_and_derives_physical() {
+        // map 里的值是**逻辑**像素（map_touch_event 已 ÷ scale）。
+        let mut map = HashMap::new();
+        map.insert(7u64, (300.0f32, 150.0f32, None));
+
+        let pts = touch_points_sorted(&map, 2.8125);
+        let (lx, ly) = pts[0].pos.logical();
+        let (px, py) = pts[0].pos.physical();
+        assert!((lx - 300.0).abs() < 1e-9, "逻辑值必须原样保留，实得 {lx}");
+        assert!((ly - 150.0).abs() < 1e-9, "逻辑值必须原样保留，实得 {ly}");
+        assert!((px - 843.75).abs() < 1e-6, "物理 = 逻辑 × scale，实得 {px}");
+        assert!(
+            (py - 421.875).abs() < 1e-6,
+            "物理 = 逻辑 × scale，实得 {py}"
+        );
+    }
+
+    #[test]
+    fn touch_points_sorted_empty_map_yields_empty() {
+        let map = HashMap::new();
+        assert!(touch_points_sorted(&map, 2.0).is_empty());
+    }
+
+    #[test]
+    fn touch_points_sorted_scale_non_positive_does_not_panic() {
+        let mut map = HashMap::new();
+        map.insert(1u64, (10.0f32, 20.0f32, None));
+        for s in [0.0f64, -1.0] {
+            let pts = touch_points_sorted(&map, s);
+            assert!(
+                pts[0].pos.physical().0.is_finite() && pts[0].pos.physical().1.is_finite(),
+                "scale={s} 不能产生 inf/NaN"
+            );
+            // 兜底语义与 pixel_of 一致：非正 scale 时 px 直接取输入值。
+            assert!((pts[0].pos.logical().0 - 10.0).abs() < 1e-9);
+        }
     }
 }
