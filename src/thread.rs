@@ -439,29 +439,34 @@ pub(crate) fn run_thread_loop(
                 }
                 break;
             }
-            // ---- 生命周期暂停闸门 --------------------------------------------
+            // ---- 生命周期回调：必须在暂停闸门**之前**判定 ------------------------
             // Android 上 activity 进后台时（winit 不转发 `MainEvent::Pause`，信号由
             // `platform::android_lifecycle` 经 `MainActivity.onPause` 的 JNI 转发送来），
-            // 整条 Thread 停在这里，不再 `drive_loops` —— 也就是不再 `on_tick`、不再
-            // `draw`、不再 acquire/present。切后台时能省下的是**全部** CPU+GPU，
+            // 整条 Thread 会停在下方的闸门里，不再 `drive_loops` —— 不再 `on_tick`、
+            // 不再 `draw`、不再 acquire/present。切后台省下的是**全部** CPU+GPU，
             // 而不只是把帧率调低。
             //
-            // 「触发用户回调」放在恢复之后而不是暂停时：暂停信号来自 UI 线程，
-            // 而用户的回调要在 vireo 自己的线程上跑（要能碰 `App` / `DrawBatch`）。
-            // 于是这里只记代号，等 resumed 时再补发 on_paused —— 见下方 transition。
-            if crate::platform::android_lifecycle::is_paused() {
-                crate::platform::android_lifecycle::wait_while_paused(&state.done);
-                if state.done.load(Ordering::Acquire) || device_lost.load(Ordering::Acquire) {
-                    break;
-                }
-            }
-            // 生命周期状态变化 → 补发回调。多 Thread 各自跟踪代号，
-            // 因此每次变更每个 loop 恰好触发一次。
+            // ⚠️ **顺序不能换**：闸门一旦先执行，渲染线程就在 `wait_while_paused`
+            // 里阻塞到恢复，醒来时 `is_paused()` 已经是 `false` ——
+            // `fire_lifecycle_callbacks` 于是永远走 resumed 分支，
+            // `on_paused` **一次都不会触发**（真机往返实测发现：paused 计数恒 0，
+            // 而 stopped 正常）。所以先判代号、先发回调，再进闸门阻塞。
+            //
+            // 回调要能碰 `App` / `DrawBatch`，不能在 UI 线程的 JNI 回调里跑 —— 这是
+            // 把触发点搬到渲染线程的**原因**；而恢复后补发只是「闸门先跑」这个 bug
+            // 带来的副作用，不是有意设计。
             {
                 let g = crate::platform::android_lifecycle::generation();
                 if g != lifecycle_gen {
                     lifecycle_gen = g;
                     app.inner.fire_lifecycle_callbacks();
+                }
+            }
+            // ---- 生命周期暂停闸门 --------------------------------------------
+            if crate::platform::android_lifecycle::is_paused() {
+                crate::platform::android_lifecycle::wait_while_paused(&state.done);
+                if state.done.load(Ordering::Acquire) || device_lost.load(Ordering::Acquire) {
+                    break;
                 }
             }
             // 内存压力同理：winit/owner 线程只推进代号，回调在渲染线程补发

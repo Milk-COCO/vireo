@@ -23,20 +23,26 @@
 //!
 //! 所以 `onStop` 才是「彻底离开（不可见）」的信号，`onPause` 也包含大量短暂中断。
 //!
-//! # 但 `onStop` **不能**当「离开时立刻干活」的钩子 —— 这是硬约束
+//! # 但 `onStop` **不能**当「离开时立刻干活」的钩子 —— 「是否彻底离开」是**事后**才知道的
 //!
 //! 渲染线程在暂停期间**整体阻塞**（见 `src/thread.rs` 的生命周期闸门：不 `on_tick`、
-//! 不 `draw`、不 acquire/present，为的是把后台的 CPU+GPU 占用降到零）。所以：
+//! 不 `draw`、不 acquire/present，为的是把后台的 CPU+GPU 占用降到零）。加上 Android 的
+//! 顺序是 `onPause → onStop → … → onStart → onResume`，而 `onStart` **紧挨**着
+//! `onResume`、都在渲染线程被唤醒之前跑完，于是：
 //!
 //! - 暂停期间**没有任何用户代码在跑** —— 「离开时立刻保存进度」做不到；
-//! - 用户回调只能**恢复后补发**（`on_paused` 就是这个语义）；
-//! - 恢复后再读 `is_paused()` 已经是 `false`，**信息已丢**。
+//! - 恢复后 `is_paused()` 已经是 `false`，**实时标志也读不出「刚才那次暂停算不算
+//!   彻底离开」**。
 //!
-//! 因此本模块用**锁存** `SAW_STOP` 记住「那次暂停期间发生过 onStop」，让恢复后
-//! 补发的 [`App::on_stopped`](crate::App::on_stopped) 能区分两种暂停 —— 这才是
+//! 因此本模块用**锁存** `SAW_STOP` 记住「那次暂停期间发生过 onStop」，让
+//! [`App::on_stopped`](crate::App::on_stopped) 在恢复时能区分两种暂停 —— 这才是
 //! 本条唯一能兑现的价值。**进程在后台被系统杀掉时不会有任何回调**，
 //! 「离开时持久化」必须由用户在自己的 `MainActivity.onSaveInstanceState` 里做
 //! （见 `TODO.md` 的 `onSaveInstanceState` 条目）。
+//!
+//! （`on_paused` / `on_resumed` 是**实时**的，不依赖锁存：渲染线程在**进入闸门之前**
+//! 先判一次代号，那一刻 `is_paused()` 还是 `true`，所以 `on_paused` 真的会在暂停
+//! 生效时触发。这个顺序是必须的 —— 反过来就永远只走 resumed 分支。）
 //!
 //! # 为什么走「Java 转发」而不是别的办法
 //!
@@ -73,23 +79,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// 进程级「已暂停」标志。由 JNI 回调（UI 线程）写，多线程读。
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
-/// 进程级「已停止」标志（activity **不可见**）。与 `PAUSED` 的区别见模块文档。
-static STOPPED: AtomicBool = AtomicBool::new(false);
-
 /// **锁存**：上一次暂停期间是否发生过 `onStop`。
 ///
-/// # 为什么必须锁存，不能直接读 [`STOPPED`]
+/// # 为什么是锁存，而不是一个「当前是否 stopped」的实时标志
 ///
-/// 渲染线程在暂停期间**整体阻塞**（`src/thread.rs` 的生命周期闸门：不 `on_tick`、
-/// 不 `draw`），只在恢复后才醒来补发回调。而 Android 的回调顺序是
-/// `onPause → onStop → … → onStart → onResume` —— `onStart` 紧挨着 `onResume`，
-/// 两者都在渲染线程被唤醒**之前**就跑完了。
+/// Android 回调顺序是 `onPause → onStop → … → onStart → onResume`，而 `onStart`
+/// **紧挨**着 `onResume`，两者都在渲染线程被唤醒**之前**就跑完。所以：
 ///
-/// 所以渲染线程醒来时读 `STOPPED` 读到的**已经是 false**，直接读会把
-/// 「彻底离开」和「短暂中断」混成同一件事 —— 而这恰恰是本条要解决的核心问题。
+/// - 渲染线程醒来时若读「实时 stopped 标志」，读到的已经是 `false` —— 直接读会把
+///   「彻底离开」和「短暂中断」混成同一件事，而这恰恰是要解决的核心问题；
+/// - 而且实时标志**没有任何地方会把它重置回 `false`**（只有 `onStop` 会置位）。
+///   一旦漏了 reset，它就永久停在 `true`，后续每次 `onStop` 都被「没变化」守卫
+///   吞掉 —— 真机跑第二轮 `on_stopped` 就不触发了，正是这个坑。
 ///
-/// 锁存由 UI 线程写、渲染线程**一次性消费**（[`take_saw_stop`]），消费即清零，
-/// 于是「每个暂停周期恰好上报一次」。
+/// 于是改为**只置位、由渲染线程一次性消费**（[`take_saw_stop`]），消费即清零，
+/// 每个暂停周期恰好上报一次，也不需要 reset。
+///
+/// 至于「当前是否不可见」这个查询，由 [`is_stopped`] **派生**（`已暂停 && 锁存`），
+/// 于是连 reset 路径都不需要存在。
 static SAW_STOP: AtomicBool = AtomicBool::new(false);
 
 /// 生命周期变更代号。每次**真实**状态变化 +1。
@@ -159,9 +166,22 @@ pub fn is_paused() -> bool {
     PAUSED.load(Ordering::Acquire)
 }
 
-/// activity 当前是否**不可见**（`onStop`）。
+/// activity 当前是否**不可见**（`onStop` 状态）。
 ///
-/// 与 [`is_paused`] 的区别（Android 官方语义）：
+/// # 派生量，不是独立标志
+///
+/// `= 已暂停 && 锁存`。Android 保证「不可见 ⊆ 已暂停」（不可见的 activity 一定
+/// 也被暂停），所以这个组合就是「不可见」。这样做的直接好处：**不需要任何 reset
+/// 路径** —— 恢复时 `is_paused()` 变 `false`，`is_stopped()` 自动跟着变 `false`。
+///
+/// 之前有过一个独立的 `STOPPED` 实时标志，但它只有 `onStop` 置位、**没有任何地方
+/// 重置**，于是第一轮之后恒为 `true`，第二轮 `onStop` 被「值没变化」守卫吞掉 ——
+/// 真机跑第二轮 `on_stopped` 不触发才暴露出来。
+///
+/// ⚠️ 在 `onStart` 与 `onResume` 之间（本函数返回 `true` 但窗口已开始恢复）这个极短
+/// 窗口里会略报「不可见」。毫秒级、自愈，且这个阶段应用正在前台，不影响任何决策。
+///
+/// # 与 [`is_paused`] 的区别
 ///
 /// | | `onPause` | `onStop` |
 /// |---|---|---|
@@ -169,18 +189,25 @@ pub fn is_paused() -> bool {
 /// | 半透明弹窗 / 权限对话框盖在上面 | ✅ | ❌ |
 /// | 回桌面 / 切别的 app | ✅ | ✅ |
 ///
-/// 桌面 / macOS 恒为 `false`。
+/// 桌面 / macOS 恒为 `false`（`is_paused()` 恒 `false`，本函数是它的派生量）。
 ///
 /// ⚠️ **恢复后这个值已经翻回 `false`** —— 渲染线程在暂停期间整体阻塞，醒来时
 /// `onStart` 已经跑完。要判断「刚才那次暂停算不算彻底离开」，用
 /// [`App::on_stopped`](crate::App::on_stopped) 回调，不要用这个查询。
 pub fn is_stopped() -> bool {
-    STOPPED.load(Ordering::Acquire)
+    is_paused() && saw_stop()
 }
 
-/// 渲染线程消费锁存：返回「上一次暂停期间是否发生过 `onStop`」并清零。
+/// 非消费地读锁存（给 [`is_stopped`] / 测试用；消费请用 [`take_saw_stop`]）。
+fn saw_stop() -> bool {
+    SAW_STOP.load(Ordering::Acquire)
+}
+
+/// # 渲染线程消费锁存：返回「上一次暂停期间是否发生过 `onStop`」并清零。
 ///
 /// 消费即清零，保证每个暂停周期恰好上报一次。
+///
+/// 调用点在**代号变化时**（与 `on_paused` / `on_resumed` 同一处），即恢复之后。
 pub(crate) fn take_saw_stop() -> bool {
     SAW_STOP.swap(false, Ordering::AcqRel)
 }
@@ -257,9 +284,13 @@ pub extern "system" fn vireo_android_on_resume(
 
 /// JNI 导出：Java `nativeOnStop()` 的实现。
 ///
-/// 与 pause/resume 不同，这个**不**唤醒等待者（`STOPPED` 不参与闸门，闸门只看
-/// `PAUSED`），只写实时标志 + 锁存。锁存是渲染线程醒来后唯一能拿到的信息 —— 详见
-/// `SAW_STOP` 的说明。
+/// 与 pause/resume 不同，这个**不**唤醒等待者（锁存不参与闸门，闸门只看 `PAUSED`），
+/// 只置位 `SAW_STOP`。
+///
+/// 幂等：Android 会在一次暂停里连续多次 `onStop`（分屏、多窗口），重复置位无害 ——
+/// 消费端是「读一次就清零」，不需要调用方去重。
+/// **曾经**在这里按「`STOPPED` 有没有变化」去重，那是错的：那个标志没人重置，
+/// 第二轮的 `onStop` 全被吞掉（真机实测）。
 ///
 /// # Safety
 ///
@@ -270,17 +301,12 @@ pub extern "system" fn vireo_android_on_stop(
     _class: jni::objects::JClass<'_>,
 ) {
     let (m, _cv) = &*WAKE;
-    // 与 set_paused 同纪律：持锁再写。虽然这里不需要 notify，但锁的互斥语义
-    // 让「写 STOPPED」与「写 SAW_STOP」对渲染线程是一次原子可见的操作 ——
-    // take_saw_stop() 只读锁存，不看 STOPPED，但保持同一把锁可避免将来
-    // 有人加读路径时踩到撕裂。
+    // 与 set_paused 同纪律：持锁再写，保证「置位锁存」对随后 take_saw_stop()
+    // 的读取是一次原子可见的操作。
     let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = STOPPED.swap(true, Ordering::AcqRel);
-    if prev != true {
-        // store 只允许 Release/Relaxed/SeqCst —— AcqRel 是编译错误（仅 Android
-        // target 才会编到这段，桌面 `cargo test` 抓不到）。
-        SAW_STOP.store(true, Ordering::Release);
-    }
+    // store 只允许 Release/Relaxed/SeqCst —— AcqRel 是编译错误（仅 Android
+    // target 才会编到这段，桌面 `cargo test` 抓不到）。
+    SAW_STOP.store(true, Ordering::Release);
 }
 
 /// 把 Java 侧的 `nativeOnPause` / `nativeOnResume` / `nativeOnStop` 绑到本模块的
@@ -413,18 +439,16 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 前置：清干净
         let _ = take_saw_stop();
-        let (paused0, stopped0) = (is_paused(), is_stopped());
+        let paused0 = is_paused();
 
         // 模拟「回桌面」：onPause → onStop → … → onStart → onResume
         set_paused(true);
-        STOPPED.store(true, Ordering::Release);
-        SAW_STOP.store(true, Ordering::Release);
-        // onStart + onResume：实时标志已经翻回去了……
-        STOPPED.store(false, Ordering::Release);
+        SAW_STOP.store(true, Ordering::Release); // == vireo_android_on_stop 的行为
+        assert!(is_stopped(), "暂停 + 发生过 onStop ⇒ 不可见");
         set_paused(false);
 
-        // ……但锁存还在，这正是它存在的理由。
-        assert!(!is_stopped(), "恢复后实时标志必须已翻回");
+        // is_stopped() 是「已暂停」的派生量，恢复后自动翻回 —— 不需要任何 reset 路径
+        assert!(!is_stopped(), "恢复后 is_stopped() 必须自动为 false");
         assert!(
             take_saw_stop(),
             "恢复后仍必须能读到「那次暂停发生过 onStop」"
@@ -432,7 +456,25 @@ mod tests {
         assert!(!take_saw_stop(), "锁存消费即清零：同一暂停周期不得重复上报");
 
         set_paused(paused0);
-        STOPPED.store(stopped0, Ordering::Release);
+    }
+
+    /// 回归：第一版按「实时 stopped 标志有没有变化」去重，而那个标志只有 onStop
+    /// 置位、**没有任何地方重置**，于是第一轮之后恒为 `true`，第二轮的 `onStop`
+    /// 全被吞掉。真机实测表现为 `paused=2` 但 `stopped=1`。
+    #[test]
+    fn every_stop_sets_the_latch_regardless_of_previous_state() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_saw_stop();
+        let paused0 = is_paused();
+
+        for round in 1..=2 {
+            set_paused(true);
+            SAW_STOP.store(true, Ordering::Release);
+            set_paused(false);
+            assert!(take_saw_stop(), "round {round}: 锁存必须每次都置位");
+            assert!(!take_saw_stop(), "round {round}: 不得重复上报");
+        }
+        set_paused(paused0);
     }
 
     #[test]
@@ -443,12 +485,13 @@ mod tests {
 
         // 模拟「半透明弹窗盖上来」：只有 onPause/onResume，没有 onStop
         set_paused(true);
+        assert!(
+            !is_stopped(),
+            "没有 onStop 的暂停，activity 仍可见 —— 这正是 on_stopped 存在的意义"
+        );
         set_paused(false);
 
-        assert!(
-            !take_saw_stop(),
-            "没有 onStop 的暂停不得被当成「彻底离开」—— 这正是 on_stopped 存在的意义"
-        );
+        assert!(!take_saw_stop(), "没有 onStop 的暂停不得被当成「彻底离开」");
         set_paused(paused0);
     }
 

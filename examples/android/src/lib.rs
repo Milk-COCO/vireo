@@ -59,24 +59,16 @@ impl From<vireo::platform::android::Insets> for Edges {
 }
 
 /// 生命周期回调计数（HUD 用来肉眼确认 `on_paused` / `on_stopped` 各自触发了几次）。
-#[derive(Default)]
+///
+/// 字段是 `Arc` —— 回调要 `'static`，必须 clone 一份带进闭包，而**计数必须共享**。
+///
+/// 踩过的坑：最初这里是裸 `AtomicU32` + 手写 `Clone`（逐字段复制），结果回调自增的是
+/// **副本**，HUD 读原处恒为 0，看起来像「回调从没触发」。真机验证时只有 logcat 可信，
+/// HUD 计数一度把我引向错误结论。
+#[derive(Clone, Default)]
 struct LifeCounters {
-    paused: std::sync::atomic::AtomicU32,
-    stopped: std::sync::atomic::AtomicU32,
-}
-
-// 回调要 `'static + Send + Sync`，所以手动 clone（两个 AtomicU32 本身 Sync）。
-impl Clone for LifeCounters {
-    fn clone(&self) -> Self {
-        Self {
-            paused: std::sync::atomic::AtomicU32::new(
-                self.paused.load(Ordering::Relaxed),
-            ),
-            stopped: std::sync::atomic::AtomicU32::new(
-                self.stopped.load(Ordering::Relaxed),
-            ),
-        }
-    }
+    paused: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 // `fonts = ...` 在 `App` 构造**之前**求值，这是宏路径下唯一能定制 Android 系统字体
@@ -116,12 +108,14 @@ async fn main(app: App) {
     let idx = app.window(WindowDesc::new("Vireo Android", 1280, 720), None::<fn()>);
 
     // ---- 生命周期：on_paused vs on_stopped ---------------------------------
-    // 两者都在**恢复之后**于渲染线程补发（暂停期间渲染线程整体阻塞，什么都不跑）。
-    // 区别是 on_stopped 只在「那次暂停期间 activity 变得不可见（onStop）」时触发，
-    // 半透明弹窗 / 权限对话框只走 onPause，不走 onStop。
+    // 两者都在**渲染线程**上触发，但时机不同：
+    //   on_paused  —— 暂停生效的那一刻（进暂停闸门阻塞之前）
+    //   on_stopped —— **恢复时**。「这次暂停算不算彻底离开」是事后才知道的
+    //                 （Android 的 onStart 紧跟 onResume，都在渲染线程被唤醒前跑完）
     //
     // 实机验证：adb shell input keyevent 3（HOME）回桌面，再启动回来，
-    // 然后 `adb logcat -d | findstr lifecycle` —— 应看到 paused 与 stopped 各一条。
+    // 然后 `adb logcat -d | findstr lifecycle` —— 应看到 paused 与 stopped 各一条，
+    // 时间戳相差约等于你按 HOME 到回来的间隔。HUD 的 `life` 行也能看计数。
     let life = LifeCounters::default();
     {
         let life = life.clone();
@@ -129,14 +123,14 @@ async fn main(app: App) {
         // 变成 u32，不满足回调要求的 `Fn()`。
         app.on_paused(move || {
             life.paused.fetch_add(1, Ordering::Relaxed);
-            log::info!("vireo-android lifecycle: paused (resume 后补发)");
+            log::info!("vireo-android lifecycle: paused（暂停生效时触发）");
         });
     }
     {
         let life = life.clone();
         app.on_stopped(move || {
             life.stopped.fetch_add(1, Ordering::Relaxed);
-            log::info!("vireo-android lifecycle: stopped = 彻底离开（本次暂停含 onStop）");
+            log::info!("vireo-android lifecycle: stopped = 彻底离开（恢复时消费锁存）");
         });
     }
 

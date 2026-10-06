@@ -176,23 +176,50 @@ Android 回调顺序是 `onPause → onStop → … → onStart → onResume`，
 必须先消费再考虑早退。
 
 #### 验证
-- `cargo test --lib` **293 passed**（+4：锁存跨 resume 仍可读且只报一次、
-  短暂中断不置锁存、连续多次 onStop 只报一次、桌面恒 `false`）
+- `cargo test --lib` **294 passed**（+5：锁存跨 resume 仍可读且只报一次 /
+  **每次 onStop 都置位（回归）** / 短暂中断不置锁存且 `is_stopped()` 为 false /
+  连续多次 onStop 只报一次 / 桌面恒 `false`）
 - `cargo ndk -t arm64-v8a` / `-t x86_64` `check --lib` 通过
 - `gradlew assembleDebug '-PndkVersion=28.2.13676358'` BUILD SUCCESSFUL
-- ⚠️ **真机 Home 键往返未验证**：验证进行到一半，两台 MuMu 的 adb 连接开始无响应
-  （`adb shell echo` 都超时；`screencap` 早一步就已失灵，而它在本次会话早些时候是好的）。
-  判定为模拟器侧故障，与本次改动无关（`force-stop` 应用后仍挂）。**JNI 绑定与 Java
-  override 这一段尚无真机证据**，恢复后需补：`adb shell input keyevent 3` 回桌面
-  → 重新启动 → `adb logcat -d | findstr lifecycle`，应看到 paused 与 stopped 各一条。
+- **MuMu 实机**（Android 15 / x86_64）：`adb shell input keyevent 3`（HOME）往返
+  **3 轮**，logcat 恰好 6 条（每轮 paused + stopped 各一条），HUD `paused=3 stopped=3`
+  与之一致。时间戳形态也印证设计：paused 在暂停生效时、stopped 在恢复时，
+  两者相隔约等于 HOME 到回来的间隔。
+- 中途踩到一次 gradle 增量状态损坏（`mergeDebugJniLibFolders\merger.xml` 内容
+  无法解析），是先前构建被中断留下的；删掉该目录即可，不必 `clean`。
 
-#### 踩坑（三处只有 Android target 才编到，桌面 `cargo test` 全绿）
-1. `jni_str!` 宏**要求字面量**，不能传 `const` 标识符 → 绑定表只能写字面量，与常量
-   脱钩；加 `JAVA_NAMES_MATCH_LITERALS` 编译期断言钉住（`PartialEq` 在 const 里还没
-   稳定，自己写了 `const fn bytes_eq` 逐字节比）。
-2. `AtomicBool::store` **不接受** `Acquire` / `AcqRel`（只有 `swap` 接受）。
-3. `LifecycleCbs` 从 2 元组变 3 元组后 `cbs.0/.1/.2` 只能靠记忆区分 → 改具名字段
-   结构体（`pub(crate)`，无 API 影响）。
+#### 真机验证抓到的两个 bug（单测和桌面编译都抓不到）
+
+1. **`App::on_paused` 在 Android 上从来就没触发过**（既有 bug，非本轮引入）。
+   `thread.rs` 里生命周期闸门在**代号检查之前**：渲染线程进闸门后阻塞到恢复，
+   醒来时 `is_paused()` 已是 `false`，`fire_lifecycle_callbacks` 于是永远走
+   resumed 分支。**修法**：把代号检查移到闸门**之前** —— 先判代号、先发回调，
+   再进闸门阻塞。那一刻 `is_paused()` 还是 `true`，`on_paused` 真的会在暂停生效时
+   触发。文档里「恢复后补发」的说法是这个 bug 的副作用，不是有意设计，已一并改掉。
+2. **`STOPPED` 实时标志只有 `onStop` 置位、没有任何地方重置**。于是 `on_stop` 里
+   「值没变化就不重复置锁存」的守卫在第一轮之后就恒为假 —— 第二轮的 `onStop` 全被
+   吞掉（实测 `paused=2` 但 `stopped=1`）。**修法**：删掉 `STOPPED`，
+   `is_stopped()` 改为**派生量** `已暂停 && 锁存`。Android 保证「不可见 ⊆ 已暂停」，
+   于是这个组合就是「不可见」，而且恢复时 `is_paused()` 变 false 就自动翻回 ——
+   **根本不存在需要忘记的 reset 路径**。`on_stop` 也随之改为无条件置位（幂等，
+   重复 `onStop` 无害）。
+
+   教训：「只有 set、没有 clear」的标志是这类 bug 的温床。凡是能派生出所需语义的
+   场合，就不要引入独立标志。
+
+#### 踩坑
+- **我的示例代码自己有个 `Arc` bug**：生命周期计数器用了裸 `AtomicU32` + 手写
+  `Clone`（逐字段复制），回调自增的是**副本**，HUD 读原处恒为 0。这让我一度
+  误判「回调从没触发」。真机验证时 **logcat 才可信**，HUD 计数在修好之前是假信号。
+- 三处只有 Android target 才编到，桌面 `cargo test` 全绿：
+  1. `jni_str!` 宏**要求字面量**，不能传 `const` 标识符 → 绑定表只能写字面量，与
+     `JAVA_METHOD_*` 常量脱钩。加 `JAVA_NAMES_MATCH_LITERALS` 编译期断言钉住
+     （`PartialEq` 在 const 里未稳定，自己写了 `const fn bytes_eq` 逐字节比）。
+  2. `AtomicBool::store` **不接受** `Acquire` / `AcqRel`（只有 `swap` 接受）。
+  3. `LifecycleCbs` 从 2 元组变 3 元组后 `cbs.0/.1/.2` 只能靠记忆区分 → 改具名
+     字段结构体。
+- 示例里 `move || atomic.fetch_add(1, ..)` 不满足 `Fn() -> ()`（fetch_add 返回
+  u32）→ 必须写花括号语句块。模板是独立 package，`log` 也得自己加进 Cargo.toml。
 
 ---
 

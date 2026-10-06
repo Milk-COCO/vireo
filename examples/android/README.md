@@ -455,17 +455,28 @@ app.on_stopped(|| mark_really_left());  // 只在「本次暂停含 onStop」时
 `nativeOnStop` 是**可选**的：不声明 / 不调用只是 `on_stopped` 永不触发，
 其它生命周期行为不受影响。
 
-四点注意：
+两点注意：
 
-1. **回调在「恢复时」才触发**，因为回调要能碰 `App`，不能在 UI 线程的 JNI 回调里跑。
-   所以「暂停瞬间要做的紧急收尾」请写在 `on_tick` 里判 `is_paused()`。
-2. **`onPause` 对短暂中断也触发**（锁屏、部分弹窗、分屏切换）—— 和 Unity
-   `OnApplicationPause` 同样的语义。要区分就用 `on_stopped`。
-3. **没照抄这段也能跑**，只是退化成旧行为（后台仍全速）+ logcat 一条 warn。
-4. ⚠️ **它不能替代 `onSaveInstanceState`**：正因为回调在恢复后才发，
+1. **回调在「恢复时」才触发**。暂停信号来自 UI 线程，而回调要能碰 `App` /
+   `DrawBatch`，所以不能直接在 JNI 回调里跑；但 Android 的 `onStart` 紧跟
+   `onResume`，都在渲染线程被唤醒之前跑完 —— 等到能安全跑用户代码时，
+   「这次暂停算不算彻底离开」才刚被确定。所以本回调必然是恢复后补发。
+2. **没照抄这段也能跑**，只是退化成旧行为（后台仍全速）+ logcat 一条 warn。
+3. ⚠️ **它不能替代 `onSaveInstanceState`**：正因为回调在恢复后才发，
    **进程在后台被系统杀掉时，vireo 侧一个回调都不会触发**。要保游戏状态，
    在你自己的 `MainActivity.java` 里 override `onSaveInstanceState(Bundle)`
    存起来（见下）。
+
+### 实机自测
+
+```bash
+adb shell input keyevent 3        # HOME 回桌面
+adb shell am start -n com.example.vireoandroid/.MainActivity
+adb logcat -d | findstr lifecycle # 应有 paused 与 stopped 各一条
+```
+
+模板的 HUD 上还有一行 `life paused=N stopped=N`，多跑几轮就能看出计数是否
+一一对应（`paused` 与 `stopped` 应当同步递增）。
 
 ### 想在 logcat 里看生命周期事件
 

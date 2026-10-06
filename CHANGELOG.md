@@ -15,9 +15,13 @@
   `android_lifecycle::is_stopped()`。只对「暂停期间 activity 变得不可见」的
   暂停触发，用来区分「半透明弹窗 / 权限对话框」这类短暂中断与「回桌面 / 锁屏」
   这类彻底离开（`onPause` 两者都触发）。
-  与 `on_paused` 同样在**恢复后**于渲染线程补发 —— 渲染线程在暂停期间整体阻塞，
-  「离开时立刻保存进度」做不到，那必须走用户自己的 `onSaveInstanceState`。
+  `is_stopped()` 是「已暂停 && 本次暂停发生过 onStop」的派生量，恢复后自动翻回。
   Android `onStop` lifecycle: distinguish a brief interruption from a real departure.
+- **修复** Android 上 `App::on_paused` **从不触发**：渲染线程的生命周期闸门排在
+  代号检查之前，进闸门后阻塞到恢复，醒来时 `is_paused()` 已是 `false`，回调于是
+  永远走 resumed 分支。现改为先判代号、先发回调、再进闸门 —— `on_paused` 在暂停
+  生效时触发。
+  Fixed `App::on_paused` never firing on Android (gate ran before the generation check).
 - GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
   （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
   GPU particle path: baked spawn params + VS integration over `camera.time`.
