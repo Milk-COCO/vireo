@@ -782,6 +782,8 @@ mod tests {
     #[test]
     fn desktop_never_reports_paused() {
         // 桌面没有 Activity 生命周期，必须恒 false，否则渲染线程会永久停摆。
+        // 读的是派生量 `PAUSED`，并发测试会中途翻它 → 必须与改写方互斥。
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !cfg!(target_os = "android") {
             assert!(!is_paused());
         }
@@ -789,6 +791,7 @@ mod tests {
 
     #[test]
     fn desktop_never_reports_stopped() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !cfg!(target_os = "android") {
             assert!(!is_stopped());
         }
@@ -797,6 +800,7 @@ mod tests {
     #[test]
     fn desktop_never_reports_back_requested() {
         // 桌面有 WindowEvent::CloseRequested（Android 没有），所以桌面不该走这条路径。
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !cfg!(target_os = "android") {
             assert!(!back_requested());
         }
@@ -806,6 +810,7 @@ mod tests {
     fn set_paused_bumps_generation_only_on_real_change() {
         // 渲染线程用代号判断要不要触发用户回调。部分 ROM 会连续多次 onPause，
         // 若每次都 bump，用户回调会被重复触发。
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let g0 = generation();
         let was = is_paused();
         set_paused(was); // 无变化
