@@ -515,6 +515,63 @@ async fn main(app: App) { .. }
 
 ---
 
+### ~~随包资源读不到 / 没有可写目录~~ ✅ **已完成**（`Assets` + 三个目录，2026-10-06）
+
+安卓的「文件」有三个互不相通的世界，此前 vireo 一条都没覆盖：
+
+| 世界 | 路径形态 | 本轮 |
+|---|---|---|
+| APK 内 | 不是路径，是 zip 里一项 | `App::assets()` → `AssetManager` |
+| 内部私有 | `/data/user/0/<包名>/files` | `App::data_dir()` |
+| 外部 app 专属 | `/storage/emulated/0/Android/data/<包名>/files` | `App::external_data_dir()` |
+
+- **读**：`App::assets().read/exists/list` + `load_texture_asset` / `load_font_asset` /
+  `WindowDesc::icon_from_asset`。桌面用 `set_asset_root` 指根目录，**同一份代码**两端通用。
+- **写**：`data_dir` / `cache_dir` / `external_data_dir`，桌面按 XDG / APPDATA 标准目录。
+- 桌面 `WindowDesc::icon_from_path` / `load_texture` / `load_font_file` 语义**完全不变**
+  （纯 `std::fs`），不做「相对路径自动回退 assets」—— 那会让同一份代码在两个平台上
+  资源来源不同且不报错。
+- 示例 `examples/resource_io`；assets 脚手架 `examples/assets/` 与
+  `examples/android/src/main/assets/`（两份内容一致）。
+
+### SAF（系统文件选择器）：**本轮不做**，用户决定（2026-10-06）
+
+要「让用户自己选位置存/取」必须走 SAF。已查证的前提事实：
+
+- `android-activity 0.6` 与 `ndk 0.9` **都没有** Intent 启动 / Activity Result API
+  （逐条搜过 `startActivity` / `ActivityResult` / `Intent`，零命中）。
+- 要做需在**用户项目的 `MainActivity.java`** 里写 `registerForActivityResult`，
+  再经 JNI 把结果回传 Rust（可套用模板现有的 `nativeTakeBackConsumed` 轮询模式），
+  最后把 `content://` URI 转 file descriptor 还要再一次 JNI。
+- **API 形状会完全不同**：SAF 不返回路径，只返回 URI / fd。所以它是**流式** API
+  （`io::Read` / `io::Write`），与 `data_dir()` 那套路径型 API 无法合并。
+
+留给后续的形状草案（未实施）：
+
+```rust
+// 安卓独有；返回流而非路径
+app.open_document(|res| ..);    // 用户选一个已有文件 -> io::Read
+app.create_document(.., |res| ..); // 用户选保存位置 -> io::Write
+app.open_document_tree(..);     // 用户选一个目录 -> 后续相对路径读写
+```
+
+在那之前的现实限制（写文档时必须说清）：
+
+- `data_dir` / `external_data_dir` **都随卸载删除**。
+- Android 11+ 分区存储不允许往 `Documents` 之外的共享位置写。要让用户指定位置，
+  **只能**走 SAF。
+
+### 剩余 Android 缺口（2026-10-06 复核）
+
+- `configChanges` 缺 `fontScale` / `locale` / `layoutDirection` / `keyboard`
+  → 系统字号或语言变化会**重建 Activity**，进程内状态全丢。
+  （`uiMode` **已在** configChanges 里，深色模式切换不会重建 —— 但仍**没有**读
+  当前 night mode 的公开 API；`AndroidApp::config().ui_mode_night()` 已有底层能力。）
+- 剪贴板（`ClipboardManager`）、振动（`Vibrator`，且 manifest 无 `uses-permission`）。
+- 可写目录不覆盖「卸载后还在」与「写共享存储任意位置」—— 见上面的 SAF 条目。
+
+---
+
 ## 非 Android
 
 （暂无）

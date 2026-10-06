@@ -22,6 +22,16 @@ pub enum VireoError {
     OffscreenNotFound(usize),
     /// 贴图索引无效：越界，或尚未加载完成（`App::texture`）。
     TextureNotFound(usize),
+    /// 随包资源不存在（`Assets::read` / `Assets::list`）。
+    ///
+    /// 安卓上还包括「`AndroidApp` 句柄不可用」（未经 `android_main` 入口）——
+    /// 那种情况下所有资源读取都会落到这里。
+    AssetNotFound(String),
+    /// 未设资产根目录（`Assets` 在桌面上的 `read`/`list`）。
+    ///
+    /// 桌面需要 [`App::set_asset_root`](crate::App::set_asset_root) 指向一个目录；
+    /// 不设时资源一律读不到。安卓下不适用（资源在 APK 内）。
+    NoAssetRoot,
     /// 其它未分类错误。
     Other(String),
 }
@@ -40,6 +50,16 @@ impl fmt::Display for VireoError {
             VireoError::TextureNotFound(idx) => write!(
                 f,
                 "texture not found (index {idx}); out of bounds or not yet loaded"
+            ),
+            VireoError::AssetNotFound(name) => write!(
+                f,
+                "asset not found: {name:?}; on Android packaged resources live inside the APK \
+                 (put them under src/main/assets/) and are not reachable through the filesystem"
+            ),
+            VireoError::NoAssetRoot => write!(
+                f,
+                "no asset root configured; call App::set_asset_root(path) on desktop \
+                 (on Android packaged resources need no root)"
             ),
             VireoError::Other(msg) => write!(f, "{msg}"),
         }

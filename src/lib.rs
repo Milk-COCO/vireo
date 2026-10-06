@@ -113,6 +113,7 @@
 //! | [`platform`] | 平台特化 API（`windows` / `macos` / `android`） |
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod area;
+pub mod asset;
 
 #[doc(hidden)]
 pub use vireo_macro::main;
@@ -135,6 +136,7 @@ pub mod particle;
 pub mod platform;
 pub mod render;
 pub mod shapes;
+pub mod storage;
 pub mod text;
 pub mod texture;
 pub mod window;
@@ -155,6 +157,7 @@ pub fn init_logger() {
 pub mod prelude {
     pub use crate::area::Area;
     pub use crate::area::AreaGeom;
+    pub use crate::asset::Assets;
     pub use crate::color::Color;
     pub use crate::color::colors::*;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};

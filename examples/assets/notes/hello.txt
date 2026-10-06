@@ -1,0 +1,8 @@
+这是随包资源（assets）里的示例文本。
+
+安卓上这个文件在 APK 内部，不在文件系统上，
+所以 std::fs::read("notes/hello.txt") 读不到 ——
+必须走 vireo::App::assets().read("notes/hello.txt")。
+
+桌面上它就在 ./examples/assets/notes/hello.txt，
+同一行代码直接可用。

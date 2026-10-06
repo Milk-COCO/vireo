@@ -57,6 +57,9 @@ android/
 ├── gradle/wrapper/         # Gradle 9.3.1 wrapper 配置
 └── src/main/
     ├── AndroidManifest.xml
+    ├── assets/               # 随包只读资源（图片/字体/关卡）。AGP 默认打进 APK
+    │   ├── logo.png
+    │   └── notes/hello.txt
     ├── java/com/example/vireoandroid/MainActivity.java
     └── res/values/themes.xml
 ```
@@ -68,6 +71,31 @@ android/
 
 > `src/main.rs`（cargo）和 `src/main/`（gradle 的 java/res 根）**共用一个目录**，
 > 这是 gradle Android 插件的默认布局，不是笔误。
+
+### ⚠️ 资源读不到？先分清「三个世界」
+
+安卓的「文件」有三个互不相通的地方，这是最常见的坑：
+
+| 你要访问的东西 | 它在哪 | 怎么读 |
+|---|---|---|
+| 随包资源（图片/字体/关卡） | **不是路径**，是 APK 这个 zip 里的一项 | `app.assets().read("logo.png")` |
+| 内部私有目录 | `/data/user/0/<包名>/files` | `app.data_dir()` |
+| 外部 app 专属目录 | `/storage/emulated/0/Android/data/<包名>/files` | `app.external_data_dir()` |
+
+```rust
+// ✅ 随包资源：安卓读 APK 内的 assets/，桌面读 set_asset_root 的目录
+app.set_asset_root("assets");            // 桌面上必需；安卓这行是 no-op
+let tex = app.load_texture_asset("logo.png");
+
+// ❌ 在安卓上必然失败：资源不在文件系统上
+let tex = app.load_texture("logo.png");  // 等价于 std::fs::read("logo.png")
+```
+
+vireo **刻意不做**「相对路径自动回退到 assets」：那会让同一份代码在两个平台上资源
+来源不同且不报错 —— 桌面调通了、安卓静默换一张图。所以上面那两行是**两个不同的 API**。
+
+三个可写目录在安卓上**都免权限**，也都**随卸载删除**。要让用户自己选存储位置，
+需走 SAF，**vireo 尚未实现**（见 `TODO.md`）。
 
 ---
 
@@ -683,6 +711,11 @@ protected void onSaveInstanceState(Bundle outState) {
 - **`cutouts()` 部分 ROM 恒空**：运行时 `set_display_cutout_mode` 是空操作，
   只能靠 manifest/style（见 §4.4）。
 - **16 KB 未保证**：见 §5。
+- **SAF（系统文件选择器）未实现**：要让用户自己选存储位置、或把数据写到
+  `Documents` 之外的共享位置，只能走 SAF。已查证 `android-activity 0.6` /
+  `ndk 0.9` 都没有 Intent 启动 / Activity Result API，需在 `MainActivity.java`
+  侧配合，且它返回的是 URI / fd 而非路径（流式 API，与 `data_dir()` 那套
+  路径型 API 无法合并）。详见 `TODO.md`。
 
 ---
 

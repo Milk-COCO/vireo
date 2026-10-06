@@ -4,6 +4,30 @@
 
 ### Added / 新增
 
+- **文件读写 API**：安卓的「文件」有三个互不相通的世界，此前 vireo 一条都没覆盖
+  ——随包资源在 APK 内部（`std::fs` 读不到），且没有任何可写目录概念。
+  - **读（随包资源，只读）**：`App::assets() -> Assets`，含
+    `read` / `exists` / `list`；配套 `App::load_texture_asset` /
+    `App::load_font_asset` / `WindowDesc::icon_from_asset`。
+    安卓读 APK 内 `src/main/assets/`（经 `AssetManager`），桌面读
+    `App::set_asset_root` 指定的目录（默认流程 `./assets`）—— **同一份代码两端通用**。
+  - **写（可写目录）**：`App::data_dir()`（持久私有）/
+    `App::cache_dir()`（可再生）/ `App::external_data_dir()`（用户可见，可为 `None`）。
+    安卓 = `internal_data_path` / `Activity.getCacheDir()` / `external_data_path`，
+    全部免权限；桌面按平台标准目录（`%APPDATA%` / `%LOCALAPPDATA%\Cache` /
+    `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` / `$XDG_DOCUMENTS`）。
+    末级名字默认取可执行文件名，`App::set_storage_name` 可改。
+  - **刻意不做**「相对路径自动回退到 assets」。那会让同一份代码在两个平台上
+    **资源来源不同且不报错** —— 桌面调通了、安卓静默换一张图，排查成本极高。
+    `load_texture` / `load_font_file` / `icon_from_path` 语义**完全不变**（纯 `std::fs`）。
+  - 资产名归一化接受 `\` 与前导 `/`（同一字符串两端都能用），**拒绝 `..`**
+    （它会参与路径拼接，能跳出根目录）。
+  - 新增错误变体 `VireoError::AssetNotFound` / `NoAssetRoot`，
+    区分「资源不存在」与「桌面没设根目录」。
+  - 读取走 `Asset::read`，压缩与未压缩资产都能读，**不依赖** `noCompress` 配置。
+  - 示例 `examples/resource_io`；assets 脚手架 `examples/assets/` 与
+    `examples/android/src/main/assets/`。
+
 - **触摸状态轮询 API**：`VireoWindow::touches() -> Vec<TouchPoint>` /
   `touch_count()` / `touch_first()`，以及公开类型 `TouchPoint`
   （`{ id, pos: PixelPos, force }`）。此前触摸没有类型安全的读法 ——

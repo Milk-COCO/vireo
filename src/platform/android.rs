@@ -386,6 +386,50 @@ fn warn_getter<T>(what: &str, e: JniErr) -> Option<T> {
     None
 }
 
+/// 安卓缓存目录（`/data/user/0/<包名>/cache`）。
+///
+/// **为什么必须走 JNI**：`AndroidApp` 只给了
+/// [`internal_data_path`](crate::android::AndroidApp::internal_data_path) /
+/// `external_data_path` / `obb_path`，**没有 cacheDir** —— 所以这个值拿不到
+/// 现成句柄，只能自己调 `Activity.getCacheDir()`。
+///
+/// 免权限，**系统可在空间紧张时自行删除其中内容**。
+pub(crate) fn cache_dir() -> Result<std::path::PathBuf, crate::error::VireoError> {
+    let app = crate::app::android_app().ok_or_else(|| {
+        crate::error::VireoError::Other(
+            "AndroidApp unavailable: cache_dir needs the #[vireo::main] android_main entry"
+                .to_string(),
+        )
+    })?;
+    let r = with_activity(app, |env, activity| {
+        // Activity.getCacheDir() -> java.io.File
+        let file = env
+            .call_method(
+                activity,
+                jni_str!("getCacheDir"),
+                jni_sig!("()Ljava/io/File;"),
+                &[],
+            )?
+            .l()?;
+        // File.getAbsolutePath() -> java.lang.String
+        let path = env
+            .call_method(
+                &file,
+                jni_str!("getAbsolutePath"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        // jni 0.22：`Env::get_string` 已弃用，走 JString::try_to_string。
+        // `cast_local` 签名是 `cast_local<'a, To>(...) -> To::Kind<'a>`，
+        // 返回类型注解推不出 `To`，必须 turbofish 指定。
+        let jstr = env.cast_local::<jni::objects::JString>(path)?;
+        let s = jstr.try_to_string(env)?;
+        Ok(std::path::PathBuf::from(s))
+    });
+    r.map_err(|e| to_err("Activity.getCacheDir", e))
+}
+
 // ---------------------------------------------------------------------------
 // VireoWindow 内部辅助（字段在 window/mod.rs，这里只放逻辑）
 // ---------------------------------------------------------------------------

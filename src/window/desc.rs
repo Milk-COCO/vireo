@@ -440,6 +440,44 @@ impl WindowDesc {
         self
     }
 
+    /// 从**随包资源**加载窗口图标（PNG/JPG/BMP）。
+    ///
+    /// 与 [`Self::icon_from_path`] 的区别是数据来源：那个读文件系统，这个读
+    /// [`App::assets`](crate::App::assets) —— 安卓 = APK 内的
+    /// `src/main/assets/`，桌面 = [`App::set_asset_root`](crate::App::set_asset_root)
+    /// 指定的目录。
+    ///
+    /// 安卓上想用图标**必须**用这个（`icon_from_path` 在安卓读不到 APK 内的文件）。
+    ///
+    /// 失败时打 `log::warn!` 并保持原图标不变。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：有效**（`icon_from_path` 在此无效，见其文档）
+    /// - **其它平台：有效**，但等价于「按资产根目录拼路径再读」——
+    ///   桌面开发时把文件放 `./assets/`，安卓放 `src/main/assets/`，同一份代码。
+    pub fn icon_from_asset(mut self, name: &str) -> Self {
+        let assets = crate::asset::Assets::new(crate::asset::current_root());
+        match assets
+            .read(name)
+            .map_err(|e| format!("read: {e}"))
+            .and_then(|data| image::load_from_memory(&data).map_err(|e| format!("decode: {e}")))
+            .and_then(|img| {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                Icon::from_rgba(rgba.into_raw(), w, h)
+                    .map_err(|e| format!("Icon::from_rgba: {e:?}"))
+            }) {
+            Ok(icon) => {
+                self.window_icon = Some(icon);
+            }
+            Err(stage) => {
+                log::warn!("vireo icon_from_asset({name}) failed at {stage} — icon unchanged");
+            }
+        }
+        self
+    }
+
     pub fn theme(mut self, theme: winit::window::Theme) -> Self {
         self.theme = Some(theme);
         self

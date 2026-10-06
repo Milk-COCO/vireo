@@ -76,6 +76,11 @@ pub struct AppInner {
     handle_to_id: Mutex<FxHashMap<u64, WindowId>>,
     next_handle: Mutex<u64>,
     default_icon: Mutex<Option<Icon>>,
+    /// 可写目录的末级名字（`data_dir` / `cache_dir` / `external_data_dir` 用）。
+    ///
+    /// 默认取可执行文件名（去扩展名）；[`App::set_storage_name`] 可改。
+    /// 构造时经 [`crate::storage::sanitize_dir_name`] 压成安全的单层分量。
+    storage_name: Mutex<String>,
     textures: Mutex<Vec<Arc<Texture>>>,
     offscreens: Mutex<Vec<Arc<OffscreenCanvas>>>,
     pub init_duration: f64,
@@ -635,6 +640,7 @@ impl App {
                 shutdown: std::sync::atomic::AtomicBool::new(false),
                 memory_warning_cbs: Mutex::new(Vec::new()),
                 memory_warn_gen: std::sync::atomic::AtomicU64::new(0),
+                storage_name: Mutex::new(crate::storage::default_storage_name()),
             }),
         }
     }
@@ -674,6 +680,161 @@ impl App {
         let idx = guard.len();
         guard.push(Arc::new(tex));
         idx
+    }
+
+    // ---- 随包资源（assets）------------------------------------------------
+    //
+    // 与上面的 `load_texture` / `load_font_file` / `WindowDesc::icon_from_path`
+    // **刻意分开**：那几个是纯 `std::fs`（真实路径），这几个走 [`Assets`]
+    // （安卓 = APK 内的 assets，桌面 = `set_asset_root` 指定的目录）。
+    //
+    // 不做「相对路径自动回退到 assets」—— 那会让同一份代码在两个平台上资源来源
+    // 不同且不报错，排查成本极高。见 `crate::asset` 模块文档。
+
+    /// 随包只读资源的句柄。
+    ///
+    /// - 安卓：APK 内 `src/main/assets/` 打进的那份
+    /// - 桌面：[`set_asset_root`](Self::set_asset_root) 指定的目录；未设则读不到
+    ///   （`Assets::read` 返回 [`VireoError::NoAssetRoot`]）
+    ///
+    /// 桌面与安卓**同一份代码**：桌面把文件放 `./assets`，安卓放
+    /// `src/main/assets`。这是把根目录显式化，不是隐式回退。
+    ///
+    /// # 例子
+    ///
+    /// ```no_run
+    /// # use vireo::prelude::*;
+    /// # fn f(app: &App) -> Result<(), VireoError> {
+    /// app.set_asset_root("assets"); // 桌面需要；安卓这行是 no-op
+    /// let assets = app.assets();
+    /// if assets.exists("bg.png") {
+    ///     let _bytes = assets.read("bg.png")?;
+    /// }
+    /// let _levels = assets.list("levels")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn assets(&self) -> crate::asset::Assets {
+        // 安卓侧根目录恒为 None：资源由 APK 内的 AssetManager 定位，
+        // `set_asset_root` 记下的值只是用户意图，不参与读取。
+        #[cfg(target_os = "android")]
+        {
+            crate::asset::Assets::new(None)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            crate::asset::Assets::new(crate::asset::current_root())
+        }
+    }
+
+    /// 设桌面的资产根目录（[`assets`](Self::assets) 相对于它解析）。
+    ///
+    /// **只在桌面有意义** —— 安卓的资源在 APK 内，根目录由构建期决定
+    /// （`src/main/assets/`），这行是 no-op。
+    ///
+    /// 必须在任何 [`load_texture_asset`](Self::load_texture_asset) /
+    /// [`load_font_asset`](Self::load_font_asset) / `icon_from_asset` 之前调用。
+    /// 重复调用以最后一次为准。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：no-op** —— 资源在 APK 内，`Assets::root()` 恒为 `None`，
+    ///   实际读取路径由 `AssetManager` 解析。跨平台共享代码里保留这一行是安全的。
+    pub fn set_asset_root(&self, path: impl AsRef<std::path::Path>) {
+        #[cfg(not(target_os = "android"))]
+        {
+            *crate::asset::ASSET_ROOT.lock() = Some(path.as_ref().to_path_buf());
+        }
+        #[cfg(target_os = "android")]
+        {
+            let _ = path;
+        }
+    }
+
+    /// 从随包资源加载贴图（png/jpg/bmp）。
+    ///
+    /// 读失败时和 [`load_texture`](Self::load_texture) 一样：打 error 日志并
+    /// 返回一张 ffcc00/6699ff 棋盘 missing 纹理（不 panic）。
+    pub fn load_texture_asset(&self, name: &str) -> usize {
+        let tex = match self.assets().read(name) {
+            Ok(bytes) => Texture::from_bytes(&bytes, &self.gpu),
+            Err(e) => {
+                log::error!("App::load_texture_asset: {e}");
+                Texture::from_bytes(&[], &self.gpu)
+            }
+        };
+        let mut guard = self.textures.lock();
+        let idx = guard.len();
+        guard.push(Arc::new(tex));
+        idx
+    }
+
+    /// 从随包资源加载字体文件。
+    ///
+    /// 语义与 [`GpuContext::load_font_file`](crate::gpu::GpuContext::load_font_file)
+    /// 一致，只是数据来源是 [`assets`](Self::assets) 而不是文件系统。
+    pub fn load_font_asset(&self, name: &str) -> Result<(), String> {
+        let bytes = self.assets().read(name).map_err(|e| e.to_string())?;
+        self.gpu.load_font(&bytes);
+        Ok(())
+    }
+
+    // ---- 可写目录 ----------------------------------------------------------
+
+    /// 设可写目录的末级名字。
+    ///
+    /// 影响 [`data_dir`](Self::data_dir) / [`cache_dir`](Self::cache_dir) /
+    /// [`external_data_dir`](Self::external_data_dir) 三者的末级分量。
+    /// 默认取可执行文件名（去扩展名）。
+    ///
+    /// 名字会被压成**安全的单层路径分量**（分隔符替换为 `_`，`.`/`..`/空 退回
+    /// `"vireo-app"`）—— 它要参与路径拼接，放任分隔符会写到意外位置。
+    pub fn set_storage_name(&self, name: impl AsRef<str>) {
+        let mut g = self.storage_name.lock();
+        *g = crate::storage::sanitize_dir_name(name.as_ref());
+    }
+
+    /// 当前可写目录的末级名字。
+    pub fn storage_name(&self) -> String {
+        self.storage_name.lock().clone()
+    }
+
+    /// 持久化私有数据目录（存档 / 设置）。
+    ///
+    /// - 安卓：`/data/user/0/<包名>/files`
+    /// - Windows：`%APPDATA%\<name>`
+    /// - 其它 Unix：`$XDG_DATA_HOME/<name>`，未设则 `$HOME/.local/share/<name>`
+    ///
+    /// 免权限；安卓下卸载即删。**不保证目录已存在** —— 需要时用
+    /// [`ensure_dir`](crate::storage::ensure_dir)。
+    pub fn data_dir(&self) -> Result<std::path::PathBuf, VireoError> {
+        crate::storage::data_dir(&self.storage_name())
+    }
+
+    /// 可再生缓存目录。
+    ///
+    /// - 安卓：`Activity.getCacheDir()`
+    /// - Windows：`%LOCALAPPDATA%\<name>\Cache`
+    /// - 其它 Unix：`$XDG_CACHE_HOME/<name>`，未设则 `$HOME/.cache/<name>`
+    ///
+    /// ⚠️ **安卓系统可能在你没运行 App 时删掉这里的内容**。别放需要长期存在的东西。
+    pub fn cache_dir(&self) -> Result<std::path::PathBuf, VireoError> {
+        crate::storage::cache_dir(&self.storage_name())
+    }
+
+    /// 用户可见的持久目录（用户文件管理器能看到、能把东西拷进来）。
+    ///
+    /// - 安卓：`/storage/emulated/0/Android/data/<包名>/files`
+    /// - Windows：`%USERPROFILE%\Documents\<name>`
+    /// - 其它 Unix：`$XDG_DOCUMENTS/<name>`，未设则 `$HOME/Documents/<name>`
+    ///
+    /// 环境不允许时返回 `None`（例如桌面找不到 Documents）。
+    ///
+    /// ⚠️ 安卓下同样**卸载即删**，且 Android 11+ 分区存储不允许写 `Documents`
+    /// 之外的共享位置。要真正「让用户自己选位置」，需 SAF —— 本轮**未实现**，
+    /// 见 `TODO.md`。
+    pub fn external_data_dir(&self) -> Option<std::path::PathBuf> {
+        crate::storage::external_data_dir(&self.storage_name())
     }
 
     /// 获取贴图（`Err` = 索引越界/未加载完成）。
