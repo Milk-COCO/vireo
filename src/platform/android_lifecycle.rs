@@ -122,6 +122,11 @@ pub const JAVA_METHOD_PAUSE: &str = "nativeOnPause";
 pub const JAVA_METHOD_RESUME: &str = "nativeOnResume";
 pub const JAVA_METHOD_STOP: &str = "nativeOnStop";
 pub const JAVA_METHOD_DESTROY: &str = "nativeOnDestroy";
+/// 返回键。**可选** —— 不声明 / 不调用时 `App::on_back` 永不触发，且返回键退回
+/// Android 默认行为（退出 Activity），其余生命周期行为不受影响。
+pub const JAVA_METHOD_BACK: &str = "nativeOnBackPressed";
+/// 返回「本次返回键是否已被消费」。**读即清零** —— 见 [`take_back_consumed`]。
+pub const JAVA_METHOD_TAKE_BACK_CONSUMED: &str = "nativeTakeBackConsumed";
 
 /// const 友好的字节串相等（`PartialEq` 在 const 上下文里还没稳定）。
 #[cfg(target_os = "android")]
@@ -152,6 +157,14 @@ const JAVA_NAMES_MATCH_LITERALS: () = {
     assert!(bytes_eq(JAVA_METHOD_RESUME.as_bytes(), b"nativeOnResume"));
     assert!(bytes_eq(JAVA_METHOD_STOP.as_bytes(), b"nativeOnStop"));
     assert!(bytes_eq(JAVA_METHOD_DESTROY.as_bytes(), b"nativeOnDestroy"));
+    assert!(bytes_eq(
+        JAVA_METHOD_BACK.as_bytes(),
+        b"nativeOnBackPressed"
+    ));
+    assert!(bytes_eq(
+        JAVA_METHOD_TAKE_BACK_CONSUMED.as_bytes(),
+        b"nativeTakeBackConsumed"
+    ));
 };
 
 // ---------------------------------------------------------------------------
@@ -406,6 +419,176 @@ pub extern "system" fn vireo_android_on_destroy(
     set_destroyed();
 }
 
+// ---------------------------------------------------------------------------
+// 返回键（Back / 预测性返回手势）
+// ---------------------------------------------------------------------------
+
+/// **本次**返回键是否已被登记请求（一次性事件）。
+///
+/// # 为什么是锁存而不是实时标志
+///
+/// 和 [`SAW_STOP`] 同理：**Android 没有「返回键被按下了」这种持续状态** —— 它是
+/// 一个瞬时事件。标志必须「写一次、消费即清零」，否则第二次返回会读到第一次的
+/// 残留值（用户已经消费过了却又触发一次动作）。
+///
+/// 更关键：这个标志是**跨线程单向**的 —— UI 线程写、渲染线程读并清零。反方向的
+/// 「我要消费这次返回」是 [`BACK_CONSUMED`]（渲染线程写、UI 线程读），**必须**用
+/// 实时标志而非锁存：UI 线程读的那一瞬间必须拿到渲染线程此刻的意愿，而不能拿到
+/// 一次历史记录。两者的时序恰好相反，这正是它们必须用两种原语的原因。
+static BACK_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 让渲染线程在下一帧重新检查返回键请求。
+///
+/// # 为什么必须推进代号
+///
+/// 渲染线程是**靠代号变化**才调 `fire_lifecycle_callbacks` 的
+/// （见 `src/thread.rs`：`let g = generation(); if g != lifecycle_gen { ... }`）。
+/// 返回键是**独立**事件 —— 它既不伴随 `onPause` 也不伴随 `onResume`，代号不动。
+/// 于是不推进代号的话 `on_back` **一次都不会触发**（App 照样按默认行为退出，
+/// 现象与「完全没实现」无法区分）。
+///
+/// 用代号而不是「渲染线程每帧无条件查标志」是为了保持与既有生命周期一致：
+/// 每个 Thread 各自跟踪已处理代号，恰好触发一次、不重不漏。
+fn request_back() {
+    BACK_REQUESTED.store(true, Ordering::Release);
+    GEN.fetch_add(1, Ordering::AcqRel);
+    notify_all();
+}
+
+/// 渲染线程对**当前**这次返回键的处置决定。
+///
+/// `true` = 已消费（不要退出 Activity）；`false` = 不消费（走默认行为，即
+/// `Activity.finish()`）。
+///
+/// # 为什么不用锁存
+///
+/// 见 [`BACK_REQUESTED`] 的说明：这里需要的是**实时**值。UI 线程读它来决定是否
+/// `finish()`，读到的必须是渲染线程刚刚写入的意愿。
+///
+/// # 时限（重要）
+///
+/// 「刚刚」有上限：Java 侧**不可能**同步等渲染线程跑完一帧（`onBackPressed`
+/// 在 UI 线程上同步阻塞会死锁 —— 渲染线程可能正等 UI 线程做某件事）。所以
+/// Java 侧的做法是「**先无条件拦住，再延后判定**」：拦下后 postDelayed 一个
+/// 时限（模板取 34ms ≈ 2 帧 @60Hz），到点再读这里的值。
+///
+/// 于是 {@link consume_back} 必须在**该时限内**被调用，否则按「未消费」退出。
+/// 这不影响同步调用 —— 渲染线程的 `on_back` 回调本身就在那之前跑完了。真正会被
+/// 这个时限坑到的是「把 consume_back 推迟到别的线程做」的错误写法。
+static BACK_CONSUMED: AtomicBool = AtomicBool::new(false);
+
+/// 本次返回键是否已被应用层请求处理（由渲染线程消费，见 [`take_back_requested`]）。
+///
+/// 桌面 / macOS 恒为 `false` —— 那边窗口有关闭按钮，`WindowEvent::CloseRequested`
+/// 走的是完全不同的路径（且桌面**有**这个事件，Android 没有）。
+pub fn back_requested() -> bool {
+    BACK_REQUESTED.load(Ordering::Acquire)
+}
+
+/// 渲染线程消费「本次返回键」请求，返回是否消费过。消费即清零。
+///
+/// 每个暂停周期…呃，每个返回周期恰好上报一次。
+pub(crate) fn take_back_requested() -> bool {
+    BACK_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+/// 声明「本次返回键我处理了，别退出 Activity」。
+///
+/// 供 [`App::on_back`](crate::App::on_back) 的回调在渲染线程上调用。
+///
+/// # 时序
+///
+/// 必须在**返回键回调之内**同步调用 —— UI 线程在同一轮 `onBackPressed` 里就会读
+/// 这个值决定是否 `finish()`。异步（spawn 到别的线程再调）会来不及，表现为
+/// 「回调跑了但 App 还是退了」。
+pub fn consume_back() {
+    BACK_CONSUMED.store(true, Ordering::Release);
+}
+
+/// UI 线程读：本次返回键是否已被消费。读即清零（下一个返回键回到默认行为）。
+///
+/// 只有 Java 侧的 back handler 调用它 —— 每次返回键必须得到一个明确的答复，
+/// 残留的 `true` 会让**下一次**返回键也被吞掉。
+pub(crate) fn take_back_consumed() -> bool {
+    BACK_CONSUMED.swap(false, Ordering::AcqRel)
+}
+
+/// JNI 导出：Java `nativeOnBackPressed()` 的实现。
+///
+/// # 为什么这里不直接 finish，也不直接决定退出
+///
+/// 因为「该不该退」是**应用层决策**（弹确认框？回暂停菜单？直接退？），而这个 JNI
+/// 回调跑在 **UI 线程**、是**瞬时**的 —— 它不能等渲染线程（渲染线程此刻可能正阻塞
+/// 在暂停闸门里，或者干脆在忙一帧）。所以职责拆成两半：
+///
+/// ```text
+/// UI 线程                        渲染线程
+/// nativeOnBackPressed()
+///   ├─ BACK_REQUESTED = true
+///   └─ 读 take_back_consumed()  ──►  fire_lifecycle_callbacks()
+///       │  false → finish()          └─ on_back 回调 → consume_back()
+///       └ true  → 什么都不做
+/// ```
+///
+/// UI 线程读到的是**上一帧**渲染线程留下的意愿（多数情况是「没消费」= 默认退出）。
+/// 这有一个可感知的时延：若渲染线程正在闸门里阻塞（App 在后台），返回键会退到
+/// 默认行为 —— 但那种情况下 Activity 本来也不在前台，返回键不会有意义。
+///
+/// # Safety
+///
+/// 由 JVM 经 `bind_lifecycle_hooks` 绑定调用，签名固定 `()V`。
+#[cfg(target_os = "android")]
+pub extern "system" fn vireo_android_on_back_pressed(
+    _env: jni::EnvUnowned<'_>,
+    _class: jni::objects::JClass<'_>,
+) {
+    request_back();
+}
+
+/// JNI 导出：Java `nativeTakeBackConsumed()` 的实现 —— 返回「本次返回键是否已被
+/// 应用层消费」，**读即清零**。
+///
+/// # 返回值语义（`jni::sys::jboolean` = `u8`）
+///
+/// 必须严格是 `JNI_TRUE`(1) / `JNI_FALSE`(0) —— Java 侧接的是 `boolean`，
+/// 任何非 0/1 的值（如 `u8::MAX`）的行为未定义。
+///
+/// # 为什么必须清零
+///
+/// 读即清零是为了「每次返回键都有独立答案」。若不清，上一次残留的 `true` 会把
+/// **下一次**返回键也吞掉 —— 用户第二次想退出却退不出，且没有任何崩溃可查。
+///
+/// # 与 `vireo_android_on_back_pressed` 的调用顺序
+///
+/// Java 侧先调本函数**再**调 `nativeOnBackPressed()`。看着反直觉（不是应该先
+/// 通知再问意见吗），但时序就是这样：
+///
+/// ```text
+/// UI 线程                        渲染线程
+/// takeBackConsumed()  ──► 读到上一帧的 consume_back() 结果
+/// onBackPressed()     ──► 置 BACK_REQUESTED，本帧稍后被消费
+///   ├─ !consumed → finish()
+///   └─ consumed  → 什么都不做
+/// ```
+///
+/// 「消费」只能来自**上一帧**渲染线程里跑的 `on_back` 回调 —— 返回键是瞬时事件，
+/// UI 线程不可能等渲染线程跑完一轮。所以本次的处置必然基于上一帧的意愿。
+///
+/// # Safety
+///
+/// 由 JVM 经 `bind_lifecycle_hooks` 绑定调用，签名固定 `()Z`。
+#[cfg(target_os = "android")]
+pub extern "system" fn vireo_android_take_back_consumed(
+    _env: jni::EnvUnowned<'_>,
+    _class: jni::objects::JClass<'_>,
+) -> jni::sys::jboolean {
+    if take_back_consumed() {
+        jni::sys::JNI_TRUE
+    } else {
+        jni::sys::JNI_FALSE
+    }
+}
+
 /// 把 Java 侧的 `nativeOnPause` / `nativeOnResume` / `nativeOnStop` 绑到本模块的
 /// C 符号上。
 ///
@@ -482,6 +665,20 @@ fn bind_inner(app: &crate::android::AndroidApp) -> Result<(), jni::errors::Error
                     vireo_android_on_destroy as *mut std::ffi::c_void,
                 )
             },
+            unsafe {
+                jni::NativeMethod::from_raw_parts(
+                    jni_str!("nativeOnBackPressed"),
+                    jni_str!("()V"),
+                    vireo_android_on_back_pressed as *mut std::ffi::c_void,
+                )
+            },
+            unsafe {
+                jni::NativeMethod::from_raw_parts(
+                    jni_str!("nativeTakeBackConsumed"),
+                    jni_str!("()Z"),
+                    vireo_android_take_back_consumed as *mut std::ffi::c_void,
+                )
+            },
         ];
         // SAFETY: `class` 是本帧有效的 local ref；`methods` 在调用期间有效。
         unsafe { env.register_native_methods(class, &methods) }
@@ -499,6 +696,87 @@ mod tests {
         assert_eq!(JAVA_METHOD_PAUSE, "nativeOnPause");
         assert_eq!(JAVA_METHOD_RESUME, "nativeOnResume");
         assert_eq!(JAVA_METHOD_STOP, "nativeOnStop");
+        assert_eq!(JAVA_METHOD_BACK, "nativeOnBackPressed");
+    }
+
+    /// 返回键锁存：写一次消费一次，绝不重复上报。
+    ///
+    /// 回归风险点：如果这里改成「实时标志」，第二次返回键会读到第一次的残留
+    /// `true`，用户已经消费过了却又被触发一次动作 —— 与 `SAW_STOP` 那次踩的
+    /// 「没人重置的实时标志」是同一类错误的镜像。
+    #[test]
+    fn back_requested_is_consume_once() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_back_requested();
+
+        BACK_REQUESTED.store(true, Ordering::Release);
+        assert!(take_back_requested(), "第一次返回必须被看到");
+        assert!(!take_back_requested(), "消费即清零：同一次返回不得重复上报");
+
+        // 连续两次按返回：各上报一次
+        BACK_REQUESTED.store(true, Ordering::Release);
+        assert!(take_back_requested());
+        BACK_REQUESTED.store(true, Ordering::Release);
+        assert!(take_back_requested(), "第二次按返回是独立事件");
+    }
+
+    /// 回归：返回键**必须**推进代号，否则渲染线程压根不会检查它。
+    ///
+    /// 渲染线程靠 `generation() != lifecycle_gen` 才触发回调，而返回键既不伴随
+    /// `onPause` 也不伴随 `onResume`。第一版只置 `BACK_REQUESTED` 不动代号，
+    /// 真机表现是「按返回键 App 直接退出，on_back 日志一次都没有」——
+    /// 与完全没实现无法区分。
+    #[test]
+    fn back_request_bumps_generation() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_back_requested();
+
+        let g0 = generation();
+        request_back();
+        assert!(take_back_requested(), "请求本身要被记录");
+        assert_eq!(generation(), g0 + 1, "必须推进代号，渲染线程才会检查");
+    }
+
+    /// `consume_back` / `take_back_consumed` 是一次性往返，且**不**跨事件残留。
+    ///
+    /// 这是「回调里同步 consume 才拦得住」的实现基础：UI 线程读的就是这个值。
+    /// 如果它像 `BACK_REQUESTED` 那样是锁存语义，残留的 `true` 会把**下一次**
+    /// 返回键也吞掉 —— 用户第二次想退出却退不出。
+    #[test]
+    fn back_consumed_round_trips_without_leaking_into_next_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_back_consumed();
+
+        assert!(!take_back_consumed(), "初始必须是「未消费」= 允许默认退出");
+        consume_back();
+        assert!(take_back_consumed(), "consume_back 之后必须读到 true");
+        assert!(
+            !take_back_consumed(),
+            "必须读到即清零：残留会让下一次返回键也退不出"
+        );
+    }
+
+    /// 两个方向必须**独立**：处理了请求不等于消费了返回。
+    ///
+    /// 这是最容易写混的一对 —— 它们时序相反（请求是锁存、消费是实时），
+    /// 用错原语会表现为「on_back 回调跑了，App 还是退了」或反过来
+    /// 「没注册回调却拦住了返回键」。
+    #[test]
+    fn back_request_and_consume_are_independent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_back_requested();
+        let _ = take_back_consumed();
+
+        // 场景 A：只请求，不消费 → 请求被看到，UI 侧读到「未消费」→ 默认退出
+        BACK_REQUESTED.store(true, Ordering::Release);
+        assert!(take_back_requested());
+        assert!(!take_back_consumed(), "没调 consume_back 就必须是 false");
+
+        // 场景 B：请求 + 消费 → 两者都独立为 true
+        BACK_REQUESTED.store(true, Ordering::Release);
+        consume_back();
+        assert!(take_back_requested());
+        assert!(take_back_consumed());
     }
 
     #[test]
@@ -513,6 +791,14 @@ mod tests {
     fn desktop_never_reports_stopped() {
         if !cfg!(target_os = "android") {
             assert!(!is_stopped());
+        }
+    }
+
+    #[test]
+    fn desktop_never_reports_back_requested() {
+        // 桌面有 WindowEvent::CloseRequested（Android 没有），所以桌面不该走这条路径。
+        if !cfg!(target_os = "android") {
+            assert!(!back_requested());
         }
     }
 

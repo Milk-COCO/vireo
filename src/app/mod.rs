@@ -268,6 +268,7 @@ pub(crate) struct LifecycleCbs {
     resumed: Vec<Arc<dyn Fn() + Send + Sync>>,
     stopped: Vec<Arc<dyn Fn() + Send + Sync>>,
     destroyed: Vec<Arc<dyn Fn() + Send + Sync>>,
+    back: Vec<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl LifecycleCbs {
@@ -277,6 +278,7 @@ impl LifecycleCbs {
             resumed: Vec::new(),
             stopped: Vec::new(),
             destroyed: Vec::new(),
+            back: Vec::new(),
         }
     }
 
@@ -285,6 +287,7 @@ impl LifecycleCbs {
             && self.resumed.is_empty()
             && self.stopped.is_empty()
             && self.destroyed.is_empty()
+            && self.back.is_empty()
     }
 }
 
@@ -297,8 +300,11 @@ impl AppInner {
         // 早退会把 `SAW_STOP` 留在 true，下一个「无 stop 的暂停」就会误报一次
         // 「彻底离开」。锁存是「每个暂停周期恰好一次」的一次性事件，不是状态。
         let saw_stop = crate::platform::android_lifecycle::take_saw_stop();
+        // 同理：返回键请求也必须在早退**之前**消费，否则 `on_back` 一个都没注册时
+        // 锁存会留在 true，下一次返回键（哪怕默认该退出）都会被误报成「已处理」。
+        let back = crate::platform::android_lifecycle::take_back_requested();
 
-        let (paused, resumed, stopped, destroyed) = {
+        let (paused, resumed, stopped, destroyed, back_cbs) = {
             let cbs = self.lifecycle_cbs.lock();
             if cbs.all_empty() {
                 return;
@@ -309,6 +315,7 @@ impl AppInner {
                 cbs.resumed.clone(),
                 cbs.stopped.clone(),
                 cbs.destroyed.clone(),
+                cbs.back.clone(),
             )
         };
         let fire = |cbs: &[Arc<dyn Fn() + Send + Sync>]| {
@@ -339,6 +346,14 @@ impl AppInner {
         // 且排在 paused/resumed 之后（后者先到，用户可以先做通用收尾）。
         if saw_stop {
             fire(&stopped);
+        }
+        // 返回键排在最后：它是**独立**事件，且不与「是否暂停」耦合 ——
+        // 后台时按返回键同样会发（此时 Activity 不在前台，Java 侧会走 finish
+        // 默认路径，所以「消费」与否通常无所谓）。
+        //
+        // 一个 `on_back` 没注册也**不影响**上一行：锁存已在早退前消费掉。
+        if back {
+            fire(&back_cbs);
         }
     }
 }
@@ -975,6 +990,67 @@ impl App {
     pub fn on_destroyed(&self, cb: impl Fn() + Send + Sync + 'static) {
         self.inner.lifecycle_cbs.lock().destroyed.push(Arc::new(cb));
     }
+
+    /// 注册「用户按了返回键」回调（Android 独有）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// **返回键此前完全无法处理**：按返回键 = `Activity.finish()` 立即销毁进程 ——
+    /// 没有确认框、没存档、连暂停菜单都来不及。Google Material 规范明文要求
+    /// 返回键应「回退一层或弹确认」，直接退出是公认的 UX 缺陷。
+    ///
+    /// winit 收不到这个事件（它只把 `KEYCODE_BACK` 映射成
+    /// `NamedKey::BrowserBack` 塞进普通按键流），而**软键盘弹出时连这条路也不通**
+    /// —— Android 把硬件键喂给 `InputConnection`，winit 的 `KeyboardInput`
+    /// 收不到（见 `examples/android/README.md` §8）。所以必须走
+    /// `OnBackPressedDispatcher` 显式接管，见 `MainActivity.java`。
+    ///
+    /// # 想拦住退出必须调 [`consume_back`](crate::platform::android_lifecycle::consume_back)
+    ///
+    /// **不调 = 不消费 = App 照常退出。** 这是有意的默认：注册回调不等于接管返回键，
+    /// 否则「只想被动知道用户按了返回」（比如记埋点）的用法会意外把退出拦住。
+    ///
+    /// ```no_run
+    /// # let app: vireo::App = unimplemented!();
+    /// // 第一次按返回键 → 弹「退出游戏？」
+    /// # 第二次按（确认中）→ 消费掉，让 App 正常退出
+    /// let mut confirming = false;
+    /// app.on_back(move || {
+    ///     if confirming {
+    ///         vireo::platform::android_lifecycle::consume_back();
+    ///         confirming = false;
+    ///     } else {
+    ///         confirming = true;   // 弹自己的确认 UI，本次不消费 → 仍会退出
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// # 时序（重要）
+    ///
+    /// 回调在**渲染线程**上触发，与 [`on_paused`](Self::on_paused) 同一条路径。
+    /// Java 侧无法同步等渲染线程（UI 线程阻塞会死锁），所以它的做法是
+    /// **「先无条件拦住返回键，再延后约一帧判定」**：拦下后 postDelayed 一个时限
+    /// （模板取 34ms），到点才读「是否已消费」来决定 `finish()`。
+    ///
+    /// 所以 [`consume_back`](crate::platform::android_lifecycle::consume_back)
+    /// 必须在本回调里**同步**调用 —— 回调本身就在那之前跑完了，调用自然满足时限。
+    /// 异步（spawn 到别的线程再调）可能超时，症状是「回调跑了但 App 还是退了」。
+    ///
+    /// # 每次返回键都要表态
+    ///
+    /// 延后判定的时限一过就是「按未消费处理」= 退出。所以「只监听、不处理」
+    /// 这种用法（比如记埋点）会得到与不注册相同的行为 —— 想拦住必须显式
+    /// `consume_back()`。
+    /// 桌面 / macOS 恒不触发（那边用 `WindowEvent::CloseRequested`，且桌面**有**
+    /// 这个事件，Android 没有）。
+    ///
+    /// 需要 `MainActivity.java` 额外声明并转发 `nativeOnBackPressed()`；未声明时
+    /// 本回调永不触发，返回键退回 Android 默认行为（退出），其余生命周期不受影响。
+    pub fn on_back(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.inner.lifecycle_cbs.lock().back.push(Arc::new(cb));
+    }
+
+    /// ⚠️ 消费**有时限**：见 [`on_back`](Self::on_back) 的「时序」一节。
 
     /// vireo 是否在切后台时**自动阻塞**渲染循环。默认 `true`。
     ///

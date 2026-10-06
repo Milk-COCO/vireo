@@ -11,6 +11,17 @@
   3. **不要**加 `android.app.lib_name` / `android_native_app_glue`：
      android-activity 的构建脚本已把同名 .so 动态打进 cdylib，
      否则会装进两套胶水层反而出问题。加载由 Java 侧 `System.loadLibrary` 负责。
+
+  enableOnBackInvokedCallback="true"（API 33+ 才认）—— **不加它返回键完全收不到**：
+  targetSdk >= 33 时系统默认**不**把返回键路由给 OnBackInvokedDispatcher，
+  于是 `registerOnBackInvokedCallback` 注册了也不会被触发；同时
+  `Activity.onBackPressed()` 覆写在 33+ 被系统直接忽略。两者叠加的结果是
+  「注册成功但按返回键毫无反应」（真机实测踩过，logcat 里 dispatcher 的
+  注册日志有、回调日志没有）。
+
+  加了它之后 `onBackPressed()` 覆写在 33+ **彻底失效**（这是有意的），
+  所以 MainActivity.java 里的 API 分档才是必需的：33+ 只靠 dispatcher，
+  31/32 只靠 onBackPressed 覆写。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -25,7 +36,8 @@
             android:exported="true"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode|smallestScreenSize"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:enableOnBackInvokedCallback="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

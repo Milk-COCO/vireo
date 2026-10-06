@@ -171,9 +171,42 @@ async fn main(app: App) {
             goal.store(true, Ordering::Release);
         });
     }
+// ---- 返回键：弹「退出游戏？」二段确认 --------------------------------------
+    //
+    // 不注册 `on_back` 也能跑，但返回键 = `Activity.finish()` 立即销毁进程 ——
+    // 没确认、没存档。所以这里演示标准接法：**第一次按返回键拦住并弹确认，
+    // 第二次才真退**。
+    //
+    // ⚠️ 语义方向容易搞反：**不消费 = 退出**（Android 默认行为）。所以
+    // 「拦下来」那一支必须调 `consume_back()`，而「确认退出」那一支要**不调**。
+    //
+    // ⚠️ 另一条关键规则：`consume_back()` 必须在 `on_back` 回调内**同步**调用。
+    // Java 侧在同一轮 `onBackPressed` 里就会读「是否已消费」来决定 finish 执不
+    // 执行，所以异步（spawn 到别的线程再调）会来不及 —— 症状是「回调跑了但 App
+    // 还是退了」。
+    let quit_confirm = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let confirming = quit_confirm.clone();
+        app.on_back(move || {
+            if confirming.swap(true, Ordering::AcqRel) {
+                // 第二次：确认中 → **不消费** → Android 走默认行为 finish()，App 退出。
+                //
+                // ⚠️ 注意语义方向：**不消费 = 退出**。所以「确认退出」这一支
+                // 要故意**不调** consume_back()。第一版我写反了（第二次消费），
+                // 结果第一次按返回键就 finish() 掉、第二次按键根本没东西可按。
+                log::info!("vireo-android: 返回键确认 → 退出");
+            } else {
+                // 第一次：**消费掉**，拦住 Android 的默认退出，App 留在原地。
+                // 真实项目在这里弹自己的「退出游戏？」UI。
+                vireo::platform::android_lifecycle::consume_back();
+                log::info!("vireo-android: 收到返回键（已拦住退出，再按一次确认）");
+            }
+        });
+    }
+
     let life = life.clone();
 
-// 触摸 → 按钮命中判定。Android 上点击只走 Touch 事件，鼠标按键状态恒 false
+    // 触摸 → 按钮命中判定。Android 上点击只走 Touch 事件，鼠标按键状态恒 false
     // （详见 run 循环里那段注释）。
     //
     // ⚠️ **不能用 `mouse_left()`**：Android 上点击只走 `WindowEvent::Touch`，
@@ -381,6 +414,15 @@ async fn main(app: App) {
             "wait    paused_wait={} until_ok={}\n",
             life.waited.load(Ordering::Relaxed),
             life.wait_until_ok.load(Ordering::Relaxed),
+        ));
+        // 返回键二段确认状态：按一次变 1（收到但未消费），再按一次消费并退出。
+        hud.push_str(&format!(
+            "back    confirm={}（按返回键：第一次=收到，第二次=退出）",
+            if quit_confirm.load(Ordering::Relaxed) {
+                "1 已收到"
+            } else {
+                "0"
+            },
         ));
         hud.push_str("gate    点左下角方块 = 切 auto_pause");
         hud.push_str(&format!("text    {typed:?}"));
