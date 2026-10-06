@@ -173,6 +173,22 @@ async fn main(app: App) {
     }
     let life = life.clone();
 
+    // 触摸 → 按钮命中判定。Android 上点击只走 Touch 事件，鼠标按键状态恒 false
+    // （详见 run 循环里那段注释），所以必须走 on_touch。
+    //
+    // ⚠️⚠️ **必须在 `run()` 之后注册**，否则**静默失效**（无任何日志）：
+    // `def_app_ons!` 宏（`src/window/on.rs:25`）是
+    //     if let Some(tx) = self.cb_tx.lock().as_ref() { tx.send(..) }
+    // 而 `cb_tx` 只在 `init_run_channels()`（`src/app/mod.rs:487`）里被赋值 ——
+    // 也就是**进了 run 才有**。在 run 之前调 `app.on_touch(..)` 时它是 `None`，
+    // 整个 send 被跳过，回调凭空消失，连 warn 都不打。
+    //
+    // 我为此连踩两个同类坑：先是 `window_ref(&idx).on_touch(..)`（窗口只是入队，
+    // `window_ref` 返回 `Err`），再是这个「早于 run」。两次都是**静默失效**。
+    //
+    // 回调在 winit 线程派发，故只置原子标志，判定留给渲染线程。
+    let tap_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
     {
@@ -183,30 +199,43 @@ async fn main(app: App) {
         }
     }
 
-    let mut prev_tap = false;
     let mut wait_tried = false;
+    let mut touch_registered = false;
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
             Ok(w) => w,
             Err(_) => return true,
         };
 
-        // ---- 点左上角按钮：切 auto_pause（对比两条路径）----------------------
-        // 用点击而非按键：示例常驻 `InputType::Text`（软键盘），Android 会把
-        // 硬件按键喂给 InputConnection（logcat 里是 `gti.InputConnection: onKey`），
-        // winit 的 `KeyboardInput` 收不到 —— 按键在真机上不可靠。
-        let tap = win.mouse_left();
-        let m = win.mouse_pos().logical();
-        // 按钮的点击判定必须和绘制用**同一个**尺寸来源（`layout_size`），
-        // 否则窗口改尺寸后按钮会移动而点击区留在原地 —— 我第一版硬编码了
-        // 640（当时恰好等于逻辑高度），改尺寸就错位。
-        let sz = win.layout_size();
-        // `mouse_pos().logical()` 给的是 f64，而绘制用 f32 —— 这里统一用 f64 判定，
-        // 再在比较处转换，避免两套精度混用。
-        let btn_y = sz.height.dp.0 - 120.0;
-        let in_gate_btn = m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0;
-        if tap && !prev_tap {
-            if in_gate_btn {
+        // on_touch 首次注册（见上面「必须在 run 之后注册」的说明）。
+        // 只需一次，用标志位保证不重复注册。
+        if !touch_registered {
+            touch_registered = true;
+            let flag = tap_flag.clone();
+            ctx.app().on_touch(idx, move |t: &vireo::input::TouchEvent| {
+                if t.phase == vireo::input::TouchPhase::Started {
+                    flag.store(true, Ordering::Release);
+                }
+            });
+        }
+
+        // ---- 点左下角按钮：切 auto_pause（对比两条路径）----------------------
+        // ⚠️ **不能用 `mouse_left()`**：Android 上点击只走 `WindowEvent::Touch`，
+        // **没有** `CursorMoved` / 鼠标按键事件（见 `window/mod.rs` 里「触摸点同时
+        // 充当指针位置」那段注释）。vireo 只把触摸位置写进 `mouse_pos`，
+        // **不写鼠标按键状态** —— 所以 `mouse_left()` 在触摸设备上恒为 `false`。
+        // 我第一版就是这么写的，按钮点了没反应。
+        //
+        // 正确做法：用 `on_touch` 回调（在 winit 线程派发）把 `Started` 记进原子
+        // 标志，渲染循环每帧消费。注意 vireo 目前**没有公开的 touch 轮询 API**
+        // （`InputState.touches` 只写不读），所以这是唯一途径。
+        if tap_flag.swap(false, Ordering::AcqRel) {
+            let m = win.mouse_pos().logical();
+            // 判定必须与绘制用**同一个**尺寸来源（`layout_size`），否则窗口改尺寸后
+            // 按钮移动而点击区留在原地。`mouse_pos().logical()` 是 f64。
+            let sz = win.layout_size();
+            let btn_y = sz.height.dp.0 - 120.0;
+            if m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0 {
                 let on = !ctx.app().auto_pause();
                 ctx.app().set_auto_pause(on);
                 log::info!(
@@ -223,7 +252,6 @@ async fn main(app: App) {
                 );
             }
         }
-        prev_tap = tap;
         if ctx.app().auto_pause() {
             life.auto_frames.fetch_add(1, Ordering::Relaxed);
         }
