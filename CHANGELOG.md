@@ -6,8 +6,10 @@
 
 - **触摸状态轮询 API**：`VireoWindow::touches() -> Vec<TouchPoint>` /
   `touch_count()` / `touch_first()`，以及公开类型 `TouchPoint`
-  （`{ id, pos: PixelPos, force }`）。此前 `InputState.touches` 只写不读，
-  触摸**只能**靠 `on_touch` 回调，鼠标式命中判定做不了。
+  （`{ id, pos: PixelPos, force }`）。此前触摸没有类型安全的读法 ——
+  `InputState.touches` 字段虽为 `pub`，但类型是裸
+  `HashMap<u64, (f32, f32, Option<f64>)>`（无排序保证、无文档），实际只能靠
+  `on_touch` 回调，鼠标式命中判定做不了。
   - `touches()` 按 `id` 升序（底层 `HashMap` 迭代顺序随机，不排序会让「取第一个点」
     每帧拿到不同手指）；`touch_first()` 与 `touches().first()` 逐位一致。
   - `pos` 用 `PixelPos` 双视图，与 `mouse_pos()` 同构；由逻辑值现算 `.px`

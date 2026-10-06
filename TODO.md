@@ -470,8 +470,10 @@ async fn main(app: App) { .. }
 
 ### ~~触摸只能靠回调，无法轮询~~ ✅ **已完成**（`touches()` / `touch_count()` / `touch_first()` + `TouchPoint`）
 
-原状态：`InputState.touches` 只写不读且 `pub(crate)`，触摸**唯一**读法是 `on_touch`
-回调（在 winit 线程派发，要搬到渲染线程消费），鼠标式命中判定做不了。
+原状态：`InputState.touches` 字段虽然是 `pub`（外部拿得到），但类型是裸
+`HashMap<u64, (f32, f32, Option<f64>)>` —— 没有类型安全的读法、没有文档、没有排序
+保证，触摸**实际只能用** `on_touch` 回调（在 winit 线程派发，要搬到渲染线程消费），
+鼠标式命中判定做不了。
 
 - `VireoWindow::touches() -> Vec<TouchPoint>`（按 `id` 升序）/ `touch_count()` /
   `touch_first()`（与 `touches().first()` 逐位一致）；`TouchPoint { id, pos: PixelPos, force }`

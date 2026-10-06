@@ -188,8 +188,9 @@ async fn main(app: App) {
     // 2. **回调** `app.on_touch(idx, ..)` —— 在 winit 线程派发，适合「事件驱动」
     //    场景（把 Started 记进原子标志，渲染循环消费）。
     //
-    // 1 和 2 之前只能选 2，因为当时**没有公开的 touch 轮询 API**
-    // （`InputState.touches` 只写不读）。现在有了，两者都能用。
+    // 1 和 2 之前只能选 2，因为当时触摸**没有类型安全的读法**
+    // （`InputState.touches` 字段虽为 `pub`，但类型是裸
+    // `HashMap<u64, (f32, f32, Option<f64>)>`，无排序保证、无文档）。现在有了。
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
