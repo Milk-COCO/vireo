@@ -21,8 +21,11 @@ const DIM: Color = Color::new(0.45, 0.75, 1.0, 1.0);
 
 #[vireo::main]
 async fn main() {
-    // 桌面的资产根；安卓这行是 no-op（资源由 src/main/assets/ 决定）
-    app.set_asset_root("assets");
+    // 桌面的资产根；安卓这行是 no-op（资源由 src/main/assets/ 决定）。
+    // 注意路径相对 **CWD** —— `cargo run --example resource_io` 的 CWD 是仓库根，
+    // 所以这里必须写 `examples/assets` 而不是 `assets`。
+    app.set_asset_root("examples/assets");
+
     // 三个可写目录的末级名字。默认取可执行文件名，这里显式设一个便于观察。
     app.set_storage_name("vireo-resource-io-demo");
 

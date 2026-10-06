@@ -21,7 +21,8 @@
 //!
 //! # 目录约定
 //!
-//! 桌面：把文件放 [`App::set_asset_root`] 的目录（默认 `./assets`）。<br/>
+//! 桌面：把文件放 [`App::set_asset_root`] 的目录。⚠️ 该路径相对 **CWD** ——
+//!       `cargo run --example x` 的 CWD 是**仓库根**，不是 `examples/`。<br/>
 //! 安卓：放 `src/main/assets/`（AGP 默认打进 APK，无需改 `build.gradle`）。
 //!
 //! 同一份代码两端通用，这是本模块存在的主要价值 —— **不是**魔法，是把根目录
@@ -204,13 +205,25 @@ fn exists_impl(_root: Option<&std::path::Path>, name: &str) -> bool {
     let Ok(cname) = std::ffi::CString::new(name) else {
         return false;
     };
-    let Some(mut asset) = app.asset_manager().open(&cname) else {
+    let am = app.asset_manager();
+
+    // ⚠️ 这里有个真实的坑：`AAsset_open` 对**目录**也返回非 None，且目录与
+    // 0 字节文件读出来**都是 0 字节** —— 只靠 `read` 无法区分两者。
+    //
+    // 所以分两步：
+    //   1. open 失败            → 不存在
+    //   2. 能读出 ≥1 字节        → 一定是资源
+    //   3. 读出 0 字节          → 用 open_dir 判定：能当目录打开就是目录（不是资源），
+    //                            否则是 0 字节的资源（存在）
+    let Some(mut asset) = am.open(&cname) else {
         return false;
     };
-    // 某些 ROM 下 `open` 对目录也返回非 None，用一次 1 字节读探测：
-    // 目录不是资源，`read` 会失败，视为不存在。
     let mut probe = [0u8; 1];
-    matches!(asset.read(&mut probe), Ok(n) if n > 0)
+    if matches!(asset.read(&mut probe), Ok(n) if n > 0) {
+        return true;
+    }
+    // 0 字节：借 open_dir 区分「目录」与「空文件」
+    am.open_dir(&cname).is_none()
 }
 
 #[cfg(target_os = "android")]
@@ -356,6 +369,36 @@ mod tests {
         assert!(a.read("ok.txt").is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_byte_asset_still_exists() {
+        // 契约：0 字节的资源**存在**。
+        // 安卓实现踩过这个坑 —— `AAsset_open` 对目录也返回非 None，且目录与
+        // 0 字节文件读出来都是 0 字节，只靠 `read` 会把空资源误判为不存在。
+        let dir = std::env::temp_dir().join("vireo_asset_test_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty.txt"), b"").unwrap();
+
+        let a = Assets::new(Some(dir.clone()));
+        assert!(a.exists("empty.txt"), "0 字节资源必须报告存在");
+        assert_eq!(a.read("empty.txt").unwrap(), Vec::<u8>::new());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subdirectory_is_not_an_asset() {
+        // 与 0 字节资源相对：子目录本身不是资源（安卓侧要靠 open_dir 区分）
+        let dir = std::env::temp_dir().join("vireo_asset_test_subdir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("levels")).unwrap();
+
+        let a = Assets::new(Some(dir));
+        assert!(!a.exists("levels"), "目录不该被当成资源");
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("vireo_asset_test_subdir"));
     }
 
     #[test]
