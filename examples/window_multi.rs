@@ -1,35 +1,26 @@
-// Android 上只能建**一个**窗口 —— 本示例的窗口 B 会被 vireo 拒绝（打
-// `log::error!`，且该 index 的 `window_ref` 恒 `Err`）。这不是 vireo 偷懒 ——
-// winit Android 的 `WindowId` 是单元结构体（所有窗口 id 相同 → 事件串台），
-// 且 `Window::new` 忽略全部窗口属性（两个 `Surface` 指向同一个 `SurfaceView`
-// → 两个 Renderer 抢同一 surface，撞 "Surface image is already acquired"）。
-//
-// 所以 Android 上第二个窗口的绘制分支会自动跳过（`window_ref` 走 `Err` 分支），
-// 不会崩，但也不会有第二个窗口。
-#[cfg(target_os = "android")]
-const _: () = {
-    // 编译期提示（比 eprintln 更早暴露问题，且不依赖运行时）。
-    // 用 `const _` 而不是裸 block：`#[cfg]` 裸块放在文件顶层也可，但这里
-    // 保持「编译期常量」的形式，风格上和下面 main 的 cfg 注解一致。
-    const _ANDROID_SINGLE_WINDOW: () = ();
-};
-
-#[cfg(target_os = "android")]
-fn android_single_window_notice() {
-    eprintln!(
-        "注意：Android 只支持一个窗口，本示例的窗口 B 会被 vireo 拒绝。\n\
-         多窗口 UI 请折进单窗口（自绘标签页），或用 OffscreenCanvas 自己合成。"
-    );
-}
-
+/// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
+///
+/// # ⚠️ 本示例是**桌面专用**，不能搬到 Android
+///
+/// 两层原因：
+///
+/// 1. 它建**两个**窗口，而 Android 上 vireo 只支持一个 —— 第 2 次
+///    [`App::window`](vireo::App::window) 调用会直接 **panic**
+///    （Android 一个 Activity 只有一个 `SurfaceView`，winit 的 `WindowId` 是
+///    单元结构体且 `Window::new` 忽略全部属性，两个窗口必然事件串台 +
+///    两个 `Renderer` 抢同一 surface）。
+/// 2. 更根本的：`#[vireo::main]` 在 Android 上展开成 `android_main`
+///    （JNI 符号，不是 `fn main`），所以桌面示例 crate 根本编不过 Android
+///    target —— 实测报 `error[E0601]: main function not found`。
+///
+/// Android 上的多窗口 UI 只能折进单窗口（自绘标签页 / 状态机切换内容），
+/// 或用 [`App::offscreen`](vireo::App::offscreen) +
+/// [`OffscreenCanvas`](vireo::OffscreenCanvas) 自己合成。
+/// Android 的单窗口示例见 `examples/android`。
 use vireo::prelude::*;
 
-/// 演示：dpi_override、多窗口、鼠标跟随、关闭钩子、文本渲染
 #[vireo::main]
 async fn main() {
-    #[cfg(target_os = "android")]
-    android_single_window_notice();
-
     let idx_a = app.window(
         WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
         Some(|| println!("窗口 A 已关闭")),
