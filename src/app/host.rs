@@ -383,7 +383,7 @@ impl ApplicationHandler for Runner {
                 ::log::warn!(
                     "vireo: dropping on_* registration for handle {handle}: \
                      exceeds MAX_CALLBACK_SLOTS ({MAX_CALLBACK_SLOTS}); \
-                     该 WindowIndex 很可能无效（窗口未创建或已关闭）"
+                     this WindowIndex is very likely stale (window never created, or already closed)"
                 );
                 continue;
             }
@@ -667,8 +667,8 @@ pub(crate) fn run_blocking(
         // 原值要留着 —— `platform::android::WindowExtAndroid` 的 JNI 在运行期
         // 还要 clone 给每个 `VireoWindow`。
         let android_app = super::android_app().cloned().expect(
-            "安卓下 AndroidApp 应已由 #[vireo::main] 的 android_main 存入 \
-             （若未走宏入口，说明进程没有经过 android_main）",
+            "on Android, AndroidApp must already be stored by #[vireo::main]'s android_main \
+             (if it is missing, the process never went through android_main)",
         );
         EventLoop::builder()
             .with_android_app(android_app)

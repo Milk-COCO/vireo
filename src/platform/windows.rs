@@ -188,7 +188,7 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
     let expected = w.saturating_mul(h).saturating_mul(4);
     if rgba.len() < expected || w == 0 || h == 0 {
         log::warn!(
-            "vireo taskbar: hicone_from_rgba 尺寸非法 ({}x{}, rgba len={}, expected={})",
+            "vireo taskbar: invalid hicone_from_rgba dimensions ({}x{}, rgba len={}, expected={})",
             width,
             height,
             rgba.len(),
@@ -234,7 +234,7 @@ fn hicone_from_rgba(rgba: &[u8], width: u32, height: u32) -> isize {
         );
         if icon.is_null() {
             log::warn!(
-                "vireo taskbar: CreateIconFromResourceEx 失败 ({}x{})",
+                "vireo taskbar: CreateIconFromResourceEx failed ({}x{})",
                 width,
                 height
             );
@@ -1380,7 +1380,7 @@ impl WindowExtWindows for crate::window::VireoWindow {
         let count = buttons.len().min(u32::MAX as usize) as u32;
         if count > 7 {
             // Windows 限制：缩略图最多 7 个按钮。
-            log::warn!("vireo: set_thumbar_buttons 超过 7 个按钮，截断到 7");
+            log::warn!("vireo: set_thumbar_buttons given more than 7 buttons, truncating to 7");
         }
         let count = count.min(7);
         let mut icons: Vec<isize> = Vec::with_capacity(count as usize);
@@ -1598,7 +1598,7 @@ fn window_hwnd(window: &winit::window::Window) -> Option<isize> {
     use winit::raw_window_handle::RawWindowHandle;
     let wh = unsafe { window.window_handle_any_thread() }.ok()?;
     let RawWindowHandle::Win32(h) = wh.as_raw() else {
-        log::warn!("vireo window_hwnd: 非 Win32 handle");
+        log::warn!("vireo window_hwnd: handle is not a Win32 handle");
         return None;
     };
     Some(h.hwnd.get())

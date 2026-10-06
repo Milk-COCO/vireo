@@ -225,7 +225,7 @@ pub(crate) fn apply_winit_event_one(
                         guard = g;
                         if res.timed_out() {
                             super::exit_log(&format!(
-                                "supervisor: draw_idle 2s 未置位 (handle={}) → 放行关窗",
+                                "supervisor: draw_idle not set after 2s (handle={}), forcing close",
                                 handle
                             ));
                             break;
@@ -410,7 +410,7 @@ pub(crate) fn supervisor_loop(
                     .unwrap_or(true);
                 if overdue >= std::time::Duration::from_secs(10) && warn_due {
                     super::exit_log(&format!(
-                        "supervisor: ERROR pending_window_creates={} 已卡 {:?}（WindowCreated 未回）",
+                        "supervisor: ERROR pending_window_creates={} stuck for {:?} (WindowCreated never arrived)",
                         pending, overdue
                     ));
                     pending_warned_at = Some(now);
@@ -432,7 +432,7 @@ pub(crate) fn supervisor_loop(
                 // 必须在 `exit_tx.send` **之前**：先让等待者醒，再让线程退出。
                 app.mark_shutdown();
                 super::exit_log(&format!(
-                    "supervisor: Exit (open={} pending={} created={}) → exit_tx + wake，等 ack",
+                    "supervisor: Exit (open={} pending={} created={}) -> exit_tx + wake, waiting for ack",
                     app.window_count(),
                     app.pending_window_creates.load(Ordering::Acquire),
                     created_windows
@@ -445,22 +445,22 @@ pub(crate) fn supervisor_loop(
                 loop {
                     match exit_ack_rx.recv_timeout(std::time::Duration::from_millis(500)) {
                         Ok(()) => {
-                            super::exit_log("supervisor: exit ack ok，退出");
+                            super::exit_log("supervisor: exit ack ok, returning");
                             break;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            super::exit_log("supervisor: exit ack 超时 → re-wake");
+                            super::exit_log("supervisor: exit ack timed out -> re-wake");
                             let _ = exit_tx.send(());
                             app.wake_event_loop();
                             if start.elapsed() >= std::time::Duration::from_secs(5) {
                                 super::exit_log(
-                                    "supervisor: exit ack 5s 未到，仍返回（事件循环侧见日志）",
+                                    "supervisor: exit ack still missing after 5s, returning anyway (see event loop side logs)",
                                 );
                                 break;
                             }
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            super::exit_log("supervisor: exit ack 通道断开，返回");
+                            super::exit_log("supervisor: exit ack channel disconnected, returning");
                             break;
                         }
                     }
@@ -469,7 +469,7 @@ pub(crate) fn supervisor_loop(
             }
             SupervisorAction::CloseAll => {
                 super::exit_log(&format!(
-                    "supervisor: CloseAll (open={})，逐窗走关窗路径",
+                    "supervisor: CloseAll (open={}), closing each window via its close path",
                     app.window_count()
                 ));
                 // vireo-main 已死、无存活 loop：快照 open 句柄后逐个走关窗路径

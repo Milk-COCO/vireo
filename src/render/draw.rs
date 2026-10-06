@@ -138,7 +138,7 @@ impl Renderer {
                 // dev 模式立刻提示用户，release 保持原行为（静默跳过）
                 debug_assert!(
                     !batch.clips_children || has_geom || batch.scissor.is_some(),
-                    "clips_children=true 但 batch 无几何且无显式 scissor；裁切不会生效。请提供几何裁切形状或显式设置 batch.scissor"
+                    "clips_children=true but the batch has no geometry and no explicit scissor; clipping will not take effect. Provide a geometry clip shape or set batch.scissor explicitly"
                 );
                 if content_level > 0 {
                     if batch.inherit.clipped && has_draw {
