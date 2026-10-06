@@ -556,16 +556,27 @@ adb logcat -d | findstr lifecycle # 应有 paused 与 stopped 各一条
 `destroyed` 需要**手动从最近任务划掉卡片**（回桌面不触发它）—— adb 没有直接的
 「划掉卡片」命令，`am force-stop` 也不是 `onDestroy` 路径（它直接杀进程）。
 
-模板 HUD 上的两行用于肉眼核对：
+模板 HUD 上的几行用于肉眼核对：
 
 ```
 life  paused=1 stopped=1 destroyed=0
-gate  auto_pause=false bg_frames=1245 waited=1
+gate  auto=off bg=1245 auto_frames=0
+wait  paused_wait=1 until_ok=1
 ```
 
-- `bg_frames` 在 HOME 后台期间持续增长 → 闸门确实关掉了（默认 `auto_pause=true` 时恒 0）
+- `bg` 在 HOME 后台期间持续增长 → 闸门确实关掉了。切到 `auto=ON` 再按 HOME，
+  **`bg` 应立刻停止增长**（默认 `auto_pause=true` 时恒 0）
+- `auto_frames` 是 `auto_pause=true` 时的帧数，用来确认默认路径没回归
 - `paused` 与 `stopped` 同步递增 → 每轮暂停都含 `onStop`（锁屏/回桌面都算）
 - `destroyed` 只在划掉任务后 +1
+- `until_ok` 是 `wait_until` 的往返成功次数
+
+> ⚠️ **切换按钮用点击而非按键**：示例常驻 `InputType::Text`（软键盘），Android 会把
+> 硬件按键喂给 `InputConnection`（logcat 里是 `gti.InputConnection: onKey`），
+> winit 的 `KeyboardInput` 收不到 —— 按键在真机上不可靠。
+>
+> 另：MuMu 上 `adb shell input tap` 注入的触摸**到不了应用**，所以按钮交互在
+> MuMu 上无法自动验证，需真机手动点。
 
 ### 想在 logcat 里看生命周期事件
 

@@ -74,6 +74,10 @@ struct LifeCounters {
     bg_frames: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// `wait_while_paused()` 返回后累计次数（证明「自己决定何时停」这条路通）。
     waited: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `wait_until` + `notify_waiters` 往返成功次数（自定义条件等待）。
+    wait_until_ok: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `auto_pause` 实际处于开启（= vireo 自动阻塞）状态的帧数。
+    auto_frames: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 // `fonts = ...` 在 `App` 构造**之前**求值，这是宏路径下唯一能定制 Android 系统字体
@@ -146,11 +150,28 @@ async fn main(app: App) {
         });
     }
 
-    // ---- 接管暂停时机：关掉 vireo 的闸门 ---------------------------------
+    // ---- 接管暂停时机：默认关掉 vireo 的闸门（A 键可切回对比）----------------
     // 默认（auto_pause = true）时 vireo 自己在切后台时阻塞整条渲染线程。
     // 关掉之后循环照常跑，后台要干什么由我们自己决定 —— 下面 `run` 里
     // 「后台仍 tick 但不 draw」就是这套用法。
+    //
+    // 启动时设为 false（演示接管），**A 键可随时切回 true 验证默认路径**：
+    // 切到 true 后按 HOME，bg_frames 应立刻停止增长 —— 那条分支同样需要回归验证，
+    // 不能只靠「auto_pause()=true 时条件退化成 is_paused()」这种推理。
     app.set_auto_pause(false);
+
+    // 自定义等待条件：`wait_until` + `notify_waiters` 的往返验证。
+    // 目标条件由「外部线程」满足 —— 这里用一个 3 秒后自己置位的 std 线程，
+    // 模拟「等网络响应 / 等某个异步任务完成」这类真实场景。
+    let wait_goal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let goal = wait_goal.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            goal.store(true, Ordering::Release);
+        });
+    }
+    let life = life.clone();
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
@@ -162,11 +183,50 @@ async fn main(app: App) {
         }
     }
 
+    let mut prev_tap = false;
+    let mut wait_tried = false;
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
             Ok(w) => w,
             Err(_) => return true,
         };
+
+        // ---- 点左上角按钮：切 auto_pause（对比两条路径）----------------------
+        // 用点击而非按键：示例常驻 `InputType::Text`（软键盘），Android 会把
+        // 硬件按键喂给 InputConnection（logcat 里是 `gti.InputConnection: onKey`），
+        // winit 的 `KeyboardInput` 收不到 —— 按键在真机上不可靠。
+        let tap = win.mouse_left();
+        let m = win.mouse_pos().logical();
+        // 按钮的点击判定必须和绘制用**同一个**尺寸来源（`layout_size`），
+        // 否则窗口改尺寸后按钮会移动而点击区留在原地 —— 我第一版硬编码了
+        // 640（当时恰好等于逻辑高度），改尺寸就错位。
+        let sz = win.layout_size();
+        // `mouse_pos().logical()` 给的是 f64，而绘制用 f32 —— 这里统一用 f64 判定，
+        // 再在比较处转换，避免两套精度混用。
+        let btn_y = sz.height.dp.0 - 120.0;
+        let in_gate_btn = m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0;
+        if tap && !prev_tap {
+            if in_gate_btn {
+                let on = !ctx.app().auto_pause();
+                ctx.app().set_auto_pause(on);
+                log::info!(
+                    "vireo-android: auto_pause = {on}（on = vireo 自动阻塞；\
+                     切到 ON 后按 HOME，bg 应停止增长）"
+                );
+            } else {
+                log::info!(
+                    "vireo-android: tap at logical ({:.0}, {:.0})，按钮在 y {:.0}..{:.0}",
+                    m.0,
+                    m.1,
+                    btn_y,
+                    btn_y + 64.0
+                );
+            }
+        }
+        prev_tap = tap;
+        if ctx.app().auto_pause() {
+            life.auto_frames.fetch_add(1, Ordering::Relaxed);
+        }
 
         // ---- 安全区三值 --------------------------------------------------
         #[cfg(target_os = "android")]
@@ -185,6 +245,20 @@ async fn main(app: App) {
         let (vw, vh) = (size.width.dp.0 as f32, size.height.dp.0 as f32);
 
         let mut batch = DrawBatch::new();
+
+        // ---- auto_pause 切换按钮 ---------------------------------------------
+        // 位置按布局尺寸算，别写死 —— 写死过一次（y=640..700）正好落在
+        // 1138x640 的逻辑视口**外面**，按钮看不见也点不到。
+        let gate_on = ctx.app().auto_pause();
+        let (bx, by) = (40.0, vh - 120.0);
+        draw_rectangle(&mut batch, Pos::new(bx, by), 300.0, 64.0, Some(GRAY));
+        draw_text(
+            &mut batch.texts,
+            if gate_on { "auto_pause: ON" } else { "auto_pause: off" },
+            Pos::new(bx + 16.0, by + 18.0),
+            TextDef { font_size: 22.0, ..Default::default() },
+            TextOverride::new(),
+        );
 
         // 三圈：safe_area（最大可能遮挡）/ padding（当前可见遮挡）/ ime（键盘）
         ring(&mut batch, vw, vh, safe, RED);
@@ -268,11 +342,17 @@ async fn main(app: App) {
             life.destroyed.load(Ordering::Relaxed),
         ));
         hud.push_str(&format!(
-            "gate    auto_pause={} bg_frames={} waited={}\n",
-            ctx.app().auto_pause(),
+            "gate    auto={} bg={} auto_frames={}\n",
+            if ctx.app().auto_pause() { "ON " } else { "off" },
             life.bg_frames.load(Ordering::Relaxed),
-            life.waited.load(Ordering::Relaxed),
+            life.auto_frames.load(Ordering::Relaxed),
         ));
+        hud.push_str(&format!(
+            "wait    paused_wait={} until_ok={}\n",
+            life.waited.load(Ordering::Relaxed),
+            life.wait_until_ok.load(Ordering::Relaxed),
+        ));
+        hud.push_str("gate    点左下角方块 = 切 auto_pause");
         hud.push_str(&format!("text    {typed:?}"));
         // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）
         let mut emoji_probe = String::from("\nemoji");
@@ -354,12 +434,35 @@ async fn main(app: App) {
             return true;
         }
         // 3. 想要「这一帧跑完再彻底停」时，可以用 wait_while_paused()。
-        //    这里演示它的可打断性：返回后 waited+1。默认不用它（连续绘制更简单），
-        //    所以只在「刚恢复」的第一帧调一次，避免每帧都白等一趟。
+        //    这里演示它的可打断性：返回后 waited+1。只在「刚恢复」的第一帧调一次，
+        //    否则每帧都白等一趟。
         if life.paused.load(Ordering::Relaxed) > life.waited.load(Ordering::Relaxed) {
             ctx.app().wait_while_paused();
             life.waited.fetch_add(1, Ordering::Relaxed);
             log::info!("vireo-android: wait_while_paused 返回（可打断，未挂死）");
+        }
+        // 4. wait_until + notify_waiters 的往返：目标条件由后台线程在 3 秒后置位。
+        //    只跑一次。条件变化本身**不会**自动唤醒（平台状态才会），
+        //    所以这条同时验证了「自定义条件必须自己 notify」这条约束。
+        if !wait_goal.load(Ordering::Relaxed) && !wait_tried {
+            wait_tried = true;
+            let t0 = std::time::Instant::now();
+            // 故意先等 4 秒再进 wait：让条件在**进入等待之前**就成立 ——
+            // 这是「通知早于等待不得丢唤醒」的真机版验证（单测里有对应那条）。
+            std::thread::sleep(std::time::Duration::from_millis(4000));
+            let ok = ctx.app().wait_until(Some(std::time::Duration::from_secs(2)), || {
+                wait_goal.load(Ordering::Relaxed)
+            });
+            let dt = t0.elapsed();
+            if ok {
+                life.wait_until_ok.fetch_add(1, Ordering::Relaxed);
+                log::info!(
+                    "vireo-android: wait_until 返回 true，耗时 {dt:?} \
+                     （条件已成立 → 立即返回，未白等满 timeout）"
+                );
+            } else {
+                log::warn!("vireo-android: wait_until 超时/被打断（{dt:?}）");
+            }
         }
 
         win.draw(BLACK, &[&batch]);
