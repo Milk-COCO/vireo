@@ -431,11 +431,13 @@ winit 的 Android 后端**注册了** Activity 生命周期回调，但除 `Resu
 ```java
 private static native void nativeOnPause();
 private static native void nativeOnResume();
-private static native void nativeOnStop();   // 可选，见下
+private static native void nativeOnStop();      // 可选，见下
+private static native void nativeOnDestroy();   // 可选，见下
 
 @Override protected void onPause()  { nativeOnPause();  super.onPause(); }
 @Override protected void onResume() { super.onResume(); nativeOnResume(); }
 @Override protected void onStop()    { nativeOnStop();    super.onStop(); }
+@Override protected void onDestroy() { nativeOnDestroy(); super.onDestroy(); }
 ```
 
 Rust 侧能拿到的东西：
@@ -447,10 +449,71 @@ app.on_resumed(|| resume_audio());
 
 app.is_stopped();                // activity 当前是否不可见；桌面恒 false
 app.on_stopped(|| mark_really_left());  // 只在「本次暂停含 onStop」时触发
+
+app.is_destroyed();              // 用户主动关闭（划掉最近任务）；桌面恒 false
+app.on_destroyed(|| quit_now()); // 只在「用户主动关闭」时触发
 ```
 
-**`paused` 期间整条渲染 Thread 完全停摆** —— 不跑 `on_tick`、不 `draw`、
+**默认 `paused` 期间整条渲染 Thread 完全停摆** —— 不跑 `on_tick`、不 `draw`、
 不 acquire/present。所以 `on_tick` 里的代码照常写，不用自己判 `is_paused()`。
+
+### 想在后台继续跑逻辑：`set_auto_pause(false)`
+
+默认 vireo 替你暂停。关掉后循环照常跑，**由你决定**做什么：
+
+```rust
+app.set_auto_pause(false);   // 默认 true，懒得写的人零改动
+app.run(|ctx| {
+    update_logic();                  // 后台也跑
+    if !ctx.app().is_paused() {      // 不可见时不画
+        win.draw(WHITE, &[&batch]);
+    }
+    if ctx.app().is_destroyed() {    // 用户划掉任务 → 退出
+        return false;
+    }
+    true
+});
+```
+
+关掉闸门后有两个必须知道的代价：
+
+1. **后台全速空转**。「后台 CPU 占用高」正是 Android 杀进程的判定依据之一，
+   结果是后台存活时间反而**更短**。上面判 `is_paused()` 不画是必须的。
+2. **长时间后台需要前台服务**（Foreground Service + 常驻通知），否则系统迟早
+   回收进程。vireo 管不了这一层。
+
+### 「暂停直到」：自己选时机
+
+```rust
+// 等前台。会被窗口关闭/设备丢失/activity 销毁打断，不会挂死
+app.wait_while_paused();
+
+// 通用条件。平台生命周期变化会自动唤醒；你自己的条件变了要 notify
+if !app.wait_until(Some(Duration::from_secs(5)), || flag.load(Relaxed)) {
+    log::warn!("timeout");
+}
+app.notify_waiters();   // 自定义条件变化后叫醒等待者
+```
+
+> ⚠️ `wait_until` 的唯一坑：**你自己的条件变了却忘了 `notify_waiters()`**，
+> 等待方只能等到超时。平台状态（切后台/恢复/销毁）不需要你 notify。
+
+### `onDestroy`：唯一能回答「用户是切走了还是把我关了」
+
+| 场景 | `is_paused` | `is_stopped` | `is_destroyed` |
+|---|---|---|---|
+| 回桌面 / 切 app | ✅ | ✅ | ❌ |
+| 锁屏 / 息屏 | ✅ | ✅ | ❌ |
+| 半透明弹窗 / 权限对话框 | ✅ | ❌ | ❌ |
+| **划掉最近任务 / `finish()`** | ✅ | ✅ | **✅** |
+| 系统回收内存杀进程 | ✅ | ✅ | ❌ |
+
+⚠️ **进程被杀时不触发**（Android 措辞是 "might be called"）。所以
+`is_destroyed()` **不能**用来做资源清理或存档 —— 那要在 `on_paused` 之类更早的
+时机做。它只回答「用户是不是明确要把你关掉」。
+
+这也是 `set_auto_pause(false)` 之后**唯一的退出信号**：`paused` / `stopped` 在
+划掉任务时都会正常来（应用只是不可见了），只有 `destroyed` 告诉你「不用再跑了」。
 
 ### `onStop` 用来区分「短暂中断」与「彻底离开」
 
@@ -466,8 +529,9 @@ app.on_stopped(|| mark_really_left());  // 只在「本次暂停含 onStop」时
 > 查询，恢复后已经翻回 `false`（`onStart` 紧跟 `onResume` 跑完，渲染线程才被唤醒）。
 > 要判断就用 `on_stopped` 回调。
 
-`nativeOnStop` 是**可选**的：不声明 / 不调用只是 `on_stopped` 永不触发，
-其它生命周期行为不受影响。
+`nativeOnStop` / `nativeOnDestroy` 是**可选**的：不声明 / 不调用只是对应的
+`on_stopped` / `on_destroyed` 与 `is_destroyed()` 恒为 `false`，其它生命周期行为
+不受影响。
 
 两点注意：
 
@@ -489,8 +553,19 @@ adb shell am start -n com.example.vireoandroid/.MainActivity
 adb logcat -d | findstr lifecycle # 应有 paused 与 stopped 各一条
 ```
 
-模板的 HUD 上还有一行 `life paused=N stopped=N`，多跑几轮就能看出计数是否
-一一对应（`paused` 与 `stopped` 应当同步递增）。
+`destroyed` 需要**手动从最近任务划掉卡片**（回桌面不触发它）—— adb 没有直接的
+「划掉卡片」命令，`am force-stop` 也不是 `onDestroy` 路径（它直接杀进程）。
+
+模板 HUD 上的两行用于肉眼核对：
+
+```
+life  paused=1 stopped=1 destroyed=0
+gate  auto_pause=false bg_frames=1245 waited=1
+```
+
+- `bg_frames` 在 HOME 后台期间持续增长 → 闸门确实关掉了（默认 `auto_pause=true` 时恒 0）
+- `paused` 与 `stopped` 同步递增 → 每轮暂停都含 `onStop`（锁屏/回桌面都算）
+- `destroyed` 只在划掉任务后 +1
 
 ### 想在 logcat 里看生命周期事件
 

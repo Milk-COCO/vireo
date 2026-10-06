@@ -134,10 +134,37 @@ NDK26 当时能过是**运气**：给 `.data.rel.ro` 加 4 KB 就立刻翻成 FA
 **相关**：`examples/android/README.md` §5（含完整原理与验证清单）
 
 ---
-### ~~`onStop` / `onDestroy`~~ ✅ `onStop` **已完成**（`App::on_stopped` + `is_stopped`）
+### ~~`onStop` / `onDestroy`~~ ✅ **两者都已完成**（`on_stopped` / `is_destroyed` + 闸门开关 + wait 家族）
 
-`onDestroy` **仍不做**：`VireoWindow::close()` 走的是 vireo 自己那条路，Activity 真正
-结束时收不到通知，影响很小。
+原先写的「`onDestroy` 不做，影响很小」**是错的** —— 那个论证只对 vireo 内部成立
+（`VireoWindow::close()` 确实走自己的路，不依赖 `onDestroy`），但对「区分用户是
+**切走了**还是**主动关了我**」这个需求，`onPause` / `onStop` **都答不了**。
+
+| 问题 | 靠什么 |
+|---|---|
+| 我在前台吗 | `is_paused()` |
+| 我完全不可见吗 | `is_stopped()` |
+| **用户是切走了还是主动关了我** | **`is_destroyed()`**（唯一） |
+| 我的进程要死了吗 | **无解**（进程被杀时没有任何回调） |
+
+且它是 `set_auto_pause(false)`（后台继续跑逻辑）之后**唯一的退出信号** ——
+划掉任务时 `paused` / `stopped` 都会照常来（应用只是不可见），只有 `destroyed`
+告诉你「不用再跑了」。
+
+本轮一并做的（用户决定）：
+1. `App::set_auto_pause(false)` —— 闸门可接管，**默认 `true`**（懒得写的用户零改动）
+2. `App::wait_while_paused()` + `wait_until()` + `notify_waiters()` —— 「暂停直到」
+3. `App::is_destroyed()` + `on_destroyed()` —— 纳入本次范围
+
+#### 硬约束：等待必须可打断，否则 join 永久阻塞
+supervisor 判定退出时调 `App::mark_shutdown()`（置标志 + `notify_all`），
+**早于线程 join**。所以「等待方需要知道退出」这件事是引擎职责 ——
+用户代码里挂着的 `wait_until` 不能因为引擎要退就把它挂死。
+
+`LoopContext` 够不到自己线程的 `done`（只有 `app` / `tick_count` / `fps_stats`），
+但**不需要** per-thread 粒度：「窗口全关」和「设备丢失」这两个全局条件已经覆盖了
+「必须唤醒」的全部场景，所以用**进程级 `shutdown` 标志**即可，`LoopContext`
+一行未改。
 
 #### 发现的硬约束：回调**不可能**在暂停期间触发
 
@@ -185,6 +212,20 @@ Android 回调顺序是 `onPause → onStop → … → onStart → onResume`，
   **3 轮**，logcat 恰好 6 条（每轮 paused + stopped 各一条），HUD `paused=3 stopped=3`
   与之一致。时间戳形态也印证设计：paused 在暂停生效时、stopped 在恢复时，
   两者相隔约等于 HOME 到回来的间隔。
+- **闸门可接管 + `onDestroy` 也已实机验证**（`auto_pause=false` 时）：
+  ```
+  life  paused=1 stopped=1 destroyed=0
+  gate  auto_pause=false bg_frames=1245 waited=1
+  ```
+  `bg_frames=1245` 是最硬的证据 —— HOME 后台 5 秒里循环仍在跑 1245 帧
+  （`auto_pause=true` 时这里恒 0）。`waited=1` 证明 `wait_while_paused()`
+  正常返回未挂死。手动划掉最近任务后 66ms 内三条回调依次触发：
+  ```
+  12:13:15.490  paused
+  12:13:15.490  stopped
+  12:13:15.556  destroyed = 用户主动关闭
+  12:13:15.557  「用户主动关闭，退出循环」   ← is_destroyed() 分支生效
+  ```
 - 中途踩到一次 gradle 增量状态损坏（`mergeDebugJniLibFolders\merger.xml` 内容
   无法解析），是先前构建被中断留下的；删掉该目录即可，不必 `clean`。
 
@@ -259,29 +300,59 @@ wgpu 也没有内存压力 API（只有被动报 `DeviceError::OutOfMemory`）�
 
 ---
 
-### `onSaveInstanceState`：**不做**（已定论，勿再议）
+### `onSaveInstanceState` / Bundle 机制：**暂不实现**（用户决定，2026-10-06）
 
-三条理由：
+**用户原话**：「那我们暂不考虑加上 SaveState 相关 api。」
 
-1. **vireo 没有可序列化的状态**。`App.textures` / `offscreens` / `windows` /
-   `gpu` 全是 `Arc<...>` 包着 `wgpu::Texture` / `Surface` / `Device` 句柄。
-   `DrawBatch` 技术上可序列化但**毫无意义** —— 它是每帧从零重建的命令缓冲。
-2. **用户游戏状态不在 vireo 里**。这是引擎层职责，vireo 是渲染库，在这一层之下。
-3. **技术上被 winit 堵死**。`SaveState` 被 `warn!("TODO")`、
-   `StateLoader` 被直接丢弃（`mod.rs:272-280`），绕过需绕开 winit 整个事件循环。
+> ⚠️ **本节此前有三处措辞错误，一并纠正**（都是我在讨论中越说越偏）：
+>
+> 1. **不是「Android 限制」，是 winit 的缺口。** Android **提供**了
+>    `onSaveInstanceState(Bundle)` 这个平台能力。卡在 winit：
+>    ```rust
+>    // winit-0.30.13/src/platform_impl/android/mod.rs:276-280
+>    MainEvent::SaveState { .. } => {
+>        // XXX: how to forward this state to applications?
+>        warn!("TODO: forward saveState notification to application");
+>    }
+>    ```
+>    `has_saved_state` / `StateLoader` 在整个 winit android 目录里 grep **零命中** ——
+>    恢复路径连占位都没有。
+> 2. **「`on_paused` 是恢复后才补发的」现已过时**。2026-10-06 修了闸门顺序
+>    （代号检查移到闸门之前），`on_paused` 现在在**暂停生效时**触发。
+> 3. **说「`onPause` 保存不住状态」是误导**。用户在 `on_paused` 里
+>    `std::fs::write(...)` **完全可行且是标准做法** —— 写文件落磁盘，进程被杀也不丢。
+>    「保存不住」只指*仅存于内存*的状态。两者被混为一谈了。
 
-> **纠正一个旧误判**：此前写「`onSaveInstanceState` 需要 `android_os_Bundle` JNI
-> 绑定 + 自定义 `Parcelable`」—— **Bundle 那部分完全错了**。
-> `StateSaver::store(&[u8])`（`android-activity-0.6.1/src/game_activity/mod.rs:50-88`）
-> 是**纯字节接口**，AGSK 的 recallback 自己写 Bundle。真实阻塞**只**是 winit 吞事件。
+**这两套机制的区别**（下次别再混）：
 
-**用户该怎么做**：在**自己的** `MainActivity.java` 里 override
-`onSaveInstanceState(Bundle)`，调自己的 native 方法存游戏状态（照
-`nativeOnPause` 的 `RegisterNatives` 思路，与 vireo 无关）。恢复同理在 Java 侧做。
+| | 干什么 | 存取方 | 适合 |
+|---|---|---|---|
+| 自己写文件 | 进程被杀也不丢 | 用户自己 read/write | 完整存档（主流做法） |
+| `onSaveInstanceState(Bundle)` | Android **重建 Activity** 时（旋转、语言切换、从被杀进程返回）自动把状态还给你 | 系统保管 Bundle，重建时交还 | 小状态（第 N 关、分数、滚动位置） |
 
-⚠️ **必须知道的现有限制**：`App::on_paused` 是**恢复后才补发**的，
-所以**进程在后台被系统杀掉时，vireo 侧零回调** ——
-`on_paused` **不能替代** `onSaveInstanceState`。
+Bundle **不是「更可靠的保存」**，真正的可靠保存是写文件；它省掉的只是
+「重建后自己判断并读文件」这一步。且整个 Bundle 受 Binder 事务 ~1MB 上限约束，
+大状态本来就放不下。
+
+**所以「进程被杀后进度不丢」这个需求，现在零新增 API 就能做**：
+
+```rust
+app.on_paused(|| {
+    std::fs::write("save.dat", &serialize(my_state)).unwrap();
+});
+```
+
+**将来若要做 Bundle 通道**（用户主动要求时再看）：
+- 保存侧只能在 **Android UI 线程**上同步跑（Java 要立刻拿到字节），此时 vireo
+  渲染线程**已阻塞在闸门里**，所以绝不能向渲染线程要数据 —— 否则死锁。
+- 因此用户代码不该在 UI 线程上跑；可行形状是「用户自己推快照
+  （`set_state_snapshot(&bytes)`，渲染线程任意时刻可调）→ Java 在
+  `onSaveInstanceState` 里用 `nativeGetState() -> byte[]` 来取」。
+- 恢复侧不受阻塞影响：`onCreate` 里 `getByteArray` → `nativeSetState(byte[])` 存
+  `OnceLock`，等 `App` 建好在渲染线程上投递，保证在第一帧之前。
+- 改动面：新模块 ~150 行 + `App` 两个方法 ~30 行 + `MainActivity.java` ~10 行。
+
+**用户当前该怎么做**：用 `on_paused` + 写文件。不需要碰 Android 的 Bundle。
 
 ---
 

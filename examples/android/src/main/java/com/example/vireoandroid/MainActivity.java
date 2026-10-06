@@ -46,6 +46,8 @@ public class MainActivity extends GameActivity {
 
     private static native void nativeOnStop();
 
+    private static native void nativeOnDestroy();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // false = 允许内容延伸到系统栏/刘海区域，vireo 自己算安全区。
@@ -79,5 +81,20 @@ public class MainActivity extends GameActivity {
         // 顺序与 onPause 一致：先转给 vireo 再 super。
         nativeOnStop();
         super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // 与前三个的区别：**只在用户主动关闭时触发**（划掉最近任务 / finish()）。
+        // 按 Home、切 app、锁屏、系统回收内存**都不会**走到这里 —— 所以它
+        // 回答的是「用户是切走了还是把我关了」，其余三者都回答不了。
+        //
+        // ⚠️ 进程被系统杀掉时**不会**触发（Android 措辞是 "might be called"），
+        // 所以不能拿它做资源清理或存档 —— 要存档在 onPause 之类更早的时机做。
+        //
+        // 典型用途：配合 App::set_auto_pause(false)，后台照跑逻辑时靠
+        // App::is_destroyed() 得知该退出了。
+        nativeOnDestroy();
+        super.onDestroy();
     }
 }

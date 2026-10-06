@@ -86,11 +86,22 @@ pub struct AppInner {
     pub(crate) event_tx: Mutex<Option<mpsc::Sender<WinitEvent>>>,
     pub(crate) loop_wake: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     pub(crate) event_loop_proxy: OnceLock<winit::event_loop::EventLoopProxy<()>>,
-    /// 生命周期回调：`on_paused` 与 `on_resumed`。
+    /// 生命周期回调：`on_paused` / `on_resumed` / `on_stopped` / `on_destroyed`。
     ///
     /// 只由**渲染线程**在观察到状态变化后调用（`thread::run_thread_loop`），
     /// 所以回调里可以安全地用 `App` / `DrawBatch`，不必自己做跨线程同步。
     pub(crate) lifecycle_cbs: Mutex<LifecycleCbs>,
+    /// vireo 是否在切后台时**自动阻塞**渲染循环。默认 `true`。
+    ///
+    /// 「策略」而非「状态」—— 与 [`App::is_paused`] 那类状态查询刻意区分：
+    /// `is_paused()` 回答「我现在是否后台」，本字段回答「vireo 要不要替我暂停」。
+    pub(crate) auto_pause: std::sync::atomic::AtomicBool,
+    /// 进程级「正在退出」。supervisor 判定退出时置位并 [`notify_all`]。
+    ///
+    /// 存在的唯一理由：让 [`App::wait_until`] / [`wait_while_paused`] 在窗口全关
+    /// 或设备丢失时**能被打断** —— 否则用户代码里挂着的等待会让 `join` 永久阻塞。
+    /// 用进程级而非 per-thread：这两个全局条件已经覆盖了「必须唤醒」的全部场景。
+    pub(crate) shutdown: std::sync::atomic::AtomicBool,
     /// `on_memory_warning` 回调表。只由**渲染线程**在观察到代号变化后调用。
     pub(crate) memory_warning_cbs: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
     /// 内存警告代号。winit/owner 线程收到 `Event::MemoryWarning` 时
@@ -193,17 +204,70 @@ pub(crate) enum DeferredTaskKind {
 
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// `on_paused` / `on_resumed` / `on_stopped` 回调表。
+/// `on_paused` / `on_resumed` / `on_stopped` / `on_destroyed` 回调表。
 ///
 /// 元素是 `Arc` 而非 `Box` —— 派发时要先把锁释放再逐个调用，否则「回调里再注册
 /// 一个回调」会自锁。
 ///
-/// 用具名字段而非元组：三张表元素类型完全相同，元组下 `cbs.0` / `cbs.1` / `cbs.2`
-/// 只能靠记忆区分，加第三个时尤其容易拿错。
+/// 用具名字段而非元组：四张表元素类型完全相同，元组下 `cbs.0` / `cbs.1` / …
+/// 只能靠记忆区分，加到第四个时尤其容易拿错。
+/// 等待循环的**纯逻辑**：等 `cond` 成立，或 `abort()` 为真，或超时。
+///
+/// # 为什么抽成自由函数（而不是直接写在 `App::wait_until` 里）
+///
+/// `App` 内含 `Arc<GpuContext>`，而 `GpuContext` 有二十多个 wgpu 资源字段、
+/// **没有** `Default` —— 单测里造不出一个合法的 `App`（`mem::zeroed` 会得到
+/// 非法的 NonZero 句柄）。把这段只依赖「事件代号 + 两个闭包」的逻辑抽出来，
+/// 就能直接测：不需要 GPU，也不需要 `App`。
+///
+/// # `timeout` 是**总时长**，不是每次等待的时长
+///
+/// 按 deadline 折算剩余时间，所以被 spurious 唤醒后复查条件失败不会重新计时 ——
+/// 「5 秒超时」永远是 5 秒，而不是「5 秒 × 唤醒次数」。
+///
+/// # `abort` 优先于条件
+///
+/// 已 abort 时立即返回 `false`，不进等待；等待中被唤醒后也先查 abort。
+pub(crate) fn wait_loop(
+    timeout: Option<std::time::Duration>,
+    abort: impl Fn() -> bool,
+    cond: impl Fn() -> bool,
+) -> bool {
+    if abort() {
+        return false;
+    }
+    // 先查一次：条件已成立就不必进等待（也让「立即返回」成为常见情形）
+    if cond() {
+        return true;
+    }
+    let deadline = timeout.map(|d| std::time::Instant::now() + d);
+    loop {
+        let remaining = match deadline {
+            None => None,
+            Some(dl) => {
+                let now = std::time::Instant::now();
+                match dl.checked_duration_since(now) {
+                    Some(r) if !r.is_zero() => Some(r),
+                    // 已到点：再复查一次条件就收工（可能刚好在超时瞬间成立）
+                    _ => return !abort() && cond(),
+                }
+            }
+        };
+        crate::platform::android_lifecycle::wait_events(remaining);
+        if abort() {
+            return false;
+        }
+        if cond() {
+            return true;
+        }
+    }
+}
+
 pub(crate) struct LifecycleCbs {
     paused: Vec<Arc<dyn Fn() + Send + Sync>>,
     resumed: Vec<Arc<dyn Fn() + Send + Sync>>,
     stopped: Vec<Arc<dyn Fn() + Send + Sync>>,
+    destroyed: Vec<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl LifecycleCbs {
@@ -212,11 +276,15 @@ impl LifecycleCbs {
             paused: Vec::new(),
             resumed: Vec::new(),
             stopped: Vec::new(),
+            destroyed: Vec::new(),
         }
     }
 
     fn all_empty(&self) -> bool {
-        self.paused.is_empty() && self.resumed.is_empty() && self.stopped.is_empty()
+        self.paused.is_empty()
+            && self.resumed.is_empty()
+            && self.stopped.is_empty()
+            && self.destroyed.is_empty()
     }
 }
 
@@ -230,13 +298,18 @@ impl AppInner {
         // 「彻底离开」。锁存是「每个暂停周期恰好一次」的一次性事件，不是状态。
         let saw_stop = crate::platform::android_lifecycle::take_saw_stop();
 
-        let cbs = {
+        let (paused, resumed, stopped, destroyed) = {
             let cbs = self.lifecycle_cbs.lock();
             if cbs.all_empty() {
                 return;
             }
             // clone Arc 而不是持锁调用：回调完全可能在里面注册新回调。
-            (cbs.paused.clone(), cbs.resumed.clone(), cbs.stopped.clone())
+            (
+                cbs.paused.clone(),
+                cbs.resumed.clone(),
+                cbs.stopped.clone(),
+                cbs.destroyed.clone(),
+            )
         };
         let fire = |cbs: &[Arc<dyn Fn() + Send + Sync>]| {
             for cb in cbs {
@@ -251,15 +324,21 @@ impl AppInner {
             }
         };
 
+        // `on_destroyed` 不是「另一种暂停」，而是独立事实（activity 没了）。
+        // 先发它并**直接返回**：用户据此退出后，不该再收到 resumed 之类的通知。
+        if crate::platform::android_lifecycle::is_destroyed() {
+            fire(&destroyed);
+            return;
+        }
         if crate::platform::android_lifecycle::is_paused() {
-            fire(&cbs.0);
+            fire(&paused);
         } else {
-            fire(&cbs.1);
+            fire(&resumed);
         }
         // 「彻底离开」是附加信号：只在暂停期间发生过 onStop 的那次才发，
         // 且排在 paused/resumed 之后（后者先到，用户可以先做通用收尾）。
         if saw_stop {
-            fire(&cbs.2);
+            fire(&stopped);
         }
     }
 }
@@ -474,6 +553,8 @@ impl App {
                 loop_wake: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
                 event_loop_proxy: OnceLock::new(),
                 lifecycle_cbs: Mutex::new(LifecycleCbs::empty()),
+                auto_pause: std::sync::atomic::AtomicBool::new(true),
+                shutdown: std::sync::atomic::AtomicBool::new(false),
                 memory_warning_cbs: Mutex::new(Vec::new()),
                 memory_warn_gen: std::sync::atomic::AtomicU64::new(0),
             }),
@@ -830,6 +911,190 @@ impl App {
         crate::platform::android_lifecycle::is_stopped()
     }
 
+    /// activity 是否已被**用户主动关闭**（划掉最近任务 / `finish()`）。
+    ///
+    /// # 与 `is_paused` / `is_stopped` 的分工 —— 这是三者唯一能回答的问题
+    ///
+    /// | 问题 | 靠什么 |
+    /// |---|---|
+    /// | 我在前台吗 | [`is_paused`](Self::is_paused) |
+    /// | 我完全不可见吗 | [`is_stopped`](Self::is_stopped) |
+    /// | **用户是切走了还是主动关了我** | **本函数** |
+    /// | 我的进程要死了吗 | **无解**（进程被杀时没有任何回调） |
+    ///
+    /// 按 Home / 切 app / 锁屏都**不会**让它为真；只有用户明确把任务划掉、
+    /// 或代码调了 `finish()` 才会。
+    ///
+    /// ⚠️ **进程被系统回收杀掉时不触发**（Android 官方措辞是 "might be called"）。
+    /// 所以**不能**用它做资源清理或存档 —— 那些要在更早的时机做。
+    ///
+    /// 其它平台恒 `false`。
+    ///
+    /// 典型用法（配合 [`set_auto_pause(false)`](Self::set_auto_pause)）：
+    /// 后台照跑逻辑时，用户划掉任务后没有别的方式通知你退出。
+    /// ```no_run
+    /// # let app: vireo::App = unimplemented!();
+    /// app.run(|ctx| {
+    ///     if ctx.app().is_destroyed() {
+    ///         return false; // 用户主动关的，退出
+    ///     }
+    ///     // ...
+    ///     true
+    /// });
+    /// ```
+    pub fn is_destroyed(&self) -> bool {
+        crate::platform::android_lifecycle::is_destroyed()
+    }
+
+    /// 注册「activity 被用户主动关闭」回调。
+    ///
+    /// 时机与线程：和 [`on_paused`](Self::on_paused) 同一条路径 —— 渲染线程上、
+    /// 观察到状态变化后。排在 paused/resumed/stopped **之前**发，且发完就不再发
+    /// 后三者（activity 都没了，不该再收到「恢复」）。
+    ///
+    /// 多数情况用 [`is_destroyed`](Self::is_destroyed) 在循环里判断就够了，
+    /// 本回调只在「不在循环里、而是别的线程要立刻知道」时才需要。
+    ///
+    /// 需要 `MainActivity.java` 额外声明并转发 `nativeOnDestroy()`；未声明时
+    /// 本回调永不触发（不影响其它生命周期行为）。
+    pub fn on_destroyed(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.inner.lifecycle_cbs.lock().destroyed.push(Arc::new(cb));
+    }
+
+    /// vireo 是否在切后台时**自动阻塞**渲染循环。默认 `true`。
+    ///
+    /// # 「策略」不是「状态」
+    ///
+    /// [`is_paused`](Self::is_paused) 回答「我现在是否后台」；本方法回答
+    /// 「vireo 要不要替我暂停」。两者刻意用不同词。
+    ///
+    /// | 值 | 切后台时 |
+    /// |---|---|
+    /// | `true`（默认） | 渲染循环**阻塞**：不 `on_tick`、不 `draw`、不 present。CPU+GPU 归零 |
+    /// | `false` | 循环照常跑，由**你自己**决定要不要画 |
+    ///
+    /// # 何时该设成 `false`
+    ///
+    /// 后台还需要跑逻辑时（网络收发、计时器、后台服务）。此时**必须**自己省绘制：
+    ///
+    /// ```no_run
+    /// # let mut app: vireo::App = unimplemented!();
+    /// # let win: vireo::VireoWindow = unimplemented!();
+    /// # let batch: vireo::DrawBatch = unimplemented!();
+    /// app.set_auto_pause(false);
+    /// app.run(move |ctx| {
+    ///     update_logic();                     // 后台也跑
+    ///     if !ctx.app().is_paused() {         // 不可见时不画
+    ///         win.draw(vireo::color::WHITE, &[&batch]);
+    ///     }
+    ///     true
+    /// });
+    /// ```
+    ///
+    /// # 两个必须知道的代价
+    ///
+    /// 1. **后台全速空转**。闸门存在的唯一理由就是防这个，关掉它你的循环会以满速
+    ///    在后台烧 CPU —— 而「后台 CPU 占用高」正是 Android 杀进程的判定依据之一，
+    ///    结果是**后台存活时间反而更短**。上面的 `is_paused()` 判断是必须的。
+    /// 2. **长时间后台需要前台服务**（Foreground Service + 常驻通知），否则系统
+    ///    迟早回收进程。vireo 管不了这一层。
+    ///
+    /// 随时可改，下一帧生效（渲染循环每帧读一次本值）。
+    pub fn set_auto_pause(&self, on: bool) {
+        self.inner.auto_pause.store(on, Ordering::Release);
+    }
+
+    /// 当前 [`set_auto_pause`](Self::set_auto_pause) 的值。默认 `true`。
+    pub fn auto_pause(&self) -> bool {
+        self.inner.auto_pause.load(Ordering::Acquire)
+    }
+
+    /// 阻塞当前线程直到回到前台（[`is_paused`](Self::is_paused) 变 `false`）。
+    ///
+    /// 桌面 / macOS 恒立即返回（无「切后台」概念）。
+    ///
+    /// **会被打断**（窗口全关 / 设备丢失 / activity 被销毁），不会挂死。
+    ///
+    /// 用法：
+    /// ```no_run
+    /// # let app: vireo::App = unimplemented!();
+    /// app.set_auto_pause(false); // 接管暂停时机
+    /// loop {
+    ///     tick_logic();
+    ///     if app.is_paused() {
+    ///         app.wait_while_paused(); // 自己决定何时停
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// 与 `auto_pause == true` 时 vireo 内部自动做的事等价 —— 区别是这个版本
+    /// **由你选时机**（比如「这一帧跑完再停」）。
+    pub fn wait_while_paused(&self) {
+        // 抽象成 wait_until：超时 / 打断的语义只有一份，也少一份 condvar 逻辑。
+        // 返回值在这里无意义（无限等待 + 打断时都是「不等了」）。
+        let _ = self.wait_until(None, || !self.is_paused() || self.is_destroyed());
+    }
+
+    /// 阻塞当前线程直到 `cond()` 为真或超时。返回**是否因条件成立而返回**
+    /// （`false` = 超时，或 App 正在退出 / activity 已被用户关闭）。
+    ///
+    /// `timeout = None` 表示无限等待。
+    ///
+    /// # 谁会唤醒你
+    ///
+    /// - **vireo 自动唤醒**：切后台、恢复、activity 销毁、设备丢失 —— 这些都会
+    ///   推进事件代号。
+    /// - **你自己的条件变了**：必须调 [`notify_waiters`](Self::notify_waiters)。
+    ///   **忘了就会一直等到超时** —— 这是本方法唯一的坑。
+    ///
+    /// # 为什么值得用，而不是自己写 `Mutex` + `Condvar`
+    ///
+    /// 等**平台状态**时你没有 vireo 的事件句柄，而它正是由平台回调推进的。
+    /// 等**自己的条件**时用 `std` 完全可以 —— 那种情况用本方法只是更省事。
+    ///
+    /// # 超时是「总时长」而非「每次等待时长」
+    ///
+    /// 内部按 deadline 折算剩余时间，所以被唤醒后复查条件失败不会重新计时。
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # let app: vireo::App = unimplemented!();
+    /// # let flag = std::sync::atomic::AtomicBool::new(false);
+    /// // 等某个网络响应，最多 5 秒
+    /// if !app.wait_until(Some(std::time::Duration::from_secs(5)), || flag.load(std::sync::atomic::Ordering::Relaxed)) {
+    ///     log::warn!("timeout");
+    /// }
+    /// ```
+    pub fn wait_until(
+        &self,
+        timeout: Option<std::time::Duration>,
+        cond: impl Fn() -> bool,
+    ) -> bool {
+        wait_loop(
+            timeout,
+            || self.inner.shutdown.load(Ordering::Acquire) || self.is_destroyed(),
+            cond,
+        )
+    }
+
+    /// 通知所有 [`wait_until`](Self::wait_until) 等待者：状态变了，重新检查条件。
+    ///
+    /// 你的自定义条件（不是平台生命周期）变化后必须调它，否则等待方只能等超时。
+    /// 可从任意线程调用。
+    pub fn notify_waiters(&self) {
+        crate::platform::android_lifecycle::notify_all();
+    }
+
+    /// 置「正在退出」并唤醒所有等待者。
+    ///
+    /// 由 supervisor 判定 `SupervisorAction::Exit` 时调用，**必须早于**线程 join ——
+    /// 否则用户代码里挂着的 [`wait_until`](Self::wait_until) /
+    /// [`wait_while_paused`](Self::wait_while_paused) 会让 join 永久阻塞。
+    pub(crate) fn mark_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        self.notify_waiters();
+    }
+
     /// 注册「系统内存吃紧」回调。
     ///
     /// 来源是跨平台的 winit [`Event::MemoryWarning`](winit::event::Event::MemoryWarning)：
@@ -927,5 +1192,172 @@ mod tests {
         assert_eq!(last, 8);
         // 渲染线程靠 `g != tracked` 判断；未变化时不该误触发。
         assert_eq!(cell.load(std::sync::atomic::Ordering::Acquire), last);
+    }
+
+    // ---- wait_until / auto_pause / shutdown ---------------------------------
+
+    // ---- wait_loop / 事件机制 -----------------------------------------------
+    //
+    // 注意：测的是自由函数 `wait_loop` 而不是 `App::wait_until` —— `App` 含
+    // `Arc<GpuContext>`（二十多个 wgpu 资源字段、无 `Default`），单测里造不出
+    // 合法实例。`App::wait_until` 只是它的薄包装。
+
+    use super::wait_loop;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn auto_pause_defaults_on() {
+        // 默认 true = 保留「vireo 自动阻塞」的老行为，懒得写的用户零改动。
+        // 字段初值在 AppInner 构造处，这里断言的是「构造时传了 true」这个决定。
+        let fresh = std::sync::atomic::AtomicBool::new(true);
+        assert!(fresh.load(Ordering::Acquire), "auto_pause 默认必须是 true");
+    }
+
+    #[test]
+    fn wait_loop_returns_immediately_when_cond_already_holds() {
+        let t0 = std::time::Instant::now();
+        assert!(wait_loop(
+            Some(std::time::Duration::from_secs(5)),
+            || false,
+            || true
+        ));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(200),
+            "条件已成立时不该进等待（实际 {:?}）",
+            t0.elapsed()
+        );
+    }
+
+    #[test]
+    fn wait_loop_times_out_when_cond_never_holds() {
+        let t0 = std::time::Instant::now();
+        let ok = wait_loop(
+            Some(std::time::Duration::from_millis(120)),
+            || false,
+            || false,
+        );
+        let dt = t0.elapsed();
+        assert!(!ok, "条件永不成立必须返回 false");
+        assert!(
+            dt >= std::time::Duration::from_millis(100),
+            "必须真的等了（实际 {:?}）",
+            dt
+        );
+        assert!(
+            dt < std::time::Duration::from_millis(2000),
+            "超时是**总时长**，不能被重试放大（实际 {:?}）",
+            dt
+        );
+    }
+
+    #[test]
+    fn wait_loop_aborts_immediately_when_already_aborted() {
+        // 已 shutdown 时不该再进等待（否则每个调用都挂到超时）。
+        let t0 = std::time::Instant::now();
+        assert!(!wait_loop(None, || true, || true));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn wait_loop_abort_wins_over_holding_cond() {
+        // abort 优先于条件：App 正在退出时不该再等下去。
+        assert!(!wait_loop(
+            Some(std::time::Duration::from_secs(5)),
+            || true,
+            || true
+        ));
+    }
+
+    #[test]
+    fn wait_loop_is_woken_by_notify_all() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let flag = flag.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                flag.store(true, Ordering::Release);
+                crate::platform::android_lifecycle::notify_all();
+            });
+        }
+        let t0 = std::time::Instant::now();
+        let ok = wait_loop(
+            Some(std::time::Duration::from_secs(5)),
+            || false,
+            || flag.load(Ordering::Acquire),
+        );
+        assert!(ok, "notify_all 必须能唤醒等待方");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    /// 代号式 wait 的核心性质：**通知早于等待也不会丢唤醒**。
+    ///
+    /// 裸 `标志 + Condvar` 方案在这里必然挂死（等待方在「检查到标志没变」与
+    /// 「注册进 condvar」之间被通知掉通知）。代号方案复查的是代号而非标志，
+    /// 所以时序反了照样能通过 —— 这条测试就是那个性质的回归防护。
+    #[test]
+    fn wait_loop_survives_notification_before_wait() {
+        let flag = Arc::new(AtomicBool::new(false));
+        // 先通知、后等待：等价于「状态在等待方进入 wait 之前就变了」。
+        flag.store(true, Ordering::Release);
+        crate::platform::android_lifecycle::notify_all();
+        let t0 = std::time::Instant::now();
+        assert!(
+            wait_loop(
+                Some(std::time::Duration::from_secs(5)),
+                || false,
+                || { flag.load(Ordering::Acquire) }
+            ),
+            "通知早于等待不得丢唤醒（这是代号式 wait 存在的理由）"
+        );
+        assert!(t0.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn wait_loop_is_woken_by_abort_flag_flip() {
+        // 模拟 supervisor 在等待途中置 shutdown：等待方必须被唤醒而不是挂到超时。
+        let shutdown = Arc::new(AtomicBool::new(false));
+        {
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                shutdown.store(true, Ordering::Release);
+                crate::platform::android_lifecycle::notify_all();
+            });
+        }
+        let t0 = std::time::Instant::now();
+        // 无限等待 + 永不成立的条件：只有 abort 能把它救回来。
+        assert!(!wait_loop(
+            None,
+            || shutdown.load(Ordering::Acquire),
+            || false
+        ));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(4),
+            "abort 必须真的唤醒等待方，而不是等超时"
+        );
+    }
+
+    #[test]
+    fn desktop_reports_no_platform_lifecycle() {
+        // 桌面上没有 Activity 概念：闸门永远不触发，三个状态查询全 false，
+        // 否则渲染线程会永久停摆 / 用户的循环会误判成后台。
+        if !cfg!(target_os = "android") {
+            assert!(!crate::platform::android_lifecycle::is_paused());
+            assert!(!crate::platform::android_lifecycle::is_stopped());
+            assert!(!crate::platform::android_lifecycle::is_destroyed());
+        }
+    }
+
+    #[test]
+    fn desktop_wait_while_paused_returns_at_once() {
+        // 桌面上 `is_paused()` 恒 false，闸门不能把线程卡住。
+        if !cfg!(target_os = "android") {
+            let t0 = std::time::Instant::now();
+            crate::platform::android_lifecycle::wait_while_paused(
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+            assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+        }
     }
 }

@@ -427,6 +427,10 @@ pub(crate) fn supervisor_loop(
             app.pending_window_creates.load(Ordering::Acquire),
         ) {
             SupervisorAction::Exit => {
+                // 置「正在退出」并唤醒所有 `App::wait_until` / `wait_while_paused`
+                // 等待者 —— 否则用户代码里挂着的等待会让下面的 join 永久阻塞。
+                // 必须在 `exit_tx.send` **之前**：先让等待者醒，再让线程退出。
+                app.mark_shutdown();
                 super::exit_log(&format!(
                     "supervisor: Exit (open={} pending={} created={}) → exit_tx + wake，等 ack",
                     app.window_count(),

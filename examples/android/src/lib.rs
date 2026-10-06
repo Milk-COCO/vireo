@@ -58,7 +58,7 @@ impl From<vireo::platform::android::Insets> for Edges {
     }
 }
 
-/// 生命周期回调计数（HUD 用来肉眼确认 `on_paused` / `on_stopped` 各自触发了几次）。
+/// 生命周期 / 闸门观测计数器（HUD 显示，真机一眼看出各机制是否生效）。
 ///
 /// 字段是 `Arc` —— 回调要 `'static`，必须 clone 一份带进闭包，而**计数必须共享**。
 ///
@@ -69,6 +69,11 @@ impl From<vireo::platform::android::Insets> for Edges {
 struct LifeCounters {
     paused: std::sync::Arc<std::sync::atomic::AtomicU32>,
     stopped: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    destroyed: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `auto_pause=false` 时后台仍执行的帧数（证明闸门真的关掉了）。
+    bg_frames: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `wait_while_paused()` 返回后累计次数（证明「自己决定何时停」这条路通）。
+    waited: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 // `fonts = ...` 在 `App` 构造**之前**求值，这是宏路径下唯一能定制 Android 系统字体
@@ -133,6 +138,19 @@ async fn main(app: App) {
             log::info!("vireo-android lifecycle: stopped = 彻底离开（恢复时消费锁存）");
         });
     }
+    {
+        let life = life.clone();
+        app.on_destroyed(move || {
+            life.destroyed.fetch_add(1, Ordering::Relaxed);
+            log::info!("vireo-android lifecycle: destroyed = 用户主动关闭（划掉最近任务）");
+        });
+    }
+
+    // ---- 接管暂停时机：关掉 vireo 的闸门 ---------------------------------
+    // 默认（auto_pause = true）时 vireo 自己在切后台时阻塞整条渲染线程。
+    // 关掉之后循环照常跑，后台要干什么由我们自己决定 —— 下面 `run` 里
+    // 「后台仍 tick 但不 draw」就是这套用法。
+    app.set_auto_pause(false);
 
     // 打开就沉浸式：状态栏 + 导航栏都让给内容。
     #[cfg(target_os = "android")]
@@ -241,11 +259,19 @@ async fn main(app: App) {
             "ime     {:.0},{:.0}  {:.0},{:.0}\n",
             ime.l, ime.t, ime.r, ime.b
         ));
-        // 生命周期回调计数。按 Home 回桌面再回来 → paused+1 且 stopped+1。
+        // 生命周期 / 闸门观测。按 Home 回桌面再回来 → paused+1 且 stopped+1；
+        // 划掉最近任务 → destroyed+1。
         hud.push_str(&format!(
-            "life    paused={} stopped={}\n",
+            "life    paused={} stopped={} destroyed={}\n",
             life.paused.load(Ordering::Relaxed),
             life.stopped.load(Ordering::Relaxed),
+            life.destroyed.load(Ordering::Relaxed),
+        ));
+        hud.push_str(&format!(
+            "gate    auto_pause={} bg_frames={} waited={}\n",
+            ctx.app().auto_pause(),
+            life.bg_frames.load(Ordering::Relaxed),
+            life.waited.load(Ordering::Relaxed),
         ));
         hud.push_str(&format!("text    {typed:?}"));
         // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）
@@ -306,6 +332,35 @@ async fn main(app: App) {
             },
             TextOverride::new(),
         );
+
+        // ---- 接管暂停时机后的三件事 ------------------------------------------
+        // 因为上面 `set_auto_pause(false)` 关掉了 vireo 的闸门，这里能拿到控制权。
+        //
+        // 1. 用户主动关闭（划掉最近任务）→ 退出。这是 auto_pause=false 后
+        //    「后台空转」唯一的终止条件：`onPause` / `onStop` 都收不到。
+        if ctx.app().is_destroyed() {
+            log::info!("vireo-android: 用户主动关闭，退出循环");
+            return false;
+        }
+        // 2. 后台：仍然 tick（证明闸门关掉了），但**不画** —— 窗口不可见时
+        //    acquire/present 纯属浪费，而且会让 Android 更早杀进程。
+        if ctx.app().is_paused() {
+            life.bg_frames.fetch_add(1, Ordering::Relaxed);
+            if !ctx.app().is_stopped() {
+                // 半透明弹窗：还可见，继续画。真正不可见才停 —— 这正是
+                // 「短暂中断 vs 彻底离开」的价值所在。
+                win.draw(BLACK, &[&batch]);
+            }
+            return true;
+        }
+        // 3. 想要「这一帧跑完再彻底停」时，可以用 wait_while_paused()。
+        //    这里演示它的可打断性：返回后 waited+1。默认不用它（连续绘制更简单），
+        //    所以只在「刚恢复」的第一帧调一次，避免每帧都白等一趟。
+        if life.paused.load(Ordering::Relaxed) > life.waited.load(Ordering::Relaxed) {
+            ctx.app().wait_while_paused();
+            life.waited.fetch_add(1, Ordering::Relaxed);
+            log::info!("vireo-android: wait_while_paused 返回（可打断，未挂死）");
+        }
 
         win.draw(BLACK, &[&batch]);
 

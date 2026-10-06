@@ -22,6 +22,18 @@
   永远走 resumed 分支。现改为先判代号、先发回调、再进闸门 —— `on_paused` 在暂停
   生效时触发。
   Fixed `App::on_paused` never firing on Android (gate ran before the generation check).
+- **生命周期暂停闸门可接管**：`App::set_auto_pause(false)`（默认 `true`，老代码零改动）。
+  关掉后切后台不再阻塞渲染循环，由用户自己决定跑什么 / 画不画 —— 引擎不替用户
+  决定功耗策略。「策略」（`auto_pause()`）与「状态」（`is_paused()`）刻意用不同词。
+- **「暂停直到」交给用户**：`App::wait_while_paused()`（等前台，可打断）、
+  `App::wait_until(timeout, cond)` + `App::notify_waiters()`（通用条件）。
+  会被窗口关闭 / 设备丢失 / activity 销毁打断，不会挂死；平台生命周期变化自动唤醒，
+  自己的条件变化需自己 `notify_waiters`。
+- Android `onDestroy` 生命周期：`App::is_destroyed()` + `App::on_destroyed()`。
+  唯一能回答「用户是切走了还是主动关了我」的信号（`is_paused` / `is_stopped`
+  在划掉任务时都会照常触发），也是 `set_auto_pause(false)` 之后唯一的退出条件。
+  ⚠️ **进程被系统杀掉时不触发**，所以不能用于资源清理或存档。
+  Lifecycle gate is now user-controllable; wait primitives and `onDestroy` exposed.
 - GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
   （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
   GPU particle path: baked spawn params + VS integration over `camera.time`.

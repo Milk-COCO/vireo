@@ -463,7 +463,11 @@ pub(crate) fn run_thread_loop(
                 }
             }
             // ---- 生命周期暂停闸门 --------------------------------------------
-            if crate::platform::android_lifecycle::is_paused() {
+            // ⚠️ **用户可以关掉这个闸门**（`App::set_auto_pause(false)`，默认开）：
+            // 关掉后后台照常 `drive_loops`，由用户自己在循环里判 `is_paused()`
+            // 决定要不要画 —— 引擎不该替用户决定功耗策略。闸门开着时切后台省下的是
+            // **全部** CPU+GPU，而不只是把帧率调低。
+            if app.auto_pause() && crate::platform::android_lifecycle::is_paused() {
                 crate::platform::android_lifecycle::wait_while_paused(&state.done);
                 if state.done.load(Ordering::Acquire) || device_lost.load(Ordering::Acquire) {
                     break;

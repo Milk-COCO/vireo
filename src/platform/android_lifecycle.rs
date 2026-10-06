@@ -79,6 +79,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// 进程级「已暂停」标志。由 JNI 回调（UI 线程）写，多线程读。
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// 进程级「已销毁」标志（**用户主动关闭**：划掉最近任务 / `finish()`）。
+///
+/// ⚠️ **进程被杀时不置位** —— 所以它只回答「用户是不是明确要把你关掉」，
+/// 不能用来做资源清理或存档（见 [`is_destroyed`] 的说明）。
+static DESTROYED: AtomicBool = AtomicBool::new(false);
+
 /// **锁存**：上一次暂停期间是否发生过 `onStop`。
 ///
 /// # 为什么是锁存，而不是一个「当前是否 stopped」的实时标志
@@ -108,17 +114,14 @@ static GEN: AtomicU64 = AtomicU64::new(0);
 /// 是否已绑定过。防止 `android_main` 被重复调用时二次 `RegisterNatives`。
 static BOUND: AtomicBool = AtomicBool::new(false);
 
-/// 等待/唤醒用。key 与 `PAUSED` 配对 —— 见 [`wait_while_paused`] 的 lost-wakeup 说明。
-pub(crate) static WAKE: std::sync::LazyLock<(std::sync::Mutex<()>, std::sync::Condvar)> =
-    std::sync::LazyLock::new(|| (std::sync::Mutex::new(()), std::sync::Condvar::new()));
-
 /// Java 侧必须声明的 native 方法名 —— 与 `MainActivity.java` 里的完全一致。
 ///
-/// ⚠️ 改这三个名字 = 破坏已发布的 `MainActivity.java` 模板。绑定会失败，且失败
+/// ⚠️ 改这些名字 = 破坏已发布的 `MainActivity.java` 模板。绑定会失败，且失败
 /// 只 `log::warn!` —— 用户看到的是「后台仍全速」而不是编译错误。
 pub const JAVA_METHOD_PAUSE: &str = "nativeOnPause";
 pub const JAVA_METHOD_RESUME: &str = "nativeOnResume";
 pub const JAVA_METHOD_STOP: &str = "nativeOnStop";
+pub const JAVA_METHOD_DESTROY: &str = "nativeOnDestroy";
 
 /// const 友好的字节串相等（`PartialEq` 在 const 上下文里还没稳定）。
 #[cfg(target_os = "android")]
@@ -137,7 +140,7 @@ const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-/// 编译期把三个常量与 `bind_inner` 里 `jni_str!` 用的**字面量**钉在一起。
+/// 编译期把四个常量与 `bind_inner` 里 `jni_str!` 用的**字面量**钉在一起。
 ///
 /// `jni_str!` 展开成从字面量构造的 `JNIStr`，不接受 `const` 标识符，所以绑定表里
 /// 只能写字面量。两处不一致的后果是**运行时** `RegisterNatives` 失败（只 `warn`，
@@ -148,6 +151,7 @@ const JAVA_NAMES_MATCH_LITERALS: () = {
     assert!(bytes_eq(JAVA_METHOD_PAUSE.as_bytes(), b"nativeOnPause"));
     assert!(bytes_eq(JAVA_METHOD_RESUME.as_bytes(), b"nativeOnResume"));
     assert!(bytes_eq(JAVA_METHOD_STOP.as_bytes(), b"nativeOnStop"));
+    assert!(bytes_eq(JAVA_METHOD_DESTROY.as_bytes(), b"nativeOnDestroy"));
 };
 
 // ---------------------------------------------------------------------------
@@ -217,35 +221,116 @@ pub(crate) fn generation() -> u64 {
     GEN.load(Ordering::Acquire)
 }
 
-/// 由 JNI 回调写标志。
+/// 全局「状态变了」事件原语：`(代号, Condvar)`。
 ///
-/// **lost-wakeup 说明**：必须**持锁**再写标志。若不持锁，渲染线程可能刚好在
-/// 「检查到 paused=true」与「注册进 condvar 等待」之间被通知掉通知，于是永久
-/// 阻塞 —— 表现为「切回前台后画面再也不动」。持锁后 notifier 必然排在
-/// `wait()` 注册之后。
+/// 谁写代号：`set_paused` / `set_stopped` / `set_destroyed`（平台事件）与
+/// `App::notify_waiters`（用户自定义条件）。谁读代号：渲染线程的
+/// `fire_lifecycle_callbacks` 判定，以及 `App::wait_until` / `wait_while_paused`。
+///
+/// # 为什么用「代号」而不是「裸标志 + condvar」
+///
+/// 裸标志方案有经典的 lost-wakeup：等待方在「检查到标志没变」与「注册进
+/// condvar 等待」之间被通知掉通知，于是**永久阻塞**（症状是「切回前台后画面
+/// 再也不动」）。老代码靠「写标志时必须持锁」来规避 —— 也就是把正确性押在
+/// notifier 排在 waiter 之后这个时序上，注释里得专门解释一遍。
+///
+/// 代号方案天然免疫：等待方先读到代号 `g`，被唤醒后**复查代号是否变了**
+/// （而不是复查标志）。只要通知发生过，`g` 必然不同；即使通知发生在读 `g`
+/// 之前，复查也会立刻通过。`wait_while_paused` 里那句
+/// 「必须持锁再写标志」的负担直接消失。
+pub(crate) static EVENTS: std::sync::LazyLock<(std::sync::Mutex<u64>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+
+/// 推进代号并唤醒所有等待者。可从任意线程调用。
+///
+/// 幂等 —— 重复调用只是多推进几次代号，等待方复查条件后自行决定。
+pub(crate) fn notify_all() {
+    let (m, cv) = &*EVENTS;
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    *g = g.wrapping_add(1);
+    cv.notify_all();
+}
+
+/// 阻塞直到代号变化或超时。返回「是否因代号变化而返回」。
+///
+/// `timeout = None` 表示无限等待。**必须**在调用前后复查调用者的条件 ——
+/// 本函数只保证「期间发生过事件」，不保证「事件满足你的条件」。
+///
+/// 供 `App::wait_until` 使用（跨平台，桌面上平台事件永不推进但超时照常生效）。
+pub(crate) fn wait_events(timeout: Option<std::time::Duration>) -> bool {
+    let (m, cv) = &*EVENTS;
+    let guard = m.lock().unwrap_or_else(|e| e.into_inner());
+    let start = *guard;
+    match timeout {
+        None => {
+            let mut guard = guard;
+            while *guard == start {
+                guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        Some(d) => {
+            let (guard, wait) = cv.wait_timeout(guard, d).unwrap_or_else(|e| e.into_inner());
+            if wait.timed_out() && *guard == start {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 由 JNI 回调写标志。
 fn set_paused(v: bool) {
-    let (m, cv) = &*WAKE;
-    let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
     let prev = PAUSED.swap(v, Ordering::AcqRel);
     if prev != v {
         GEN.fetch_add(1, Ordering::AcqRel);
     }
-    // 即使状态没变也唤醒：`wait_while_paused` 只在 paused 时阻塞，
-    // 而重复的 onPause 在部分 ROM 上很常见。
-    cv.notify_all();
+    // 即使状态没变也通知：`wait_while_paused` 只在 paused 时阻塞，
+    // 而重复的 onPause 在部分 ROM 上很常见。代号式 wait 免疫丢唤醒，
+    // 所以这里不必再靠「持锁写标志」来保证时序。
+    notify_all();
+}
+
+/// activity 是否已被**用户主动关闭**（划掉最近任务 / `finish()`）。
+///
+/// # 与 `is_paused` / `is_stopped` 的分工
+///
+/// | 问题 | 靠什么 |
+/// |---|---|
+/// | 我在前台吗 | [`is_paused`] |
+/// | 我完全不可见吗 | [`is_stopped`] |
+/// | **用户是切走了还是主动关了我** | **本函数** |
+/// | 我的进程要死了吗 | 无解（进程被杀时没有任何回调） |
+///
+/// # 关键性质：**进程被杀时不触发**
+///
+/// 这是 Android 官方文档「might be called」的含义 —— 所以本函数**不能**用来
+/// 做资源清理或存档，它只回答「用户是不是明确要把你关掉」。
+///
+/// 它也**不是**单调的：activity 被销毁后若用户从最近任务重新打开，进程通常是
+/// 新的（标志重置）。同一次进程里 `onDestroy` 之后不会再有 `onResume`。
+///
+/// 桌面 / macOS 恒为 `false`（无 Activity 概念）。
+pub fn is_destroyed() -> bool {
+    DESTROYED.load(Ordering::Acquire)
+}
+
+/// 由 JNI 回调（UI 线程）写。只在真实变化时推进代号。
+fn set_destroyed() {
+    let prev = DESTROYED.swap(true, Ordering::AcqRel);
+    if !prev {
+        GEN.fetch_add(1, Ordering::AcqRel);
+        notify_all();
+    }
 }
 
 /// 渲染线程在 paused 时阻塞，直到恢复。
 ///
 /// `done` 用于退出时打断等待（否则关闭流程会挂住）。
 pub(crate) fn wait_while_paused(done: &std::sync::atomic::AtomicBool) {
-    if !is_paused() {
-        return;
-    }
-    let (m, cv) = &*WAKE;
-    let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
     while is_paused() && !done.load(Ordering::Acquire) {
-        guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+        if !wait_events(None) {
+            return;
+        }
     }
 }
 
@@ -300,13 +385,25 @@ pub extern "system" fn vireo_android_on_stop(
     _env: jni::EnvUnowned<'_>,
     _class: jni::objects::JClass<'_>,
 ) {
-    let (m, _cv) = &*WAKE;
-    // 与 set_paused 同纪律：持锁再写，保证「置位锁存」对随后 take_saw_stop()
-    // 的读取是一次原子可见的操作。
-    let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
+    // 不参与闸门、也不需要 notify（锁存只在代号变化时被消费，而那时
+    // `onPause`/`onResume` 必然已经推进过代号）。这里只置位。
+    //
     // store 只允许 Release/Relaxed/SeqCst —— AcqRel 是编译错误（仅 Android
     // target 才会编到这段，桌面 `cargo test` 抓不到）。
     SAW_STOP.store(true, Ordering::Release);
+}
+
+/// JNI 导出：Java `nativeOnDestroy()` 的实现。
+///
+/// # Safety
+///
+/// 由 JVM 经 `bind_lifecycle_hooks` 绑定调用，签名固定 `()V`。
+#[cfg(target_os = "android")]
+pub extern "system" fn vireo_android_on_destroy(
+    _env: jni::EnvUnowned<'_>,
+    _class: jni::objects::JClass<'_>,
+) {
+    set_destroyed();
 }
 
 /// 把 Java 侧的 `nativeOnPause` / `nativeOnResume` / `nativeOnStop` 绑到本模块的
@@ -376,6 +473,13 @@ fn bind_inner(app: &crate::android::AndroidApp) -> Result<(), jni::errors::Error
                     jni_str!("nativeOnStop"),
                     jni_str!("()V"),
                     vireo_android_on_stop as *mut std::ffi::c_void,
+                )
+            },
+            unsafe {
+                jni::NativeMethod::from_raw_parts(
+                    jni_str!("nativeOnDestroy"),
+                    jni_str!("()V"),
+                    vireo_android_on_destroy as *mut std::ffi::c_void,
                 )
             },
         ];
