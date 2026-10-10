@@ -31,11 +31,19 @@
         android:hardwareAccelerated="true"
         android:allowBackup="false">
 
+        <!--
+          configChanges：列出的变化走 onConfigurationChanged，不重建 Activity。
+          fontScale（系统字号）/ locale（系统语言）/ layoutDirection（LTR/RTL）
+          缺了的话，用户切出去改个字号或语言再回来，Activity 会整套重建：
+          Java 字段全丢（含 SAF 在途请求的 pendingSafRequest），native surface
+          重拆（Suspended/Resumed 那条路）。keyboard（硬件键盘，现代设备基本
+          碰不到）顺手带上，反正零成本。
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="landscape"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode|smallestScreenSize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|density|fontScale|locale|layoutDirection|uiMode|smallestScreenSize"
             android:windowSoftInputMode="adjustResize"
             android:enableOnBackInvokedCallback="true">
             <intent-filter>

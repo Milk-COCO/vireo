@@ -568,10 +568,12 @@ async fn main(app: App) { .. }
 - 真机验证（MuMu Android 15）：杀 picker → `surface recreated after resume` →
   零 panic → SurfaceFlinger 时间戳持续推进（渲染真在继续）。
 
-### 剩余 Android 缺口（2026-10-06 复核）
+### 剩余 Android 缺口（2026-10-06 复核，2026-10-11 更新）
 
-- `configChanges` 缺 `fontScale` / `locale` / `layoutDirection` / `keyboard`
-  → 系统字号或语言变化会**重建 Activity**，进程内状态全丢。
+- ~~`configChanges` 缺 `fontScale` / `locale` / `layoutDirection` / `keyboard`~~
+  **已补**（2026-10-11）：`fontScale|locale|layoutDirection|keyboard` 四个全进
+  manifest。真机验证（MuMu Android 15）：改系统字号、切系统语言再回来，
+  pid 不变、无重建、无 panic，只有正常 paused/stopped 往返。
   （`uiMode` **已在** configChanges 里，深色模式切换不会重建 —— 但仍**没有**读
   当前 night mode 的公开 API；`AndroidApp::config().ui_mode_night()` 已有底层能力。）
 - 剪贴板（`ClipboardManager`）、振动（`Vibrator`，且 manifest 无 `uses-permission`）。

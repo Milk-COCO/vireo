@@ -297,6 +297,11 @@
   native surface: the stale surface object was reused for configure. Now Suspended
   marks it stale (frames skip surface use), and the first frame after Resumed
   recreates it.
+- Android 模板 `configChanges` 补齐 `fontScale|locale|layoutDirection|keyboard`：
+  改系统字号或语言不再重建 Activity（此前会整套重建，Java 字段全丢）。
+  真机验证通过（pid 不变、无重建、无 panic）。
+  Added missing configChanges values so font-scale and locale changes no longer
+  recreate the Activity.
 
 ## [0.1.2]
 
