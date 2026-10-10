@@ -131,6 +131,20 @@ std::io::Read::read_to_end(&mut uri.open_reader()?, &mut buf)?;
 - 本模板跑起来就有演示：HUD 上三按钮（`SAF:tree` / `SAF:open` / `SAF:save`），
   首跑还会自动弹一次目录选择（marker 落 cache，删掉可重演）。
 
+#### 剪贴板（已实现）
+
+```rust
+// 免费函数（无 App 状态可注入，故不挂 App 上）
+vireo::set_clipboard_text("关卡名")?;
+let s: Option<String> = vireo::clipboard_text();  // None = 空剪贴板
+vireo::set_clipboard_html("<p>hi</p>", "hi")?;
+let h: Option<String> = vireo::clipboard_html();  // 有纯文本无 HTML 时为 None，不降级
+```
+
+- Android 侧纯 JNI：**无需 manifest 权限、无需改 Java**。API 33+ 读会弹系统
+  "pasted" 提示（OS 行为）。
+- 本模板 HUD 上两按钮（`CB:copy` 写文本+HTML / `CB:paste` 读回显示）。
+
 #### APK 里 assets 的压缩存法（实测）
 
 APK 是 zip，每一项要么 STORED（不压缩）要么 DEFLATE（压缩）。这决定能不能走

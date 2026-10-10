@@ -302,6 +302,13 @@
   真机验证通过（pid 不变、无重建、无 panic）。
   Added missing configChanges values so font-scale and locale changes no longer
   recreate the Activity.
+- **剪贴板**：免费函数 `clipboard_text` / `set_clipboard_text` /
+  `clipboard_html` / `set_clipboard_html`（prelude 导出，刻意不挂 `App` ——
+  剪贴板是进程级全局状态，无状态可注入）。
+  Windows（Win32，`CF_UNICODETEXT`/`CF_HTML`，短暂占用重试）+
+  Android（纯 JNI，无权限无 Java 改动）；macOS/Linux → `Unsupported`。
+  读空剪贴板返回 `None`（不是错误），读 HTML 严格不降级。
+  Clipboard: plain text + HTML on Windows and Android; free functions.
 
 ## [0.1.2]
 

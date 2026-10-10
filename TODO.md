@@ -576,7 +576,12 @@ async fn main(app: App) { .. }
   pid 不变、无重建、无 panic，只有正常 paused/stopped 往返。
   （`uiMode` **已在** configChanges 里，深色模式切换不会重建 —— 但仍**没有**读
   当前 night mode 的公开 API；`AndroidApp::config().ui_mode_night()` 已有底层能力。）
-- 剪贴板（`ClipboardManager`）、振动（`Vibrator`，且 manifest 无 `uses-permission`）。
+- ~~剪贴板（`ClipboardManager`）~~、振动（`Vibrator`，且 manifest 无 `uses-permission`）。
+  **剪贴板已实现**（2026-10-11）：免费函数 `clipboard_text` / `set_clipboard_text` /
+  `clipboard_html` / `set_clipboard_html`（`src/clipboard.rs`，prelude 导出，
+  刻意不挂 `App` —— 无状态可注入）。Windows（Win32 + `Win32_System_Memory` /
+  `Win32_System_DataExchange`，0.61 模块位置已搬家）+ Android（纯 JNI，无权限
+  无 Java 改动）；macOS/Linux → `Unsupported`。真机验证：写双格式 → 读回逐字一致。
 - 可写目录不覆盖「卸载后还在」与「写共享存储任意位置」—— 见上面的 SAF 条目。
 
 ---

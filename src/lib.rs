@@ -114,6 +114,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod area;
 pub mod asset;
+pub mod clipboard;
 
 #[doc(hidden)]
 pub use vireo_macro::main;
@@ -159,6 +160,10 @@ pub mod prelude {
     pub use crate::area::Area;
     pub use crate::area::AreaGeom;
     pub use crate::asset::Assets;
+    pub use crate::clipboard::clipboard_html;
+    pub use crate::clipboard::clipboard_text;
+    pub use crate::clipboard::set_clipboard_html;
+    pub use crate::clipboard::set_clipboard_text;
     pub use crate::color::Color;
     pub use crate::color::colors::*;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};

@@ -334,6 +334,7 @@ async fn main(app: App) {
             // 按钮移动而点击区留在原地。
             let sz = win.layout_size();
             // SAF 三按钮（绘制在 y=250，见下）：tree / open / create。
+            // CB 两按钮（同行右侧）：copy（写文本+HTML）/ paste（读文本+HTML）。
             let saf_hit = if m.1 >= 250.0 && m.1 <= 306.0 {
                 if m.0 >= 80.0 && m.0 <= 260.0 {
                     Some('t')
@@ -341,6 +342,10 @@ async fn main(app: App) {
                     Some('o')
                 } else if m.0 >= 480.0 && m.0 <= 660.0 {
                     Some('c')
+                } else if m.0 >= 700.0 && m.0 <= 880.0 {
+                    Some('C')
+                } else if m.0 >= 900.0 && m.0 <= 1080.0 {
+                    Some('P')
                 } else {
                     None
                 }
@@ -348,6 +353,28 @@ async fn main(app: App) {
                 None
             };
             if let Some(which) = saf_hit {
+                if which == 'C' || which == 'P' {
+                    // 剪贴板是同步 API，直接调直接记（无回调）。
+                    if which == 'C' {
+                        match vireo::prelude::set_clipboard_text("vireo clipboard demo 你好🦊") {
+                            Ok(()) => {
+                                match vireo::prelude::set_clipboard_html(
+                                    "<p>hi <b>there</b> 你好</p>",
+                                    "hi there",
+                                ) {
+                                    Ok(()) => saf_note(&saf_report, "cb copy ok (text+html)".to_string()),
+                                    Err(e) => saf_note(&saf_report, format!("cb copy html ERR {e}")),
+                                }
+                            }
+                            Err(e) => saf_note(&saf_report, format!("cb copy text ERR {e}")),
+                        }
+                    } else {
+                        let t = vireo::prelude::clipboard_text();
+                        let h = vireo::prelude::clipboard_html();
+                        saf_note(&saf_report, format!("cb paste text={t:?} html={h:?}"));
+                    }
+                    continue;
+                }
                 let rep = saf_report.clone();
                 let launch_r = match which {
                     't' => ctx.app().open_document_tree(move |res| on_tree_picked(rep, res)),
@@ -485,6 +512,21 @@ async fn main(app: App) {
         // 命中判定在触摸循环里（与绘制用同一坐标），见上。
         for (i, label) in ["SAF:tree", "SAF:open", "SAF:save"].iter().enumerate() {
             let sx = 80.0 + i as f32 * 200.0;
+            draw_rectangle(&mut batch, Pos::new(sx, 250.0), 180.0, 56.0, Some(GRAY));
+            draw_text(
+                &mut batch.texts,
+                label,
+                Pos::new(sx + 16.0, 250.0 + 14.0),
+                TextDef {
+                    font_size: 22.0,
+                    ..Default::default()
+                },
+                TextOverride::new(),
+            );
+        }
+        // ---- 剪贴板两按钮（同行右侧）------------------------------------------
+        for (i, label) in ["CB:copy", "CB:paste"].iter().enumerate() {
+            let sx = 700.0 + i as f32 * 200.0;
             draw_rectangle(&mut batch, Pos::new(sx, 250.0), 180.0, 56.0, Some(GRAY));
             draw_text(
                 &mut batch.texts,
