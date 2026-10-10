@@ -1,9 +1,14 @@
 package com.example.vireoandroid;
 
+import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.window.OnBackInvokedDispatcher;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.view.WindowCompat;
 
 import com.google.androidgamesdk.GameActivity;
@@ -90,6 +95,62 @@ public class MainActivity extends GameActivity {
      */
     private static final long BACK_DECIDE_DELAY_MS = 34;
 
+    // ---------------------------------------------------------------------
+    // SAF（系统文件选择器）桥
+    //
+    // vireo 的 `App::open_document_tree` / `open_document` / `create_document`
+    // 需要它。独立可复制版见 `examples/android/SAF_SNIPPET.java` —— 两边改了要同步。
+    //
+    // 为什么必须有这段 Java（不能纯 Rust）：见 SAF_SNIPPET.java 文件头。
+    // ---------------------------------------------------------------------
+    private ActivityResultLauncher<Intent> safLauncher;
+    private long pendingSafRequest = 0;
+
+    /**
+     * Rust 侧发起 SAF 选择（`App::open_document_tree` 等经 JNI 调这里）。
+     *
+     * <p>任何线程可调：内部 `runOnUiThread` 接管。单文件/新建加 `CATEGORY_OPENABLE`，
+     * 选目录不加（目录本身不是可打开文档）。三个授权 flag 全要 —— 缺 `PERSISTABLE`
+     * 则授权活不过重启（`OpenDocumentTree` 那三个 contract 生成的 Intent 不带它，
+     * 所以这里用 `StartActivityForResult` 自己组 Intent）。
+     */
+    public void vireoLaunchSaf(long requestId, String action, String type, String[] mimes, String title) {
+        runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(action);
+                if (type != null) {
+                    i.setType(type);
+                }
+                if (mimes != null) {
+                    i.putExtra(Intent.EXTRA_MIME_TYPES, mimes);
+                }
+                if (title != null) {
+                    i.putExtra(Intent.EXTRA_TITLE, title);
+                }
+                if (!Intent.ACTION_OPEN_DOCUMENT_TREE.equals(action)) {
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                }
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                pendingSafRequest = requestId;
+                safLauncher.launch(i);
+            } catch (Exception e) {
+                // 如设备上没有 DocumentsUI：转成异步错误回 Rust，不让 UI 线程崩。
+                nativeOnSafResult(requestId, null, "launch failed: " + e);
+            }
+        });
+    }
+
+    /**
+     * 选择结果回传 Rust（`vireo_android_on_saf_result`，`RegisterNatives` 绑定）。
+     *
+     * <p>约定：`(uri != null)` = 成功；`(uri == null, error == null)` = 用户取消；
+     * `(uri == null, error != null)` = 失败。重建后迟到的旧结果 id 对不上，
+     * Rust 侧丢弃 + warn。
+     */
+    private static native void nativeOnSafResult(long requestId, String uriOrNull, String errorOrNull);
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // false = 允许内容延伸到系统栏/刘海区域，vireo 自己算安全区。
@@ -115,6 +176,24 @@ public class MainActivity extends GameActivity {
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,
                     this::onBackPressedCompat);
         }
+
+        // SAF 选择器：必须在 onCreate 里（STARTED 之前）注册，见文件头 SAF 节。
+        safLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    long id = pendingSafRequest;
+                    pendingSafRequest = 0;
+                    Uri uri = null;
+                    String error = null;
+                    if (result.getResultCode() != Activity.RESULT_OK) {
+                        // 用户点了返回：uri/error 全 null，Rust 侧按 UserCancelled 处理。
+                    } else if (result.getData() == null || result.getData().getData() == null) {
+                        error = "picker returned no document";
+                    } else {
+                        uri = result.getData().getData();
+                    }
+                    nativeOnSafResult(id, uri == null ? null : uri.toString(), error);
+                });
     }
 
     /**

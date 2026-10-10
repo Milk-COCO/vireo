@@ -238,6 +238,9 @@ pub enum DrawSkipReason {
     Occluded,
     /// surface 过期（`Outdated`），已重配，本帧跳过。
     SurfaceReconfigured,
+    /// surface 已知死亡（winit `Suspended` 之后、`Resumed` 之前）：本帧未碰
+    /// surface 直接跳过，`Resumed` 后首帧重建。移动端切后台/盖选择器时出现。
+    SurfaceStale,
     /// 窗口正在关闭，不绘制。
     Closing,
 }

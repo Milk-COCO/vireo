@@ -135,6 +135,7 @@ pub mod offscreen;
 pub mod particle;
 pub mod platform;
 pub mod render;
+pub mod saf;
 pub mod shapes;
 pub mod storage;
 pub mod text;
@@ -193,6 +194,9 @@ pub mod prelude {
     pub use crate::render::ShapeStats;
     pub use crate::render::Transform;
     pub use crate::render::UvRect;
+    pub use crate::saf::SafEntry;
+    pub use crate::saf::SafGrant;
+    pub use crate::saf::SafUri;
     pub use crate::shapes::*;
     pub use crate::text::Attrs;
     pub use crate::text::AttrsOwned;

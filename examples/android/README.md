@@ -94,14 +94,42 @@ let tex = app.load_texture("logo.png");  // 等价于 std::fs::read("logo.png")
 vireo **刻意不做**「相对路径自动回退到 assets」：那会让同一份代码在两个平台上资源
 来源不同且不报错 —— 桌面调通了、安卓静默换一张图。所以上面那两行是**两个不同的 API**。
 
-三个可写目录在安卓上**都免权限**，也都**随卸载删除**。要让用户自己选存储位置，
-需走 SAF，**vireo 尚未实现**（见 `TODO.md`）。
+三个可写目录在安卓上**都免权限**，也都**随卸载删除**。要让用户自己选存储位置
+（且卸载后文件还在），走 SAF —— **已实现**，见下。
 
 > ⚠️ **`assets.list()` 在安卓上只列文件、不列子目录** —— 底层 `AAssetDir` 就是这个
 > 语义，没有「有哪些子目录」的概念。真机实测：`assets/` 里放着 `logo.png` 和
 > `notes/hello.txt`，`list("")` 返回 `["logo.png"]`，`notes` 不出现（尽管
 > `read("notes/hello.txt")` 能读到）。**所以不能靠 `list` 遍历资源树**，
 > 要遍历就自己维护一份资源清单。
+
+#### SAF：让用户自己选位置（已实现）
+
+```rust
+// 三个入口全异步：立即返回，系统选择器出现，用户操作后调回调（渲染线程）
+app.open_document_tree(move |res| { /* Ok(SafUri) / Err(UserCancelled) */ });
+app.open_document(&["image/*"], move |res| { /* ... */ });
+app.create_document("chart.json", move |res| { /* ... */ });
+
+// SafUri：URI 字符串可持久化（自己存，下次 from_uri_string 复用）+
+// open_reader/open_writer 开出真正 std::fs::File +
+// 目录 list/resolve/create_*/delete + persisted/release
+let mut buf = Vec::new();
+std::io::Read::read_to_end(&mut uri.open_reader()?, &mut buf)?;
+```
+
+要点：
+
+- SAF 返回的是 `content://` URI，**不是路径** —— 塞不进任何 `PathBuf` 参数，
+  `std::fs` 也读不了它。必须经 `SafUri` 中转。
+- 你的 `MainActivity.java` 必须含 SAF 桥（本模板已集成；独立可复制文件
+  `examples/android/SAF_SNIPPET.java`，拷三块进自己的 Activity 即可）。
+  缺了 launch 直接 `Err` 明说，不会静默无事发生。
+- 收到 URI 当即自动持久化授权；`SafUri::persisted()` 列历史授权。
+  卸载后授权清零（系统行为），但文件本身还在。
+- 同一时刻只允许一个选择器在途；取消走 `Err(UserCancelled)`，不是故障。
+- 本模板跑起来就有演示：HUD 上三按钮（`SAF:tree` / `SAF:open` / `SAF:save`），
+  首跑还会自动弹一次目录选择（marker 落 cache，删掉可重演）。
 
 #### APK 里 assets 的压缩存法（实测）
 

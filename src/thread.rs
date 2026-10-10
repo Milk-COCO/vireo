@@ -402,6 +402,8 @@ pub(crate) fn run_thread_loop(
         // 本 loop 已处理过的生命周期变更代号；0 是初始值且 GEN 也从 0 起，
         // 所以首个 tick 不会误触发回调（此时还没有任何 pause/resume 发生过）。
         let mut lifecycle_gen = crate::platform::android_lifecycle::generation();
+        // 同上：SAF 选择结果代号，无结果时 drain 是空操作。
+        let mut saf_gen = crate::saf::saf_generation();
         // 同上：内存警告代号，每个 loop 各自跟踪，保证每次变更恰好补发一次。
         let mut mem_warn_gen = app.inner.memory_warn_gen();
         while !state.done.load(Ordering::Acquire) {
@@ -457,9 +459,12 @@ pub(crate) fn run_thread_loop(
             // 带来的副作用，不是有意设计。
             {
                 let g = crate::platform::android_lifecycle::generation();
-                if g != lifecycle_gen {
+                let sg = crate::saf::saf_generation();
+                if g != lifecycle_gen || sg != saf_gen {
                     lifecycle_gen = g;
+                    saf_gen = sg;
                     app.inner.fire_lifecycle_callbacks();
+                    app.inner.fire_saf_results();
                 }
             }
             // ---- 生命周期暂停闸门 --------------------------------------------

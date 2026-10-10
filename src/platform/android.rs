@@ -178,7 +178,7 @@ impl core::fmt::Debug for JniErr {
     }
 }
 
-type JRes<T> = Result<T, JniErr>;
+pub(crate) type JRes<T> = Result<T, JniErr>;
 
 /// `safe_area` / `padding` 用的 `WindowInsets.Type` 掩码。
 ///
@@ -192,7 +192,7 @@ fn sdk() -> i32 {
 }
 
 /// 附加到当前线程的 JVM 并拿到 Activity 对象。
-fn with_activity<F, R>(app: &crate::android::AndroidApp, f: F) -> JRes<R>
+pub(crate) fn with_activity<F, R>(app: &crate::android::AndroidApp, f: F) -> JRes<R>
 where
     F: FnOnce(&mut jni::Env, &jni::objects::JObject<'_>) -> JRes<R>,
 {

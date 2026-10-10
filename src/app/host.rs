@@ -322,7 +322,20 @@ impl ApplicationHandler for Runner {
         self.send(WinitEvent::MemoryWarning);
     }
 
+    /// surface 已知死亡（移动端：native window 被拆掉，`Resumed` 之前保证为空）。
+    ///
+    /// 只置脏旗，不碰 surface 本体 —— surface 所有权在渲染线程。
+    /// 渲染线程在 `draw_frame` 帧首看到旗即跳过一切 surface 调用（`configure`
+    /// 打在死对象上会直接走 wgpu fatal handler panic，真机实测过）；
+    /// `Resumed` 清旗后首帧重建。桌面 winit 永不发此事件，零行为变化。
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        crate::platform::android_lifecycle::mark_surface_stale();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // 与 suspended() 配对：native window 重新有效，允许渲染线程重建 surface。
+        // 首次启动时清一个从未置位的旗，无事发生；`created` 守卫不受影响。
+        crate::platform::android_lifecycle::clear_surface_stale();
         if self.created {
             return;
         }

@@ -534,32 +534,39 @@ async fn main(app: App) { .. }
 - 示例 `examples/resource_io`；assets 脚手架 `examples/assets/` 与
   `examples/android/src/main/assets/`（两份内容一致）。
 
-### SAF（系统文件选择器）：**本轮不做**，用户决定（2026-10-06）
+### SAF（系统文件选择器）：**已实现**（2026-10-10）
 
-要「让用户自己选位置存/取」必须走 SAF。已查证的前提事实：
+- `App::open_document_tree` / `open_document` / `create_document`（全异步，结果走回调，
+  回调跑渲染线程）+ `SafUri`（URI 字符串可持久化 + `open_reader` / `open_writer`
+  开出真正 `std::fs::File` + 目录 `list` / `resolve` / `create_*` / `delete` +
+  `persisted` / `release`）+ `saf_cancel_pending`。`src/saf.rs`，prelude 导出。
+- Java 侧强制：`MainActivity.java` 必须含 SAF 桥（模板已集成，另有独立可复制文件
+  `examples/android/SAF_SNIPPET.java`）。缺了 launch 直接 `Err` 明说。
+- 关键查证（纠正 2026-10-06 的记录）：`GameActivity extends AppCompatActivity`
+  （javap 反编译 AAR 确认），`registerForActivityResult` / `onActivityResult` 继承可用；
+  但三个 `OpenDocument*` contract 生成的 Intent **不带任何 flag**（字节码确认），
+  持久化做不成 —— 所以用 `StartActivityForResult` contract + 自己组 Intent。
+- 前置修复（同轮）：SAF 选择器盖住时会拆 native surface，回来后拿旧对象
+  `configure` 必 panic。修：winit `Suspended` 置脏旗（suspend 期跳过一切 surface
+  调用）+ `Resumed` 后首帧重建（`DrawSkipReason::SurfaceStale`）。见下。
+- 现实限制（写文档时必须说清）：
+  - `data_dir` / `external_data_dir` **都随卸载删除**。
+  - Android 11+ 分区存储不允许往 `Documents` 之外的共享位置写。要让用户指定位置，
+    **只能**走 SAF。
+  - `AAssetDir` 式的遍历限制同样适用于 SAF 目录之外 —— 无。
 
-- `android-activity 0.6` 与 `ndk 0.9` **都没有** Intent 启动 / Activity Result API
-  （逐条搜过 `startActivity` / `ActivityResult` / `Intent`，零命中）。
-- 要做需在**用户项目的 `MainActivity.java`** 里写 `registerForActivityResult`，
-  再经 JNI 把结果回传 Rust（可套用模板现有的 `nativeTakeBackConsumed` 轮询模式），
-  最后把 `content://` URI 转 file descriptor 还要再一次 JNI。
-- **API 形状会完全不同**：SAF 不返回路径，只返回 URI / fd。所以它是**流式** API
-  （`io::Read` / `io::Write`），与 `data_dir()` 那套路径型 API 无法合并。
+### resume 后 surface 重建（SAF 前置修复，2026-10-10）
 
-留给后续的形状草案（未实施）：
-
-```rust
-// 安卓独有；返回流而非路径
-app.open_document(|res| ..);    // 用户选一个已有文件 -> io::Read
-app.create_document(.., |res| ..); // 用户选保存位置 -> io::Write
-app.open_document_tree(..);     // 用户选一个目录 -> 后续相对路径读写
-```
-
-在那之前的现实限制（写文档时必须说清）：
-
-- `data_dir` / `external_data_dir` **都随卸载删除**。
-- Android 11+ 分区存储不允许往 `Documents` 之外的共享位置写。要让用户指定位置，
-  **只能**走 SAF。
+- 现象：SAF 选择器关闭 → `onSurfaceCreated_native` → 下一帧 `configure` 打在
+  已死的旧 surface 上 → wgpu fatal handler panic（`Surface::configure` /
+  `queue family`）；有时逃逸成 SIGABRT（tombstone 三连，`panic_cannot_unwind`）。
+- 修：`Runner::suspended()` 置 `android_lifecycle::SURFACE_STALE`；
+  `draw_frame` 帧首见旗即 `Skipped(SurfaceStale)`（不碰 surface）；
+  `Runner::resumed()` 清旗；per-window `was_stale` 闩让 resume 后首帧
+  `recreate_surface` + `configure` + 跳过（复用 `Lost` 路径形状）。
+  桌面 winit 永不发 `Suspended`，零行为变化。`render_advice` 视 stale 为 Skip。
+- 真机验证（MuMu Android 15）：杀 picker → `surface recreated after resume` →
+  零 panic → SurfaceFlinger 时间戳持续推进（渲染真在继续）。
 
 ### 剩余 Android 缺口（2026-10-06 复核）
 

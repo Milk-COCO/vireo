@@ -32,6 +32,15 @@ pub enum VireoError {
     /// 桌面需要 [`App::set_asset_root`](crate::App::set_asset_root) 指向一个目录；
     /// 不设时资源一律读不到。安卓下不适用（资源在 APK 内）。
     NoAssetRoot,
+    /// 用户在系统选择器里主动取消（SAF 取文件/目录时点了返回）。
+    ///
+    /// 不是故障 —— 调用方通常应该静默忽略，而不是报错。
+    UserCancelled,
+    /// 该能力只在特定平台上有（如 SAF 只在 Android 上有）。
+    ///
+    /// 与返回 `Option` 的平台查询不同：这里是**动作**（发起选择器、打开 fd），
+    /// 失败是错误而不是「无值」，所以用 `Result` + 本变体。
+    Unsupported(&'static str),
     /// 其它未分类错误。
     Other(String),
 }
@@ -61,6 +70,8 @@ impl fmt::Display for VireoError {
                 "no asset root configured; call App::set_asset_root(path) on desktop \
                  (on Android packaged resources need no root)"
             ),
+            VireoError::UserCancelled => write!(f, "user cancelled the picker"),
+            VireoError::Unsupported(what) => write!(f, "{what} is only supported on Android"),
             VireoError::Other(msg) => write!(f, "{msg}"),
         }
     }

@@ -28,6 +28,18 @@
   - 示例 `examples/resource_io`；assets 脚手架 `examples/assets/` 与
     `examples/android/src/main/assets/`。
 
+- **SAF（系统文件选择器，安卓独有）**：`App::open_document_tree` /
+  `open_document` / `create_document`（全异步，结果走回调，回调跑渲染线程）+
+  `SafUri`（URI 字符串可持久化 + `open_reader` / `open_writer` 开出真正
+  `std::fs::File` + 目录 `list` / `resolve` / `create_*` / `delete` +
+  `persisted` / `release`）+ `saf_cancel_pending`。
+  - Java 侧强制：`MainActivity.java` 必须含 SAF 桥（模板已集成，另有独立可复制文件
+    `examples/android/SAF_SNIPPET.java`）；缺了 launch 直接 `Err` 明说。
+  - 不用 `OpenDocument*` 三个 contract（其 Intent 不带 flag，持久化做不成），
+    改用 `StartActivityForResult` + 自己组 Intent（READ/WRITE/PERSISTABLE 全要）。
+  - 新增错误变体 `VireoError::UserCancelled`（用户取消，不是故障）/
+    `Unsupported`（该能力只在特定平台有）。
+
 - **触摸状态轮询 API**：`VireoWindow::touches() -> Vec<TouchPoint>` /
   `touch_count()` / `touch_first()`，以及公开类型 `TouchPoint`
   （`{ id, pos: PixelPos, force }`）。此前触摸没有类型安全的读法 ——
@@ -272,6 +284,19 @@
   Root cause is winit 0.30 Windows `exit()` setting the flag without waking the waiter
   while `run_app` only checks it after an infinite park; fixed with a self-wake after
   `exit()`, plus exit handshake hardening (ack, timeouts, backstop, trace).
+
+- Android：另一个 Activity 盖住后回来（SAF 选择器等），`configure` 打在已死的旧
+  surface 上必 panic（`Surface::configure` / `queue family`，有时逃逸成 SIGABRT）。
+  根因是 GameActivity 在 suspend 时拆掉 native surface，而 vireo 只在 acquire 路径
+  处理 `Lost`，resume 后 0×0→正常尺寸的 drift-configure 仍用旧对象。
+  修：`Runner::suspended()` 置脏旗（suspend 期跳过一切 surface 调用，
+  `DrawSkipReason::SurfaceStale`），`resumed()` 清旗，per-window `was_stale` 闩让
+  resume 后首帧 `recreate_surface` + `configure` + 跳过（复用 `Lost` 路径形状）。
+  桌面 winit 永不发 `Suspended`，零行为变化。
+  Fixed panic when resuming after another Activity (e.g. SAF picker) destroyed the
+  native surface: the stale surface object was reused for configure. Now Suspended
+  marks it stale (frames skip surface use), and the first frame after Resumed
+  recreates it.
 
 ## [0.1.2]
 

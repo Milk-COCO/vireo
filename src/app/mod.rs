@@ -423,6 +423,24 @@ impl AppInner {
             fire(&back_cbs);
         }
     }
+
+    /// 由渲染线程在观察到 SAF 结果代号变化后调用（与 `fire_lifecycle_callbacks` 同位置）。
+    ///
+    /// 取出全部待交付结果并逐个调回调（`FnOnce`，锁外调用，panic 隔离与上同款）。
+    /// 无结果时就是一次空 drain，不早退判断 —— 代号没变根本不会进到这里。
+    pub(crate) fn fire_saf_results(&self) {
+        let _ = self;
+        for (cb, outcome) in crate::saf::drain_results() {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(outcome)))
+            {
+                log::error!(
+                    "vireo: SAF callback panicked: {}",
+                    crate::app::supervisor::panic_payload_to_string(payload)
+                );
+            }
+        }
+    }
 }
 
 /// 安卓进程级 `AndroidApp` 句柄（仅安卓）。
@@ -458,6 +476,7 @@ where
     // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
     // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
     crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);
+    crate::saf::bind_saf_hooks(&android_app);
     let _ = ANDROID_APP.set(android_app);
     App::new(main)
 }
@@ -481,6 +500,7 @@ pub fn android_main_entry_with_descriptor<F, Fut>(
     // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
     // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
     crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);
+    crate::saf::bind_saf_hooks(&android_app);
     let _ = ANDROID_APP.set(android_app);
     App::with_descriptor(desc, main)
 }
@@ -837,10 +857,89 @@ impl App {
     /// 环境不允许时返回 `None`（例如桌面找不到 Documents）。
     ///
     /// ⚠️ 安卓下同样**卸载即删**，且 Android 11+ 分区存储不允许写 `Documents`
-    /// 之外的共享位置。要真正「让用户自己选位置」，需 SAF —— 本轮**未实现**，
-    /// 见 `TODO.md`。
+    /// 之外的共享位置。要真正「让用户自己选位置」，走 SAF
+    ///（[`open_document_tree`](App::open_document_tree) 等）。
     pub fn external_data_dir(&self) -> Option<std::path::PathBuf> {
         crate::storage::external_data_dir(&self.storage_name())
+    }
+
+    /// SAF：让用户选一个目录（系统选择器，异步）。
+    ///
+    /// 立即返回：`Ok(())` = 请求已发出；用户选定/取消后调 `cb`
+    ///（`Ok(SafUri)` / `Err(UserCancelled)`）。回调跑在渲染线程。
+    ///
+    /// 拿到目录 URI 后相对路径读写（[`SafUri::resolve`] / [`list`](crate::SafUri::list) /
+    /// [`create_file`](crate::SafUri::create_file)）。授权在收到时自动持久化，
+    /// URI 字符串自己存下来下次复用 —— 详见 [`crate::saf`] 模块文档。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **仅 Android**：桌面直接返回 `Err(Unsupported)`。
+    /// - 需要 `MainActivity.java` 含 SAF 桥（`examples/android/SAF_SNIPPET.java`），
+    ///   缺了返回 `Err`（会明说缺什么）。
+    /// - 同一时刻只允许一个选择器在途；重叠发起返回 `Err`。
+    pub fn open_document_tree(
+        &self,
+        cb: impl FnOnce(Result<crate::saf::SafUri, VireoError>) + Send + 'static,
+    ) -> Result<(), VireoError> {
+        crate::saf::request(
+            crate::saf::SafKind::Tree,
+            "android.intent.action.OPEN_DOCUMENT_TREE",
+            None,
+            &[],
+            None,
+            Box::new(cb),
+        )
+    }
+
+    /// SAF：让用户选一个已有文件来读（系统选择器，异步）。
+    ///
+    /// `mime_types` 如 `&["image/*"]`、`&["application/json", "text/plain"]`；
+    /// 空切片 = 不限类型。
+    /// 回调与平台约束同 [`open_document_tree`](App::open_document_tree)。
+    /// 拿到 URI 后 [`open_reader`](crate::SafUri::open_reader) 读出真正的 `File`。
+    pub fn open_document(
+        &self,
+        mime_types: &[&str],
+        cb: impl FnOnce(Result<crate::saf::SafUri, VireoError>) + Send + 'static,
+    ) -> Result<(), VireoError> {
+        crate::saf::request(
+            crate::saf::SafKind::Open,
+            "android.intent.action.OPEN_DOCUMENT",
+            Some("*/*"),
+            mime_types,
+            None,
+            Box::new(cb),
+        )
+    }
+
+    /// SAF：让用户选保存位置来写（系统选择器，异步）。
+    ///
+    /// `suggestion` 是建议文件名（含扩展名，如 `"chart.json"`）—— mime 由扩展名
+    /// 暗示（contract 本来就不接受 mime 参数，见 `crate::saf` 文档）。
+    /// 回调与平台约束同 [`open_document_tree`](App::open_document_tree)。
+    /// 拿到 URI 后 [`open_writer`](crate::SafUri::open_writer) 写。
+    pub fn create_document(
+        &self,
+        suggestion: &str,
+        cb: impl FnOnce(Result<crate::saf::SafUri, VireoError>) + Send + 'static,
+    ) -> Result<(), VireoError> {
+        crate::saf::request(
+            crate::saf::SafKind::Create,
+            "android.intent.action.CREATE_DOCUMENT",
+            Some("*/*"),
+            &[],
+            Some(suggestion),
+            Box::new(cb),
+        )
+    }
+
+    /// 丢掉在途的 SAF 请求（回调永不触发）。只用于「Activity 中途重建、
+    /// 选择结果永远回不来」的逃生口；返回是否真丢掉过东西。
+    ///
+    /// 迟到的结果到达时按未知 id 丢弃 + `warn`，不会串给后面的请求。
+    pub fn saf_cancel_pending(&self) -> bool {
+        crate::saf::cancel_pending()
     }
 
     /// 获取贴图（`Err` = 索引越界/未加载完成）。

@@ -111,6 +111,36 @@ static SAW_STOP: AtomicBool = AtomicBool::new(false);
 /// 已处理的代号，于是每个 loop 对每次变更恰好触发一次，不会重复也不会漏。
 static GEN: AtomicU64 = AtomicU64::new(0);
 
+/// 进程级「surface 已知死亡」标志（winit `Event::Suspended` 置位，`Resumed` 清除）。
+///
+/// 背景：另一个 Activity 盖到前面（如 SAF 系统选择器）时，GameActivity 会拆掉
+/// native surface（回来时 `onSurfaceCreated_native` 重新触发）。此时旧的
+/// `wgpu::Surface` 对象已死 —— 拿它调 `configure` 直接走 wgpu fatal handler
+/// panic（真机实测：SAF 选择器关闭后的第一帧必现）。
+///
+/// 为什么是「peek 而不是 take」：suspend 期间渲染线程可能还在画
+/// （`auto_pause=false` 时），每帧都必须跳过；只有 `Resumed` 能清除
+/// （那时 native window 重新有效）。消费点在 `draw_frame` 帧首 + resume 后首帧
+/// 的重建（`was_stale` 闩，见 `VireoWindow`）。
+///
+/// 桌面永不置位（winit 只在移动端发 `Suspended`），零行为变化。
+static SURFACE_STALE: AtomicBool = AtomicBool::new(false);
+
+/// winit `Event::Suspended` 到达（winit 线程经 Runner 调用）。
+pub(crate) fn mark_surface_stale() {
+    SURFACE_STALE.store(true, Ordering::Release);
+}
+
+/// winit `Event::Resumed` 到达。清除即允许下一帧重建 surface。
+pub(crate) fn clear_surface_stale() {
+    SURFACE_STALE.store(false, Ordering::Release);
+}
+
+/// surface 是否已知死亡（渲染线程每帧读）。
+pub(crate) fn surface_stale() -> bool {
+    SURFACE_STALE.load(Ordering::Acquire)
+}
+
 /// 是否已绑定过。防止 `android_main` 被重复调用时二次 `RegisterNatives`。
 static BOUND: AtomicBool = AtomicBool::new(false);
 
@@ -803,6 +833,25 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if !cfg!(target_os = "android") {
             assert!(!back_requested());
+        }
+    }
+
+    #[test]
+    fn surface_stale_flag_round_trips() {
+        // Suspended→脏→跳过→Resumed→清→重建：渲染线程只读 peek，
+        // 清除只能由 Resumed 做（draw 侧永不清，否则死 surface 又会被 configure）。
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let was = surface_stale();
+        mark_surface_stale();
+        assert!(surface_stale());
+        // 重复置位幂等
+        mark_surface_stale();
+        assert!(surface_stale());
+        clear_surface_stale();
+        assert!(!surface_stale());
+        // 复原，避免影响其它测试
+        if was {
+            mark_surface_stale();
         }
     }
 

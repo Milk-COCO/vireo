@@ -229,6 +229,10 @@ pub struct VireoWindow {
     /// 首次 draw 前 surface 尚未 `surface.configure`（建窗时推迟到渲染线程）：
     /// 置 true 强制首帧走 configure 路径，建立合法 swapchain 后再 acquire。
     needs_initial_configure: Mutex<bool>,
+    /// suspend 期间见过脏旗（`was_stale` 闩）：resume 后首帧重建 surface。
+    /// 脏旗本身是进程级的（`android_lifecycle::surface_stale`），这个闩是
+    /// per-window 的消费记录 —— suspend 期间画过的帧才需要重建。
+    was_stale: std::sync::atomic::AtomicBool,
     /// 首帧渲染成功后是否自动显示窗口（`WindowDesc::preparable`）：建窗时隐藏，
     /// 首次 `Presented` 后 `set_visible(true)`，让窗口第一次出现即完整形态。
     pending_show: Mutex<bool>,
@@ -414,6 +418,7 @@ impl VireoWindow {
             instance,
             surface_config: Mutex::new(surface_config),
             needs_initial_configure: Mutex::new(true),
+            was_stale: std::sync::atomic::AtomicBool::new(false),
             pending_show: Mutex::new(pending_show),
             renderer: Mutex::new(renderer),
             inner,
@@ -592,7 +597,10 @@ impl VireoWindow {
             return RenderAdvice::Skip;
         }
         if let Some(DrawOutcome::Skipped(
-            DrawSkipReason::ZeroSized | DrawSkipReason::Occluded | DrawSkipReason::Closing,
+            DrawSkipReason::ZeroSized
+            | DrawSkipReason::Occluded
+            | DrawSkipReason::Closing
+            | DrawSkipReason::SurfaceStale,
         )) = *self.last_draw_outcome.lock()
         {
             return RenderAdvice::Skip;
@@ -634,6 +642,47 @@ impl VireoWindow {
                 timings: DrawTimings::default(),
                 vsync_throttled: false,
             };
+        }
+        // surface 已知死亡（winit Suspended 之后、Resumed 之前）：本帧不碰 surface
+        // 任何东西 —— `get_capabilities` / `configure` / acquire 打在死对象上都可能
+        // panic（`configure` 走 wgpu fatal handler，真机实测 SAF 选择器关闭后必现）。
+        // `Resumed` 清旗后首帧走下方重建（`was_stale` 闩）。
+        if crate::platform::android_lifecycle::surface_stale() {
+            self.was_stale
+                .store(true, std::sync::atomic::Ordering::Release);
+            return DrawReport {
+                outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceStale),
+                timings: DrawTimings::default(),
+                vsync_throttled: false,
+            };
+        }
+        // resume 后首帧：surface 对象已死，重建后再走正常流程。本分支只在「suspend
+        // 期间画过帧」时进入（`was_stale` 闩）；suspend 期间没画过则旧对象大概率仍
+        // 可用，走正常 acquire，`Lost` 路径兜底。
+        // winit 保证 `Resumed` 之后 native window 有效，`create_surface` 不会命中
+        // 「Suspended 期间为空」的 panic 分支；失败则落到正常流程，acquire 侧兜底。
+        if self
+            .was_stale
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let size = self.inner.inner_size();
+            if size.width > 0 && size.height > 0 {
+                if let Some(new_surface) = self.recreate_surface() {
+                    *self.surface.lock() = new_surface;
+                    let t_conf = std::time::Instant::now();
+                    self.configure_surface(size, t_conf);
+                    self.maybe_show_prepared_window();
+                    log::info!("vireo: surface recreated after resume");
+                    return DrawReport {
+                        outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                        timings: DrawTimings {
+                            configure_secs: t_conf.elapsed().as_secs_f64(),
+                            ..DrawTimings::default()
+                        },
+                        vsync_throttled: false,
+                    };
+                }
+            }
         }
         // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_tick 内手动调）
         if *self.auto_refresh_input.lock() {

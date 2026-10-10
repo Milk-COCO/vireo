@@ -258,7 +258,8 @@ async fn main(app: App) {
     //   2. 内部私有目录 —— /data/user/0/<包名>/files，免权限
     //   3. 外部 app 专属 —— /storage/emulated/0/Android/data/<包名>/files，免权限
     //
-    // 三者**都随卸载删除**。要让用户自己选存储位置得走 SAF，vireo 尚未实现。
+    // 三者**都随卸载删除**。要让用户自己选存储位置得走 SAF —— 已实现，
+    // 见下面的 SAF 演示（`App::open_document_tree` 等 + `SafUri`）。
     //
     // 桌面开发时同一份代码用 `set_asset_root` 指到本地目录即可 —— 这就是
     // `assets/` API 的全部意义：不是魔法，是把「资源根」显式化。
@@ -273,6 +274,40 @@ async fn main(app: App) {
     // 末级名字可改（默认取可执行文件名）。安卓下三个目录由系统从包名派生，
     // 这个名字在安卓上是 no-op —— 写在这里是为了让桌面行为可见。
     app.set_storage_name("vireo-android-template");
+
+    // ---- SAF：系统文件选择器 ----------------------------------------------
+    // 结果报告存在这里：回调（渲染线程）写，HUD 读。logcat 同步打一份。
+    let saf_report: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    // 无头自检（不需要点选择器，真机上也能全自动验证 JNI 链路）：
+    //   1. persisted() —— 零授权时应 Ok(empty)，顺带走通 ContentResolver 查询链
+    //   2. 伪造 URI open_reader —— 应 Err（走通 fd 失败路径）
+    //   3. from_uri_string 往返 + is_tree 启发式
+    {
+        let say = |s: String| {
+            log::info!("vireo-android: saf-selftest | {s}");
+        };
+        match vireo::prelude::SafUri::persisted() {
+            Ok(g) => say(format!("persisted ok, {} grant(s)", g.len())),
+            Err(e) => say(format!("persisted ERR ({e})")),
+        }
+        let bogus = vireo::prelude::SafUri::from_uri_string("content://example.invalid/tree/0");
+        say(format!(
+            "bogus is_tree={} open={:?}",
+            bogus.is_tree(),
+            bogus.open_reader().map(|_| "opened?!").map_err(|e| e.to_string())
+        ));
+    }
+    // 首跑自动弹一次目录选择（marker 落在 cache_dir）：这是唯一能无头验证
+    // 「launch 通路」到系统选择器的方式（之后用 dumpsys 看 DocumentsUI 是否在前台）。
+    // 只做一次 —— marker 写下后不再打扰；删掉 marker 文件可重演。
+    // 桌面上 open_document_tree 直接同步 Err（进报告，不弹任何东西）。
+    let saf_auto_marker: Option<std::path::PathBuf> = app
+        .cache_dir()
+        .map(|d| d.join("saf_demo_autorun"))
+        .ok();
+    let mut saf_auto_done =
+        saf_auto_marker.as_ref().map(|p| p.exists()).unwrap_or(true);
+    let mut frames: u64 = 0;
 
     // 随包贴图：证明 assets/logo.png 真的解码成功了（不是 missing 棋盘）。
     let asset_tex = app.load_texture_asset("logo.png");
@@ -298,6 +333,66 @@ async fn main(app: App) {
             // 判定必须与绘制用**同一个**尺寸来源（`layout_size`），否则窗口改尺寸后
             // 按钮移动而点击区留在原地。
             let sz = win.layout_size();
+            // SAF 三按钮（绘制在 y=250，见下）：tree / open / create。
+            let saf_hit = if m.1 >= 250.0 && m.1 <= 306.0 {
+                if m.0 >= 80.0 && m.0 <= 260.0 {
+                    Some('t')
+                } else if m.0 >= 280.0 && m.0 <= 460.0 {
+                    Some('o')
+                } else if m.0 >= 480.0 && m.0 <= 660.0 {
+                    Some('c')
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(which) = saf_hit {
+                let rep = saf_report.clone();
+                let launch_r = match which {
+                    't' => ctx.app().open_document_tree(move |res| on_tree_picked(rep, res)),
+                    'o' => ctx.app().open_document(
+                        &["*/*"],
+                        move |res| match res {
+                            Ok(uri) => {
+                                let name =
+                                    uri.display_name().unwrap_or_else(|e| format!("ERR {e}"));
+                                let bytes = uri.open_reader().map(|mut f| {
+                                    let mut b = Vec::new();
+                                    std::io::Read::read_to_end(&mut f, &mut b)
+                                        .map(|_| b.len())
+                                        .map_err(|e| e.to_string())
+                                });
+                                saf_note(&rep, format!("open ok {name} bytes={bytes:?}"));
+                            }
+                            Err(e) => saf_note(&rep, format!("open ERR {e}")),
+                        },
+                    ),
+                    _ => ctx.app().create_document(
+                        "vireo-saf-demo.txt",
+                        move |res| match res {
+                            Ok(uri) => {
+                                let w = uri.open_writer().map(|mut f| {
+                                    std::io::Write::write_all(&mut f, b"vireo saf demo\n")
+                                        .map_err(|e| e.to_string())
+                                });
+                                saf_note(
+                                    &rep,
+                                    format!(
+                                        "create ok {} write={w:?}",
+                                        uri.display_name().unwrap_or_default()
+                                    ),
+                                );
+                            }
+                            Err(e) => saf_note(&rep, format!("create ERR {e}")),
+                        },
+                    ),
+                };
+                if let Err(e) = launch_r {
+                    saf_note(&saf_report, format!("launch ERR {e}"));
+                }
+                continue;
+            }
             let btn_y = sz.height.dp.0 - 120.0;
             if m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0 {
                 let on = !ctx.app().auto_pause();
@@ -319,6 +414,27 @@ async fn main(app: App) {
         }
         if ctx.app().auto_pause() {
             life.auto_frames.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // 首跑自动弹一次目录选择（约 2.5 秒处）：无头验证 launch 通路的方式 ——
+        // 之后用 dumpsys 看 DocumentsUI 是否在前台。marker 写下后不再打扰。
+        frames += 1;
+        if !saf_auto_done && frames == 150 {
+            saf_auto_done = true;
+            if let Some(p) = &saf_auto_marker {
+                if let Some(parent) = p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(p, b"1");
+            }
+            log::info!("vireo-android: saf | 首跑自动弹目录选择（验证 launch 通路）");
+            let rep = saf_report.clone();
+            if let Err(e) = ctx
+                .app()
+                .open_document_tree(move |res| on_tree_picked(rep, res))
+            {
+                saf_note(&saf_report, format!("auto-tree ERR {e}"));
+            }
         }
 
         // ---- 安全区三值 --------------------------------------------------
@@ -364,6 +480,23 @@ async fn main(app: App) {
         ring(&mut batch, vw, vh, safe, RED);
         ring(&mut batch, vw, vh, pad, YELLOW);
         ring(&mut batch, vw, vh, ime, GREEN);
+
+        // ---- SAF 三按钮 ------------------------------------------------------
+        // 命中判定在触摸循环里（与绘制用同一坐标），见上。
+        for (i, label) in ["SAF:tree", "SAF:open", "SAF:save"].iter().enumerate() {
+            let sx = 80.0 + i as f32 * 200.0;
+            draw_rectangle(&mut batch, Pos::new(sx, 250.0), 180.0, 56.0, Some(GRAY));
+            draw_text(
+                &mut batch.texts,
+                label,
+                Pos::new(sx + 16.0, 250.0 + 14.0),
+                TextDef {
+                    font_size: 22.0,
+                    ..Default::default()
+                },
+                TextOverride::new(),
+            );
+        }
 
         // ---- 文本输入框（键盘弹出时上移）----------------------------------
         let fw = vw - 160.0;
@@ -486,6 +619,13 @@ async fn main(app: App) {
         //   save    roundtrip = 目录真的可写（不只是路径算得出来）
         hud.push('\n');
         hud.push_str(&io_report);
+        // SAF 结果（回调写 progress）。第一行是操作提示。
+        hud.push_str("saf     点上方三按钮 = 目录/打开/新建\n");
+        for line in saf_report.lock().unwrap().iter() {
+            hud.push_str("saf     ");
+            hud.push_str(line);
+            hud.push('\n');
+        }
         // emoji：曲名/故事板要用，得确认能画出来（不是豆腐块）
         let mut emoji_probe = String::from("\nemoji");
         // 逐行测：单色 / 旗帜 / ZWJ 序列 / 肤色修饰
@@ -634,6 +774,42 @@ async fn main(app: App) {
     })
     .await
     .unwrap();
+}
+
+/// SAF 目录选择结果的演示处理：记 URI + 列根目录。
+fn on_tree_picked(
+    rep: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    res: Result<vireo::prelude::SafUri, vireo::error::VireoError>,
+) {
+    match res {
+        Ok(uri) => {
+            saf_note(&rep, format!("tree ok {}", uri.uri()));
+            match uri.list("") {
+                Ok(entries) => {
+                    let shown: Vec<String> = entries
+                        .iter()
+                        .take(5)
+                        .map(|e| {
+                            format!("{}{}", e.name, if e.is_dir { "/" } else { "" })
+                        })
+                        .collect();
+                    saf_note(&rep, format!("tree list({}): {}", entries.len(), shown.join(", ")));
+                }
+                Err(e) => saf_note(&rep, format!("tree list ERR {e}")),
+            }
+        }
+        Err(e) => saf_note(&rep, format!("tree ERR {e}")),
+    }
+}
+
+/// SAF 结果记一笔：logcat + HUD 报告（留最近 4 条）。
+fn saf_note(report: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: String) {
+    log::info!("vireo-android: saf | {line}");
+    let mut g = report.lock().unwrap();
+    g.push(line);
+    while g.len() > 4 {
+        g.remove(0);
+    }
 }
 
 /// 探测随包资源（只读）。返回 HUD 用的一行文本。
