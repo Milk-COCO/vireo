@@ -303,6 +303,14 @@
   （此前必 SIGABRT）。真机三次真实 pick 全恢复，零崩溃。
   Hardened resume recovery (catch unwind around configure) and second-activity
   re-entry guard.
+- Android：返回键退出后进程不死（winit 循环 parked-deaf，`run_blocking` 回不来，
+  `onDestroy` 卡住，任务记录烂成 RESUMED 僵尸，重进 splash 卡死）。修：
+  `about_to_wait` 首行见 `is_destroyed()` 即 ack + `exit()` + 返回；
+  supervisor 收尾后若 activity 已死则自杀（`killProcess(self)`，等价 force-stop）。
+  走过的弯路：`process::exit` 在 ART teardown 里 abort，已 revert 永不再用。
+  真机验证：退出后数秒进程消失（SIGNALED/9，无 tombstone），重进全新进程全功能。
+  Fixed zombie process after back-button exit (winit loop parked-deaf post-Destroy):
+  exit eagerly on destroy + self-terminate when teardown is done.
 - Android 模板 `configChanges` 补齐 `fontScale|locale|layoutDirection|keyboard`：
   改系统字号或语言不再重建 Activity（此前会整套重建，Java 字段全丢）。
   真机验证通过（pid 不变、无重建、无 panic）。

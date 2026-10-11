@@ -243,6 +243,54 @@ pub(crate) fn android_night_fresh() -> Option<bool> {
 /// 是否已绑定过。防止 `android_main` 被重复调用时二次 `RegisterNatives`。
 static BOUND: AtomicBool = AtomicBool::new(false);
 
+/// 自杀（`Process.killProcess(myPid())`，等价 force-stop 的干净死亡）。
+///
+/// 只允许在「activity 已死 + supervisor 收尾做完」时调用（见调用点）：
+/// Destroy 后 winit 循环可能 parked-deaf，等它配合等于永远等 —— 而收尾
+/// （关窗/计数）已经全部做完，留着的只是等一个永远不会来的 loop 结束。
+/// 自己死则系统清记录，重进 fork 新进程（force-stop 已证明干净）。
+///
+/// 为什么不用 `process::exit`：ART 在 teardown 中调它会 abort（真机实测，
+/// `hwuiTask` + JNI-detach 双 SIGABRT）。SIGKILL 不跑任何 handler，
+/// 和用户划掉效果逐位一致。
+///
+/// 竞态说明：若用户恰在收尾这几秒内点开新 Activity，会被连带杀掉 ——
+/// 再点一次即是全新进程，自愈。窗口极小（Destroy 到 kill 之间），接受。
+#[cfg(target_os = "android")]
+pub(crate) fn kill_self_if_destroyed() {
+    if !is_destroyed() {
+        return;
+    }
+    use crate::platform::android::{JniErr, with_activity};
+    use jni::{jni_sig, jni_str};
+    let Some(app) = crate::app::android_app() else {
+        return;
+    };
+    let _ = with_activity(app, |env, _activity| {
+        let cls = env
+            .find_class(jni_str!("android/os/Process"))
+            .map_err(JniErr::from)?;
+        let pid = env
+            .call_static_method(cls, jni_str!("myPid"), jni_sig!("()I"), &[])
+            .map_err(JniErr::from)?
+            .i()
+            .map_err(JniErr::from)?;
+        // JClass 非 Copy：第二次调用重新查（find_class 便宜，自杀前这点开销无所谓）。
+        let cls2 = env
+            .find_class(jni_str!("android/os/Process"))
+            .map_err(JniErr::from)?;
+        // SAFETY: 杀自己，等价用户 force-stop；不返回。
+        let _ = env.call_static_method(
+            cls2,
+            jni_str!("killProcess"),
+            jni_sig!("(I)V"),
+            &[jni::objects::JValue::Int(pid)],
+        );
+        // `killProcess` 不返回；走到这里说明没杀掉（几乎不可能），Ok 继续。
+        Ok::<(), JniErr>(())
+    });
+}
+
 /// Java 侧必须声明的 native 方法名 —— 与 `MainActivity.java` 里的完全一致。
 ///
 /// ⚠️ 改这些名字 = 破坏已发布的 `MainActivity.java` 模板。绑定会失败，且失败

@@ -577,6 +577,16 @@ async fn main(app: App) { .. }
   winit 拒绝第二个 loop → SIGABRT（tombstone 实锤）—— 修：
   `ANDROID_MAIN_ENTERED` 重入直接拒绝（黑屏但不崩；多 Activity 本来就不支持）。
   该 guard 代码审查通过，触发场景难复现（需恰好点两下），暂无设备观测。
+- 追补2（返回键退出后进程不死 → 重进卡死，经诊断版定位）：back-back finish 后
+  supervisor 收尾做完，但 winit 循环 parked-deaf（Destroy 后不再迭代，ack 永不到，
+  连调了 `exit()` 也醒不来）→ `run_blocking` 回不来 → `onDestroy` 卡住 →
+  任务记录烂成 RESUMED 僵尸 → 重进 splash 卡死。修两处：① `about_to_wait` 首行
+  见 `is_destroyed()` 即 ack + `exit()` + 返回（Destroy 送达那次迭代一定跑到）；
+  ② supervisor 收尾后若 activity 已死则自杀（`killProcess(self)`，等价 force-stop，
+  实测干净）。走过的弯路：`process::exit` 在 ART teardown 里 abort
+  （`hwuiTask` + JNI-detach 双 SIGABRT），已 revert，永不再用。
+  真机验证：返回键退出后进程数秒内消失（SIGNALED/9，无 tombstone），重进 fork
+  新进程全功能正常。
 
 ### 剩余 Android 缺口（2026-10-06 复核，2026-10-11 更新）
 

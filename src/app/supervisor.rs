@@ -465,6 +465,12 @@ pub(crate) fn supervisor_loop(
                         }
                     }
                 }
+                // 安卓收尾：如果 activity 已死，自己结束进程（见 kill_self_if_destroyed）。
+                // Destroy 后 winit 循环可能 parked-deaf，run_blocking 等它结束等于
+                // 永远等 —— 而收尾已经做完，留着只会烂成僵尸任务记录。
+                // activity 活着时不碰（正常 idle/后台，语义不变）。
+                #[cfg(target_os = "android")]
+                crate::platform::android_lifecycle::kill_self_if_destroyed();
                 return;
             }
             SupervisorAction::CloseAll => {

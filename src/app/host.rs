@@ -353,6 +353,17 @@ impl ApplicationHandler for Runner {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Destroy 后 loop 若 parked-deaf，等 supervisor 的 exit 握手等于永远等
+        // （真机实测：ack 5s 兜底也救不了，parked 的循环不再迭代，supervisor 的
+        // exit(0) 又会被 ART 拦成 SIGABRT —— 两条路都走过，全灭）。
+        // Destroy 送达的这次迭代一定会跑到这里 —— 直接 ack + exit + 返回，
+        // 不再依赖后续迭代。supervisor 侧照常收尾（ack 瞬间到，不用等 5s）。
+        // 非安卓 `is_destroyed` 恒 false，零行为变化。
+        if crate::platform::android_lifecycle::is_destroyed() {
+            let _ = self.exit_ack_tx.send(());
+            event_loop.exit();
+            return;
+        }
         let mut exit_requested = false;
         let mut exit_hits = 0u32;
         while self.exit_rx.try_recv().is_ok() {
