@@ -309,6 +309,13 @@
   Android（纯 JNI，无权限无 Java 改动）；macOS/Linux → `Unsupported`。
   读空剪贴板返回 `None`（不是错误），读 HTML 严格不降级。
   Clipboard: plain text + HTML on Windows and Android; free functions.
+- **振动**：免费函数 `has_vibrator` / `vibrate_once(ms, amplitude?)` /
+  `vibrate_predefined(Tick/Click/HeavyClick/DoubleClick)` /
+  `vibrate_pattern(timings, amplitudes?, repeat?)` / `cancel_vibration`
+  （prelude 导出）。Android 纯 JNI（模板 manifest 加 `VIBRATE` 权限行）；
+  其它平台 → `Unsupported`。无马达设备 `vibrate_*` 报 `Err`（逼调用方用
+  `has_vibrator` 做门），`cancel` 无马达直接 `Ok`。
+  Vibration: one-shot, predefined effects, custom waveforms on Android.
 
 ## [0.1.2]
 

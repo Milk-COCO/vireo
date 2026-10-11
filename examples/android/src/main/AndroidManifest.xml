@@ -25,6 +25,10 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 振动：普通权限，安装即授予，无需运行时弹窗。vireo 的 vibrate_* 需要它；
+         没声明时调用直接抛 SecurityException（不是静默无事）。 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
         android:label="Vireo Android"
         android:theme="@style/ActivityTheme"

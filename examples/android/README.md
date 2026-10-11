@@ -145,6 +145,23 @@ let h: Option<String> = vireo::clipboard_html();  // 有纯文本无 HTML 时为
   "pasted" 提示（OS 行为）。
 - 本模板 HUD 上两按钮（`CB:copy` 写文本+HTML / `CB:paste` 读回显示）。
 
+#### 振动（已实现）
+
+```rust
+// 免费函数（同剪贴板，无状态可注入，不挂 App）
+if vireo::has_vibrator() {
+    vireo::vibrate_once(60, None)?;                       // 单次，默认强度
+    vireo::vibrate_predefined(vireo::VibrateKind::Tick)?; // 系统预置触感
+    vireo::vibrate_pattern(&[0, 80, 60, 80], Some(&[0, 200, 0, 200]), None)?;
+}
+vireo::cancel_vibration()?;  // 停掉当前振动
+```
+
+- 模板 manifest 已声明 `VIBRATE` 权限（普通权限，安装即授）。
+- 本模板 HUD 上 `VB:test` 按钮跑全套记报告。MuMu 实测报有马达（全 Ok）；
+  无马达的设备上预期 `has=false` + 三个 `ERR(no vibrator)` + `cancel ok`
+  （验证不崩即可）；真震感只能物理手机。
+
 #### APK 里 assets 的压缩存法（实测）
 
 APK 是 zip，每一项要么 STORED（不压缩）要么 DEFLATE（压缩）。这决定能不能走

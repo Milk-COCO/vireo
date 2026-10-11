@@ -420,6 +420,34 @@ async fn main(app: App) {
                 }
                 continue;
             }
+            // VB:test（绘制在 (900,340)，见下）：has + once + predefined + pattern +
+            // cancel 跑全套记报告。模拟器无马达，预期 has=false + 三个 ERR + cancel ok
+            // （验证的是「不崩 + 路径正确」，真震感只能物理手机）。
+            if m.1 >= 340.0 && m.1 <= 396.0 && m.0 >= 900.0 && m.0 <= 1080.0 {
+                let hv = vireo::prelude::has_vibrator();
+                saf_note(&saf_report, format!("vb has={hv}"));
+                match vireo::prelude::vibrate_once(60, None) {
+                    Ok(()) => saf_note(&saf_report, "vb once ok".to_string()),
+                    Err(e) => saf_note(&saf_report, format!("vb once ERR {e}")),
+                }
+                match vireo::prelude::vibrate_predefined(vireo::prelude::VibrateKind::Tick) {
+                    Ok(()) => saf_note(&saf_report, "vb tick ok".to_string()),
+                    Err(e) => saf_note(&saf_report, format!("vb tick ERR {e}")),
+                }
+                match vireo::prelude::vibrate_pattern(
+                    &[0, 80, 60, 80],
+                    Some(&[0, 200, 0, 200]),
+                    None,
+                ) {
+                    Ok(()) => saf_note(&saf_report, "vb pattern ok".to_string()),
+                    Err(e) => saf_note(&saf_report, format!("vb pattern ERR {e}")),
+                }
+                match vireo::prelude::cancel_vibration() {
+                    Ok(()) => saf_note(&saf_report, "vb cancel ok".to_string()),
+                    Err(e) => saf_note(&saf_report, format!("vb cancel ERR {e}")),
+                }
+                continue;
+            }
             let btn_y = sz.height.dp.0 - 120.0;
             if m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0 {
                 let on = !ctx.app().auto_pause();
@@ -539,6 +567,18 @@ async fn main(app: App) {
                 TextOverride::new(),
             );
         }
+        // ---- 振动测试按钮（右下空位）--------------------------------------------
+        draw_rectangle(&mut batch, Pos::new(900.0, 340.0), 180.0, 56.0, Some(GRAY));
+        draw_text(
+            &mut batch.texts,
+            "VB:test",
+            Pos::new(900.0 + 16.0, 340.0 + 14.0),
+            TextDef {
+                font_size: 22.0,
+                ..Default::default()
+            },
+            TextOverride::new(),
+        );
 
         // ---- 文本输入框（键盘弹出时上移）----------------------------------
         let fw = vw - 160.0;

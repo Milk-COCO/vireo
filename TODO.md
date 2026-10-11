@@ -582,6 +582,11 @@ async fn main(app: App) { .. }
   刻意不挂 `App` —— 无状态可注入）。Windows（Win32 + `Win32_System_Memory` /
   `Win32_System_DataExchange`，0.61 模块位置已搬家）+ Android（纯 JNI，无权限
   无 Java 改动）；macOS/Linux → `Unsupported`。真机验证：写双格式 → 读回逐字一致。
+- ~~振动~~ **已实现**（2026-10-11）：免费函数 `has_vibrator` / `vibrate_once` /
+  `vibrate_predefined(Tick/Click/HeavyClick/DoubleClick)` / `vibrate_pattern` /
+  `cancel_vibration`（`src/vibrate.rs`，prelude 导出）。Android 纯 JNI，模板
+  manifest 加 `VIBRATE` 权限行。真机验证（MuMu 报有马达）：has=true + once/tick/
+  pattern/cancel 全 Ok，无崩溃。模拟器无马达时走 `Err(no vibrator)`，真震感需物理机。
 - 可写目录不覆盖「卸载后还在」与「写共享存储任意位置」—— 见上面的 SAF 条目。
 
 ---

@@ -141,6 +141,7 @@ pub mod shapes;
 pub mod storage;
 pub mod text;
 pub mod texture;
+pub mod vibrate;
 pub mod window;
 
 /// 安卓入口类型（仅 `target_os = "android"` 存在；winit 转发的 `android-activity` API）。
@@ -225,6 +226,12 @@ pub mod prelude {
     pub use crate::text::draw_text_parts;
     pub use crate::text::split_hud;
     pub use crate::texture::Texture;
+    pub use crate::vibrate::VibrateKind;
+    pub use crate::vibrate::cancel_vibration;
+    pub use crate::vibrate::has_vibrator;
+    pub use crate::vibrate::vibrate_once;
+    pub use crate::vibrate::vibrate_pattern;
+    pub use crate::vibrate::vibrate_predefined;
     // 输入系统
     pub use crate::input::ElementState;
     pub use crate::input::Ime;
