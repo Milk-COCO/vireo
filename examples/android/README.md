@@ -824,12 +824,12 @@ protected void onSaveInstanceState(Bundle outState) {
   `NotoColorEmoji`），否则 cosmic-text 根本排不到它。
 - **`cutouts()` 部分 ROM 恒空**：运行时 `set_display_cutout_mode` 是空操作，
   只能靠 manifest/style（见 §4.4）。
-- **16 KB 未保证**：见 §5。
-- **SAF（系统文件选择器）未实现**：要让用户自己选存储位置、或把数据写到
-  `Documents` 之外的共享位置，只能走 SAF。已查证 `android-activity 0.6` /
-  `ndk 0.9` 都没有 Intent 启动 / Activity Result API，需在 `MainActivity.java`
-  侧配合，且它返回的是 URI / fd 而非路径（流式 API，与 `data_dir()` 那套
-  路径型 API 无法合并）。详见 `TODO.md`。
+  - **16 KB**：静态检查已过（`check-16kb.ps1`，双 ABI 全绿，NDK 28.2，
+    见 §5）。设备实锤待定：手头两台模拟器都是 4K 页（`getconf PAGE_SIZE`），
+    需 16K 物理设备或 Cuttlefish 才能验证运行时不炸。
+  - ~~**SAF（系统文件选择器）未实现**~~ ✅ **已实现**：`App::open_document_tree` /
+    `open_document` / `create_document` + `SafUri`（URI / fd 流式 API，见 §2
+    的 SAF 节与 `TODO.md`）。模板 HUD 有演示按钮，`SAF_SNIPPET.java` 可抄走。
 
 ---
 

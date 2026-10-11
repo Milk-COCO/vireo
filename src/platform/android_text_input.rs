@@ -382,7 +382,9 @@ impl InputType {
 // （`Waited 5000ms for FocusEvent(hasFocus=false)`）被系统 ANR 杀掉。
 static IME_STATE: AtomicU64 = AtomicU64::new(0);
 
-/// 同一请求被抑制的时间戳窗口（仅用于诊断 / 将来做节流，当前不做周期性重发）。
+/// 历史窗口值，现仅单测用（证明「超过旧窗口也不重发」）。
+/// 生产代码已无周期性重发（组合态易碎，见下单测），故 test 门控。
+#[cfg(test)]
 pub(crate) const IME_DEDUPE_WINDOW_MS: u64 = 200;
 
 fn now_ms() -> u64 {

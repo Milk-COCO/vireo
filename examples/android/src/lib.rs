@@ -278,6 +278,13 @@ async fn main(app: App) {
     // ---- SAF：系统文件选择器 ----------------------------------------------
     // 结果报告存在这里：回调（渲染线程）写，HUD 读。logcat 同步打一份。
     let saf_report: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    // 内存压力回调（`am send-trim-memory` 可无头触发验证）。
+    {
+        let rep = saf_report.clone();
+        app.on_memory_warning(move || {
+            saf_note(&rep, "memory warning received".to_string());
+        });
+    }
     // 无头自检（不需要点选择器，真机上也能全自动验证 JNI 链路）：
     //   1. persisted() —— 零授权时应 Ok(empty)，顺带走通 ContentResolver 查询链
     //   2. 伪造 URI open_reader —— 应 Err（走通 fd 失败路径）
@@ -287,7 +294,27 @@ async fn main(app: App) {
             log::info!("vireo-android: saf-selftest | {s}");
         };
         match vireo::prelude::SafUri::persisted() {
-            Ok(g) => say(format!("persisted ok, {} grant(s)", g.len())),
+            Ok(g) => {
+                say(format!("persisted ok, {} grant(s)", g.len()));
+                // 恢复复用探测：有历史授权就试着用（读目录列表或文件名），
+                // 验证跨启动 restore 不是空架子。失败只记日志，不炸。
+                if let Some(first) = g.first() {
+                    if first.uri.is_tree() {
+                        match first.uri.list("") {
+                            Ok(entries) => say(format!(
+                                "restored tree list ok, {} entries",
+                                entries.len()
+                            )),
+                            Err(e) => say(format!("restored tree list ERR ({e})")),
+                        }
+                    } else {
+                        match first.uri.display_name() {
+                            Ok(n) => say(format!("restored file ok, name={n:?}")),
+                            Err(e) => say(format!("restored file ERR ({e})")),
+                        }
+                    }
+                }
+            }
             Err(e) => say(format!("persisted ERR ({e})")),
         }
         let bogus = vireo::prelude::SafUri::from_uri_string("content://example.invalid/tree/0");
