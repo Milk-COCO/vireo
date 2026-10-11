@@ -607,7 +607,7 @@ async fn main(app: App) { .. }
 |---|---|---|---|
 | 1 | SAF 单文件 open/create 全流程 | ✅ 已验证（2026-10-11）：open 读回 6.4MB 文件，create 写成功，零 panic | 用户点 SAF:open / SAF:save 完成 |
 | 2 | SAF 持久化跨启动复用 | ✅ 已验证（2026-10-11）：`persisted ok, 4 grant(s)` + 重启后 `restored tree list ok` | pick 后重进看自检行 |
-| 3 | `layoutDirection` RTL | 中/英都是 LTR，RTL 没走过；`keyboard` 无硬件条件，判不可验证 | 切阿拉伯语/希伯来语再回来（需人工进设置） |
+| 3 | `layoutDirection` RTL | ✅ 已验证（2026-10-11）：语言列表加 `ar_JO` 置顶，方向切到 `ldrtl`（locale+方向双变），pid 不变、无崩溃，正常 suspend/resume + surface 恢复 | 用户进设置加阿拉伯语 |
 | 4 | API 31/32 分档（返回键 legacy、disable 向后兼容分支） | 手头只有 API 35 模拟器，历史分支单测覆盖但无真机 | 需 API 31/32 设备 |
 | 5 | 振动物理震感 | MuMu 报有马达且全 Ok（API 层通了），但模拟器不会真震 | 需物理手机 |
 | 6 | 16K 页设备运行 | 静态检查双 ABI 全绿（NDK 28.2），两台模拟器都是 4K 页 | 需 16K 物理设备 |
