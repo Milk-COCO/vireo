@@ -481,7 +481,13 @@ impl VireoWindow {
 
     /// Configure the surface and synchronise every size-dependent renderer state.
     /// The caller must ensure no `SurfaceTexture` is outstanding.
-    fn configure_surface(&self, size: winit::dpi::PhysicalSize<u32>, now: std::time::Instant) {
+    /// 返回是否成功。失败（死 surface，如 resume 后旧对象）时跳过全部 bookkeeping，
+    /// 调用方按 Lost 同等处理（本帧跳过，不再碰 surface）。
+    fn configure_surface(
+        &self,
+        size: winit::dpi::PhysicalSize<u32>,
+        now: std::time::Instant,
+    ) -> bool {
         debug_assert!(size.width > 0 && size.height > 0);
         let sf = self.inner.scale_factor();
         let dpi_override = *self.applied_dpi_override.lock();
@@ -493,7 +499,22 @@ impl VireoWindow {
         let mut config = self.surface_config.lock().clone();
         config.width = size.width;
         config.height = size.height;
-        self.surface.lock().configure(&self.gpu.device, &config);
+        // wgpu 30 的 `Surface::configure` 返回 `()`，失败只有两条路：全局 error
+        // handler（默认直接 panic）或 error scope（异步，同步帧循环里等不了）。
+        // 死 surface（resume 后旧对象最常见）必走前者 —— 这里是唯一能把它转成
+        // 可恢复错误的卡点，于是用 catch_unwind 兜住，转 `false` 交给调用方按
+        // Lost 处理。parking_lot 不 poison，configure 时不持有 SurfaceTexture，
+        // unwind 安全；payload 打进日志，免得静默吞错。
+        let configured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.surface.lock().configure(&self.gpu.device, &config);
+        }));
+        if let Err(payload) = configured {
+            log::warn!(
+                "vireo: surface configure failed (treated as lost, frame skipped): {}",
+                crate::app::panic_payload_to_string(payload)
+            );
+            return false;
+        }
 
         *self.applied_present_mode.lock() = config.present_mode;
         *self.applied_frame_latency.lock() = config.desired_maximum_frame_latency;
@@ -522,6 +543,7 @@ impl VireoWindow {
             scale,
             dpi_scale,
         );
+        true
     }
 
     /// 绘制一帧（render thread 独占 surface 帧循环）。
@@ -813,7 +835,19 @@ impl VireoWindow {
             if need_configure {
                 let t_conf = std::time::Instant::now();
                 // wgpu 30 configure 返回 ()，错误经全局 error handler 上报。
-                self.configure_surface(size, now);
+                // 失败（死 surface）直接跳帧，不再往下 acquire —— 旧 surface 上
+                // 任何操作都可能炸，acquire 侧兜底反而够不着。
+                if !self.configure_surface(size, now) {
+                    self.maybe_show_prepared_window();
+                    return DrawReport {
+                        outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                        timings: DrawTimings {
+                            configure_secs: t_conf.elapsed().as_secs_f64(),
+                            ..DrawTimings::default()
+                        },
+                        vsync_throttled: false,
+                    };
+                }
                 configure_secs = t_conf.elapsed().as_secs_f64();
             } else if size_drifted && *self.layout_follow.lock() {
                 // layout_follow（独立开关，默认关）：窗口已变但 surface 未重配——

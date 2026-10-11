@@ -297,6 +297,12 @@
   native surface: the stale surface object was reused for configure. Now Suspended
   marks it stale (frames skip surface use), and the first frame after Resumed
   recreates it.
+- Android：`configure_surface` 改返回 bool（失败走 `catch_unwind` 转 Lost 跳帧，
+  兜住闸门拦住时 `was_stale` 闩够不着的 `Outdated` 路径）；同进程第二个
+  `android_main`（旧 Activity 死后点图标）直接拒绝，不建第二个 loop
+  （此前必 SIGABRT）。真机三次真实 pick 全恢复，零崩溃。
+  Hardened resume recovery (catch unwind around configure) and second-activity
+  re-entry guard.
 - Android 模板 `configChanges` 补齐 `fontScale|locale|layoutDirection|keyboard`：
   改系统字号或语言不再重建 Activity（此前会整套重建，Java 字段全丢）。
   真机验证通过（pid 不变、无重建、无 panic）。

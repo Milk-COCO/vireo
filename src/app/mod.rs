@@ -446,8 +446,10 @@ impl AppInner {
 /// 安卓进程级 `AndroidApp` 句柄（仅安卓）。
 ///
 /// `AndroidApp` 只能从 activity 的 `onCreate` 回调拿到（android-activity
-/// 不提供全局访问器），但它本身是**进程级单例** —— 一个进程一个 Activity，
+/// 不提供全局访问器），但它本身是**进程级单例** —— 通常一个进程一个 Activity，
 /// 生命周期等于进程。所以存进 `OnceLock` 即可：
+/// （注意「通常」：旧 Activity 结束后点图标会起新 Activity，同进程跑第二个
+/// `android_main`，由 `ANDROID_MAIN_ENTERED` 挡掉，见下。）
 ///
 /// - `#[vireo::main]` 展开的 `android_main` 只需「存句柄 → 调 [`App::new`]」，
 ///   公开 API 上不必区分安卓 / 桌面两个构造器。
@@ -463,6 +465,18 @@ pub(crate) fn android_app() -> Option<&'static crate::android::AndroidApp> {
     ANDROID_APP.get()
 }
 
+/// `android_main` 是否已进过（仅安卓，防同进程第二个 Activity）。
+///
+/// 背景：默认 `launchMode` 下，用户在旧 Activity 结束后点图标会起新 Activity，
+/// 同进程跑第二个 `android_main`。winit 单进程只允许一个事件循环，第二个
+/// `run_blocking` 必炸（`EventLoop::build` 失败 → unwrap → SIGABRT，真机实测）。
+/// vireo 是单 Activity 架构（多 Activity 单进程不在支持范围），重入时直接拒绝，
+/// 新 Activity 黑屏但进程存活 —— 总比 SIGABRT 强。根治要么 manifest 声明
+/// `singleTask`（见模板注释），要么多 Activity 架构（另议）。
+#[cfg(target_os = "android")]
+static ANDROID_MAIN_ENTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 安卓进程入口（仅安卓）：`#[vireo::main]` 展开的 `android_main` 调这个。
 ///
 /// 存下 [`crate::android::AndroidApp`] 后转 [`App::new`]，其余流程与桌面完全一致。
@@ -473,6 +487,13 @@ where
     F: FnOnce(App) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    if ANDROID_MAIN_ENTERED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log::error!(
+            "vireo: android_main entered twice in one process (second Activity instance?); \
+             vireo serves only the first one, ignoring this entry (no second event loop)"
+        );
+        return;
+    }
     // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
     // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
     crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);
@@ -497,6 +518,13 @@ pub fn android_main_entry_with_descriptor<F, Fut>(
     F: FnOnce(App) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    if ANDROID_MAIN_ENTERED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log::error!(
+            "vireo: android_main entered twice in one process (second Activity instance?); \
+             vireo serves only the first one, ignoring this entry (no second event loop)"
+        );
+        return;
+    }
     // 绑定放在 set 之前：直接用这个所有权值，不需要回头查单例
     // （参数名 `android_app` 遮蔽了同名取值函数，用路径反而绕）。
     crate::platform::android_lifecycle::bind_lifecycle_hooks(&android_app);

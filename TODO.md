@@ -567,6 +567,16 @@ async fn main(app: App) { .. }
   桌面 winit 永不发 `Suspended`，零行为变化。`render_advice` 视 stale 为 Skip。
 - 真机验证（MuMu Android 15）：杀 picker → `surface recreated after resume` →
   零 panic → SurfaceFlinger 时间戳持续推进（渲染真在继续）。
+- 追补（同轮，真机复现倒逼）：① `was_stale` 闩只覆盖「suspend 期画过帧」，
+  闸门拦住时（`auto_pause=true` 默认）走不到重建，`Outdated` 路径 configure 死对象
+  照样炸 —— 修：`configure_surface` 返回 bool，`surface.configure` 那行包
+  `catch_unwind`（wgpu 只给 fatal-panic/全局 handler 两条路，被逼的），失败跳
+  bookkeeping，调用方按 Lost 跳帧。设备上此后三次真实 pick 全走主路径恢复，
+  backstop 没再触发过（好事：说明主路径盖住了；它是纯保险）。
+  ② 同进程第二个 Activity（旧的死后点图标）会跑第二个 `android_main`，
+  winit 拒绝第二个 loop → SIGABRT（tombstone 实锤）—— 修：
+  `ANDROID_MAIN_ENTERED` 重入直接拒绝（黑屏但不崩；多 Activity 本来就不支持）。
+  该 guard 代码审查通过，触发场景难复现（需恰好点两下），暂无设备观测。
 
 ### 剩余 Android 缺口（2026-10-06 复核，2026-10-11 更新）
 
@@ -589,7 +599,19 @@ async fn main(app: App) { .. }
   `cancel_vibration`（`src/vibrate.rs`，prelude 导出）。Android 纯 JNI，模板
   manifest 加 `VIBRATE` 权限行。真机验证（MuMu 报有马达）：has=true + once/tick/
   pattern/cancel 全 Ok，无崩溃。模拟器无马达时走 `Err(no vibrator)`，真震感需物理机。
-- 可写目录不覆盖「卸载后还在」与「写共享存储任意位置」—— 见上面的 SAF 条目。
+  - 可写目录不覆盖「卸载后还在」与「写共享存储任意位置」—— 见上面的 SAF 条目。
+
+### 待验证清单（2026-10-11 审计，需人工 / 特殊设备，代码已就绪）
+
+| # | 项 | 现状 | 怎么验 |
+|---|---|---|---|
+| 1 | SAF 单文件 open/create 全流程 | ✅ 已验证（2026-10-11）：open 读回 6.4MB 文件，create 写成功，零 panic | 用户点 SAF:open / SAF:save 完成 |
+| 2 | SAF 持久化跨启动复用 | ✅ 已验证（2026-10-11）：`persisted ok, 4 grant(s)` + 重启后 `restored tree list ok` | pick 后重进看自检行 |
+| 3 | `layoutDirection` RTL | 中/英都是 LTR，RTL 没走过；`keyboard` 无硬件条件，判不可验证 | 切阿拉伯语/希伯来语再回来（需人工进设置） |
+| 4 | API 31/32 分档（返回键 legacy、disable 向后兼容分支） | 手头只有 API 35 模拟器，历史分支单测覆盖但无真机 | 需 API 31/32 设备 |
+| 5 | 振动物理震感 | MuMu 报有马达且全 Ok（API 层通了），但模拟器不会真震 | 需物理手机 |
+| 6 | 16K 页设备运行 | 静态检查双 ABI 全绿（NDK 28.2），两台模拟器都是 4K 页 | 需 16K 物理设备 |
+| 7 | `on_memory_warning` 真机路径 | ✅ 已验证（2026-10-11）：`am send-trim-memory RUNNING_CRITICAL` → logcat 出回调，进程存活 |
 
 ---
 
