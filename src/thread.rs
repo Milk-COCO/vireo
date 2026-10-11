@@ -458,6 +458,9 @@ pub(crate) fn run_thread_loop(
             // 把触发点搬到渲染线程的**原因**；而恢复后补发只是「闸门先跑」这个 bug
             // 带来的副作用，不是有意设计。
             {
+                // 安卓主题 diff（纯 Rust RwLock 读，无 JNI；非安卓是空函数）。
+                // 放闸门前：后台切深浅色，恢复后第一帧就能送达，不丢。
+                crate::platform::android_lifecycle::poll_android_theme();
                 let g = crate::platform::android_lifecycle::generation();
                 let sg = crate::saf::saf_generation();
                 if g != lifecycle_gen || sg != saf_gen {

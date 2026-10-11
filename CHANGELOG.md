@@ -316,6 +316,13 @@
   其它平台 → `Unsupported`。无马达设备 `vibrate_*` 报 `Err`（逼调用方用
   `has_vibrator` 做门），`cancel` 无马达直接 `Ok`。
   Vibration: one-shot, predefined effects, custom waveforms on Android.
+- **Android 主题（深浅色）读与通知**：`win.theme()` 在安卓读系统深浅色
+  （`Yes→Dark` / `No→Light`，winit 本身不支持），`win.on_theme_changed`
+  在安卓经渲染线程每帧 diff 后派发 —— 不新增 API，把桌面已有的同一套在
+  安卓填上。注意实现细节：`android-activity` 的 `config()` 缓存真机实测从
+  启动就冻住，改走 `getResources().getConfiguration().uiMode` 现值直读。
+  Theme (night mode) reading and change notification on Android, reusing the
+  existing cross-platform API instead of adding a new one.
 
 ## [0.1.2]
 

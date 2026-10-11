@@ -308,6 +308,9 @@ async fn main(app: App) {
     let mut saf_auto_done =
         saf_auto_marker.as_ref().map(|p| p.exists()).unwrap_or(true);
     let mut frames: u64 = 0;
+    // 主题回调只注册一次（窗口首帧可拿到后）。值本身 HUD 每帧现读 win.theme()，
+    // 回调只证明「变化通知」这条路是通的。
+    let mut theme_registered = false;
 
     // 随包贴图：证明 assets/logo.png 真的解码成功了（不是 missing 棋盘）。
     let asset_tex = app.load_texture_asset("logo.png");
@@ -317,6 +320,14 @@ async fn main(app: App) {
             Ok(w) => w,
             Err(_) => return true,
         };
+
+        if !theme_registered {
+            theme_registered = true;
+            let rep = saf_report.clone();
+            win.on_theme_changed(move |t| {
+                saf_note(&rep, format!("theme changed → {t:?}"));
+            });
+        }
 
         let fresh: Vec<vireo::input::TouchPoint> = {
             let pts = win.touches();
@@ -701,6 +712,8 @@ async fn main(app: App) {
         //   save    roundtrip = 目录真的可写（不只是路径算得出来）
         hud.push('\n');
         hud.push_str(&io_report);
+        // 当前主题（桌面走 winit，安卓读系统配置；变化走 on_theme_changed 回调）。
+        hud.push_str(&format!("theme   {:?}\n", win.theme()));
         // SAF 结果（回调写 progress）。第一行是操作提示。
         hud.push_str("saf     点上方三按钮 = 目录/打开/新建\n");
         for line in saf_report.lock().unwrap().iter() {

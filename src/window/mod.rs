@@ -1851,7 +1851,8 @@ impl VireoWindow {
         on_file_hover_cancelled: impl FnOnce() + 'static => on_file_hover_cancelled,
         /// 窗口位置（物理像素，含边框外沿）变化时回调。运行在 winit 线程。
         on_moved: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static => on_moved,
-        /// 系统主题变化时回调（仅 Windows/macOS 上报）。运行在 winit 线程。
+        /// 系统主题变化时回调（Windows/macOS 由 winit 上报；Android 由渲染线程
+        /// 每帧 diff 系统值后经同一循环派发）。运行在 winit 线程。
         on_theme_changed: impl FnMut(winit::window::Theme) + 'static => on_theme_changed,
         /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
         /// 运行在 winit 线程。
@@ -2195,13 +2196,35 @@ impl VireoWindow {
         self.inner.set_theme(theme);
     }
 
-    /// 当前窗口主题。iOS / Android / X11 / Orbital 不支持；Wayland 仅在显式设置后返回。
+    /// 当前窗口主题。iOS / X11 / Orbital 不支持；Wayland 仅在显式设置后返回。
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Android：读系统深浅色**（`getResources().getConfiguration().uiMode`，
+    ///   现值直读，任意线程可调；winit 本身在 Android 上不支持本方法）。
+    ///   `YES→Dark` / `NO→Light` / 其它（`UNDEFINED` 等）或读不到 → `None`。
+    ///   变化通知走 [`on_theme_changed`](Self::on_theme_changed)
+    ///  （渲染线程每帧 diff 系统值，需要注册）。
     ///
     /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
     /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
     /// 同步等待渲染线程）中调用，否则会死锁。渲染线程每帧热路径请优先使用缓存值。
     pub fn theme(&self) -> Option<Theme> {
-        self.inner.theme()
+        #[cfg(target_os = "android")]
+        {
+            // winit android 的 theme() 不可用（见上），直接问 OS。
+            // 不用 android-activity 的缓存：真机实测它从启动就冻住（见
+            // `android_night_fresh` 的注释），读现值才对。
+            return match crate::platform::android_lifecycle::android_night_fresh() {
+                Some(true) => Some(Theme::Dark),
+                Some(false) => Some(Theme::Light),
+                None => None,
+            };
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.inner.theme()
+        }
     }
 
     /// 请求用户注意（任务栏闪烁/图标抖动）。

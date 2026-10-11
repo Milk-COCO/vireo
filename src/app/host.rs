@@ -445,6 +445,22 @@ impl ApplicationHandler for Runner {
             crate::app::exit_log(&format!("about_to_wait: close handle={}", handle));
             self.request_close(handle);
         }
+        // 安卓主题变化（渲染线程 poll 到 config 变化，见 poll_android_theme）：
+        // 复用 ThemeChanged 的回调循环派发。桌面走 WindowEvent 那条，这里只在
+        // 安卓有东西可取（其它平台 take 恒 None，零开销）。
+        // 水平触发：只保证最终值送达，快速连切的中间值可能合并。
+        if let Some(dark) = crate::platform::android_lifecycle::take_android_theme() {
+            let theme = if dark {
+                winit::window::Theme::Dark
+            } else {
+                winit::window::Theme::Light
+            };
+            for cbs in &mut self.window_callbacks {
+                for cb in &mut cbs.on_theme_changed {
+                    cb(theme);
+                }
+            }
+        }
         if exit_requested {
             crate::app::exit_log(&format!(
                 "about_to_wait: exit_rx hits={} → ack + event_loop.exit() + self-wake",

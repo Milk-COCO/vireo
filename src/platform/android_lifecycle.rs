@@ -141,6 +141,105 @@ pub(crate) fn surface_stale() -> bool {
     SURFACE_STALE.load(Ordering::Acquire)
 }
 
+/// 安卓主题待派发状态（`on_theme_changed` 的安卓喂值端）。
+///
+/// 背景：winit android 永不发 `WindowEvent::ThemeChanged`（uiMode 变化在
+/// `ConfigChanged` 分支里只比 scale，主题部分直接丢了）。所以渲染线程每帧
+/// [`poll_android_theme`] 读一次 `config()`（纯 Rust RwLock，无 JNI），变了
+/// 就记在这里；winit 线程在 `about_to_wait` 里 [`take_android_theme`] 取走，
+/// 复用 `ThemeChanged` 的回调循环派发。
+///
+/// 水平触发：只保证最终值送达，快速连切的中间值可能合并。
+/// 生产者（渲染线程 poll）与消费者（winit 线程 drain）各一类，用 Mutex 足够
+/// （无竞争热路径；`SAW_STOP` 那种原子锁存是给多 loop 并发消费准备的，
+/// 这里消费者只有一个）。
+#[derive(Default)]
+struct ThemePending {
+    /// 上次观测值（`None` = 还没观测过，首个值只记基线不派发）。
+    last: Option<bool>,
+    /// 待派发值（`None` = 无事发生）。
+    pending: Option<bool>,
+}
+
+static THEME: parking_lot::Mutex<ThemePending> = parking_lot::Mutex::new(ThemePending {
+    last: None,
+    pending: None,
+});
+
+/// 记一次观测（渲染线程经 `poll_android_theme` 调）。首个值只记基线。
+pub(crate) fn note_android_theme(dark: bool) {
+    let mut t = THEME.lock();
+    if t.last == Some(dark) {
+        return;
+    }
+    let first = t.last.is_none();
+    t.last = Some(dark);
+    if !first {
+        t.pending = Some(dark);
+    }
+}
+
+/// 取走待派发值（winit 线程调）。`None` = 无变化。
+pub(crate) fn take_android_theme() -> Option<bool> {
+    THEME.lock().pending.take()
+}
+
+/// 读一次系统深浅色并记（渲染线程每帧调；非安卓是空函数）。
+pub(crate) fn poll_android_theme() {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dark) = android_night_fresh() {
+            note_android_theme(dark);
+        }
+        // 读不到（Activity 句柄暂时不可用）就跳过本帧，不污染基线。
+    }
+}
+
+/// 直接问 OS 要当前值（`getResources().getConfiguration().uiMode`），不走
+/// `android-activity` 的缓存。
+///
+/// 为什么不用缓存：真机实测缓存从启动就冻住（初始值永不变，toggle 两次零回调；
+/// Java→native→`APP_CMD_CONFIG_CHANGED`→`config.replace` 整链源码齐备但值就是
+/// 不更新，逐段排查胶水层的 ROI 不如直接读现值）。现值读不到返回 `None`
+/// （调用方跳过本帧），不猜。
+#[cfg(target_os = "android")]
+pub(crate) fn android_night_fresh() -> Option<bool> {
+    use crate::platform::android::{JniErr, with_activity};
+    use jni::{jni_sig, jni_str};
+    let app = crate::app::android_app()?;
+    with_activity(app, |env, activity| {
+        let res = env
+            .call_method(
+                activity,
+                jni_str!("getResources"),
+                jni_sig!("()Landroid/content/res/Resources;"),
+                &[],
+            )
+            .map_err(JniErr::from)?
+            .l()
+            .map_err(JniErr::from)?;
+        let cfg = env
+            .call_method(
+                &res,
+                jni_str!("getConfiguration"),
+                jni_sig!("()Landroid/content/res/Configuration;"),
+                &[],
+            )
+            .map_err(JniErr::from)?
+            .l()
+            .map_err(JniErr::from)?;
+        // `Configuration.uiMode` 是 public int 字段；低 4 位是 night 段，
+        // 0x20 = YES（AOSP 稳定值，见 android.content.res.Configuration）。
+        let ui_mode = env
+            .get_field(&cfg, jni_str!("uiMode"), jni_sig!("I"))
+            .map_err(JniErr::from)?
+            .i()
+            .map_err(JniErr::from)?;
+        Ok((ui_mode & 0x30) == 0x20)
+    })
+    .ok()
+}
+
 /// 是否已绑定过。防止 `android_main` 被重复调用时二次 `RegisterNatives`。
 static BOUND: AtomicBool = AtomicBool::new(false);
 
@@ -853,6 +952,25 @@ mod tests {
         if was {
             mark_surface_stale();
         }
+    }
+
+    #[test]
+    fn android_theme_note_fires_once_per_change() {
+        // 首个值只记基线不派发；同值重复记不派发；真变才派发一次；take 即消费。
+        // 复用 TEST_LOCK（THEME 是同文件内另一份进程级全局，同样要串行）。
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 先清场（桌面单测与设备逻辑共用这份状态，残留会污染断言）
+        take_android_theme();
+        note_android_theme(false);
+        assert_eq!(take_android_theme(), None, "首个值是基线，不派发");
+        note_android_theme(false);
+        assert_eq!(take_android_theme(), None, "同值不派发");
+        note_android_theme(true);
+        assert_eq!(take_android_theme(), Some(true), "真变派发一次");
+        assert_eq!(take_android_theme(), None, "take 即消费，不重复");
+        note_android_theme(false);
+        assert_eq!(take_android_theme(), Some(false), "变回去也派发");
+        take_android_theme();
     }
 
     #[test]

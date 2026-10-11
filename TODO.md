@@ -574,8 +574,10 @@ async fn main(app: App) { .. }
   **已补**（2026-10-11）：`fontScale|locale|layoutDirection|keyboard` 四个全进
   manifest。真机验证（MuMu Android 15）：改系统字号、切系统语言再回来，
   pid 不变、无重建、无 panic，只有正常 paused/stopped 往返。
-  （`uiMode` **已在** configChanges 里，深色模式切换不会重建 —— 但仍**没有**读
-  当前 night mode 的公开 API；`AndroidApp::config().ui_mode_night()` 已有底层能力。）
+  （`uiMode` **已在** configChanges 里，深色模式切换不会重建。读当前值与变更通知
+  **已实现**（2026-10-11）：`win.theme()` 在安卓读系统深浅色，
+  `win.on_theme_changed` 在安卓经渲染线程 poll 派发 —— 不另起新 API，
+  把原来只在桌面生效的一套在安卓填上。）
 - ~~剪贴板（`ClipboardManager`）~~、振动（`Vibrator`，且 manifest 无 `uses-permission`）。
   **剪贴板已实现**（2026-10-11）：免费函数 `clipboard_text` / `set_clipboard_text` /
   `clipboard_html` / `set_clipboard_html`（`src/clipboard.rs`，prelude 导出，
