@@ -103,6 +103,8 @@ pub fn set_clipboard_html(html: &str, plain_fallback: &str) -> Result<(), VireoE
 // ---- 纯逻辑（无 cfg，全平台可测） ------------------------------------------------
 
 /// UTF-16LE 编码 + 末尾 NUL（`CF_UNICODETEXT` 要求以 NUL 结尾）。
+// Windows 生产代码 + 全平台单测用；其它平台非 test 构建下无人调用。
+#[cfg(any(windows, test))]
 pub(crate) fn encode_utf16_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -110,6 +112,7 @@ pub(crate) fn encode_utf16_nul(s: &str) -> Vec<u16> {
 /// UTF-16LE 解码，遇到首个 NUL 即停（`CF_UNICODETEXT` 按 NUL 截断；
 /// 越界不用管 —— 调用方按 `GlobalSize` 切片，`end` 兜底）。
 /// 非法序列按 U+FFFD 替换（剪贴板内容不可信，不值得 `Err`）。
+#[cfg(any(windows, test))]
 pub(crate) fn decode_utf16_bounded(words: &[u16]) -> String {
     let end = words.iter().position(|&w| w == 0).unwrap_or(words.len());
     String::from_utf16_lossy(&words[..end])
@@ -119,6 +122,7 @@ pub(crate) fn decode_utf16_bounded(words: &[u16]) -> String {
 ///
 /// 偏移从数据起始算起。`fragment` 按 UTF-8 原样嵌入（中文的偏移是字节数，
 /// 不是字符数 —— 这是 CF_HTML 最常见的错法，单测用中文锁死）。
+#[cfg(any(windows, test))]
 pub(crate) fn build_cf_html(fragment: &str) -> Vec<u8> {
     let frag = fragment.as_bytes();
     let pre = b"<html>\r\n<body>\r\n<!--StartFragment-->";
@@ -141,6 +145,7 @@ pub(crate) fn build_cf_html(fragment: &str) -> Vec<u8> {
 ///
 /// 数字宽度不限（规范写 8 位，但 10 位的生产者真实存在，按「冒号后连续数字」解析，
 /// 与换行风格无关）。越界/非法 UTF-8/缺标记一律 `None`。
+#[cfg(any(windows, test))]
 pub(crate) fn parse_cf_html(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
     let num = |key: &str| -> Option<usize> {
