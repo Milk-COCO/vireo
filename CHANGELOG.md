@@ -261,9 +261,14 @@
   无行为变更。
 - `vireo_macro` 生成的 Android 入口改为 `pub extern "C" fn android_main`
   （原为 Rust ABI 的 `pub fn`；`#[no_mangle]` 本就足够导出，此项是 ABI 正确性改进）。
-- Android 模板补上缺失的 gradle wrapper（`gradlew` / `gradlew.bat` /
-  `gradle-wrapper.jar`）——README 一直让用户跑 `./gradlew`，但脚本并不存在，
-  模板此前并非真正「可复制」。
+  - Android 模板补上缺失的 gradle wrapper（`gradlew` / `gradlew.bat` /
+    `gradle-wrapper.jar`）——README 一直让用户跑 `./gradlew`，但脚本并不存在，
+    模板此前并非真正「可复制」。
+  - `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
+    `surface_format` 自愈重建，见下）；`view()` / `bind_group()` 改返回
+    owned 克隆（原返回内部引用，与锁共存不了）。`Texture` 新增 `format` 字段。
+    受影响的只有三处示例（`offscreen` / `offscreen_aa` /
+    `custom_material_post`，`&canvas.texture` 改为持锁守卫）。
 
 ### Fixed / 修复
 
@@ -335,10 +340,19 @@
   在安卓经渲染线程每帧 diff 后派发 —— 不新增 API，把桌面已有的同一套在
   安卓填上。注意实现细节：`android-activity` 的 `config()` 缓存真机实测从
   启动就冻住，改走 `getResources().getConfiguration().uiMode` 现值直读。
-  Theme (night mode) reading and change notification on Android, reusing the
-  existing cross-platform API instead of adding a new one.
+    Theme (night mode) reading and change notification on Android, reusing the
+    existing cross-platform API instead of adding a new one.
+  - 弱 GPU 回退（noflat）：adapter 后端为 GLES 时自动剥掉 `local_pos` varying 的
+    `linear` / `sample` 插值（naga-GLSL 把它们映射到 ES 不一定有的特性；正交投影
+    下默认插值逐位等价）与 `@invariant`（glyphon / 文字材质各一处，ANGLE 拒收）。
+    `flat` 的 u32 varying 全保留（naga-GLSL 全版本支持）。桌面 / Vulkan 路径
+    shader 逐位不变。MuMu12（API 32）离屏探针像素逐位精确，API 35 Vulkan 零回归。
+  - 离屏格式漂移自愈：GLES 首帧把 `surface_format` 由默认 sRGB 翻为线性格式后，
+    首帧前创建的离屏画布目标纹理与管线格式失配（validation fatal）。现 `draw` 内
+    检测到漂移即按当前格式重建目标纹理并清 MSAA/DS 缓存；`msaa_view` 缓存校验
+    加格式位。桌面默认格式与 surface 一致，此前从未触发。
 
-## [0.1.2]
+  ## [0.1.2]
 
 ### Fixed / 修复
 - vireo-main 结束（正常返回或 panic）即关闭所有窗口并退出进程：

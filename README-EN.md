@@ -15,7 +15,7 @@ And it's also a 2D GPU rendering library built on `wgpu` + `winit`.
 | Windows (DX12 / Vulkan) | ✅ thoroughly tested |
 | Linux (Vulkan) | 🟡 compiles, untested |
 | macOS (Metal) | 🟡 compiles, untested |
-| **Android** (Vulkan) | ✅ **tested on device** (HyperOS 16) |
+  | **Android** (Vulkan, auto GLES fallback on weak GPUs) | ✅ **tested on device** (HyperOS 16; MuMu12 API 32 GLES offscreen pixels exact, window surface fails to create due to an emulator bug) |
 
 Android runs on `AGDK GameActivity` (winit's `android-game-activity` backend), which is why
 **CJK text input works** — `NativeActivity` has no `InputConnection` and simply cannot do it.

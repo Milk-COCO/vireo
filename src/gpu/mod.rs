@@ -54,6 +54,10 @@ pub struct GpuContext {
     shader_instance_ssaa: wgpu::ShaderModule,
     shader_particle: wgpu::ShaderModule,
     shader_particle_ssaa: wgpu::ShaderModule,
+    /// 弱 GLES 后端回退：`true` 时所有管线模块剥掉 `local_pos` 的 `linear`/`sample`
+    /// 插值（naga-GLSL 把它们映射到 ES 不一定有的特性；正交投影下默认插值等价）。
+    /// 由 adapter 后端决定（`Backend::Gl`），创建后不变，管线键无需另加位。
+    pub(crate) noflat: bool,
     /// GPU 设备丢失标志：由 `Device::set_device_lost_callback` 置位。
     /// 供 `VireoWindow::draw`（返回 `Failed(DeviceLost)`）与渲染循环（终止）共用。
     device_lost: Arc<std::sync::atomic::AtomicBool>,
@@ -632,52 +636,66 @@ impl GpuContext {
             });
 
         let shader_src = include_str!("../shader.wgsl");
+        // 弱 GLES 回退：adapter 是 GL 后端时剥掉 linear/sample（见 noflat 字段注释）。
+        let noflat = adapter.get_info().backend == wgpu::Backend::Gl;
+        if noflat {
+            log::warn!("vireo gpu: GL backend, stripping linear/sample interpolation (noflat)");
+        }
+        let flat = |s: &str| {
+            if noflat {
+                crate::gpu::strip_noflat_interpolation(s)
+            } else {
+                s.to_owned()
+            }
+        };
         // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
         let shader_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (SSAA)"),
-            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(shader_src).into()),
         });
         // MSAA：去掉 `, sample` — 每像素执行一次片段着色器
         let msaa_src: String =
             shader_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (MSAA)"),
-            source: wgpu::ShaderSource::Wgsl(msaa_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(&msaa_src).into()),
         });
 
         // 几何光栅化 shader：无 SDF 分支，无 per-sample 插值
         let shader_geo_src = include_str!("../shader_geo.wgsl");
         let shader_geo = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (geometry)"),
-            source: wgpu::ShaderSource::Wgsl(shader_geo_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(shader_geo_src).into()),
         });
         // 几何模板实例化 shader：无 SDF 分支，无 per-sample 插值
         let shader_geo_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (geometry instance)"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shader_geo_instance.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                flat(include_str!("../shader_geo_instance.wgsl")).into(),
+            ),
         });
         let shader_instance_src = include_str!("../shader_instance.wgsl");
         let shader_instance_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo instance shader (SSAA)"),
-            source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(shader_instance_src).into()),
         });
         let shader_instance_src =
             shader_instance_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo instance shader (MSAA)"),
-            source: wgpu::ShaderSource::Wgsl(shader_instance_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(&shader_instance_src).into()),
         });
         // 粒子 VS：与 instance 同源结构（`local_pos` 插值变体），FS 极简（tex×color，无 SDF）。
         let shader_particle_src = include_str!("../shader_particle.wgsl");
         let shader_particle_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo particle shader (SSAA)"),
-            source: wgpu::ShaderSource::Wgsl(shader_particle_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(shader_particle_src).into()),
         });
         let shader_particle_src =
             shader_particle_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader_particle = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo particle shader (MSAA)"),
-            source: wgpu::ShaderSource::Wgsl(shader_particle_src.into()),
+            source: wgpu::ShaderSource::Wgsl(flat(&shader_particle_src).into()),
         });
         let instance_quad_vertex_buf =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -750,6 +768,7 @@ impl GpuContext {
             &engine_storage_bind_group_layout,
             &white_texture_view,
             &default_sampler,
+            noflat,
         ));
 
         let mut pipelines = FxHashMap::default();
@@ -811,6 +830,7 @@ impl GpuContext {
             shader_instance_ssaa,
             shader_particle,
             shader_particle_ssaa,
+            noflat,
             device_lost,
             clocks: Mutex::new(ClockTable::new()),
         }

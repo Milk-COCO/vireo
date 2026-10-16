@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use crate::gpu::GpuContext;
 use crate::render::{DrawBatch, Renderer};
 use crate::texture::Texture;
@@ -9,7 +11,7 @@ use crate::window::{AntiAliasing, OffscreenIndex};
 
 /// 离屏画布 — 与 VireoWindow 对等，但不依赖 winit
 pub struct OffscreenCanvas {
-    pub texture: Texture,
+    pub texture: Mutex<Texture>,
     renderer: Renderer,
     /// 该离屏画布初始化耗时（秒）：app.offscreen() 内的 AA 管线预热。
     pub init_duration: f64,
@@ -56,7 +58,7 @@ impl OffscreenCanvas {
             1.0,
         );
         Self {
-            texture,
+            texture: Mutex::new(texture),
             renderer,
             init_duration,
             index: OffscreenIndex(0),
@@ -73,9 +75,38 @@ impl OffscreenCanvas {
         self.init_duration
     }
 
-    /// 渲染并提交
+    /// 渲染并提交。
+    /// 若创建后 `GpuContext::surface_format` 漂移（如 GLES 首帧由默认 sRGB
+    /// 翻为线性格式），先按当前格式重建目标纹理再画，调用方无感。
     pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
-        let target = self.texture.target();
+        let gpu = self.renderer.gpu();
+        let format = gpu.surface_format();
+        {
+            let tex = self.texture.lock();
+            if tex.format != format {
+                drop(tex);
+                let mut fresh = self.texture.lock();
+                // 双重检查：等待锁期间可能已被别的 draw 重建。
+                if fresh.format != format {
+                    let (w, h) = (fresh.width, fresh.height);
+                    log::warn!(
+                        "offscreen: surface format drifted ({:?} -> {:?}), recreating target",
+                        fresh.format,
+                        format
+                    );
+                    *fresh = Texture::new(
+                        &gpu.device,
+                        w,
+                        h,
+                        format,
+                        &gpu.texture_bind_group_layout,
+                        &gpu.default_sampler,
+                    );
+                    self.renderer.clear_msaa_ds();
+                }
+            }
+        }
+        let target = self.texture.lock().target();
         let cmd_buf = target.draw(&self.renderer, clear_color, batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }
@@ -90,14 +121,14 @@ impl OffscreenCanvas {
         self.renderer.gpu()
     }
 
-    /// 获取纹理视图（用于贴到窗口等）
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.texture.view
+    /// 获取纹理视图（用于贴到窗口等）。
+    pub fn view(&self) -> wgpu::TextureView {
+        self.texture.lock().view.clone()
     }
 
     /// 获取纹理 bind group（用于贴回窗口）。
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.texture.bind_group
+    pub fn bind_group(&self) -> wgpu::BindGroup {
+        self.texture.lock().bind_group.clone()
     }
 
     /// 像素回读（用于 GPU 回归测试断言）。
@@ -106,7 +137,8 @@ impl OffscreenCanvas {
     /// 调用方负责保证此前已 `draw` 过。
     pub fn read_pixels(&self) -> Vec<u8> {
         let gpu = self.renderer.gpu();
-        let (w, h) = (self.texture.width, self.texture.height);
+        let tex = self.texture.lock();
+        let (w, h) = (tex.width, tex.height);
         let bytes_per_row = w * 4;
         let padded = (bytes_per_row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
             & !(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1);
@@ -123,7 +155,7 @@ impl OffscreenCanvas {
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture.texture,
+                texture: &tex.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,

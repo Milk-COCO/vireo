@@ -46,7 +46,8 @@ async fn main() {
 
         // 贴到窗口
         let mut win_batch = DrawBatch::new();
-        win_batch.set_texture(Some(&canvas.texture));
+        let canvas_tex = canvas.texture.lock();
+        win_batch.set_texture(Some(&canvas_tex));
         draw_rectangle(
             &mut win_batch,
             Pos::new(50.0, 50.0),

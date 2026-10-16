@@ -626,6 +626,11 @@ impl Renderer {
         self.sample_count = aa.sample_count();
         self.alpha_to_coverage = aa.alpha_to_coverage();
         self.ssaa = aa.is_ssaa();
+        self.clear_msaa_ds();
+    }
+
+    /// 清空 MSAA/DS 纹理缓存（格式漂移或尺寸变化后下一帧重建）。
+    pub(crate) fn clear_msaa_ds(&self) {
         *self.msaa_tex.lock() = None;
         *self.ds_tex.lock() = None;
     }
@@ -640,6 +645,7 @@ impl Renderer {
             || mt.as_ref().unwrap().0.width() != self.physical_width
             || mt.as_ref().unwrap().0.height() != self.physical_height
             || mt.as_ref().unwrap().0.sample_count() != self.sample_count
+            || mt.as_ref().unwrap().0.format() != format
         {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("msaa"),

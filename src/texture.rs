@@ -11,6 +11,9 @@ pub struct Texture {
     pub bind_group: wgpu::BindGroup,
     pub width: u32,
     pub height: u32,
+    /// 创建时格式。离屏画布据此检测 `GpuContext::surface_format` 漂移
+    /// （GLES 首帧由默认 sRGB 翻为线性格式）并重建目标纹理。
+    pub format: wgpu::TextureFormat,
 }
 
 impl Texture {
@@ -68,6 +71,7 @@ impl Texture {
             bind_group,
             width,
             height,
+            format,
         }
     }
 
@@ -179,6 +183,7 @@ impl Texture {
             bind_group,
             width,
             height,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
         }
     }
 
@@ -212,6 +217,7 @@ impl Texture {
             ),
             width: self.width,
             height: self.height,
+            format: self.format,
         }
     }
 

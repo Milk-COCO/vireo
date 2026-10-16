@@ -58,7 +58,8 @@ async fn main() {
         scene_canvas.draw(Some(Color::new(0.055, 0.07, 0.11, 1.0)), &[&scene_batch]);
 
         let mut present = DrawBatch::new();
-        present.set_texture(Some(&scene_canvas.texture));
+        let scene_tex = scene_canvas.texture.lock();
+        present.set_texture(Some(&scene_tex));
         present.set_custom_material(Some(material.clone()));
         draw_rectangle(&mut present, Pos::new(0.0, 0.0), 640.0, 400.0, Some(WHITE));
 

@@ -25,12 +25,33 @@ struct VertexOutput {
 };
 "#;
 
-pub(crate) fn default_shape_vertex_wgsl(ssaa: bool) -> String {
+/// 弱 GLES 后端回退：剥掉 `local_pos` varying 的 `linear`/`sample` 插值修饰，
+/// 只留默认透视插值。正交投影下 w 恒 1，透视插值与线性插值逐位一致；
+/// `flat` 的 u32 varying（naga-GLSL 全版本支持，不请求任何特性）原样保留。
+/// 长形式先换（短形式是其前缀，直接换短的会留下 `, sample)` 残片）。
+pub(crate) fn strip_noflat_interpolation(src: &str) -> String {
+    src.replace("@interpolate(linear, sample) local_pos", "local_pos")
+        .replace("@interpolate(linear) local_pos", "local_pos")
+}
+
+/// 弱 GLES 回退其二：剥掉 `@invariant`（ANGLE/ES 编译器拒收 fragment 侧的
+/// invariant 限定，glyphon `position` 与文字材质 `VertexOutput` 各一处）。
+/// 非 noflat 路径原样保留（桌面/真机 Vulkan 无此限制）。
+pub(crate) fn strip_noflat_invariant(src: &str) -> String {
+    src.replace("@invariant ", "")
+}
+
+pub(crate) fn default_shape_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
     let source = include_str!("../shader.wgsl");
-    if ssaa {
+    let base = if ssaa {
         source.to_owned()
     } else {
         source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+    };
+    if noflat {
+        strip_noflat_interpolation(&base)
+    } else {
+        base
     }
 }
 
@@ -38,20 +59,26 @@ pub(crate) fn default_shape_vertex_wgsl(ssaa: bool) -> String {
 /// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致：
 ///   - ssaa=true：  VS/FS 双方 `@interpolate(linear, sample)`
 ///   - ssaa=false： VS/FS 双方 `@interpolate(linear)`
-pub(crate) fn default_sdf_instance_vertex_wgsl(ssaa: bool) -> String {
+/// `noflat=true` 时双方统一退为默认插值（见 `strip_noflat_interpolation`）。
+pub(crate) fn default_sdf_instance_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
     let source = include_str!("../shader_instance.wgsl");
-    if ssaa {
+    let base = if ssaa {
         source.to_owned()
     } else {
         source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+    };
+    if noflat {
+        strip_noflat_interpolation(&base)
+    } else {
+        base
     }
 }
 
 /// 默认 Geo instance VS（`shader_geo_instance.wgsl`），按 `ssaa` 同步 local_pos 插值。
 /// geo shape 本无 SDF 字段，VS 输出 local_pos 仅为 material FS 可读参考。
-pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool) -> String {
+pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
     let source = include_str!("../shader_geo_instance.wgsl");
-    if ssaa {
+    let base = if ssaa {
         // geo VS 当前用 `@interpolate(linear)`（per-pixel），提升为 per-sample 与 FS 对齐
         source.replace(
             "@interpolate(linear) local_pos",
@@ -59,18 +86,28 @@ pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool) -> String {
         )
     } else {
         source.to_owned()
+    };
+    if noflat {
+        strip_noflat_interpolation(&base)
+    } else {
+        base
     }
 }
 
 /// 默认粒子 VS（`shader_particle.wgsl`），按 `ssaa` 同步 local_pos 插值。
 /// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致（SDF 字段恒 0，
 /// `vireo_apply_sdf` 早退；`local_pos` 为 material FS 可读参考）。
-pub(crate) fn default_particle_vertex_wgsl(ssaa: bool) -> String {
+pub(crate) fn default_particle_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
     let source = include_str!("../shader_particle.wgsl");
-    if ssaa {
+    let base = if ssaa {
         source.to_owned()
     } else {
         source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+    };
+    if noflat {
+        strip_noflat_interpolation(&base)
+    } else {
+        base
     }
 }
 
@@ -79,6 +116,7 @@ pub(crate) fn material_fragment_source(
     source: &str,
     target: MaterialTarget,
     ssaa: bool,
+    noflat: bool,
 ) -> (String, u32) {
     let line_count = |s: &str| s.split('\n').count() as u32;
     match target {
@@ -90,6 +128,11 @@ pub(crate) fn material_fragment_source(
                 )
             } else {
                 SHAPE_VERTEX_OUTPUT_WGSL.to_owned()
+            };
+            let vertex_out = if noflat {
+                strip_noflat_interpolation(&vertex_out)
+            } else {
+                vertex_out
             };
             let offset = line_count(&vertex_out)
                 + line_count(MATERIAL_INPUT_WGSL)
@@ -119,6 +162,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
         }
         MaterialTarget::Text => {
+            let text_vertex_out = if noflat {
+                strip_noflat_invariant(TEXT_VERTEX_OUTPUT_WGSL)
+            } else {
+                TEXT_VERTEX_OUTPUT_WGSL.to_owned()
+            };
             let text_support = r#"
 @group(0) @binding(0) var vireo_color_atlas: texture_2d<f32>;
 @group(0) @binding(1) var vireo_mask_atlas: texture_2d<f32>;
@@ -138,13 +186,13 @@ fn vireo_has_base_sample() -> bool { return true; }
 fn vireo_has_local_pos() -> bool { return false; }
 fn vireo_has_sdf_data() -> bool { return false; }
 "#;
-            let offset = line_count(TEXT_VERTEX_OUTPUT_WGSL)
+            let offset = line_count(&text_vertex_out)
                 + line_count(MATERIAL_INPUT_WGSL)
                 + line_count(text_support);
             (
                 format!(
                     "{}\n{}\n{}\n{}\n{}",
-                    TEXT_VERTEX_OUTPUT_WGSL,
+                    text_vertex_out,
                     MATERIAL_INPUT_WGSL,
                     text_support,
                     source,
@@ -1128,7 +1176,8 @@ impl GpuContext {
     ) -> Result<wgpu::RenderPipeline, String> {
         let ssaa = ssaa && target == MaterialTarget::Shape && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let (fragment_source_str, user_offset) = material_fragment_source(source, target, ssaa);
+        let (fragment_source_str, user_offset) =
+            material_fragment_source(source, target, ssaa, self.noflat);
         let user_line_count = source.split('\n').count() as u32;
         let depth_stencil = if !stencil_mode {
             None
@@ -1195,10 +1244,14 @@ impl GpuContext {
                 // layout 决定默认 VS：Mesh 用 default_shape，instance path 用各自 VS。
                 // instance path 不允许 custom VS（VS 与 instance 字段契约不一致）。
                 let default_vs = match shape_layout {
-                    ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa),
-                    ShapeVertexLayout::SdfInstance => default_sdf_instance_vertex_wgsl(ssaa),
-                    ShapeVertexLayout::GeoInstance => default_geo_instance_vertex_wgsl(ssaa),
-                    ShapeVertexLayout::Particle => default_particle_vertex_wgsl(ssaa),
+                    ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa, self.noflat),
+                    ShapeVertexLayout::SdfInstance => {
+                        default_sdf_instance_vertex_wgsl(ssaa, self.noflat)
+                    }
+                    ShapeVertexLayout::GeoInstance => {
+                        default_geo_instance_vertex_wgsl(ssaa, self.noflat)
+                    }
+                    ShapeVertexLayout::Particle => default_particle_vertex_wgsl(ssaa, self.noflat),
                 };
                 let vs_source = match shape_layout {
                     ShapeVertexLayout::Mesh => {
@@ -1640,8 +1693,58 @@ mod custom_material_tests {
 
     #[test]
     fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
-        assert!(default_shape_vertex_wgsl(true).contains("@interpolate(linear, sample)"));
-        assert!(!default_shape_vertex_wgsl(false).contains("@interpolate(linear, sample)"));
+        assert!(default_shape_vertex_wgsl(true, false).contains("@interpolate(linear, sample)"));
+        assert!(!default_shape_vertex_wgsl(false, false).contains("@interpolate(linear, sample)"));
+    }
+
+    #[test]
+    fn noflat_strips_linear_and_sample_but_keeps_flat() {
+        // 长形式先剥（短形式是其前缀），flat 的 u32 varying 原样保留。
+        let src = "@location(3) @interpolate(linear, sample) local_pos: vec2<f32>,\n    @location(4) @interpolate(flat) sdf_type: u32,";
+        let out = strip_noflat_interpolation(src);
+        assert!(out.contains("@location(3) local_pos: vec2<f32>"));
+        assert!(out.contains("@location(4) @interpolate(flat) sdf_type: u32"));
+        assert!(!out.contains("interpolate(linear"));
+        assert!(!out.contains("sample)"));
+        let plain = "@location(3) @interpolate(linear) local_pos: vec2<f32>";
+        assert_eq!(
+            strip_noflat_interpolation(plain),
+            "@location(3) local_pos: vec2<f32>"
+        );
+    }
+
+    #[test]
+    fn noflat_strips_invariant_but_keeps_positions() {
+        let src = "@invariant @builtin(position) position: vec4<f32>";
+        assert_eq!(
+            strip_noflat_invariant(src),
+            "@builtin(position) position: vec4<f32>"
+        );
+        // 文字材质路径 noflat 下无 invariant，flat 保留。
+        let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
+        let text = material_fragment_source(shader, MaterialTarget::Text, false, true).0;
+        assert!(!text.contains("@invariant"));
+        assert!(text.contains("@interpolate(flat) content_type: u32"));
+        let text_plain = material_fragment_source(shader, MaterialTarget::Text, false, false).0;
+        assert!(text_plain.contains("@invariant @builtin(position)"));
+    }
+
+    #[test]
+    fn noflat_vertex_sources_have_no_linear_interpolation() {
+        // 四条 local_pos 路径在 noflat 下全部退为默认插值，flat 不动。
+        for src in [
+            default_shape_vertex_wgsl(true, true),
+            default_shape_vertex_wgsl(false, true),
+            default_sdf_instance_vertex_wgsl(true, true),
+            default_geo_instance_vertex_wgsl(true, true),
+            default_geo_instance_vertex_wgsl(false, true),
+            default_particle_vertex_wgsl(true, true),
+        ] {
+            assert!(!src.contains("@interpolate(linear"), "{}", &src[..80]);
+            assert!(src.contains("@interpolate(flat)"));
+        }
+        // 非 noflat 路径行为不变。
+        assert!(default_shape_vertex_wgsl(true, false).contains("@interpolate(linear, sample)"));
     }
 
     #[test]
@@ -1676,23 +1779,27 @@ mod custom_material_tests {
     fn material_shape_fragment_matches_ssaa_interpolation() {
         let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
         assert!(
-            material_fragment_source(shader, MaterialTarget::Shape, true)
+            material_fragment_source(shader, MaterialTarget::Shape, true, false)
                 .0
                 .contains("@interpolate(linear, sample) local_pos")
         );
         assert!(
-            !material_fragment_source(shader, MaterialTarget::Shape, false)
+            !material_fragment_source(shader, MaterialTarget::Shape, false, false)
                 .0
                 .contains("@interpolate(linear, sample) local_pos")
         );
+        // noflat 下 ssaa 也不保留 linear/sample，flat 保留。
+        let noflat = material_fragment_source(shader, MaterialTarget::Shape, true, true).0;
+        assert!(!noflat.contains("@interpolate(linear"));
+        assert!(noflat.contains("@interpolate(flat) sdf_type: u32"));
     }
 
     #[test]
     fn material_helpers_exist_for_both_targets() {
         let shader =
             "fn material_main(in: MaterialInput) -> vec4<f32> { return vireo_base_color(in); }";
-        let shape = material_fragment_source(shader, MaterialTarget::Shape, false).0;
-        let text = material_fragment_source(shader, MaterialTarget::Text, false).0;
+        let shape = material_fragment_source(shader, MaterialTarget::Shape, false, false).0;
+        let text = material_fragment_source(shader, MaterialTarget::Text, false, false).0;
         for src in [shape, text] {
             assert!(src.contains("fn vireo_base_sample(uv: vec2<f32>) -> vec4<f32>"));
             assert!(src.contains("fn vireo_base_color(in: MaterialInput) -> vec4<f32>"));

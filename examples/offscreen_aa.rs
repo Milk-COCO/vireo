@@ -75,11 +75,16 @@ async fn main() {
             ctx.app().offscreen_ref(&off_sdf),
         ) {
             let mut b = DrawBatch::new();
-            b.set_texture(Some(&c1.texture));
+            let t1 = c1.texture.lock();
+            b.set_texture(Some(&t1));
             draw_rectangle(&mut b, Pos::new(15.0, 30.0), 300.0, 300.0, Some(WHITE));
-            b.set_texture(Some(&c2.texture));
+            drop(t1);
+            let t2 = c2.texture.lock();
+            b.set_texture(Some(&t2));
             draw_rectangle(&mut b, Pos::new(350.0, 30.0), 300.0, 300.0, Some(WHITE));
-            b.set_texture(Some(&c3.texture));
+            drop(t2);
+            let t3 = c3.texture.lock();
+            b.set_texture(Some(&t3));
             draw_rectangle(&mut b, Pos::new(685.0, 30.0), 300.0, 300.0, Some(WHITE));
             draw_text(
                 &mut b.texts,

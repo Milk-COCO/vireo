@@ -655,6 +655,7 @@ impl TextContext {
         transform_bgl: &wgpu::BindGroupLayout,
         default_base_texture: &wgpu::TextureView,
         default_base_sampler: &wgpu::Sampler,
+        noflat: bool,
     ) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_system_fonts();
@@ -662,7 +663,7 @@ impl TextContext {
         crate::text::android_fonts::install(&mut font_system);
 
         let swash_cache = SwashCache::new();
-        let cache = Cache::new(device, transform_bgl);
+        let cache = Cache::new(device, transform_bgl, noflat);
         let mut text_atlas = TextAtlas::with_color_mode(
             device,
             queue,

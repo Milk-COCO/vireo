@@ -46,7 +46,9 @@ struct Inner {
 
 impl Cache {
     /// Creates a new `Cache` with the given `device` and transform bind group layout.
-    pub fn new(device: &Device, engine_storage_bgl: &BindGroupLayout) -> Self {
+    /// `noflat`（弱 GLES 回退）：剥掉 shader 的 `@invariant`（ANGLE 拒收），
+    /// 其余源码逐位不变；`flat` varying 在 ES 3.0+ 合法，保留。
+    pub fn new(device: &Device, engine_storage_bgl: &BindGroupLayout, noflat: bool) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("glyphon sampler"),
             min_filter: FilterMode::Nearest,
@@ -57,9 +59,15 @@ impl Cache {
             ..Default::default()
         });
 
+        let glyphon_src = include_str!("shader.wgsl");
+        let glyphon_src = if noflat {
+            glyphon_src.replace("@invariant ", "")
+        } else {
+            glyphon_src.to_owned()
+        };
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("glyphon shader"),
-            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: ShaderSource::Wgsl(Cow::Borrowed(glyphon_src.as_str())),
         });
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {

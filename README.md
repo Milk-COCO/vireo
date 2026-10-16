@@ -15,7 +15,7 @@ Vireo 只是一种可爱的小鸟！
 | Windows（DX12 / Vulkan）| ✅ 充分测试 |
 | Linux（Vulkan）| 🟡 可编译，未实测 |
 | macOS（Metal）| 🟡 可编译，未实测 |
-| **Android**（Vulkan）| ✅ **已实测**（HyperOS 16）|
+  | **Android**（Vulkan，弱 GPU 自动 GLES 回退）| ✅ **已实测**（HyperOS 16；MuMu12 API 32 GLES 离屏像素精确，窗口 surface 是模拟器 bug 建不出）|
 
 Android 上用 `AGDK GameActivity`（`winit` 的 `android-game-activity` 后端），
 所以**支持中文输入法**——`NativeActivity` 没有 `InputConnection`，做不到这件事。
