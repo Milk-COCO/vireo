@@ -335,6 +335,8 @@ async fn main(app: App) {
     let mut saf_auto_done =
         saf_auto_marker.as_ref().map(|p| p.exists()).unwrap_or(true);
     let mut frames: u64 = 0;
+    // VB:test 轮播计数（每点一次播一种）。
+    let mut vb_step = 0u32;
     // 主题回调只注册一次（窗口首帧可拿到后）。值本身 HUD 每帧现读 win.theme()，
     // 回调只证明「变化通知」这条路是通的。
     let mut theme_registered = false;
@@ -458,34 +460,36 @@ async fn main(app: App) {
                 }
                 continue;
             }
-            // VB:test（绘制在 (900,340)，见下）：has + once + predefined + pattern +
-            // cancel 跑全套记报告。模拟器无马达，预期 has=false + 三个 ERR + cancel ok
-            // （验证的是「不崩 + 路径正确」，真震感只能物理手机）。
-            if m.1 >= 340.0 && m.1 <= 396.0 && m.0 >= 900.0 && m.0 <= 1080.0 {
-                let hv = vireo::prelude::has_vibrator();
-                saf_note(&saf_report, format!("vb has={hv}"));
-                match vireo::prelude::vibrate_once(60, None) {
-                    Ok(()) => saf_note(&saf_report, "vb once ok".to_string()),
-                    Err(e) => saf_note(&saf_report, format!("vb once ERR {e}")),
-                }
-                match vireo::prelude::vibrate_predefined(vireo::prelude::VibrateKind::Tick) {
-                    Ok(()) => saf_note(&saf_report, "vb tick ok".to_string()),
-                    Err(e) => saf_note(&saf_report, format!("vb tick ERR {e}")),
-                }
-                match vireo::prelude::vibrate_pattern(
-                    &[0, 80, 60, 80],
-                    Some(&[0, 200, 0, 200]),
-                    None,
-                ) {
-                    Ok(()) => saf_note(&saf_report, "vb pattern ok".to_string()),
-                    Err(e) => saf_note(&saf_report, format!("vb pattern ERR {e}")),
-                }
-                match vireo::prelude::cancel_vibration() {
-                    Ok(()) => saf_note(&saf_report, "vb cancel ok".to_string()),
-                    Err(e) => saf_note(&saf_report, format!("vb cancel ERR {e}")),
-                }
-                continue;
-            }
+              // VB:test（绘制在 (vbx,340)，见下；vbx 跟窗口宽走，竖屏手机也能看到）：
+              // 每点一次播一种（1=once 2=tick 3=pattern 0=cancel），循环。
+              // 必须隔离：Android 每次 vibrate() 都会掐掉上一个，连发只能感到最后一个。
+              let vbx = (sz.width.dp.0 - 200.0).max(0.0);
+              if m.1 >= 340.0 && m.1 <= 396.0 && m.0 >= vbx && m.0 <= vbx + 180.0 {
+                  vb_step = (vb_step + 1) % 4;
+                  let hv = vireo::prelude::has_vibrator();
+                  saf_note(&saf_report, format!("vb step={vb_step} has={hv}"));
+                  let r = match vb_step {
+                      1 => vireo::prelude::vibrate_once(60, None).map_err(|e| e.to_string()),
+                      2 => vireo::prelude::vibrate_predefined(
+                          vireo::prelude::VibrateKind::HeavyClick,
+                      )
+                      .map_err(|e| e.to_string()),
+                      3 => vireo::prelude::vibrate_pattern(
+                          &[0, 80, 60, 80],
+                          Some(&[0, 200, 0, 200]),
+                          None,
+                      )
+                      .map_err(|e| e.to_string()),
+                      _ => vireo::prelude::cancel_vibration().map_err(|e| e.to_string()),
+                  };
+                  match r {
+                      Ok(()) => saf_note(&saf_report, format!("vb step{vb_step} ok")),
+                      Err(e) => saf_note(&saf_report, format!("vb step{vb_step} ERR {e}")),
+                  }
+                  // 注意：不要在这里调 cancel——调用都是 fire-and-forget，
+                  // 紧接着 cancel 会把刚启动的振动几毫秒内掐死，马达来不及转。
+                  continue;
+              }
             let btn_y = sz.height.dp.0 - 120.0;
             if m.0 >= 40.0 && m.0 <= 340.0 && m.1 >= btn_y && m.1 <= btn_y + 64.0 {
                 let on = !ctx.app().auto_pause();
@@ -605,12 +609,13 @@ async fn main(app: App) {
                 TextOverride::new(),
             );
         }
-        // ---- 振动测试按钮（右下空位）--------------------------------------------
-        draw_rectangle(&mut batch, Pos::new(900.0, 340.0), 180.0, 56.0, Some(GRAY));
-        draw_text(
-            &mut batch.texts,
-            "VB:test",
-            Pos::new(900.0 + 16.0, 340.0 + 14.0),
+          // ---- 振动测试按钮（右下空位；跟窗口宽走，竖屏可见）--------------------
+          let vbx = (vw - 200.0).max(0.0);
+          draw_rectangle(&mut batch, Pos::new(vbx, 340.0), 180.0, 56.0, Some(GRAY));
+          draw_text(
+              &mut batch.texts,
+              "VB:test",
+              Pos::new(vbx + 16.0, 340.0 + 14.0),
             TextDef {
                 font_size: 22.0,
                 ..Default::default()

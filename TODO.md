@@ -619,14 +619,15 @@ async fn main(app: App) { .. }
 | 2 | SAF 持久化跨启动复用 | ✅ 已验证（2026-10-11）：`persisted ok, 4 grant(s)` + 重启后 `restored tree list ok` | pick 后重进看自检行 |
 | 3 | `layoutDirection` RTL | ✅ 已验证（2026-10-11）：语言列表加 `ar_JO` 置顶，方向切到 `ldrtl`（locale+方向双变），pid 不变、无崩溃，正常 suspend/resume + surface 恢复 | 用户进设置加阿拉伯语 |
 | 4 | API 31/32 分档（返回键 legacy、disable 向后兼容分支） | 手头只有 API 35 模拟器，历史分支单测覆盖但无真机 | 需 API 31/32 设备 |
-| 5 | 振动物理震感 | MuMu 报有马达且全 Ok（API 层通了），但模拟器不会真震 | 需物理手机 |
+  | 5 | 振动物理震感 | ✅ 已验证（2026-10-16，真机红米 Note 15）：once 短震 + HeavyClick 重击 + pattern 两段（震—停—震）全感到。`Tick` 几乎无感是预期（最轻一档），非 bug。附带修俩模板 bug：① 按钮 x=900 写死横屏，竖屏（逻辑宽 384）屏外，改跟窗口宽走；② 原测试 once→tick→pattern→cancel 连发，cancel 几毫秒内掐死振动，且每次 vibrate() 本就掐掉上一个——改每点播一种轮播（1=once 2=HeavyClick 3=pattern 0=cancel） |
 | 6 | 16K 页设备运行 | 静态检查双 ABI 全绿（NDK 28.2），两台模拟器都是 4K 页 | 需 16K 物理设备 |
 | 7 | `on_memory_warning` 真机路径 | ✅ 已验证（2026-10-11）：`am send-trim-memory RUNNING_CRITICAL` → logcat 出回调，进程存活 |
 | 8 | 弱 GPU 驱动（缺 `NOPERSPECTIVE_QUALIFIER`）启动即崩 | ✅ 已修并验证（2026-10-16）：noflat 回退（`local_pos` 的 `linear`/`sample` 退默认插值，正交投影下逐位等价；`flat` u32 全保留，naga-GLSL 全版本支持）+ `@invariant` 剥离（glyphon/文字材质各一处，ANGLE 拒收）+ 离屏格式漂移自愈（GLES 首帧 sRGB→线性翻转）。MuMu12（API 32，默认选 GL 后端）离屏探针像素逐位精确（`RED=(0.90,0.16,0.22)`→`[229,41,56,255]`）；API 35 Vulkan 零回归。对照实验证明非系统性不兼容：同产品 API35 实例强制 GLES
 跑出 fps 60 满屏 HUD（中文/emoji/SAF/主题全正常）。残留：MuMu12（5559 实例）的 EGL 窗口
 surface 建不出（`eglCreateWindowSurface`→`BAD_ALLOC`，477+ 次零成功，恢复路径正常不死），
 属该实例 GPU 模拟层问题（可试重装/切其渲染后端设置）——GPU 栈在其上全通，只是画不上屏 | 弱 GPU 物理机（老 Mali/Adreno）看真实上屏像素 |
-| — | `keyboard` configChange | 关闭（不可验证）：无硬件键盘条件；manifest 已声明，机制与其它 flag 同源，代码即文档 |
+  | 9 | 5559 实例 EGL 窗口 surface `BAD_ALLOC` 根因（待定排查） | 已知：GPU 栈全通（离屏像素精确），只有窗口 surface 建不出；同产品 API35 实例 GLES 60fps 正常，故非系统性不兼容。排查步骤：① 切 MuMu12 设置里的渲染后端（DirectX/OpenGL 互换）重验；② 删掉重建该 MuMu12 实例；③ 若仍复现→写原生 EGL 多配置探针（wgpu 式最小配置 vs 手游式 RGB888+DEPTH16，看哪种成功）， verdict 是「wgpu 配置挑剔」还是「实例全坏」 | 用户侧操作 + 按需写探针 |
+  | — | `keyboard` configChange | 关闭（不可验证）：无硬件键盘条件；manifest 已声明，机制与其它 flag 同源，代码即文档 |
 | — | 重入 guard 触发观测 | 未观测到（且现在更难观测）：自杀修复后退出即死，重进必 fork 新进程，guard 的触发窗口只剩 teardown overlap 竞态。保留作纯保险，代码审查通过 |
 | — | `singleTask` 治标 | 否决：自杀修复后重进必 fork 新进程，singleTask 已无必要；且它是应用行为变更，不应由库决定 |
 
