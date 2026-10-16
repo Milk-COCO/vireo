@@ -71,7 +71,7 @@ impl VibrateKind {
 pub fn has_vibrator() -> bool {
     #[cfg(target_os = "android")]
     {
-        return has_vibrator_android();
+        has_vibrator_android()
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -86,12 +86,12 @@ pub fn has_vibrator() -> bool {
 pub fn vibrate_once(ms: u32, amplitude: Option<u8>) -> Result<(), VireoError> {
     #[cfg(target_os = "android")]
     {
-        return vibrate_once_android(ms, amplitude);
+        vibrate_once_android(ms, amplitude)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = (ms, amplitude);
-        return Err(VireoError::Unsupported("vibration"));
+        Err(VireoError::Unsupported("vibration"))
     }
 }
 
@@ -99,12 +99,12 @@ pub fn vibrate_once(ms: u32, amplitude: Option<u8>) -> Result<(), VireoError> {
 pub fn vibrate_predefined(kind: VibrateKind) -> Result<(), VireoError> {
     #[cfg(target_os = "android")]
     {
-        return vibrate_predefined_android(kind);
+        vibrate_predefined_android(kind)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = kind;
-        return Err(VireoError::Unsupported("vibration"));
+        Err(VireoError::Unsupported("vibration"))
     }
 }
 
@@ -120,11 +120,11 @@ pub fn vibrate_pattern(
     validate_pattern(timings_ms, amplitudes, repeat_at)?;
     #[cfg(target_os = "android")]
     {
-        return vibrate_pattern_android(timings_ms, amplitudes, repeat_at);
+        vibrate_pattern_android(timings_ms, amplitudes, repeat_at)
     }
     #[cfg(not(target_os = "android"))]
     {
-        return Err(VireoError::Unsupported("vibration"));
+        Err(VireoError::Unsupported("vibration"))
     }
 }
 
@@ -132,11 +132,11 @@ pub fn vibrate_pattern(
 pub fn cancel_vibration() -> Result<(), VireoError> {
     #[cfg(target_os = "android")]
     {
-        return cancel_android();
+        cancel_android()
     }
     #[cfg(not(target_os = "android"))]
     {
-        return Err(VireoError::Unsupported("vibration"));
+        Err(VireoError::Unsupported("vibration"))
     }
 }
 
@@ -151,22 +151,22 @@ pub(crate) fn validate_pattern(
     if timings.is_empty() {
         return Err(VireoError::Other("vibration pattern is empty".to_string()));
     }
-    if let Some(a) = amplitudes {
-        if a.len() != timings.len() {
-            return Err(VireoError::Other(format!(
-                "vibration amplitudes len {} != timings len {}",
-                a.len(),
-                timings.len()
-            )));
-        }
+    if let Some(a) = amplitudes
+        && a.len() != timings.len()
+    {
+        return Err(VireoError::Other(format!(
+            "vibration amplitudes len {} != timings len {}",
+            a.len(),
+            timings.len()
+        )));
     }
-    if let Some(r) = repeat_at {
-        if r >= timings.len() {
-            return Err(VireoError::Other(format!(
-                "vibration repeat_at {r} out of range (len {})",
-                timings.len()
-            )));
-        }
+    if let Some(r) = repeat_at
+        && r >= timings.len()
+    {
+        return Err(VireoError::Other(format!(
+            "vibration repeat_at {r} out of range (len {})",
+            timings.len()
+        )));
     }
     Ok(())
 }

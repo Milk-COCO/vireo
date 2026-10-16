@@ -622,6 +622,9 @@ async fn main(app: App) { .. }
 | 5 | 振动物理震感 | MuMu 报有马达且全 Ok（API 层通了），但模拟器不会真震 | 需物理手机 |
 | 6 | 16K 页设备运行 | 静态检查双 ABI 全绿（NDK 28.2），两台模拟器都是 4K 页 | 需 16K 物理设备 |
 | 7 | `on_memory_warning` 真机路径 | ✅ 已验证（2026-10-11）：`am send-trim-memory RUNNING_CRITICAL` → logcat 出回调，进程存活 |
+| — | `keyboard` configChange | 关闭（不可验证）：无硬件键盘条件；manifest 已声明，机制与其它 flag 同源，代码即文档 |
+| — | 重入 guard 触发观测 | 未观测到（且现在更难观测）：自杀修复后退出即死，重进必 fork 新进程，guard 的触发窗口只剩 teardown overlap 竞态。保留作纯保险，代码审查通过 |
+| — | `singleTask` 治标 | 否决：自杀修复后重进必 fork 新进程，singleTask 已无必要；且它是应用行为变更，不应由库决定 |
 
 ---
 

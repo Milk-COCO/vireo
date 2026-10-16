@@ -100,8 +100,8 @@ pub(crate) type SafCallback = Box<dyn FnOnce(Result<SafUri, VireoError>) + Send 
 /// - 读写：[`open_reader`](SafUri::open_reader) /
 ///   [`open_writer`](SafUri::open_writer) 开出真正的 `std::fs::File`。
 /// - 目录操作（`list` / `resolve` / `create_*` / `delete`）要求它是**目录 URI**
-///  （`open_document_tree` 给的，或复用时存的就是目录 URI）；单文件 URI 调这些
-///   直接 `Err`。
+///   （`open_document_tree` 给的，或复用时存的就是目录 URI；单文件 URI 调这些
+///   直接 `Err`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafUri {
     uri: String,
@@ -154,7 +154,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = self;
-            return Err(VireoError::Unsupported("SAF file open"));
+            Err(VireoError::Unsupported("SAF file open"))
         }
         #[cfg(target_os = "android")]
         {
@@ -171,7 +171,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = self;
-            return Err(VireoError::Unsupported("SAF file open"));
+            Err(VireoError::Unsupported("SAF file open"))
         }
         #[cfg(target_os = "android")]
         {
@@ -184,7 +184,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = self;
-            return Err(VireoError::Unsupported("SAF metadata query"));
+            Err(VireoError::Unsupported("SAF metadata query"))
         }
         #[cfg(target_os = "android")]
         {
@@ -197,7 +197,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = self;
-            return Err(VireoError::Unsupported("SAF metadata query"));
+            Err(VireoError::Unsupported("SAF metadata query"))
         }
         #[cfg(target_os = "android")]
         {
@@ -212,7 +212,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, rel);
-            return Err(VireoError::Unsupported("SAF directory list"));
+            Err(VireoError::Unsupported("SAF directory list"))
         }
         #[cfg(target_os = "android")]
         {
@@ -227,7 +227,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, rel);
-            return Err(VireoError::Unsupported("SAF path resolve"));
+            Err(VireoError::Unsupported("SAF path resolve"))
         }
         #[cfg(target_os = "android")]
         {
@@ -243,7 +243,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, rel_dir, mime, name);
-            return Err(VireoError::Unsupported("SAF document create"));
+            Err(VireoError::Unsupported("SAF document create"))
         }
         #[cfg(target_os = "android")]
         {
@@ -256,7 +256,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, rel_dir, name);
-            return Err(VireoError::Unsupported("SAF directory create"));
+            Err(VireoError::Unsupported("SAF directory create"))
         }
         #[cfg(target_os = "android")]
         {
@@ -273,7 +273,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, rel);
-            return Err(VireoError::Unsupported("SAF document delete"));
+            Err(VireoError::Unsupported("SAF document delete"))
         }
         #[cfg(target_os = "android")]
         {
@@ -290,7 +290,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = (self, write);
-            return Err(VireoError::Unsupported("SAF persistable permission"));
+            Err(VireoError::Unsupported("SAF persistable permission"))
         }
         #[cfg(target_os = "android")]
         {
@@ -316,7 +316,7 @@ impl SafUri {
         #[cfg(not(target_os = "android"))]
         {
             let _ = self;
-            return Err(VireoError::Unsupported("SAF persistable permission"));
+            Err(VireoError::Unsupported("SAF persistable permission"))
         }
         #[cfg(target_os = "android")]
         {
@@ -330,7 +330,7 @@ impl SafUri {
     pub fn persisted() -> Result<Vec<SafGrant>, VireoError> {
         #[cfg(not(target_os = "android"))]
         {
-            return Err(VireoError::Unsupported("SAF persistable permission"));
+            Err(VireoError::Unsupported("SAF persistable permission"))
         }
         #[cfg(target_os = "android")]
         {
@@ -379,7 +379,7 @@ pub(crate) fn request(
     #[cfg(not(target_os = "android"))]
     {
         let _ = (kind, action, typ, mimes, title, cb);
-        return Err(VireoError::Unsupported("SAF document picker"));
+        Err(VireoError::Unsupported("SAF document picker"))
     }
     #[cfg(target_os = "android")]
     {

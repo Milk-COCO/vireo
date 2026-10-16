@@ -36,16 +36,15 @@ use crate::error::VireoError;
 pub fn clipboard_text() -> Option<String> {
     #[cfg(windows)]
     {
-        return get_text_impl();
+        get_text_impl()
     }
     #[cfg(target_os = "android")]
     {
-        return get_text_android();
+        get_text_android()
     }
     #[cfg(not(any(windows, target_os = "android")))]
     {
-        let _ = VireoError::Unsupported("clipboard");
-        return None;
+        None
     }
 }
 
@@ -53,16 +52,16 @@ pub fn clipboard_text() -> Option<String> {
 pub fn set_clipboard_text(text: &str) -> Result<(), VireoError> {
     #[cfg(windows)]
     {
-        return set_text_impl(text);
+        set_text_impl(text)
     }
     #[cfg(target_os = "android")]
     {
-        return set_text_android(text);
+        set_text_android(text)
     }
     #[cfg(not(any(windows, target_os = "android")))]
     {
         let _ = text;
-        return Err(VireoError::Unsupported("clipboard"));
+        Err(VireoError::Unsupported("clipboard"))
     }
 }
 
@@ -70,16 +69,15 @@ pub fn set_clipboard_text(text: &str) -> Result<(), VireoError> {
 pub fn clipboard_html() -> Option<String> {
     #[cfg(windows)]
     {
-        return get_html_impl();
+        get_html_impl()
     }
     #[cfg(target_os = "android")]
     {
-        return get_html_android();
+        get_html_android()
     }
     #[cfg(not(any(windows, target_os = "android")))]
     {
-        let _ = VireoError::Unsupported("clipboard");
-        return None;
+        None
     }
 }
 
@@ -87,16 +85,16 @@ pub fn clipboard_html() -> Option<String> {
 pub fn set_clipboard_html(html: &str, plain_fallback: &str) -> Result<(), VireoError> {
     #[cfg(windows)]
     {
-        return set_html_impl(html, plain_fallback);
+        set_html_impl(html, plain_fallback)
     }
     #[cfg(target_os = "android")]
     {
-        return set_html_android(html, plain_fallback);
+        set_html_android(html, plain_fallback)
     }
     #[cfg(not(any(windows, target_os = "android")))]
     {
         let _ = (html, plain_fallback);
-        return Err(VireoError::Unsupported("clipboard"));
+        Err(VireoError::Unsupported("clipboard"))
     }
 }
 

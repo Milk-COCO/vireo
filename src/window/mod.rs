@@ -688,22 +688,27 @@ impl VireoWindow {
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             let size = self.inner.inner_size();
-            if size.width > 0 && size.height > 0 {
-                if let Some(new_surface) = self.recreate_surface() {
-                    *self.surface.lock() = new_surface;
-                    let t_conf = std::time::Instant::now();
-                    self.configure_surface(size, t_conf);
-                    self.maybe_show_prepared_window();
+            if size.width > 0
+                && size.height > 0
+                && let Some(new_surface) = self.recreate_surface()
+            {
+                *self.surface.lock() = new_surface;
+                let t_conf = std::time::Instant::now();
+                let ok = self.configure_surface(size, t_conf);
+                self.maybe_show_prepared_window();
+                if ok {
                     log::info!("vireo: surface recreated after resume");
-                    return DrawReport {
-                        outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
-                        timings: DrawTimings {
-                            configure_secs: t_conf.elapsed().as_secs_f64(),
-                            ..DrawTimings::default()
-                        },
-                        vsync_throttled: false,
-                    };
                 }
+                // 成功失败都跳过本帧：失败时下帧走正常流程，
+                // acquire/后续 configure 的兜底（Lost/Validation/catch）会接住。
+                return DrawReport {
+                    outcome: DrawOutcome::Skipped(DrawSkipReason::SurfaceReconfigured),
+                    timings: DrawTimings {
+                        configure_secs: t_conf.elapsed().as_secs_f64(),
+                        ..DrawTimings::default()
+                    },
+                    vsync_throttled: false,
+                };
             }
         }
         // 自动输入刷新（`auto_refresh_input` 默认开；用户如需当帧零滞后可在 on_tick 内手动调）
@@ -2236,9 +2241,9 @@ impl VireoWindow {
     ///
     /// - **Android：读系统深浅色**（`getResources().getConfiguration().uiMode`，
     ///   现值直读，任意线程可调；winit 本身在 Android 上不支持本方法）。
-    ///   `YES→Dark` / `NO→Light` / 其它（`UNDEFINED` 等）或读不到 → `None`。
-    ///   变化通知走 [`on_theme_changed`](Self::on_theme_changed)
-    ///  （渲染线程每帧 diff 系统值，需要注册）。
+    ///   `YES→Dark` / `NO→Light` / 其它（`UNDEFINED` 等）或读不到 → `None`
+    ///   （变化通知走 [`on_theme_changed`](Self::on_theme_changed)，
+    ///   渲染线程每帧 diff 系统值，需要注册）。
     ///
     /// **macOS 注意**：本方法从非主线程调用时通过 GCD `exec_sync` 同步派发到
     /// 主线程执行并阻塞等待；不要在会与主线程形成相互等待的上下文（如主线程回调内
