@@ -615,10 +615,10 @@ async fn main(app: App) { .. }
 
 | # | 项 | 现状 | 怎么验 |
 |---|---|---|---|
-| 1 | SAF 单文件 open/create 全流程 | ✅ 已验证（2026-10-11）：open 读回 6.4MB 文件，create 写成功，零 panic | 用户点 SAF:open / SAF:save 完成 |
+  | 1 | SAF 单文件 open/create 全流程 | ✅ 已验证（2026-10-11 模拟器 + 2026-10-16 真机红米 Note 15）：open 读回 6.4MB 文件（模拟器）/ 1.2MB 真机截图（真机），create 写成功，零 panic；剪贴板 copy→paste 真机逐字一致（text `hi there` + html 原样） | 用户点 SAF:open / SAF:save 完成 |
 | 2 | SAF 持久化跨启动复用 | ✅ 已验证（2026-10-11）：`persisted ok, 4 grant(s)` + 重启后 `restored tree list ok` | pick 后重进看自检行 |
 | 3 | `layoutDirection` RTL | ✅ 已验证（2026-10-11）：语言列表加 `ar_JO` 置顶，方向切到 `ldrtl`（locale+方向双变），pid 不变、无崩溃，正常 suspend/resume + surface 恢复 | 用户进设置加阿拉伯语 |
-| 4 | API 31/32 分档（返回键 legacy、disable 向后兼容分支） | 手头只有 API 35 模拟器，历史分支单测覆盖但无真机 | 需 API 31/32 设备 |
+  | 4 | API 31/32 分档（返回键 legacy、disable 向后兼容分支） | 搁置（2026-10-16）：有真机但它是 API 37，31/32 验不了；且 5559 实测发现 legacy `onBackPressed` 会被 GameTextInput 连接吃掉（31/32 返回键可能全死），修要改 Java 拦截，用户决定先不管 MuMu 系问题 | — |
   | 5 | 振动物理震感 | ✅ 已验证（2026-10-16，真机红米 Note 15）：once 短震 + HeavyClick 重击 + pattern 两段（震—停—震）全感到。`Tick` 几乎无感是预期（最轻一档），非 bug。附带修俩模板 bug：① 按钮 x=900 写死横屏，竖屏（逻辑宽 384）屏外，改跟窗口宽走；② 原测试 once→tick→pattern→cancel 连发，cancel 几毫秒内掐死振动，且每次 vibrate() 本就掐掉上一个——改每点播一种轮播（1=once 2=HeavyClick 3=pattern 0=cancel） |
 | 6 | 16K 页设备运行 | 静态检查双 ABI 全绿（NDK 28.2），两台模拟器都是 4K 页 | 需 16K 物理设备 |
 | 7 | `on_memory_warning` 真机路径 | ✅ 已验证（2026-10-11）：`am send-trim-memory RUNNING_CRITICAL` → logcat 出回调，进程存活 |

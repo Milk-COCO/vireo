@@ -372,26 +372,28 @@ async fn main(app: App) {
             let m = tp.pos.logical();
             // 判定必须与绘制用**同一个**尺寸来源（`layout_size`），否则窗口改尺寸后
             // 按钮移动而点击区留在原地。
-            let sz = win.layout_size();
-            // SAF 三按钮（绘制在 y=250，见下）：tree / open / create。
-            // CB 两按钮（同行右侧）：copy（写文本+HTML）/ paste（读文本+HTML）。
-            let saf_hit = if m.1 >= 250.0 && m.1 <= 306.0 {
-                if m.0 >= 80.0 && m.0 <= 260.0 {
-                    Some('t')
-                } else if m.0 >= 280.0 && m.0 <= 460.0 {
-                    Some('o')
-                } else if m.0 >= 480.0 && m.0 <= 660.0 {
-                    Some('c')
-                } else if m.0 >= 700.0 && m.0 <= 880.0 {
-                    Some('C')
-                } else if m.0 >= 900.0 && m.0 <= 1080.0 {
-                    Some('P')
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+              let sz = win.layout_size();
+              // SAF/CB 五按钮命中（与绘制共用 saf_layout，见下）。
+              let vw32 = sz.width.dp.0 as f32;
+              let vh32 = sz.height.dp.0 as f32;
+              let lay = saf_layout(vw32, vh32);
+              let mut saf_hit: Option<char> = None;
+              for (i, (x, y, w)) in lay.iter().enumerate() {
+                  if m.0 as f32 >= *x
+                      && m.0 as f32 <= *x + *w
+                      && m.1 as f32 >= *y
+                      && m.1 as f32 <= *y + 56.0
+                  {
+                      saf_hit = Some(match i {
+                          0 => 't',
+                          1 => 'o',
+                          2 => 'c',
+                          3 => 'C',
+                          _ => 'P',
+                      });
+                      break;
+                  }
+              }
             if let Some(which) = saf_hit {
                 if which == 'C' || which == 'P' {
                     // 剪贴板是同步 API，直接调直接记（无回调）。
@@ -460,11 +462,15 @@ async fn main(app: App) {
                 }
                 continue;
             }
-              // VB:test（绘制在 (vbx,340)，见下；vbx 跟窗口宽走，竖屏手机也能看到）：
-              // 每点一次播一种（1=once 2=tick 3=pattern 0=cancel），循环。
+              // VB:test（绘制见下 vb_pos；跟窗口宽走，竖屏手机也能看到）：
+              // 每点一次播一种（1=once 2=HeavyClick 3=pattern 0=cancel），循环。
               // 必须隔离：Android 每次 vibrate() 都会掐掉上一个，连发只能感到最后一个。
-              let vbx = (sz.width.dp.0 - 200.0).max(0.0);
-              if m.1 >= 340.0 && m.1 <= 396.0 && m.0 >= vbx && m.0 <= vbx + 180.0 {
+              let (vbx, vby) = vb_pos(vw32, vh32);
+              if m.0 as f32 >= vbx
+                  && m.0 as f32 <= vbx + 180.0
+                  && m.1 as f32 >= vby
+                  && m.1 as f32 <= vby + 56.0
+              {
                   vb_step = (vb_step + 1) % 4;
                   let hv = vireo::prelude::has_vibrator();
                   saf_note(&saf_report, format!("vb step={vb_step} has={hv}"));
@@ -578,44 +584,32 @@ async fn main(app: App) {
         ring(&mut batch, vw, vh, pad, YELLOW);
         ring(&mut batch, vw, vh, ime, GREEN);
 
-        // ---- SAF 三按钮 ------------------------------------------------------
-        // 命中判定在触摸循环里（与绘制用同一坐标），见上。
-        for (i, label) in ["SAF:tree", "SAF:open", "SAF:save"].iter().enumerate() {
-            let sx = 80.0 + i as f32 * 200.0;
-            draw_rectangle(&mut batch, Pos::new(sx, 250.0), 180.0, 56.0, Some(GRAY));
+        // ---- SAF 三按钮 + 剪贴板两按钮（布局见 saf_layout，命中与绘制共用）----
+        let btn_font = if vw >= 1100.0 { 22.0 } else { 15.0 };
+        for (i, label) in ["SAF:tree", "SAF:open", "SAF:save", "CB:copy", "CB:paste"]
+            .iter()
+            .enumerate()
+        {
+            let (sx, sy, sw) = saf_layout(vw, vh)[i];
+            draw_rectangle(&mut batch, Pos::new(sx, sy), sw, 56.0, Some(GRAY));
             draw_text(
                 &mut batch.texts,
                 label,
-                Pos::new(sx + 16.0, 250.0 + 14.0),
+                Pos::new(sx + 16.0, sy + 14.0),
                 TextDef {
-                    font_size: 22.0,
+                    font_size: btn_font,
                     ..Default::default()
                 },
                 TextOverride::new(),
             );
         }
-        // ---- 剪贴板两按钮（同行右侧）------------------------------------------
-        for (i, label) in ["CB:copy", "CB:paste"].iter().enumerate() {
-            let sx = 700.0 + i as f32 * 200.0;
-            draw_rectangle(&mut batch, Pos::new(sx, 250.0), 180.0, 56.0, Some(GRAY));
-            draw_text(
-                &mut batch.texts,
-                label,
-                Pos::new(sx + 16.0, 250.0 + 14.0),
-                TextDef {
-                    font_size: 22.0,
-                    ..Default::default()
-                },
-                TextOverride::new(),
-            );
-        }
-          // ---- 振动测试按钮（右下空位；跟窗口宽走，竖屏可见）--------------------
-          let vbx = (vw - 200.0).max(0.0);
-          draw_rectangle(&mut batch, Pos::new(vbx, 340.0), 180.0, 56.0, Some(GRAY));
+          // ---- 振动测试按钮（位置见 vb_pos；跟窗口宽走，竖屏可见）--------------------
+          let (vbx, vby) = vb_pos(vw, vh);
+          draw_rectangle(&mut batch, Pos::new(vbx, vby), 180.0, 56.0, Some(GRAY));
           draw_text(
               &mut batch.texts,
               "VB:test",
-              Pos::new(vbx + 16.0, 340.0 + 14.0),
+              Pos::new(vbx + 16.0, vby + 14.0),
             TextDef {
                 font_size: 22.0,
                 ..Default::default()
@@ -746,8 +740,7 @@ async fn main(app: App) {
         hud.push_str(&io_report);
         // 当前主题（桌面走 winit，安卓读系统配置；变化走 on_theme_changed 回调）。
         hud.push_str(&format!("theme   {:?}\n", win.theme()));
-        // SAF 结果（回调写 progress）。第一行是操作提示。
-        hud.push_str("saf     点上方三按钮 = 目录/打开/新建\n");
+        // SAF 结果（回调写 progress）。
         for line in saf_report.lock().unwrap().iter() {
             hud.push_str("saf     ");
             hud.push_str(line);
@@ -769,6 +762,35 @@ async fn main(app: App) {
                 emoji_probe.push('\n');
             }
         }
+        // 窄屏（竖屏手机）：三块合并一次绘制，自动换行，顶部放，按钮已沉底。
+        // 宽屏：保持原三处绘制，零变化。
+        if vw < 1100.0 {
+            let hud_short: String = hud
+                .lines()
+                .map(|l| truncate_hud_line(l, 60))
+                .collect::<Vec<_>>()
+                .join("\n");
+              let mut all = hud_short;
+              all.push('\n');
+              all.push_str(&emoji_probe);
+              all.push('\n');
+            #[cfg(target_os = "android")]
+            match vireo::text::android_fonts::report() {
+                Some(r) => all.push_str(&format!("fonts   {r}\n")),
+                None => all.push_str("fonts   (install() 未运行)\n"),
+            }
+            draw_text(
+                &mut batch.texts,
+                &all,
+                Pos::new(16.0, 36.0),
+                TextDef {
+                    font_size: 14.0,
+                    max_width: Some(vw - 32.0),
+                    ..Default::default()
+                },
+                TextOverride::new(),
+            );
+        } else {
         draw_text(
             &mut batch.texts,
             &emoji_probe,
@@ -782,24 +804,27 @@ async fn main(app: App) {
 
         // 字体加载摘要（Android 上 logcat 不可靠，看画面）
         #[cfg(target_os = "android")]
-        {
+        let fonts_line = {
             // 字体加载摘要（Android 上 logcat 不可靠，看画面）
             let mut line = String::new();
             match vireo::text::android_fonts::report() {
                 Some(r) => line.push_str(&format!("fonts   {r}\n")),
                 None => line.push_str("fonts   (install() 未运行)\n"),
             }
-            draw_text(
-                &mut batch.texts,
-                &line,
-                Pos::new(80.0, 500.0),
-                TextDef {
-                    font_size: 16.0,
-                    ..Default::default()
-                },
-                TextOverride::new(),
-            );
-        }
+            line
+        };
+        #[cfg(not(target_os = "android"))]
+        let fonts_line = String::new();
+        draw_text(
+            &mut batch.texts,
+            &fonts_line,
+            Pos::new(80.0, 500.0),
+            TextDef {
+                font_size: 16.0,
+                ..Default::default()
+            },
+            TextOverride::new(),
+        );
 
         draw_text(
             &mut batch.texts,
@@ -811,6 +836,7 @@ async fn main(app: App) {
             },
             TextOverride::new(),
         );
+        }
 
         // ---- 接管暂停时机后的三件事 ------------------------------------------
         // 因为上面 `set_auto_pause(false)` 关掉了 vireo 的闸门，这里能拿到控制权。
@@ -1014,7 +1040,57 @@ fn ring(batch: &mut DrawBatch, vw: f32, vh: f32, e: Edges, color: Color) {
     if e.l > 0.0 {
         draw_rectangle(batch, Pos::new(0.0, 0.0), e.l, vh, Some(c));
     }
-    if e.t > 0.0 {
-        draw_rectangle(batch, Pos::new(0.0, 0.0), vw, e.t, Some(c));
-    }
-}
+      if e.t > 0.0 {
+          draw_rectangle(batch, Pos::new(0.0, 0.0), vw, e.t, Some(c));
+      }
+  }
+
+  /// SAF/CB 五按钮布局（顺序 tree/open/save/copy/paste），返回各按钮 (x, y, w)，h 恒 56。
+  /// 宽屏（vw≥1100）沿用原坐标零变化；窄屏（竖屏手机）沉底两行（3+2）。
+  /// 命中判定与绘制共用此函数，窗口改尺寸后不错位。
+  fn saf_layout(vw: f32, vh: f32) -> [(f32, f32, f32); 5] {
+      if vw >= 1100.0 {
+          [
+              (80.0, 250.0, 180.0),
+              (280.0, 250.0, 180.0),
+              (480.0, 250.0, 180.0),
+              (700.0, 250.0, 180.0),
+              (900.0, 250.0, 180.0),
+          ]
+      } else {
+          let w = ((vw - 40.0 - 16.0) / 3.0).max(64.0);
+          let x1 = 20.0 + (w + 8.0);
+          let x2 = 20.0 + 2.0 * (w + 8.0);
+          let y0 = vh - 330.0;
+          let y1 = vh - 260.0;
+          [
+              (20.0, y0, w),
+              (x1, y0, w),
+              (x2, y0, w),
+              (20.0, y1, w),
+              (x1, y1, w),
+          ]
+      }
+  }
+
+  /// VB 按钮左上坐标：宽屏右部 y=340；窄屏沉底（CB 第二行之下、auto_pause 之上）。
+  fn vb_pos(vw: f32, vh: f32) -> (f32, f32) {
+      if vw >= 1100.0 {
+          ((vw - 200.0).max(0.0), 340.0)
+      } else {
+          ((vw - 200.0).max(0.0), vh - 190.0)
+      }
+  }
+
+  /// 窄屏 HUD 截行：按字符数截（中文按一个字符算，配合 max_width 换行兜底），
+  /// 超了加 "…"。logcat 里有全量，HUD 只求不溢出。
+  fn truncate_hud_line(line: &str, max_chars: usize) -> String {
+      let n = line.chars().count();
+      if n <= max_chars {
+          line.to_owned()
+      } else {
+          let mut s: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+          s.push('…');
+          s
+      }
+  }
