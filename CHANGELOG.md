@@ -28,18 +28,6 @@
   - 示例 `examples/resource_io`；assets 脚手架 `examples/assets/` 与
     `examples/android/src/main/assets/`。
 
-- **SAF（系统文件选择器，安卓独有）**：`App::open_document_tree` /
-  `open_document` / `create_document`（全异步，结果走回调，回调跑渲染线程）+
-  `SafUri`（URI 字符串可持久化 + `open_reader` / `open_writer` 开出真正
-  `std::fs::File` + 目录 `list` / `resolve` / `create_*` / `delete` +
-  `persisted` / `release`）+ `saf_cancel_pending`。
-  - Java 侧强制：`MainActivity.java` 必须含 SAF 桥（模板已集成，另有独立可复制文件
-    `examples/android/SAF_SNIPPET.java`）；缺了 launch 直接 `Err` 明说。
-  - 不用 `OpenDocument*` 三个 contract（其 Intent 不带 flag，持久化做不成），
-    改用 `StartActivityForResult` + 自己组 Intent（READ/WRITE/PERSISTABLE 全要）。
-  - 新增错误变体 `VireoError::UserCancelled`（用户取消，不是故障）/
-    `Unsupported`（该能力只在特定平台有）。
-
 - **触摸状态轮询 API**：`VireoWindow::touches() -> Vec<TouchPoint>` /
   `touch_count()` / `touch_first()`，以及公开类型 `TouchPoint`
   （`{ id, pos: PixelPos, force }`）。此前触摸没有类型安全的读法 ——
@@ -62,13 +50,6 @@
   实际它一直是 `Some`）。现在 drain 时按 handle 提前建槽（回调注册本就只依赖
   `WindowIndex`，与窗口对象何时创建无关），并对超出 `MAX_CALLBACK_SLOTS` 的
   无效索引告警丢弃。**`on_*` 现在可以在 `app.run(..)` 之前正常注册。**
-- Android 系统字体扫描可定制：`#[vireo::main(fonts = |c| { .. })]` 宏属性 +
-  `vireo::text::android_fonts::configure`（进程级，须在 `App` 构造前调用），
-  可追加 `extra_prefixes`（文件名前缀）/ `extra_dirs`（扫描目录）/
-  `extra_families`（优先家族名，排在内置表之前）。
-  解决「未收录的 ROM 拿不到任何正文字体 → 所有文字全大写、数字消失」。
-  三个字段缺一不可：只加前缀不钉家族名，症状照旧。
-  Android font scanning is now user-configurable (whitelist was compile-time fixed).
 - Android `onStop` 生命周期：`App::on_stopped` 回调 + `App::is_stopped()` /
   `android_lifecycle::is_stopped()`。只对「暂停期间 activity 变得不可见」的
   暂停触发，用来区分「半透明弹窗 / 权限对话框」这类短暂中断与「回桌面 / 锁屏」
@@ -87,11 +68,12 @@
   `App::wait_until(timeout, cond)` + `App::notify_waiters()`（通用条件）。
   会被窗口关闭 / 设备丢失 / activity 销毁打断，不会挂死；平台生命周期变化自动唤醒，
   自己的条件变化需自己 `notify_waiters`。
-- Android `onDestroy` 生命周期：`App::is_destroyed()` + `App::on_destroyed()`。
+  - Android `onDestroy` 生命周期：`App::is_destroyed()` + `App::on_destroyed()`。
   唯一能回答「用户是切走了还是主动关了我」的信号（`is_paused` / `is_stopped`
   在划掉任务时都会照常触发），也是 `set_auto_pause(false)` 之后唯一的退出条件。
   ⚠️ **进程被系统杀掉时不触发**，所以不能用于资源清理或存档。
   Lifecycle gate is now user-controllable; wait primitives and `onDestroy` exposed.
+
 - GPU 粒子路径：`Particle` / `ParticlePool` / `ParticleSlot` / `draw_particles`
   （`spawn` 参数烘焙＋VS 按 `camera.time` 积分位移与 fade 包络，存活期 CPU 零更新）。
   GPU particle path: baked spawn params + VS integration over `camera.time`.
@@ -123,52 +105,21 @@
 - 粒子 `fade_mid` 包络中点（`Option<f32>`，默认 None = smoothstep；设值后 fade_out 段
   改线性三点 `1.0 → mid → 0.0`，与时长正交，`clamp 0..1`；`fade_in` 恒 smoothstep）。
   Particle fade-out midpoint shaping (linear 3-point vs smoothstep).
-- Android 平台支持：`#[vireo::main]` 在安卓 target 下生成 GameActivity 胶水层
-  按符号名查找的 `android_main` 入口，`AndroidApp` 存进进程级单例后转 `App::new`
-  —— 与桌面同一构造器，公开 API 不区分平台；Android 上按文件名白名单加载系统
-  正文字体，修复 `no default font found` panic；`requested_maximum_frame_latency` 可配。
-  - **Android 后端从 `android-native-activity` 换成 `android-game-activity`**：
-    前者没有 `InputConnection`，软键盘只能以物理按键事件送ASCII，**中文输入不可能**
-    （android-activity 把 native_activity 的 `set_text_input_state` 写成 `// NOP`）。
-    GameActivity 提供 `GameTextInput`（`TextInputState`：text / selection /
-    compose_region），真机已确认输入法 `onStartInput` 正常连上。
-  - **构建链随之改变**：`GameActivity extends AppCompatActivity`，theme 必须是
-    AppCompat 子主题，且需要 `androidx.games:games-activity:4.4.0` 这个 gradle AAR
-    —— `xbuild` / `cargo-apk` 没有 gradle 依赖支持，**不再适用**。改用
-    `cargo ndk` 编 cdylib + gradle 打包。版本号对齐官方模板
-    `rust-mobile/rust-android-examples` 的 `agdk-winit-wgpu`（AGP 9.1.0 / Gradle 9.3.1）。
-  - 附带解决**内容进不去挖孔**：`xbuild` 内置 NDK 拒绝 `target_sdk_version ≥ 34`
-    （`ndk doesn't support sdk version`），导致 targetSdk 偏低、
-    `windowLayoutInDisplayCutoutMode` 被系统忽略。gradle 下 targetSdk 35 正常，
-    真机实测窗口从 `2264×1080`（letterbox）恢复为 `2392×1080` 全宽。
-  Android support: GameActivity entry point (CJK IME capable) + Android system fonts.
-- `vireo::platform::android::WindowExtAndroid`（`#[cfg(target_os = "android")]`，
-  不进 prelude）：系统 UI 显隐 / 滑动唤回行为、安全区三值模型、挖孔模式、
-  运行期朝向、常亮、屏幕亮度、窗口层级。
-  - 安全区三值：`safe_area`（物理最大遮挡，忽略可见性）/ `padding`（当前可见遮挡，
-    键盘会吸收底部）/ `ime_insets`（键盘）＋`cutouts()`（摄像头物理矩形）。
-    坐标系左上 y-down，单位 vireo 逻辑像素。设计参考 Flutter `MediaQuery` 三值模型
-    （Unity 单值 `safeArea` 与 Godot 4.4→4.5 都在这个歧义上出过 bug）。
-  - `SystemBars` 是 bitmask（可只隐藏状态栏或导航栏），`SystemBarBehavior` 只提供
-    Android 31+ 真正支持的两档（不提供 API 30 已废弃的僵尸枚举）。
-  - `WindowLevel`（`LayoutParams.type`）按 Android 语义重新表达为
-    `Normal / Overlay / SystemAlert / AttachedDialog`，**不硬套** winit 四档
-    （Android 没有「置底」）。`Overlay` 需 `SYSTEM_ALERT_WINDOW` 权限＋用户授权。
-  - 平台强制行为已在 doc 注明：targetSdk 35+ 强制 edge-to-edge、API 36 无法退出；
-    桌面窗口化模式 caption bar 永远可见。
-  - setter 一律返回 `Result`（不静默 no-op），getter 打日志返回零值（每帧热路径）。
-    Rust 生态此前无任何安全区 / 沉浸式 API（winit 0.30 的
-    `WindowExtAndroid` 只有 2 个方法）。
-  - 模块 doc 新增「建窗期属性」一节：`screenOrientation` / `configChanges` /
-    `windowSoftInputMode` / 挖孔 style 全是 **APK 构建期 manifest 条目**，winit 的
-    `WindowAttributes` 在 Android 上全部忽略，运行期改 `Window.setAttributes` 也不
-    触发 WM 重算边框（实测挖孔模式无效）——附参考 manifest 片段。
-  - 模块 doc 新增「三个刻意缺席的方法」：`set_ime_purpose` /
-    `set_ime_cursor_area` / `fullscreen`+`Frameless` 在 Android 的语义差异与
-    不提供的原因（前者须与文本输入后端一起做，后者 Android 无对应概念）
-    —— 说明而非静默 no-op。
-    Android system UI / safe-area / cutout / window-level control
-    (first of its kind in Rust).
+- Android 平台支持（0.2.0 起全新提供；此前版本无任何安卓适配）：
+  - 入口与构建：`#[vireo::main]` 生成 GameActivity 胶水（`InputConnection` 正常，
+    中文输入可用）＋`cargo ndk` / gradle 模板（`examples/android`，
+    `xbuild` / `cargo-apk` 不再适用）＋ targetSdk 35（挖孔全宽）＋ 16KB 页合规。
+  - 窗口与系统：`WindowExtAndroid`（系统栏 / 安全区三值 / 挖孔 / 朝向 / 常亮 /
+    亮度 / 层级）＋真实刷新率＋深浅色读与通知（复用 `theme()`，不新增 API）＋
+    `configChanges`（字号 / 语言不重建）。
+  - 输入：`TextInputState`（UTF-16/UTF-8 下标换算）＋返回键接管
+    （`App::on_back` / `consume_back`）＋剪贴板（文本 / HTML，免费函数）＋
+    振动（once / predefined / pattern / cancel，免费函数）。
+  - 文件：SAF（tree / open / create＋`SafUri` 持久化跨启动复用）——资产与可写目录
+    见上「文件读写 API」条。
+  - 生命周期（安卓侧）：resume surface 重建＋返回键退出防僵尸（跨平台闸门见上相关条）。
+  - 文字与弱 GPU：系统字体白名单加载（可定制扫描）＋ COLRv1 emoji＋
+    noflat GLES 回退＋离屏格式漂移自愈。
 
 ### Added / 新增
 
@@ -184,101 +135,20 @@
 
 ### Fixed / 修复
 
-- **Android 12+ emoji 渲染为空白**（`🦊🎵😀🇨🇳👨‍👩‍👧👍🏽` 全部画不出来）。
-  `swash` 0.2.10 —— `cosmic-text` 0.19 唯一的字形光栅器 —— 按 **COLR version 0** 的
-  布局读表头，而 Android 12+ 的 `NotoColorEmoji.ttf` 是 **COLRv1**：该字段在 v1 布局里
-  是 `numBaseGlyphRecords` = 0，记录查找落空 → 回退到 `glyf` 轮廓 → 而这些 emoji 的
-  `glyf` 条目长度为 0 → 交回一个 `0×0` 位图 → 被当作「无需光栅化」**静默丢弃**（无 panic、
-  无日志）。上游 issue 五年零活动且 swash 已是末版，因此 vireo 内补了一条 COLRv1 光栅化
-  路径（`skrifa` 走 paint graph + `zeno` 光栅，两者**本来就在依赖树里，零新增依赖**），
-  仅在 swash 交回空位图时二次尝试。
-  修法选的是「读系统字体」而不是「打包一份 emoji 字体」：后者更省事，但会把所有平台的
-  emoji 锁死成同一套外观，抹掉平台原生风格。
-  COLRv1 rasterization for Android emoji: reads the platform's own colour font instead of
-  shipping one, so each OS keeps its native emoji design.
-- 顺带修掉 `glyphon` 图集扩容路径上一个会**静默吞字形**的隐患：
-  `InnerAtlas::grow()` 重建纹理后重光栅化每个缓存字形，此前对重光栅化结果不做任何校验，
-  失败时写入变成 no-op，字形指向空白区域且无任何日志。现在尺寸或内容类型与缓存记录不符
-  即淘汰该字形并归还打包槽位，下一帧重新光栅化。
-- Android 文档纠正：`MainEvent::LowMemory` 并非「在 Android 侧永远不会被构造」。
-  winit 该区间里恰好有一个非 `warn!` 分支正常转发它，此前审计读了
-  `mod.rs:245-297` 却漏看这一个 arm，把 `LowMemory` 连同其他一起归进「全部吞掉」，
-  且该错误结论在仓库里复制了 5 处（`android_lifecycle.rs` 模块文档 / README /
-  TODO / 审计报告）。同时纠正「`onSaveInstanceState` 需要 `android_os_Bundle` JNI
-  绑定」—— `StateSaver::store(&[u8])` 是纯字节接口，Bundle 由 AGSK 处理，
-  真实阻塞只是 winit 吞事件。
-- 测试：`android_text_input` 的三个 `IME_STATE` 测试加了串行锁。此前它们共享
-  进程级全局量却依赖 cargo 默认串行执行，并行下会互相污染（`cargo test --lib`
-  偶发 FAILED，单跑必过）。
-
-- Android：`vireo_macro` 依赖指向 crates.io 而非仓库内的 `vireo_macro/`，导致本地宏
-  改动**完全不生效**（改源码后构建 0.65s 不重编、宏内 `eprintln!` 一次不打印）。
-  模板 `cdylib` 因此缺 `android_main` 导出符号，真机 `dlopen failed: cannot locate
-  symbol "android_main"` 直接崩。改为 `vireo_macro = { path = "vireo_macro", version = "0.1" }`。
-- Android：帧回调里每帧调用 `show_soft_input` / `hide_soft_input` 会把 Java 主线程
-  handler 淹掉，真机 **5 秒 ANR**（`Input dispatching timed out` /
-  `Waited 5000ms for FocusEvent(hasFocus=false)`），系统随后 `send 9` 杀进程。
-  根因是这两个 API 无条件 `post` 到主线程，且已有 `IME_WANTED` 状态却没用来去重。
-  现在两者都是**纯跳变去重**（未聚焦时每帧调用**零** post，同状态重复调用永不重复
-  post），均可安全每帧调用。实测未聚焦时 `ImeTracker` 会话数从数百个降到 3 个。
-  「用户用系统按钮收起键盘」这一观测不到的状态不靠引擎周期性重发兜底（见下条），
-  而是在文档里给出显式恢复方式：`hide_soft_input()` 再 `show_soft_input()`。
-- Android：**重复 `show_soft_input` 会清掉输入法的组合态**。为兜底「键盘被收起后
-  请求值陈旧」曾加 200ms 重发窗口，真机症状：① 输入字符时候选词与 preedit 一闪即消；
-  ② 按输入法的收起键会在 200ms 内被重新拉起，只有点到 vireo 其他区域（`focused=false`
-  走 hide）才停。组合态易碎，**任何重复 show 都是破坏**，故重发窗口已完全移除。
-- Android：触摸坐标被**双重换算**。`WinitEvent::Touch` 里存的已是逻辑像素
-  （`host.rs` 收到事件时按有效 scale 除过），`apply_input_event` 又除了一遍 scale ——
-  HyperOS(scale 2.8125) 上 `tap(844,551)` 变成 `(37.9,24.8)`，任何命中判断都失效，
-  表现为「点输入框键盘不弹」。另外触摸**完全不更新** `mouse_pos`，而 Android 上点击
-  不产生 `CursorMoved`，该字段恒为 `(-1,-1)`。现在触摸点也写入 `mouse_pos`（按
-  `CursorMoved` 的约定存物理像素），新增 `touch_logical_to_mouse_pos` 纯函数 +
-  往返测试锁死两个坐标空间的契约。
-- Android：输入法无视 `IME_FLAG_NO_FULLSCREEN`，横屏进入 AOSP **fullscreen extract
-  mode**，顶部弹全宽白条 + 框架字符串按钮，IME 窗口 `MATCH_PARENT` 吃掉整屏 →
-  `ime_insets.bottom` 恒为 0、`adjustResize` 形同虚设。该 flag 的 AOSP 文档本就写明
-  「不是保证，某些输入法可能忽略」，而 `IME_FLAG_NO_EXTRACT_UI`（`0x10000000`）与它
-  **语义不等价**（前者「别显示 extracted-text UI」，后者「别进全屏模式」），
-  前者被无视时只有后者管用，故一并下发。白条随之消失。
-- Android：`gradle -PndkVersion=` 被静默忽略。`project.findProperty('ndkVersion')`
-  撞上 AGP 注入的同名约定属性（AGP 9.1 默认 NDK 恰好是 `28`），于是去找不存在的
-  `sdk/ndk/28`。改用 `gradle.startParameter.projectProperties`（只含命令行 `-P`）。
-  另注：PowerShell 调 `.bat` 会在 `=` 后首个 `.` 截断参数，需写成
-  `'-PndkVersion=28.2.13676358'`。
+- 首版打磨（均为 Android 真机逐个修；构建八卦与内部测试锁不记）：输入法
+  `show/hide_soft_input` 跳变去重（未聚焦零 post，5 秒 ANR 消除）/ 组合态重发窗口
+  移除 / 触摸双重换算修正＋`mouse_pos` 同步 / 横屏 extract 白条改下发
+  `IME_FLAG_NO_EXTRACT_UI`。
 
 ### Changed / 变更
 
-- **Android 平台限制文档债已清**：所有带 `## Platform-specific` 段的 `pub fn`
-  现在都明确标注了 Android 行为（`window/mod.rs` + `window/desc.rs` 共 47/47）。
-  本轮补齐 `set_resizable`（原本**完全没有**该段）/ `title` / `set_size` /
-  `set_min_size` / `set_max_size` / `focus` / `set_icon` / `set_cursor` /
-  `request_resize`，并在 `WindowDesc` 的字段 + builder 双份标注 `resizable` /
-  `fullscreen` / `maximized` / `icon` / `icon_from_path`。
-  这些 API 在 Android 上是**静默 no-op**（winit Android 后端不实现，
-  无报错无日志）—— 现在文档写明了，附带哪些 Android 上**确实可用**的对照
-  （如 `set_visible` 半生效、`primary_monitor` 可用）。顺带修正一处失效的
-  文档引用（`set_cursor` 指向不存在的 `InputState::cursor_pressed`）。
-  无行为变更。
-- `vireo_macro` 生成的 Android 入口改为 `pub extern "C" fn android_main`
-  （原为 Rust ABI 的 `pub fn`；`#[no_mangle]` 本就足够导出，此项是 ABI 正确性改进）。
-  - Android 模板补上缺失的 gradle wrapper（`gradlew` / `gradlew.bat` /
-    `gradle-wrapper.jar`）——README 一直让用户跑 `./gradlew`，但脚本并不存在，
-    模板此前并非真正「可复制」。
-  - `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
+- `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
     `surface_format` 自愈重建，见下）；`view()` / `bind_group()` 改返回
     owned 克隆（原返回内部引用，与锁共存不了）。`Texture` 新增 `format` 字段。
     受影响的只有三处示例（`offscreen` / `offscreen_aa` /
     `custom_material_post`，`&canvas.texture` 改为持锁守卫）。
 
 ### Fixed / 修复
-
-- Android 字体：全量加载 `/system/fonts`（真机 230 个文件）会把装饰体带进字体库，
-  cosmic-text 默认家族 `"Arial"` 在 Android 命中不到 → 回退到「排序后第一个 face」
-  → 实测**所有文字全大写、比分数字画不出来**。改为**文件名白名单**（正文字体前缀
-  AND 字体扩展名双条件），只解析已知的正文字体文件，其余一概不碰；同时钉死 fontdb
-  三个 generic 家族。顺带省掉 200+ 次字体解析的启动开销。桌面因恰好装了 Arial
-  一直没暴露。
-  Android fonts: full-dir scan pulled decorative faces in; whitelist text fonts instead.
 
 - 无焦点时自动退出挂起：窗口已关闭但进程不退。根因是 winit 0.30 Windows 的
   `exit()` 只置标志不唤醒等待者，而 `run_app` 的退出检查点全在无限 park 返回之后，
@@ -289,68 +159,6 @@
   Root cause is winit 0.30 Windows `exit()` setting the flag without waking the waiter
   while `run_app` only checks it after an infinite park; fixed with a self-wake after
   `exit()`, plus exit handshake hardening (ack, timeouts, backstop, trace).
-
-- Android：另一个 Activity 盖住后回来（SAF 选择器等），`configure` 打在已死的旧
-  surface 上必 panic（`Surface::configure` / `queue family`，有时逃逸成 SIGABRT）。
-  根因是 GameActivity 在 suspend 时拆掉 native surface，而 vireo 只在 acquire 路径
-  处理 `Lost`，resume 后 0×0→正常尺寸的 drift-configure 仍用旧对象。
-  修：`Runner::suspended()` 置脏旗（suspend 期跳过一切 surface 调用，
-  `DrawSkipReason::SurfaceStale`），`resumed()` 清旗，per-window `was_stale` 闩让
-  resume 后首帧 `recreate_surface` + `configure` + 跳过（复用 `Lost` 路径形状）。
-  桌面 winit 永不发 `Suspended`，零行为变化。
-  Fixed panic when resuming after another Activity (e.g. SAF picker) destroyed the
-  native surface: the stale surface object was reused for configure. Now Suspended
-  marks it stale (frames skip surface use), and the first frame after Resumed
-  recreates it.
-- Android：`configure_surface` 改返回 bool（失败走 `catch_unwind` 转 Lost 跳帧，
-  兜住闸门拦住时 `was_stale` 闩够不着的 `Outdated` 路径）；同进程第二个
-  `android_main`（旧 Activity 死后点图标）直接拒绝，不建第二个 loop
-  （此前必 SIGABRT）。真机三次真实 pick 全恢复，零崩溃。
-  Hardened resume recovery (catch unwind around configure) and second-activity
-  re-entry guard.
-- Android：返回键退出后进程不死（winit 循环 parked-deaf，`run_blocking` 回不来，
-  `onDestroy` 卡住，任务记录烂成 RESUMED 僵尸，重进 splash 卡死）。修：
-  `about_to_wait` 首行见 `is_destroyed()` 即 ack + `exit()` + 返回；
-  supervisor 收尾后若 activity 已死则自杀（`killProcess(self)`，等价 force-stop）。
-  走过的弯路：`process::exit` 在 ART teardown 里 abort，已 revert 永不再用。
-  真机验证：退出后数秒进程消失（SIGNALED/9，无 tombstone），重进全新进程全功能。
-  Fixed zombie process after back-button exit (winit loop parked-deaf post-Destroy):
-  exit eagerly on destroy + self-terminate when teardown is done.
-- Android 模板 `configChanges` 补齐 `fontScale|locale|layoutDirection|keyboard`：
-  改系统字号或语言不再重建 Activity（此前会整套重建，Java 字段全丢）。
-  真机验证通过（pid 不变、无重建、无 panic）。
-  Added missing configChanges values so font-scale and locale changes no longer
-  recreate the Activity.
-- **剪贴板**：免费函数 `clipboard_text` / `set_clipboard_text` /
-  `clipboard_html` / `set_clipboard_html`（prelude 导出，刻意不挂 `App` ——
-  剪贴板是进程级全局状态，无状态可注入）。
-  Windows（Win32，`CF_UNICODETEXT`/`CF_HTML`，短暂占用重试）+
-  Android（纯 JNI，无权限无 Java 改动）；macOS/Linux → `Unsupported`。
-  读空剪贴板返回 `None`（不是错误），读 HTML 严格不降级。
-  Clipboard: plain text + HTML on Windows and Android; free functions.
-- **振动**：免费函数 `has_vibrator` / `vibrate_once(ms, amplitude?)` /
-  `vibrate_predefined(Tick/Click/HeavyClick/DoubleClick)` /
-  `vibrate_pattern(timings, amplitudes?, repeat?)` / `cancel_vibration`
-  （prelude 导出）。Android 纯 JNI（模板 manifest 加 `VIBRATE` 权限行）；
-  其它平台 → `Unsupported`。无马达设备 `vibrate_*` 报 `Err`（逼调用方用
-  `has_vibrator` 做门），`cancel` 无马达直接 `Ok`。
-  Vibration: one-shot, predefined effects, custom waveforms on Android.
-- **Android 主题（深浅色）读与通知**：`win.theme()` 在安卓读系统深浅色
-  （`Yes→Dark` / `No→Light`，winit 本身不支持），`win.on_theme_changed`
-  在安卓经渲染线程每帧 diff 后派发 —— 不新增 API，把桌面已有的同一套在
-  安卓填上。注意实现细节：`android-activity` 的 `config()` 缓存真机实测从
-  启动就冻住，改走 `getResources().getConfiguration().uiMode` 现值直读。
-    Theme (night mode) reading and change notification on Android, reusing the
-    existing cross-platform API instead of adding a new one.
-  - 弱 GPU 回退（noflat）：adapter 后端为 GLES 时自动剥掉 `local_pos` varying 的
-    `linear` / `sample` 插值（naga-GLSL 把它们映射到 ES 不一定有的特性；正交投影
-    下默认插值逐位等价）与 `@invariant`（glyphon / 文字材质各一处，ANGLE 拒收）。
-    `flat` 的 u32 varying 全保留（naga-GLSL 全版本支持）。桌面 / Vulkan 路径
-    shader 逐位不变。MuMu12（API 32）离屏探针像素逐位精确，API 35 Vulkan 零回归。
-  - 离屏格式漂移自愈：GLES 首帧把 `surface_format` 由默认 sRGB 翻为线性格式后，
-    首帧前创建的离屏画布目标纹理与管线格式失配（validation fatal）。现 `draw` 内
-    检测到漂移即按当前格式重建目标纹理并清 MSAA/DS 缓存；`msaa_view` 缓存校验
-    加格式位。桌面默认格式与 surface 一致，此前从未触发。
 
   ## [0.1.2]
 
