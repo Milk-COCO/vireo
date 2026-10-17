@@ -7,8 +7,8 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use crate::area::AreaStencilOp;
-pub use crate::gpu::Vertex;
-use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, GpuContext, ParticleInstance, ShapeInstance};
+use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, GpuContext, ParticleInstance};
+pub use crate::gpu::{InstanceData, Vertex};
 use crate::material::Material;
 pub use crate::math::{Pos, Rect, Transform, UvRect};
 
@@ -463,7 +463,6 @@ pub struct Renderer {
     clock_groups: Mutex<FxHashMap<(u32, u32), (wgpu::Buffer, wgpu::BindGroup)>>,
     vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     index_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
-    instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     geo_instance_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     particle_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     geo_template_vertex_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
@@ -503,7 +502,7 @@ pub struct Renderer {
     scratch_batch_geo_index_base: Mutex<Vec<u32>>,
     scratch_last_dynamic_offsets: Mutex<Vec<u32>>,
     scratch_scissor_stack: Mutex<Vec<(u32, u32, u32, u32)>>,
-    scratch_instances: Mutex<Vec<ShapeInstance>>,
+    scratch_instances: Mutex<Vec<InstanceData>>,
     scratch_particles: Mutex<Vec<ParticleInstance>>,
     scratch_geo_instances: Mutex<Vec<GeoInstance>>,
     scratch_geo_vertices: Mutex<Vec<GeoVertex>>,
@@ -568,7 +567,6 @@ impl Renderer {
             clock_groups: Mutex::new(FxHashMap::default()),
             vertex_buf: Mutex::new(None),
             index_buf: Mutex::new(None),
-            instance_buf: Mutex::new(None),
             geo_instance_buf: Mutex::new(None),
             particle_buf: Mutex::new(None),
             geo_template_vertex_buf: Mutex::new(None),
@@ -824,12 +822,13 @@ impl Renderer {
         *slot = Some((buf, new_cap));
     }
 
-    fn ensure_instance_buffer(&self, size: u64) {
+    /// 确保 instance storage buffer 足够大（vertex-pulling，VS 按 instance_index 读取）。
+    fn ensure_instance_storage_buffer(&self, size: u64) {
         if size == 0 {
             return;
         }
-        let mut slot = self.instance_buf.lock();
-        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        let mut slot = self.gpu.instance_storage_buf.lock().unwrap();
+        let cur = (*slot).as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size {
             return;
         }
@@ -839,12 +838,14 @@ impl Renderer {
             (cur * 2).max(size)
         };
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vireo shape instance buffer"),
+            label: Some("vireo instance storage buffer"),
             size: new_cap,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         *slot = Some((buffer, new_cap));
+        // buffer 已重建：engine storage bind group 缓存绑的是旧 buffer，必须失效。
+        *self.engine_storage_bind_group_cache.lock() = None;
     }
 
     fn ensure_geo_instance_buffer(&self, size: u64) {

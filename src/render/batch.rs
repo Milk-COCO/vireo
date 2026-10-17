@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::area::{Area, AreaGeom, effective_area};
-use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, ParticleInstance, ShapeInstance, Vertex};
+use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, InstanceData, ParticleInstance, Vertex};
 use crate::material::Material;
 use crate::math::{
     Pos, Rect, Transform, UvRect, affine_rect_bounds, mul_affine_cols,
@@ -327,7 +327,7 @@ pub struct DrawBatch {
     pub(crate) bind_group: Option<wgpu::BindGroup>,
     pub(crate) text_texture_view: Option<wgpu::TextureView>,
     pub(crate) texture_segments: Vec<TextureSegment>,
-    pub(crate) instances: Vec<ShapeInstance>,
+    pub(crate) instance_data: Vec<InstanceData>,
     pub(crate) instance_texture_segments: Vec<InstanceTextureSegment>,
     /// 粒子实例（`draw_particles` 推送，`ParticleInstance` 152B，VS 按 time 积分）。
     /// 与 `instances` 独立成缓冲/命令/段，默认管线零影响。
@@ -490,7 +490,7 @@ impl DrawBatch {
             bind_group: None,
             text_texture_view: None,
             texture_segments: Vec::with_capacity(2),
-            instances: Vec::with_capacity(32),
+            instance_data: Vec::with_capacity(32),
             instance_texture_segments: Vec::with_capacity(2),
             particles: Vec::with_capacity(32),
             particle_texture_segments: Vec::with_capacity(2),
@@ -543,7 +543,7 @@ impl DrawBatch {
         self.bind_group = None;
         self.text_texture_view = None;
         self.texture_segments.clear();
-        self.instances.clear();
+        self.instance_data.clear();
         self.instance_texture_segments.clear();
         self.particles.clear();
         self.particle_texture_segments.clear();
@@ -584,14 +584,14 @@ impl DrawBatch {
     }
     pub fn to_area(&self) -> Area {
         if (self.vertices.is_empty() || self.indices.is_empty())
-            && self.instances.is_empty()
+            && self.instance_data.is_empty()
             && self.geo_instances.is_empty()
         {
             return Area::Empty;
         }
         let mut vertices = self.vertices.clone();
         let mut indices = self.indices.clone();
-        for instance in &self.instances {
+        for instance in &self.instance_data {
             let base = vertices.len() as u32;
             let [x0, y0, x1, y1] = instance.bounds;
             let [ux0, uy0, ux1, uy1] = instance.uv_bounds;
@@ -727,7 +727,7 @@ impl DrawBatch {
                 wy,
             );
         }
-        for instance in &self.instances {
+        for instance in &self.instance_data {
             any = true;
             let [x0, y0, x1, y1] = instance.bounds;
             for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
@@ -1094,7 +1094,7 @@ impl DrawBatch {
     /// 本节点或任意子孙是否含形状/文字。
     pub fn has_drawable_content(&self) -> bool {
         !self.vertices.is_empty()
-            || !self.instances.is_empty()
+            || !self.instance_data.is_empty()
             || !self.geo_instances.is_empty()
             || !self.texts.entries.is_empty()
             || self.children.iter().any(Self::has_drawable_content)
@@ -1105,7 +1105,7 @@ impl DrawBatch {
     /// = `mesh_vertices + instances * 4 + particles * 4 + Σ geo 模板顶点数`
     ///
     /// - **mesh path**：每个 shape 推送 4 顶点 unit quad（CPU 端）。
-    /// - **instance path**：CPU 端只推送 1 个 `ShapeInstance`（约 80 字节），
+    /// - **instance path**：CPU 端只推送 1 个 `InstanceData`（112 字节），
     ///   GPU 渲染时用 1 个共享 quad × N instances = `N * 4` 顶点。
     /// - **particle path**：CPU 端只推送 1 个 `ParticleInstance`（152B），
     ///   GPU 渲染时同样 `N * 4` 顶点（VS 按 time 积分）。
@@ -1115,7 +1115,8 @@ impl DrawBatch {
     /// 不包含子 batch 与文字。如果想看 CPU 端实际推送量，调用
     /// [`Self::shape_stats`]。
     pub fn shape_vertex_count(&self) -> usize {
-        let mut count = self.vertices.len() + self.instances.len() * 4 + self.particles.len() * 4;
+        let mut count =
+            self.vertices.len() + self.instance_data.len() * 4 + self.particles.len() * 4;
         for instance in &self.geo_instances {
             if let Some(template) = self.geo_template_by_start(instance.template_vertex_start) {
                 count += template.vertex_count as usize;
@@ -1129,7 +1130,7 @@ impl DrawBatch {
     pub fn shape_stats(&self) -> ShapeStats {
         ShapeStats {
             mesh_vertices: self.vertices.len(),
-            sdf_instances: self.instances.len(),
+            sdf_instances: self.instance_data.len(),
             geo_instances: self.geo_instances.len(),
             geo_templates: self.geo_templates.len(),
             geo_template_vertices: self.geo_template_vertices.len(),
@@ -1227,7 +1228,7 @@ impl DrawBatch {
         // 路径（sdf_feather=None 的默认几何）也算有几何，否则 clips_children 的
         // geo-only batch 只 Push 不 Pop，clip_depth 泄漏。
         let has_geom = !self.vertices.is_empty()
-            || !self.instances.is_empty()
+            || !self.instance_data.is_empty()
             || !self.geo_instances.is_empty();
         // 子树 stencil base（与 draw 的 content_level 抬升一致）：
         // Area cover → +1；clips_children 且走 stencil Push → 再 +1；scissor 不抬 stencil。
@@ -1815,11 +1816,12 @@ impl DrawBatch {
                 instance_count,
                 ..
             } => {
-                if instance_start.saturating_add(*instance_count) > self.instances.len() as u32 {
+                if instance_start.saturating_add(*instance_count) > self.instance_data.len() as u32
+                {
                     return false;
                 }
                 let edge_count = self.polygon_edges.len() / 4;
-                self.instances
+                self.instance_data
                     [*instance_start as usize..(*instance_start + *instance_count) as usize]
                     .iter()
                     .all(|inst| {
@@ -1861,7 +1863,7 @@ impl DrawBatch {
 
     fn record_instance_command(&mut self, start: u32) {
         self.record_pending_mesh_command();
-        let end = self.instances.len() as u32;
+        let end = self.instance_data.len() as u32;
         if end <= start {
             return;
         }
@@ -2238,7 +2240,7 @@ impl DrawBatch {
             bind_group: self.bind_group.clone(),
             text_texture_view: self.text_texture_view.clone(),
             texture_segments: self.texture_segments.clone(),
-            instances: self.instances.clone(),
+            instance_data: self.instance_data.clone(),
             instance_texture_segments: self.instance_texture_segments.clone(),
             particles: self.particles.clone(),
             particle_texture_segments: self.particle_texture_segments.clone(),
@@ -2351,7 +2353,7 @@ impl DrawBatch {
             .instance_texture_segments
             .last()
             .map_or(0, |s| s.instance_start + s.instance_count);
-        let end = self.instances.len() as u32;
+        let end = self.instance_data.len() as u32;
         if end > start {
             self.instance_texture_segments.push(InstanceTextureSegment {
                 instance_start: start,
@@ -2430,8 +2432,8 @@ impl DrawBatch {
         let (c0, c1, c2) = composed.to_cols();
         let transform_index = self.register_transform(c0, c1, c2);
         self.cached_transform_index = saved_cache;
-        let instance_start = self.instances.len() as u32;
-        self.instances.push(ShapeInstance {
+        let instance_start = self.instance_data.len() as u32;
+        self.instance_data.push(InstanceData {
             bounds,
             uv_bounds,
             uv_rect: [self.uv.u0, self.uv.v0, self.uv.u1, self.uv.v1],
@@ -2441,7 +2443,8 @@ impl DrawBatch {
             sdf_type,
             sdf_feather: feather,
             transform_index,
-            _padding: 0,
+            _pad: 0,
+            _pad2: [0, 0],
         });
         self.record_instance_command(instance_start);
         self.note_sdf();

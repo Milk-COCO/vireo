@@ -106,7 +106,7 @@ fn transform_index_stable_across_same_transform() {
     b.set_position(10.0, 20.0);
     draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
     draw_circle(&mut b, Pos::new(0.0, 0.0), 3.0, Some(BLUE));
-    let idxs: Vec<u32> = b.instances.iter().map(|v| v.transform_index).collect();
+    let idxs: Vec<u32> = b.instance_data.iter().map(|v| v.transform_index).collect();
     assert!(idxs.iter().all(|&i| i == idxs[0]));
     // 槽 0 = 单位阵 + 1 个平移
     assert_eq!(b.transform_table.len() / 12, 2);
@@ -119,8 +119,8 @@ fn transform_cache_invalidates_on_set_position() {
     // 不同 Pos 应产生不同 transform entry
     draw_rectangle(&mut b, Pos::new(0.0, 0.0), 5.0, 5.0, Some(RED));
     draw_rectangle(&mut b, Pos::new(100.0, 0.0), 5.0, 5.0, Some(BLUE));
-    let i0 = b.instances[0].transform_index;
-    let i1 = b.instances[1].transform_index;
+    let i0 = b.instance_data[0].transform_index;
+    let i1 = b.instance_data[1].transform_index;
     assert_ne!(i0, i1);
     // 槽 0 = 单位阵 + 2 个不同平移（Pos(0,0) 复用槽 0）
     assert_eq!(b.transform_table.len() / 12, 2);
@@ -138,7 +138,7 @@ fn transform_slot_zero_is_identity_after_shape() {
     assert_eq!(t0[5], 1.0);
     assert_eq!(t0[8], 0.0);
     assert_eq!(t0[9], 0.0);
-    assert_eq!(b.instances[0].transform_index, 1);
+    assert_eq!(b.instance_data[0].transform_index, 1);
     let t1 = &b.transform_table[12..24];
     assert!((t1[8] - 100.0).abs() < 1e-4);
     assert!((t1[9] - 200.0).abs() < 1e-4);
@@ -165,11 +165,11 @@ fn multi_batch_poly_base_patch_values() {
     let mut b1 = DrawBatch::new();
     b1.sdf_feather = Some(1.0);
     draw_polygon(&mut b1, &pts, Some(BLUE));
-    let start_local = b1.instances[0].sdf_params[0];
+    let start_local = b1.instance_data[0].sdf_params[0];
     assert_eq!(start_local, 0.0);
 
     let poly_base = edges0 as f32;
-    let mut patched = b1.instances.clone();
+    let mut patched = b1.instance_data.clone();
     for v in &mut patched {
         if v.sdf_type == 6 || v.sdf_type == 7 {
             v.sdf_params[0] += poly_base;
@@ -212,7 +212,7 @@ fn sdf_instances_store_one_record_per_shape() {
     for i in 0..1000 {
         batch.instance_rectangle(Pos::new(i as f32, 0.0), 8.0, 4.0, Some(RED));
     }
-    assert_eq!(batch.instances.len(), 1000);
+    assert_eq!(batch.instance_data.len(), 1000);
     assert!(batch.vertices.is_empty());
     assert!(batch.indices.is_empty());
     assert!(batch.has_sdf);
@@ -223,7 +223,7 @@ fn instance_shapes_capture_transform_and_position() {
     let mut batch = DrawBatch::new();
     batch.set_position(10.0, 20.0);
     batch.instance_circle(Pos::new(5.0, 6.0), 3.0, Some(WHITE));
-    let instance = batch.instances[0];
+    let instance = batch.instance_data[0];
     assert_ne!(instance.transform_index, 0);
     let (_, _, translation) =
         DrawBatch::table_cols_at(&batch.transform_table, instance.transform_index);
@@ -236,7 +236,7 @@ fn instance_geometry_mode_falls_back_to_vertices() {
     let mut batch = DrawBatch::new();
     batch.sdf_feather = None;
     batch.instance_circle(Pos::ZERO, 5.0, Some(WHITE));
-    assert!(batch.instances.is_empty());
+    assert!(batch.instance_data.is_empty());
     assert!(!batch.geo_instances.is_empty());
     assert!(!batch.geo_template_vertices.is_empty());
     assert!(!batch.geo_template_indices.is_empty());
@@ -292,14 +292,14 @@ fn extended_sdf_instances_do_not_expand_vertices() {
     );
     batch.instance_polygon(&[(0.0, 0.0), (8.0, 0.0), (4.0, 6.0)], Some(WHITE));
     batch.instance_line_chain(&[(0.0, 0.0), (4.0, 2.0), (8.0, 0.0)], 2.0, Some(WHITE));
-    assert_eq!(batch.instances.len(), 6);
+    assert_eq!(batch.instance_data.len(), 6);
     assert!(batch.vertices.is_empty());
-    assert_eq!(batch.instances[0].sdf_type, 2);
-    assert_eq!(batch.instances[1].sdf_type, 3);
-    assert_eq!(batch.instances[2].sdf_type, 4);
-    assert_eq!(batch.instances[3].sdf_type, 5);
-    assert_eq!(batch.instances[4].sdf_type, 6);
-    assert_eq!(batch.instances[5].sdf_type, 7);
+    assert_eq!(batch.instance_data[0].sdf_type, 2);
+    assert_eq!(batch.instance_data[1].sdf_type, 3);
+    assert_eq!(batch.instance_data[2].sdf_type, 4);
+    assert_eq!(batch.instance_data[3].sdf_type, 5);
+    assert_eq!(batch.instance_data[4].sdf_type, 6);
+    assert_eq!(batch.instance_data[5].sdf_type, 7);
     assert!(!batch.polygon_edges.is_empty());
 }
 
@@ -311,8 +311,8 @@ fn repeated_instance_polygon_reuses_edges() {
     batch.instance_polygon(&points, Some(WHITE));
 
     assert_eq!(batch.polygon_edges.len(), points.len() * 4);
-    assert_eq!(batch.instances[0].sdf_params[0], 0.0);
-    assert_eq!(batch.instances[1].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[0].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[1].sdf_params[0], 0.0);
 }
 
 #[test]
@@ -322,8 +322,8 @@ fn polygon_and_line_chain_edges_use_distinct_templates() {
     batch.instance_polygon(&points, Some(WHITE));
     batch.instance_line_chain(&points, 2.0, Some(WHITE));
 
-    assert_eq!(batch.instances[0].sdf_params[0], 0.0);
-    assert_eq!(batch.instances[1].sdf_params[0], 3.0);
+    assert_eq!(batch.instance_data[0].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[1].sdf_params[0], 3.0);
     assert_eq!(batch.polygon_edges.len(), (3 + 2) * 4);
 }
 
@@ -335,9 +335,9 @@ fn repeated_instance_line_chain_reuses_edges() {
     batch.instance_line_chain(&points, 4.0, Some(RED));
 
     assert_eq!(batch.polygon_edges.len(), 2 * 4);
-    assert_eq!(batch.instances[0].sdf_params[0], 0.0);
-    assert_eq!(batch.instances[1].sdf_params[0], 0.0);
-    assert_eq!(batch.instances[1].sdf_params[2], 2.0);
+    assert_eq!(batch.instance_data[0].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[1].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[1].sdf_params[2], 2.0);
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn edge_template_recovers_after_public_edge_buffer_mutation() {
     batch.instance_polygon(&points, Some(WHITE));
 
     assert_eq!(batch.polygon_edges, expected);
-    assert_eq!(batch.instances[1].sdf_params[0], 0.0);
+    assert_eq!(batch.instance_data[1].sdf_params[0], 0.0);
 }
 
 #[test]
@@ -373,10 +373,12 @@ fn instance_shape_covers_positioned_and_outline_variants() {
         },
         crate::shapes::ShapeOverride::default(),
     );
-    assert_eq!(batch.instances.len(), 2);
+    assert_eq!(batch.instance_data.len(), 2);
     assert!(batch.vertices.is_empty());
-    let (_, _, translation) =
-        DrawBatch::table_cols_at(&batch.transform_table, batch.instances[0].transform_index);
+    let (_, _, translation) = DrawBatch::table_cols_at(
+        &batch.transform_table,
+        batch.instance_data[0].transform_index,
+    );
     assert!((translation[0] - 20.0).abs() < 1e-5);
     assert!((translation[1] - 30.0).abs() < 1e-5);
 }
@@ -486,7 +488,7 @@ fn automatic_instances_merge_contiguous_commands() {
     draw_rectangle(&mut batch, Pos::ZERO, 8.0, 8.0, Some(RED));
     draw_circle(&mut batch, Pos::new(10.0, 0.0), 4.0, Some(BLUE));
 
-    assert_eq!(batch.instances.len(), 2);
+    assert_eq!(batch.instance_data.len(), 2);
     assert_eq!(batch.shape_commands.len(), 1);
     assert!(matches!(
         batch.shape_commands[0],
@@ -708,8 +710,8 @@ fn automatic_rectangle_bounds_include_feather() {
     batch.sdf_feather = Some(2.0);
     draw_rectangle(&mut batch, Pos::ZERO, 10.0, 20.0, Some(WHITE));
 
-    assert_eq!(batch.instances[0].bounds, [-2.0, -2.0, 12.0, 22.0]);
-    assert_eq!(batch.instances[0].uv_bounds, [0.0, 0.0, 10.0, 20.0]);
+    assert_eq!(batch.instance_data[0].bounds, [-2.0, -2.0, 12.0, 22.0]);
+    assert_eq!(batch.instance_data[0].uv_bounds, [0.0, 0.0, 10.0, 20.0]);
 }
 
 #[test]
@@ -811,7 +813,7 @@ fn inherit_transform_left_muls_child_table() {
     child.sdf_feather = Some(1.0);
     child.inherit = InheritFromParent::TRANSFORM;
     draw_rectangle(&mut child, Pos::new(0.0, 0.0), 10.0, 10.0, Some(RED));
-    let idx = child.instances[0].transform_index as usize;
+    let idx = child.instance_data[0].transform_index as usize;
     let base = idx * 12;
     // 继承前局部表为恒等
     assert_eq!(child.transform_table[base], 1.0);
@@ -906,7 +908,7 @@ fn nested_clips_stencil_ref_sequence() {
         match item {
             Some(batch) => {
                 let has_geom = !batch.vertices.is_empty()
-                    || !batch.instances.is_empty()
+                    || !batch.instance_data.is_empty()
                     || !batch.geo_instances.is_empty();
                 let has_draw = has_geom || !batch.texts.entries.is_empty();
                 let (op, r) = if batch.clips_children && has_geom {
@@ -1011,7 +1013,7 @@ fn nested_text_and_shape_share_composed_transform() {
     // --- root ---
     assert_eq!(root.texts.entries.len(), 1);
     let rti = root.texts.entries[0].transform_index();
-    let rvi = root.instances[0].transform_index;
+    let rvi = root.instance_data[0].transform_index;
     assert_eq!(rti, rvi, "root text/shape index");
     let (_, _, _, _, rtx, rty) = mat6(&root.transform_table, rti);
     assert!((rtx - 230.0).abs() < 1e-3, "root tx={rtx}");
@@ -1021,7 +1023,7 @@ fn nested_text_and_shape_share_composed_transform() {
     let mid = &root.children[0];
     assert_eq!(mid.texts.entries.len(), 1);
     let mti = mid.texts.entries[0].transform_index();
-    let mvi = mid.instances[0].transform_index;
+    let mvi = mid.instance_data[0].transform_index;
     assert_eq!(mti, mvi, "mid text/shape index");
     let (_, _, _, _, mtx, mty) = mat6(&mid.transform_table, mti);
     assert!(
@@ -1033,7 +1035,7 @@ fn nested_text_and_shape_share_composed_transform() {
     let leaf = &root.children[0].children[0];
     assert_eq!(leaf.texts.entries.len(), 1);
     let lti = leaf.texts.entries[0].transform_index();
-    let lvi = leaf.instances[0].transform_index;
+    let lvi = leaf.instance_data[0].transform_index;
     assert_eq!(lti, lvi, "leaf text/shape index");
     let (_, _, _, _, ltx, lty) = mat6(&leaf.transform_table, lti);
     assert!(
@@ -1097,7 +1099,7 @@ fn text_before_shape_shares_transform_index() {
     draw_rectangle(&mut b, Pos::new(0.0, 0.0), 4.0, 4.0, Some(RED));
     assert_eq!(
         b.texts.entries[0].transform_index(),
-        b.instances[0].transform_index
+        b.instance_data[0].transform_index
     );
     let (_, _, _, _, tx, ty) = mat6(&b.transform_table, b.texts.entries[0].transform_index());
     assert!((tx - 12.0).abs() < 1e-4 && (ty - 34.0).abs() < 1e-4);
@@ -1289,7 +1291,7 @@ fn area_plus_clips_child_stencil_ref_not_double_counted() {
                 }
                 let content = clip_depth + anc + (has_own as u32);
                 let has_geom = !batch.vertices.is_empty()
-                    || !batch.instances.is_empty()
+                    || !batch.instance_data.is_empty()
                     || !batch.geo_instances.is_empty();
                 if batch.clips_children && has_geom {
                     parent_push_ref = Some(content);
@@ -1534,7 +1536,7 @@ fn geo_instance_clip_emits_stencil_pop() {
     g.clips_children = true;
     crate::shapes::draw_triangle(&mut g, 0.0, 0.0, 100.0, 0.0, 0.0, 50.0, Some(WHITE));
     assert!(!g.geo_instances.is_empty());
-    assert!(g.vertices.is_empty() && g.instances.is_empty());
+    assert!(g.vertices.is_empty() && g.instance_data.is_empty());
     let mut events: Vec<DrawEvent> = Vec::new();
     g.flatten_events(
         &mut events,

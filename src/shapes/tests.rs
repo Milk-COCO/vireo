@@ -44,11 +44,11 @@ fn opts_sdf_and_transform_restore_batch_state() {
     );
     assert_eq!(batch.sdf_feather, None);
     assert_eq!(batch.color, WHITE);
-    assert_eq!(batch.instances[0].sdf_type, 1);
-    assert_eq!(batch.instances[0].color, [RED.r, RED.g, RED.b, RED.a]);
+    assert_eq!(batch.instance_data[0].sdf_type, 1);
+    assert_eq!(batch.instance_data[0].color, [RED.r, RED.g, RED.b, RED.a]);
     // 覆盖后的 shape 与 batch 后续 draw 应使用不同 transform_index
     draw_rectangle(&mut batch, Pos::new(0.0, 0.0), 1.0, 1.0, Some(BLUE));
-    let idx_override = batch.instances[0].transform_index;
+    let idx_override = batch.instance_data[0].transform_index;
     let idx_restored = batch.geo_instances[0].transform_index;
     assert_ne!(idx_override, idx_restored);
 }
@@ -68,9 +68,9 @@ fn draw_shape_matches_draw_circle_sdf() {
         },
         ShapeOverride::from_color(Some(RED)),
     );
-    assert_eq!(a.instances.len(), b.instances.len());
-    assert_eq!(a.instances[0].sdf_type, 1);
-    assert_eq!(a.instances[0].sdf_params, b.instances[0].sdf_params);
+    assert_eq!(a.instance_data.len(), b.instance_data.len());
+    assert_eq!(a.instance_data[0].sdf_type, 1);
+    assert_eq!(a.instance_data[0].sdf_params, b.instance_data[0].sdf_params);
 }
 
 #[test]
@@ -100,8 +100,8 @@ fn circle_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(0.0);
     draw_circle(&mut batch, Pos::new(100.0, 100.0), 50.0, Some(RED));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 1);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 1);
 }
 
 #[test]
@@ -124,8 +124,8 @@ fn line_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
     draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 2.0, Some(WHITE));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 3);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 3);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn line_zero_thickness_both_modes_combined() {
     // default SDF mode: zero thickness → no SDF instances
     let mut batch = DrawBatch::new();
     draw_line(&mut batch, 0.0, 0.0, 100.0, 0.0, 0.0, Some(WHITE));
-    assert!(batch.instances.is_empty());
+    assert!(batch.instance_data.is_empty());
 }
 
 #[test]
@@ -162,8 +162,8 @@ fn ellipse_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
     draw_ellipse(&mut batch, Pos::new(0.0, 0.0), 30.0, 20.0, Some(BLUE));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 1);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 1);
 }
 
 #[test]
@@ -201,8 +201,8 @@ fn rounded_rect_sdf_produces_quad() {
         10.0,
         Some(GREEN),
     );
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 2);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 2);
 }
 
 #[test]
@@ -226,15 +226,15 @@ fn triangle_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
     draw_triangle(&mut batch, 0.0, 0.0, 100.0, 0.0, 50.0, 100.0, Some(RED));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 4);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 4);
 }
 
 #[test]
 fn degenerate_triangle_skipped_in_default_sdf_mode() {
     let mut batch = DrawBatch::new();
     draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 20.0, 0.0, Some(RED));
-    assert!(batch.instances.is_empty());
+    assert!(batch.instance_data.is_empty());
 }
 
 #[test]
@@ -253,8 +253,8 @@ fn polygon_sdf_produces_quad() {
     batch.sdf_feather = Some(1.0);
     let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
     draw_polygon(&mut batch, &pts, Some(WHITE));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 6);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 6);
 }
 
 #[test]
@@ -291,8 +291,8 @@ fn arc_sdf_produces_quad() {
         std::f32::consts::PI,
         Some(RED),
     );
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 5);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 5);
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn arc_zero_radius_and_span_skipped_in_default_sdf_mode() {
     let mut batch = DrawBatch::new();
     draw_arc(&mut batch, Pos::ZERO, 0.0, 0.0, 1.0, Some(RED));
     draw_arc(&mut batch, Pos::ZERO, 10.0, 1.0, 1.0, Some(RED));
-    assert!(batch.instances.is_empty());
+    assert!(batch.instance_data.is_empty());
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn negative_radius_and_size_skipped() {
     draw_ellipse(&mut batch, Pos::new(0.0, 0.0), -3.0, 5.0, Some(RED));
     draw_rectangle(&mut batch, Pos::new(0.0, 0.0), -10.0, 10.0, Some(RED));
     draw_arc(&mut batch, Pos::new(0.0, 0.0), -5.0, 0.0, 1.0, Some(RED));
-    assert!(batch.instances.is_empty());
+    assert!(batch.instance_data.is_empty());
     assert!(batch.geo_instances.is_empty());
 }
 
@@ -329,7 +329,7 @@ fn multiple_shapes_in_one_batch() {
     draw_circle(&mut batch, Pos::new(100.0, 100.0), 5.0, Some(BLUE));
     draw_triangle(&mut batch, 0.0, 0.0, 10.0, 0.0, 5.0, 10.0, Some(GREEN));
 
-    assert_eq!(batch.instances.len(), 3);
+    assert_eq!(batch.instance_data.len(), 3);
     assert!(batch.vertices.is_empty());
     assert!(batch.indices.is_empty());
 }
@@ -338,8 +338,8 @@ fn multiple_shapes_in_one_batch() {
 fn rect_default_mode_is_sdf() {
     let mut batch = DrawBatch::new();
     draw_rectangle(&mut batch, Pos::new(10.0, 10.0), 100.0, 60.0, Some(GREEN));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 2);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 2);
 }
 
 #[test]
@@ -405,6 +405,6 @@ fn line_chain_sdf_produces_quad() {
     batch.sdf_feather = Some(1.0);
     let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
     draw_line_chain(&mut batch, &pts, 2.0, Some(WHITE));
-    assert_eq!(batch.instances.len(), 1);
-    assert_eq!(batch.instances[0].sdf_type, 7);
+    assert_eq!(batch.instance_data.len(), 1);
+    assert_eq!(batch.instance_data[0].sdf_type, 7);
 }

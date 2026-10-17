@@ -2,17 +2,21 @@ struct QuadVertex {
     @location(0) corner: vec2<f32>,
 };
 
-struct InstanceInput {
-    @location(1) bounds: vec4<f32>,
-    @location(2) uv_bounds: vec4<f32>,
-    @location(3) uv_rect: vec4<f32>,
-    @location(4) color: vec4<f32>,
-    @location(5) sdf_params: vec4<f32>,
-    @location(6) sdf_extra: vec2<f32>,
-    @location(7) @interpolate(flat) sdf_type: u32,
-    @location(8) sdf_feather: f32,
-    @location(9) @interpolate(flat) transform_index: u32,
+struct InstanceData {
+    bounds: vec4<f32>,
+    uv_bounds: vec4<f32>,
+    uv_rect: vec4<f32>,
+    color: vec4<f32>,
+    sdf_params: vec4<f32>,
+    sdf_extra: vec2<f32>,
+    sdf_type: u32,
+    sdf_feather: f32,
+    transform_index: u32,
+    _pad: u32,
+    _pad2: vec2<u32>,
 };
+
+@group(2) @binding(2) var<storage> instances: array<InstanceData>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -37,20 +41,21 @@ struct Camera {
 @group(2) @binding(1) var<storage> polygon_edges: array<vec4<f32>>;
 
 @vertex
-fn vs_main(vertex: QuadVertex, instance: InstanceInput) -> VertexOutput {
+fn vs_main(vertex: QuadVertex, @builtin(instance_index) inst_idx: u32) -> VertexOutput {
     var out: VertexOutput;
+    let inst = instances[inst_idx];
     let t = vertex.corner * 0.5 + vec2<f32>(0.5);
-    let local_pos = mix(instance.bounds.xy, instance.bounds.zw, t);
-    let world_pos = transforms[instance.transform_index] * vec3<f32>(local_pos, 1.0);
+    let local_pos = mix(inst.bounds.xy, inst.bounds.zw, t);
+    let world_pos = transforms[inst.transform_index] * vec3<f32>(local_pos, 1.0);
     out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
-    let uv_t = (local_pos - instance.uv_bounds.xy) / (instance.uv_bounds.zw - instance.uv_bounds.xy);
-    out.uv = mix(instance.uv_rect.xy, instance.uv_rect.zw, uv_t);
-    out.color = instance.color;
-    out.sdf_params = instance.sdf_params;
+    let uv_t = (local_pos - inst.uv_bounds.xy) / (inst.uv_bounds.zw - inst.uv_bounds.xy);
+    out.uv = mix(inst.uv_rect.xy, inst.uv_rect.zw, uv_t);
+    out.color = inst.color;
+    out.sdf_params = inst.sdf_params;
     out.local_pos = local_pos;
-    out.sdf_type = instance.sdf_type;
-    out.sdf_feather = instance.sdf_feather;
-    out.sdf_extra = instance.sdf_extra;
+    out.sdf_type = inst.sdf_type;
+    out.sdf_feather = inst.sdf_feather;
+    out.sdf_extra = inst.sdf_extra;
     return out;
 }
 

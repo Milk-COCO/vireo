@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use crate::material::Material;
 
-use super::{
-    GeoInstance, GeoVertex, GpuContext, ParticleInstance, QuadVertex, ShapeInstance, Vertex,
-};
+use super::{GeoInstance, GeoVertex, GpuContext, ParticleInstance, QuadVertex, Vertex};
 
 // ---------------------------------------------------------------------------
 // WGSL constants and helper functions
@@ -476,8 +474,9 @@ pub(crate) enum MaterialTarget {
 ///
 /// - `Mesh`：单 buffer `[Vertex]`（68B），用于 `DrawBatch.vertices` / Area 全屏 quad
 ///   / custom VS Material 路径。
-/// - `SdfInstance`：双 buffer `[QuadVertex, ShapeInstance]`（8B + 104B），
-///   共享 unit quad + 每实例 SDF 参数；1 dc 跨参数合并（round-38+ 父提交基线）。
+/// - `SdfInstance`：单 buffer `[QuadVertex]`（8B）+ group 2 binding 2 的
+///   `InstanceData` storage（vertex-pulling，VS 按 `instance_index` 读取）；
+///   1 dc 跨参数合并（round-38+ 父提交基线）。
 ///   **仅 fragment-only Material 可用**（custom VS 路径需走 Mesh layout）。
 /// - `GeoInstance`：双 buffer `[GeoVertex, GeoInstance]`（16B + 32B），
 ///   共享模板 + 每实例 color/transform；支持 `merge_geo_templates` 合并。
@@ -851,7 +850,7 @@ impl GpuContext {
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some("vs_main"),
-                    buffers: &[Some(QuadVertex::desc()), Some(ShapeInstance::desc())],
+                    buffers: &[Some(QuadVertex::desc())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -1353,9 +1352,7 @@ impl GpuContext {
             });
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> = match shape_layout {
             ShapeVertexLayout::Mesh => vec![Some(Vertex::desc())],
-            ShapeVertexLayout::SdfInstance => {
-                vec![Some(QuadVertex::desc()), Some(ShapeInstance::desc())]
-            }
+            ShapeVertexLayout::SdfInstance => vec![Some(QuadVertex::desc())],
             ShapeVertexLayout::GeoInstance => {
                 vec![Some(GeoVertex::desc()), Some(GeoInstance::desc())]
             }

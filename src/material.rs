@@ -403,7 +403,7 @@ impl Material {
     }
 
     /// 是否带自定义 vertex shader。
-    /// 决定 shape path 走 mesh（[`Vertex`](crate::gpu::Vertex)）还是 instance layout（`QuadVertex` / `ShapeInstance` /
+    /// 决定 shape path 走 mesh（[`Vertex`](crate::gpu::Vertex)）还是 instance layout（`QuadVertex` / `InstanceData` /
     /// `GeoVertex` / `GeoInstance`）。Fragment-only material 在 SDF/Geo batch 上可走 instance 路径；
     /// 带 custom VS 时必须走 mesh（VS 与 instance 字段契约不一致）。
     pub fn has_custom_vertex_shader(&self) -> bool {

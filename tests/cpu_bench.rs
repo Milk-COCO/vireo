@@ -497,7 +497,7 @@ fn bench_merge_path_cpu() {
 #[test]
 fn bench_particle_push() {
     println!("\n=== Particle Push (Phase 0 gate; read under --release) ===");
-    let one = ShapeInstance {
+    let one = InstanceData {
         bounds: [0.0, 0.0, 14.0, 14.0],
         uv_bounds: [0.0, 0.0, 1.0, 1.0],
         uv_rect: [0.0, 0.0, 1.0, 1.0],
@@ -507,7 +507,8 @@ fn bench_particle_push() {
         sdf_type: 0,
         sdf_feather: 1.0,
         transform_index: 0,
-        _padding: 0,
+        _pad: 0,
+        _pad2: [0, 0],
     };
     for &n in &[500usize, 2000usize] {
         // (i) 现状：逐调用推送（带旋转，贴近 note/FX 负载）
@@ -531,7 +532,7 @@ fn bench_particle_push() {
         );
         // (ii) 下限：同等字节 bulk memcpy（提案能达到的最好情况）
         let template = vec![one; n];
-        let mut buf: Vec<ShapeInstance> = Vec::with_capacity(n);
+        let mut buf: Vec<InstanceData> = Vec::with_capacity(n);
         let (_, total) = time_ms(|| {
             for _ in 0..60 {
                 buf.clear();
@@ -540,7 +541,7 @@ fn bench_particle_push() {
         });
         println!(
             "  {:<40} {:>8.3} ms/frame",
-            format!("bulk memcpy {n}x104B (lower bound)"),
+            format!("bulk memcpy {n}x112B (lower bound)"),
             total / 60.0
         );
     }

@@ -172,8 +172,8 @@ pub mod prelude {
     pub use crate::draw_text_hud;
     pub use crate::gpu::ClockIndex;
     pub use crate::gpu::GpuContext;
+    pub use crate::gpu::InstanceData;
     pub use crate::gpu::ParticleInstance;
-    pub use crate::gpu::ShapeInstance;
     pub use crate::gpu::VIREO_TARGET_SHAPE;
     pub use crate::gpu::VIREO_TARGET_TEXT;
     pub use crate::gpu::Vertex;

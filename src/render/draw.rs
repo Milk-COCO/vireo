@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::gpu::{
-    ClockIndex, GeoInstance, GeoVertex, MaterialTarget, ParticleInstance, ShapeInstance, Vertex,
+    ClockIndex, GeoInstance, GeoVertex, InstanceData, MaterialTarget, ParticleInstance, Vertex,
 };
 use crate::material::Material;
 use crate::math::{IDENTITY_TRANSFORM_ROW, Transform, left_mul_view_table};
@@ -61,7 +61,7 @@ impl Renderer {
         );
 
         let has_content = clear_color.is_some()
-            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instances.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
+            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instance_data.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
             *self.last_draw_calls.lock() = 0;
@@ -124,7 +124,7 @@ impl Renderer {
             ref_stack: &mut Vec<u32>,
         ) -> (u32, u32) {
             let has_geom = !batch.vertices.is_empty()
-                || !batch.instances.is_empty()
+                || !batch.instance_data.is_empty()
                 || !batch.geo_instances.is_empty()
                 || !batch.particles.is_empty();
             let has_draw = has_geom || !batch.texts.entries.is_empty();
@@ -177,7 +177,7 @@ impl Renderer {
                     let use_scissor = batch.uses_scissor_path(has_own_area);
                     let (stencil_op, stencil_ref) = if use_scissor {
                         let has_draw = !batch.vertices.is_empty()
-                            || !batch.instances.is_empty()
+                            || !batch.instance_data.is_empty()
                             || !batch.geo_instances.is_empty()
                             || !batch.texts.entries.is_empty();
                         if content_level > 0 && batch.inherit.clipped && has_draw {
@@ -315,8 +315,8 @@ impl Renderer {
                     total_vcount += batch.vertices.len() as u32;
                     total_icount += batch.indices.len() as u32;
                     if batch.custom_material.is_some() {
-                        total_vcount += batch.instances.len() as u32 * 4;
-                        total_icount += batch.instances.len() as u32 * 6;
+                        total_vcount += batch.instance_data.len() as u32 * 4;
+                        total_icount += batch.instance_data.len() as u32 * 6;
                     }
                     batch_geo_vertex_base.push(combined_geo_vertices.len() as u32);
                     batch_geo_index_base.push(combined_geo_indices.len() as u32);
@@ -403,10 +403,10 @@ impl Renderer {
                         .as_ref()
                         .map(|m| !m.has_custom_vertex_shader())
                         .unwrap_or(true);
-                    let use_instances = !batch.instances.is_empty() && fragment_only;
+                    let use_instances = !batch.instance_data.is_empty() && fragment_only;
                     if use_instances {
                         let transform_base = batch_transform_bases[info_idx];
-                        combined_instances.extend(batch.instances.iter().copied().map(
+                        combined_instances.extend(batch.instance_data.iter().copied().map(
                             |mut instance| {
                                 instance.transform_index += transform_base;
                                 if instance.sdf_type == 6 || instance.sdf_type == 7 {
@@ -495,7 +495,7 @@ impl Renderer {
                     } else if batch.instance_texture_segments.is_empty() {
                         vec![InstanceSegment {
                             instance_start,
-                            instance_count: batch.instances.len() as u32,
+                            instance_count: batch.instance_data.len() as u32,
                             bind_group: resolve_bg(batch.bind_group.clone()),
                             material: batch_material.clone(),
                             blend: batch_blend,
@@ -517,7 +517,7 @@ impl Renderer {
                         let last_end = segments
                             .last()
                             .map_or(instance_start, |s| s.instance_start + s.instance_count);
-                        let total_end = instance_start + batch.instances.len() as u32;
+                        let total_end = instance_start + batch.instance_data.len() as u32;
                         if last_end < total_end {
                             segments.push(InstanceSegment {
                                 instance_start: last_end,
@@ -689,7 +689,7 @@ impl Renderer {
                         }
                     };
                     let shape = if !batch.vertices.is_empty()
-                        || !batch.instances.is_empty()
+                        || !batch.instance_data.is_empty()
                         || !batch.geo_instances.is_empty()
                     {
                         let transform_base = batch_transform_bases[info_idx];
@@ -712,7 +712,8 @@ impl Renderer {
                         combined_idata.extend_from_slice(bytemuck::cast_slice(&batch.indices));
                         let mut mesh_index_count = batch.indices.len() as u32;
                         if !use_instances {
-                            for (instance_index, instance) in batch.instances.iter().enumerate() {
+                            for (instance_index, instance) in batch.instance_data.iter().enumerate()
+                            {
                                 let base = batch.vertices.len() as u32 + instance_index as u32 * 4;
                                 let [x0, y0, x1, y1] = instance.bounds;
                                 let [ux0, uy0, ux1, uy1] = instance.uv_bounds;
@@ -1011,7 +1012,7 @@ impl Renderer {
                             + if use_instances {
                                 0
                             } else {
-                                batch.instances.len() as u32 * 4
+                                batch.instance_data.len() as u32 * 4
                             };
                         idx_offset += mesh_index_count;
                         Some(info)
@@ -1224,14 +1225,13 @@ impl Renderer {
                 .write_buffer(&ibuf.as_ref().unwrap().0, 0, &combined_idata);
         }
         if !combined_instances.is_empty() {
-            let size = (combined_instances.len() * size_of::<ShapeInstance>()) as u64;
-            self.ensure_instance_buffer(size);
-            let instance_buf = self.instance_buf.lock();
-            self.gpu.queue.write_buffer(
-                &instance_buf.as_ref().unwrap().0,
-                0,
-                bytemuck::cast_slice(&combined_instances),
-            );
+            let size = (combined_instances.len() * size_of::<InstanceData>()) as u64;
+            self.ensure_instance_storage_buffer(size);
+            let instance_buf = self.gpu.instance_storage_buf.lock().unwrap();
+            let buf = &(*instance_buf).as_ref().unwrap().0;
+            self.gpu
+                .queue
+                .write_buffer(buf, 0, bytemuck::cast_slice(&combined_instances));
         }
 
         if !combined_particles.is_empty() {
@@ -1392,6 +1392,15 @@ impl Renderer {
                     .as_ref()
                     .map(|(buf, _)| buf)
                     .unwrap_or(&self.gpu.polygon_dummy_buf);
+                // instance storage 是本帧上传阶段刚写入的 buffer；此处 clone 句柄
+                // （绑定不持有所有权），避免临时值在表达式末尾被释放。
+                let instance_buf = {
+                    let instance_storage = self.gpu.instance_storage_buf.lock().unwrap();
+                    (*instance_storage)
+                        .as_ref()
+                        .map(|(buf, _)| buf.clone())
+                        .unwrap_or_else(|| self.gpu.transform_dummy_buf.clone())
+                };
                 *cache = Some(
                     self.gpu
                         .device
@@ -1406,6 +1415,10 @@ impl Renderer {
                                 wgpu::BindGroupEntry {
                                     binding: 1,
                                     resource: polygon_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: instance_buf.as_entire_binding(),
                                 },
                             ],
                         }),
@@ -1464,7 +1477,6 @@ impl Renderer {
 
             let vbuf = self.vertex_buf.lock();
             let ibuf = self.index_buf.lock();
-            let instance_buf = self.instance_buf.lock();
             let particle_buf = self.particle_buf.lock();
             let geo_template_vbuf = self.geo_template_vertex_buf.lock();
             let geo_template_ibuf = self.geo_template_index_buf.lock();
@@ -1686,10 +1698,6 @@ impl Renderer {
                                             0,
                                             self.gpu.instance_quad_vertex_buf.slice(..),
                                         );
-                                        pass.set_vertex_buffer(
-                                            1,
-                                            instance_buf.as_ref().unwrap().0.slice(..),
-                                        );
                                         pass.set_index_buffer(
                                             self.gpu.instance_quad_index_buf.slice(..),
                                             wgpu::IndexFormat::Uint32,
@@ -1725,10 +1733,6 @@ impl Renderer {
                                         pass.set_vertex_buffer(
                                             0,
                                             self.gpu.instance_quad_vertex_buf.slice(..),
-                                        );
-                                        pass.set_vertex_buffer(
-                                            1,
-                                            instance_buf.as_ref().unwrap().0.slice(..),
                                         );
                                         pass.set_index_buffer(
                                             self.gpu.instance_quad_index_buf.slice(..),
@@ -2143,10 +2147,6 @@ impl Renderer {
                                     0,
                                     self.gpu.instance_quad_vertex_buf.slice(..),
                                 );
-                                pass.set_vertex_buffer(
-                                    1,
-                                    instance_buf.as_ref().unwrap().0.slice(..),
-                                );
                                 pass.set_index_buffer(
                                     self.gpu.instance_quad_index_buf.slice(..),
                                     wgpu::IndexFormat::Uint32,
@@ -2184,10 +2184,6 @@ impl Renderer {
                                 pass.set_vertex_buffer(
                                     0,
                                     self.gpu.instance_quad_vertex_buf.slice(..),
-                                );
-                                pass.set_vertex_buffer(
-                                    1,
-                                    instance_buf.as_ref().unwrap().0.slice(..),
                                 );
                                 pass.set_index_buffer(
                                     self.gpu.instance_quad_index_buf.slice(..),

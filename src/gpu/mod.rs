@@ -36,6 +36,9 @@ pub struct GpuContext {
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub(crate) instance_quad_vertex_buf: wgpu::Buffer,
     pub(crate) instance_quad_index_buf: wgpu::Buffer,
+    /// SDF 实例数据存储（vertex-pulling，VS 按 instance_index 读取）。
+    /// 每帧由 draw 阶段重写上传。
+    pub(crate) instance_storage_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     pub surface_format: Mutex<wgpu::TextureFormat>,
     pub text_ctx: Mutex<TextContext>,
     /// 跨材质 bind group 复用池。
@@ -150,9 +153,28 @@ impl GeoInstance {
     }
 }
 
+/// 实例数据记录（112B），存储于 group 2 binding 2 storage buffer，
+/// VS 按 `instance_index` 进行 vertex-pulling 读取（SDF 实例路径）。
+/// 尾部 `_pad`/`_pad2` 补齐 16B 对齐（WGSL `array<InstanceData>` stride = 112）。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceData {
+    pub bounds: [f32; 4],
+    pub uv_bounds: [f32; 4],
+    pub uv_rect: [f32; 4],
+    pub color: [f32; 4],
+    pub sdf_params: [f32; 4],
+    pub sdf_extra: [f32; 2],
+    pub sdf_type: u32,
+    pub sdf_feather: f32,
+    pub transform_index: u32,
+    pub _pad: u32,
+    pub _pad2: [u32; 2],
+}
+
 /// 粒子实例（152B）：spawn 参数全烘焙，VS 按 `camera.time` 积分（`pos += vel*age` +
 /// fade 包络），存活期 CPU 零更新。复用共享 unit quad（`instance_quad_*_buf`），
-/// 与 `ShapeInstance` 独立成管线（见 `ShapeVertexLayout::Particle`），默认管线零影响。
+/// 与 `InstanceData` 独立成管线（见 `ShapeVertexLayout::Particle`），默认管线零影响。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleInstance {
@@ -477,6 +499,16 @@ impl GpuContext {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -619,6 +651,13 @@ impl GpuContext {
             contents: bytemuck::cast_slice(&identity),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        // SDF 实例数据 storage（vertex-pulling，VS 按 instance_index 读取）。
+        // 占位尺寸 = 单条记录大小；WSGL `array<InstanceData>` stride 为 112。
+        let instance_storage_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instance storage buffer"),
+            contents: &[0u8; std::mem::size_of::<InstanceData>()],
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
         let engine_storage_dummy_bind_group =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("engine storage dummy bind group"),
@@ -631,6 +670,10 @@ impl GpuContext {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: polygon_dummy_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: instance_storage_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -816,6 +859,7 @@ impl GpuContext {
             transform_dummy_buf,
             instance_quad_vertex_buf,
             instance_quad_index_buf,
+            instance_storage_buf: Mutex::new(None),
             surface_format: Mutex::new(surface_format),
             text_ctx,
             bind_group_pool: crate::material::BindGroupPool::new(),
@@ -1395,78 +1439,6 @@ pub struct Vertex {
     /// 变换矩阵索引，指向 `transforms` storage buffer（group 2 binding 0）。
     /// 0 = 恒等矩阵（默认）。
     pub transform_index: u32,
-}
-
-/// SDF quad instance. A shared four-vertex quad supplies the corner coordinates.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ShapeInstance {
-    pub bounds: [f32; 4],
-    pub uv_bounds: [f32; 4],
-    pub uv_rect: [f32; 4],
-    pub color: [f32; 4],
-    pub sdf_params: [f32; 4],
-    pub sdf_extra: [f32; 2],
-    pub sdf_type: u32,
-    pub sdf_feather: f32,
-    pub transform_index: u32,
-    pub _padding: u32,
-}
-
-impl ShapeInstance {
-    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    offset: 16,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 32,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 48,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    offset: 64,
-                    format: wgpu::VertexFormat::Float32x4,
-                    shader_location: 5,
-                },
-                wgpu::VertexAttribute {
-                    offset: 80,
-                    format: wgpu::VertexFormat::Float32x2,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    offset: 88,
-                    format: wgpu::VertexFormat::Uint32,
-                    shader_location: 7,
-                },
-                wgpu::VertexAttribute {
-                    offset: 92,
-                    format: wgpu::VertexFormat::Float32,
-                    shader_location: 8,
-                },
-                wgpu::VertexAttribute {
-                    offset: 96,
-                    format: wgpu::VertexFormat::Uint32,
-                    shader_location: 9,
-                },
-            ],
-        }
-    }
 }
 
 impl Vertex {

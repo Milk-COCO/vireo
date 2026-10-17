@@ -147,6 +147,12 @@
     owned 克隆（原返回内部引用，与锁共存不了）。`Texture` 新增 `format` 字段。
     受影响的只有三处示例（`offscreen` / `offscreen_aa` /
     `custom_material_post`，`&canvas.texture` 改为持锁守卫）。
+- SDF 实例路径改为 storage vertex-pulling：实例记录集中到 `@group(2) @binding(2)`
+  storage buffer（`InstanceData`，112B，为 custom VS 提供可追加的稳定 ABI），
+  内置 VS 用 `@builtin(instance_index)` 读取。公开类型 `ShapeInstance` 移除
+  （`DrawBatch` 内部字段随之改名 `instance_data`）；渲染行为与 draw call 合并不变。
+  SDF instancing now pulls `InstanceData` from a storage buffer (stable,
+  append-only ABI for custom vertex shaders).
 
 ### Fixed / 修复
 
