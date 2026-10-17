@@ -123,6 +123,13 @@
 
 ### Added / 新增
 
+- **GPU Compute 入口（P5）**：`App::compute_pipeline(wgsl, entry, &[(group, &bgl)])` /
+  `GpuContext::create_compute_pipeline` 创建 compute 管线（用户自带 BGL 与任意 group 编号，
+  复用 P3 的自管 group 模型；WGSL/布局错误返回 `Err` 而不是 panic）；
+  `App::dispatch(&kernel, &[(group, &bind_group)], [x, y, z])` / `GpuContext::dispatch`
+  提交一次 dispatch（独立 command buffer，提交边界自动 barrier —— 写入对后续 render pass
+  可见）。新增 `App::gpu()` 暴露共享 `GpuContext` 以便自建纹理 / buffer / BGL。
+  示例 `compute`（compute shader 每帧写粒子场到 storage texture 再贴回窗口）。
 - `App::on_memory_warning(cb)` —— 跨平台内存压力回调（winit `Event::MemoryWarning`，
   Android 来自 `onTrimMemory`、iOS 来自 memory warning notification）。在**渲染线程**
   上触发，单个回调 panic 不打断渲染循环。**零 JNI**：winit 是唯一把 Android 生命周期

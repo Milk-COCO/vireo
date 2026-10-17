@@ -3174,3 +3174,212 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         base.last_draw_calls()
     );
 }
+
+/// P5：compute dispatch 写 storage buffer，CPU 回读校验。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn compute_dispatch_writes_storage_buffer() {
+    const WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= arrayLength(&data) {
+        return;
+    }
+    data[i] = i * i + 7u;
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    let n: u32 = 64;
+    let bytes = (n * 4) as u64;
+    let data_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("compute data"),
+        size: bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("compute readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let bgl = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compute bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compute bg"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: data_buf.as_entire_binding(),
+        }],
+    });
+    let kernel = gpu
+        .create_compute_pipeline(WGSL, "cs_main", &[(0, &bgl)])
+        .expect("compute pipeline");
+    gpu.dispatch(&kernel, &[(0, &bg)], [1, 1, 1]);
+
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(&data_buf, 0, &staging, 0, bytes);
+    gpu.queue.submit([encoder.finish()]);
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    rx.recv().expect("map callback").expect("map ok");
+    let mapped = slice.get_mapped_range().expect("mapped range");
+    let values: Vec<u32> = mapped
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    drop(mapped);
+    staging.unmap();
+
+    for (i, v) in values.iter().enumerate() {
+        assert_eq!(*v, i as u32 * i as u32 + 7, "compute 输出第 {i} 项不符");
+    }
+    println!("  compute: {} 项 storage buffer 写入正确", values.len());
+}
+
+/// P5：compute 写 storage texture，随后 render pass 采样该纹理可见。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn compute_storage_texture_visible_to_render() {
+    const WGSL: &str = r#"
+@group(0) @binding(1) var out_tex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = i32(gid.x);
+    let y = i32(gid.y);
+    var color = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    if gid.x < 100u {
+        color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
+    textureStore(out_tex, vec2<i32>(x, y), color);
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let size = 200u32;
+
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("compute storage texture"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let display_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compute display bg"),
+        layout: &gpu.texture_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&gpu.default_sampler),
+            },
+        ],
+    });
+    let field = Texture {
+        texture: tex,
+        view: view.clone(),
+        bind_group: display_bg,
+        width: size,
+        height: size,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+    };
+
+    let bgl = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compute tex bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compute tex bg"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(&view),
+        }],
+    });
+    let kernel = gpu
+        .create_compute_pipeline(WGSL, "cs_main", &[(0, &bgl)])
+        .expect("compute texture pipeline");
+    gpu.dispatch(
+        &kernel,
+        &[(0, &bg)],
+        [size.div_ceil(8), size.div_ceil(8), 1],
+    );
+
+    let canvas = OffscreenCanvas::new(&gpu, size, size);
+    let mut b = DrawBatch::new();
+    b.set_texture(Some(&field));
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        size as f32,
+        size as f32,
+        Some(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_is_red(&pixels, size, 20, 20, 80, 180),
+        "compute 写入的左半边应可见（红）"
+    );
+    assert!(
+        region_is_blue(&pixels, size, 120, 20, 180, 180),
+        "compute 写入的右半边应可见（蓝）"
+    );
+    println!("  compute: storage texture 写入对 render pass 可见");
+}

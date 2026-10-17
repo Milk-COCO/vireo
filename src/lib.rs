@@ -99,6 +99,7 @@
 //! | [`shapes`] | 16 种形状（SDF / 几何 / 实例三路径） |
 //! | [`text`] | 文字绘制、shape 缓存、HUD 分段、StableText |
 //! | [`material`] | 自定义 WGSL 材质、纹理/采样器/bind group |
+//! | [`compute`] | GPU compute 管线（`ComputePipeline` + dispatch） |
 //! | [`gpu`] | `GpuContext`、`Vertex`、pipeline 缓存 |
 //! | [`window`] | `VireoWindow`、`WindowDesc`、resize 策略、present mode |
 //! | [`thread`] | 多循环线程模型 |
@@ -124,6 +125,7 @@ pub mod app;
 pub mod thread;
 
 pub mod color;
+pub mod compute;
 pub mod dpi;
 pub mod error;
 pub mod glyphon;
@@ -169,6 +171,7 @@ pub mod prelude {
     pub use crate::color::colors::*;
     pub use crate::color::{hsl_to_rgb, rgb_to_hsl};
     pub use crate::color_u8;
+    pub use crate::compute::ComputePipeline;
     pub use crate::draw_text_hud;
     pub use crate::gpu::ClockIndex;
     pub use crate::gpu::GpuContext;

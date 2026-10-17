@@ -1188,6 +1188,35 @@ impl App {
         self.gpu.create_material(source)
     }
 
+    /// 共享的 GPU 上下文（高级用法：自建纹理 / buffer / bind group / compute）。
+    pub fn gpu(&self) -> &Arc<crate::gpu::GpuContext> {
+        &self.gpu
+    }
+
+    /// 创建 GPU compute 管线（P5）。
+    ///
+    /// `bgl_entries` 为用户自带的 `(group_index, BindGroupLayout)`，group 编号任意
+    /// （与自管材质同规则）。错误（WGSL / 布局）以 `Err` 返回，不 panic。
+    pub fn compute_pipeline(
+        &self,
+        source: &str,
+        entry_point: &str,
+        bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
+    ) -> Result<Arc<crate::compute::ComputePipeline>, String> {
+        self.gpu
+            .create_compute_pipeline(source, entry_point, bgl_entries)
+    }
+
+    /// 提交一次 compute dispatch；写入结果对后续 render pass 可见。
+    pub fn dispatch(
+        &self,
+        pipeline: &crate::compute::ComputePipeline,
+        bind_groups: &[(u32, &wgpu::BindGroup)],
+        workgroups: [u32; 3],
+    ) {
+        self.gpu.dispatch(pipeline, bind_groups, workgroups);
+    }
+
     /// 创建带自定义 vertex shader 的材质。VS 须匹配所在绘制路径的输入契约：
     /// `sdf_feather = Some` → SDF 实例契约（`QuadVertex` + `InstanceData` storage）；
     /// `None` → 几何实例契约（`TemplateVertex` + `GeoInstance`）；直接 push 的 mesh
