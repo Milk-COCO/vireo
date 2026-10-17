@@ -1229,6 +1229,16 @@ impl App {
             .create_material_manual_with_vertex_shader(source, vertex_source, bgl)
     }
 
+    /// 创建自管材质：用户提供多个 (group_index, BGL)，引擎不再插入 group 0/1/2。
+    /// 第三方 wgpu shader 可零改移植，按自己的 `@group`/`@binding` 使用资源。
+    pub fn material_self_managed(
+        &self,
+        source: &str,
+        entries: &[(u32, &wgpu::BindGroupLayout)],
+    ) -> Result<Arc<crate::material::Material>, String> {
+        self.gpu.create_material_self_managed(source, entries)
+    }
+
     /// 获取窗口（`Err` = 从未创建或已关闭）。
     pub fn window_ref(&self, idx: &WindowIndex) -> Result<Arc<VireoWindow>, VireoError> {
         match self

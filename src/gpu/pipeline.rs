@@ -1215,6 +1215,24 @@ impl GpuContext {
         if let Some(p) = pipes.get(&key) {
             return Ok(p.clone());
         }
+        // 确定 material bind group entries 和是否包含引擎组。
+        let (material_bgl_entries, include_engine_groups) =
+            match &material.state {
+                crate::material::MaterialState::SelfManaged { entries, .. } => {
+                    let es: Vec<(u32, &wgpu::BindGroupLayout)> = entries
+                        .iter()
+                        .map(|e| (e.group_index, &e.bgl))
+                        .collect();
+                    (es, false)
+                }
+                _ => {
+                    // State A / B / ZeroResource：material BGL（若有）固定放在 group 3，
+                    // 引擎组 0/1/2 始终包含。
+                    let entries: Vec<(u32, &wgpu::BindGroupLayout)> =
+                        material.bgl().map(|b| (3u32, b)).into_iter().collect();
+                    (entries, true)
+                }
+            };
         let pipeline = self.create_material_pipeline_raw(
             &material.source,
             material.shape_vertex_source.as_deref(),
@@ -1227,7 +1245,8 @@ impl GpuContext {
             depth_compare,
             stencil_mode,
             stencil_op,
-            material.bgl(),
+            &material_bgl_entries,
+            include_engine_groups,
             shape_layout,
             key_blend,
         )?;
@@ -1248,7 +1267,8 @@ impl GpuContext {
         depth_compare: wgpu::CompareFunction,
         stencil_mode: bool,
         stencil_op: u32,
-        material_bgl: Option<&wgpu::BindGroupLayout>,
+        material_bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
+        include_engine_groups: bool,
         shape_layout: ShapeVertexLayout,
         blend: wgpu::BlendState,
     ) -> Result<wgpu::RenderPipeline, String> {
@@ -1360,7 +1380,8 @@ impl GpuContext {
                     multisample,
                     depth_stencil,
                     stencil_op,
-                    material_bgl,
+                    material_bgl_entries,
+                    include_engine_groups,
                     shape_layout,
                     blend,
                 )
@@ -1372,7 +1393,7 @@ impl GpuContext {
                 .text_atlas
                 .create_material_pipeline(
                     &self.device,
-                    material_bgl,
+                    material_bgl_entries.first().map(|(_, b)| *b),
                     &fragment_source_str,
                     multisample,
                     depth_stencil,
@@ -1391,50 +1412,68 @@ impl GpuContext {
         Ok(pipeline)
     }
 
-    fn create_shape_material_pipeline(
-        &self,
-        fragment_source: &str,
-        vertex_source: &str,
-        multisample: wgpu::MultisampleState,
-        depth_stencil: Option<wgpu::DepthStencilState>,
-        stencil_op: u32,
-        material_bgl: Option<&wgpu::BindGroupLayout>,
-        shape_layout: ShapeVertexLayout,
-        blend: wgpu::BlendState,
-    ) -> wgpu::RenderPipeline {
-        let vertex = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("material shape vertex"),
-                source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
-            });
-        let fragment = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("material shape fragment"),
-                source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
-            });
-        let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if material_bgl.is_some() {
-            vec![
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-                material_bgl,
-            ]
-        } else {
-            vec![
-                Some(&self.camera_bind_group_layout),
-                Some(&self.texture_bind_group_layout),
-                Some(&self.engine_storage_bind_group_layout),
-            ]
-        };
-        let layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("material shape layout"),
-                bind_group_layouts: &bgls,
-                immediate_size: 0,
-            });
+        fn create_shape_material_pipeline(
+            &self,
+            fragment_source: &str,
+            vertex_source: &str,
+            multisample: wgpu::MultisampleState,
+            depth_stencil: Option<wgpu::DepthStencilState>,
+            stencil_op: u32,
+            material_bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
+            include_engine_groups: bool,
+            shape_layout: ShapeVertexLayout,
+            blend: wgpu::BlendState,
+        ) -> wgpu::RenderPipeline {
+            let vertex = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("material shape vertex"),
+                    source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
+                });
+            let fragment = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("material shape fragment"),
+                    source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
+                });
+            // 构建 pipeline layout 的 bind group 列表。
+            // 旧行为：group 0 camera、group 1 texture、group 2 engine storage、group 3 material。
+            // 自管模式：仅用户 entries，不含引擎组。
+            let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if include_engine_groups {
+                let mut v = vec![
+                    Some(&self.camera_bind_group_layout),
+                    Some(&self.texture_bind_group_layout),
+                    Some(&self.engine_storage_bind_group_layout),
+                ];
+                if let Some((gi, bgl)) = material_bgl_entries.first() {
+                    // 确保数组足够大，放在指定 group_index 处
+                    let needed = (*gi as usize) + 1;
+                    if v.len() < needed {
+                        v.resize(needed, None);
+                    }
+                    v[*gi as usize] = Some(*bgl);
+                }
+                v
+            } else {
+                // 自管模式：仅用户 entries
+                let max_group = material_bgl_entries
+                    .iter()
+                    .map(|(gi, _)| *gi as usize)
+                    .max()
+                    .unwrap_or(0);
+                let mut v = vec![None; max_group + 1];
+                for (gi, bgl) in material_bgl_entries {
+                    v[*gi as usize] = Some(*bgl);
+                }
+                v
+            };
+            let layout = self
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("material shape layout"),
+                    bind_group_layouts: &bgls,
+                    immediate_size: 0,
+                });
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> = match shape_layout {
             ShapeVertexLayout::Mesh => vec![Some(Vertex::desc())],
             ShapeVertexLayout::SdfInstance => vec![Some(QuadVertex::desc())],

@@ -1294,7 +1294,9 @@ impl GpuContext {
         // 支持集的布局入 pipelines 表，其余创建期 warning，全败报错。
         let mut pipelines = FxHashMap::default();
         let mut shape_support = 0u8;
-        let bgl_ref = material_bgl.as_ref();
+        // State A：material BGL 放在 group 3，引擎组 0/1/2 始终包含。
+        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> =
+            material_bgl.as_ref().map(|b| (3u32, b)).into_iter().collect();
         for layout in [
             ShapeVertexLayout::Mesh,
             ShapeVertexLayout::SdfInstance,
@@ -1312,7 +1314,8 @@ impl GpuContext {
                 wgpu::CompareFunction::Always,
                 false,
                 0,
-                bgl_ref,
+                &material_bgl_entries,
+                true,
                 layout,
                 wgpu::BlendState::ALPHA_BLENDING,
             );
@@ -1365,7 +1368,8 @@ impl GpuContext {
             wgpu::CompareFunction::Always,
             false,
             0,
-            bgl_ref,
+            &material_bgl_entries,
+            true,
             ShapeVertexLayout::Mesh,
             wgpu::BlendState::ALPHA_BLENDING,
         )?;
@@ -1429,7 +1433,9 @@ impl GpuContext {
         let source = crate::material::expand_includes(source)?;
         let mut pipelines = FxHashMap::default();
         let mut shape_support = 0u8;
-        let bgl_ref = Some(bgl);
+        // material_manual：BGL 放在 group 3，引擎组 0/1/2 始终包含。
+        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> =
+            vec![(3u32, bgl)];
         for layout in [
             ShapeVertexLayout::Mesh,
             ShapeVertexLayout::SdfInstance,
@@ -1447,7 +1453,8 @@ impl GpuContext {
                 wgpu::CompareFunction::Always,
                 false,
                 0,
-                bgl_ref,
+                &material_bgl_entries,
+                true,
                 layout,
                 wgpu::BlendState::ALPHA_BLENDING,
             );
@@ -1500,7 +1507,8 @@ impl GpuContext {
             wgpu::CompareFunction::Always,
             false,
             0,
-            bgl_ref,
+            &material_bgl_entries,
+            true,
             ShapeVertexLayout::Mesh,
             wgpu::BlendState::ALPHA_BLENDING,
         )?;
@@ -1526,9 +1534,110 @@ impl GpuContext {
 
         Ok(Arc::new(Material::new_b(
             bgl.clone(),
+            3, // 默认 group_index=3，与旧行为兼容
             None,
             source.to_owned(),
             shape_vertex_source,
+            shape_support,
+            pipelines,
+        )))
+    }
+
+    /// 完全自管材质：用户提供多个 (group_index, BGL)，引擎不再在 pipeline layout
+    /// 中插入 group 0/1/2，绘制期也不绑定引擎 bind group。第三方 wgpu shader
+    /// 可零改移植，按自己的 `@group`/`@binding` 使用资源。
+    ///
+    /// `entries` 中的每个元素为 (group_index, BGL layout)；`init_bind_groups` 与其
+    /// 一一对应，`None` 表示延迟到 `set_bind_group_provider` 首次调用时再建。
+    /// 返回的 Material 需配合 `set_bind_group_provider` 为每个 entry 安装回调。
+    pub fn create_material_self_managed(
+        &self,
+        source: &str,
+        entries: &[(u32, &wgpu::BindGroupLayout)],
+    ) -> Result<Arc<Material>, String> {
+        if entries.is_empty() {
+            return Err("create_material_self_managed: entries 不能为空".to_owned());
+        }
+        let source = crate::material::expand_includes(source)?;
+        let mut pipelines = FxHashMap::default();
+        let mut shape_support = 0u8;
+
+        // 为每个 layout 预验证 custom VS（与 material_manual 一致）。
+        let _entries_refs: Vec<Option<&wgpu::BindGroupLayout>> =
+            entries.iter().map(|(_, bgl)| Some(*bgl)).collect();
+        for layout in [
+            ShapeVertexLayout::Mesh,
+            ShapeVertexLayout::SdfInstance,
+            ShapeVertexLayout::GeoInstance,
+        ] {
+            let result = self.create_material_pipeline_raw(
+                &source,
+                None,
+                MaterialTarget::Shape,
+                1,
+                false,
+                false,
+                false,
+                false,
+                wgpu::CompareFunction::Always,
+                false,
+                0,
+                entries,
+                false, // self-managed：不包含引擎组
+                layout,
+                wgpu::BlendState::ALPHA_BLENDING,
+            );
+            match result {
+                Ok(pipeline) => {
+                    shape_support |= 1 << layout as u8;
+                    pipelines.insert(
+                        (
+                            material_pipeline_key(
+                                MaterialTarget::Shape,
+                                1,
+                                false,
+                                false,
+                                false,
+                                false,
+                                wgpu::CompareFunction::Always,
+                                false,
+                                0,
+                                layout,
+                                self.surface_format(),
+                            ),
+                            wgpu::BlendState::ALPHA_BLENDING,
+                        ),
+                        Arc::new(pipeline),
+                    );
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "self-managed custom material failed to compile with {layout:?} layout: {err}"
+                    ));
+                }
+            }
+        }
+        if shape_support == 0 {
+            return Err(
+                "self-managed custom material did not compile with any shape vertex layout"
+                    .to_owned(),
+            );
+        }
+
+        let self_managed_entries: Vec<crate::material::SelfManagedEntry> = entries
+            .iter()
+            .map(|(group_index, bgl)| crate::material::SelfManagedEntry {
+                group_index: *group_index,
+                bgl: (*bgl).clone(),
+            })
+            .collect();
+        let init_bind_groups = vec![None; entries.len()];
+
+        Ok(Arc::new(Material::new_self_managed(
+            self_managed_entries,
+            init_bind_groups,
+            source.to_owned(),
+            None,
             shape_support,
             pipelines,
         )))

@@ -269,6 +269,15 @@ pub(crate) enum SlotKind {
 // MaterialState (internal)
 // ---------------------------------------------------------------------------
 
+/// 用户自管的 bind group 条目：group 索引 + 对应的 BGL layout。
+/// 用于 P3 完全自管模式，第三方 shader 可按自己的 `@group` 绑定资源，
+/// 引擎不再强制插入 group 0/1/2。
+#[derive(Clone, Debug)]
+pub(crate) struct SelfManagedEntry {
+    pub group_index: u32,
+    pub bgl: wgpu::BindGroupLayout,
+}
+
 pub(crate) enum MaterialState {
     ZeroResource,
     A {
@@ -285,9 +294,20 @@ pub(crate) enum MaterialState {
     },
     B {
         bgl: wgpu::BindGroupLayout,
+        /// 用户 BGL 在 pipeline layout 中的 group 索引（默认 3，与旧行为兼容）。
+        group_index: u32,
         provider:
             Mutex<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
         bind_group: Mutex<Option<wgpu::BindGroup>>,
+    },
+    /// 完全自管：用户提供多个 (group_index, BGL)，引擎不再插入 group 0/1/2。
+    /// 第三方 wgpu shader 可零改移植，按自己的 `@group`/`@binding` 使用资源。
+    SelfManaged {
+        entries: Vec<SelfManagedEntry>,
+        providers: Vec<
+            Mutex<Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>>,
+        >,
+        bind_groups: Vec<Mutex<Option<wgpu::BindGroup>>>,
     },
 }
 
@@ -417,6 +437,7 @@ impl Material {
 
     pub(crate) fn new_b(
         bgl: wgpu::BindGroupLayout,
+        group_index: u32,
         init_bind_group: Option<wgpu::BindGroup>,
         source: String,
         shape_vertex_source: Option<String>,
@@ -426,6 +447,7 @@ impl Material {
         Self {
             state: MaterialState::B {
                 bgl,
+                group_index,
                 provider: Mutex::new(None),
                 bind_group: Mutex::new(init_bind_group),
             },
@@ -439,12 +461,59 @@ impl Material {
         }
     }
 
+    /// 完全自管材质：用户提供多个 (group_index, BGL)，引擎不再插入 group 0/1/2。
+    /// `init_bind_groups` 与 `entries` 一一对应，`None` 表示延迟到 provider 首次调用时再建。
+    pub(crate) fn new_self_managed(
+        entries: Vec<SelfManagedEntry>,
+        init_bind_groups: Vec<Option<wgpu::BindGroup>>,
+        source: String,
+        shape_vertex_source: Option<String>,
+        shape_layout_support: u8,
+        pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
+    ) -> Self {
+        assert_eq!(entries.len(), init_bind_groups.len());
+        let providers: Vec<_> = entries
+            .iter()
+            .map(|_| Mutex::new(None as Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>))
+            .collect();
+        let bind_groups: Vec<_> = init_bind_groups
+            .into_iter()
+            .map(|bg| Mutex::new(bg))
+            .collect();
+        Self {
+            state: MaterialState::SelfManaged {
+                entries,
+                providers,
+                bind_groups,
+            },
+            source,
+            shape_vertex_source,
+            shape_layout_support,
+            warned_layouts: AtomicU8::new(0),
+            depth_write: AtomicBool::new(false),
+            depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
+            pipelines: Mutex::new(pipelines),
+        }
+    }
+
+    /// 用户自管 BGL 的列表（group_index, BGL）。`ZeroResource` / `A` 返回空。
+    pub(crate) fn self_managed_entries(&self) -> Vec<(u32, &wgpu::BindGroupLayout)> {
+        match &self.state {
+            MaterialState::SelfManaged { entries, .. } => {
+                entries.iter().map(|e| (e.group_index, &e.bgl)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// group 3 bind group layout（0 资源材质为 `None`）。
+    /// `SelfManaged` 返回第一个 entry 的 BGL（用于兼容旧代码的 `bgl()` 调用点）。
     pub(crate) fn bgl(&self) -> Option<&wgpu::BindGroupLayout> {
         match &self.state {
             MaterialState::ZeroResource => None,
             MaterialState::A { bgl, .. } => Some(bgl),
             MaterialState::B { bgl, .. } => Some(bgl),
+            MaterialState::SelfManaged { entries, .. } => entries.first().map(|e| &e.bgl),
         }
     }
 
@@ -577,6 +646,56 @@ impl Material {
                 }
                 bg_guard.clone()
             }
+            MaterialState::SelfManaged { .. } => {
+                // SelfManaged 使用 ensure_bind_groups 返回多个 (group_index, bind_group)。
+                None
+            }
+        }
+    }
+
+    /// 确保所有用户自管 bind group 就绪，返回 `(group_index, bind_group)` 列表。
+    /// `SelfManaged` 返回全部条目；`B` 返回单个 `(group_index, bind_group)`；其余返回空。
+    pub(crate) fn ensure_bind_groups(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pool: &BindGroupPool,
+    ) -> Vec<(u32, wgpu::BindGroup)> {
+        match &self.state {
+            MaterialState::SelfManaged {
+                entries,
+                providers,
+                bind_groups,
+            } => {
+                let mut result = Vec::with_capacity(entries.len());
+                for (i, entry) in entries.iter().enumerate() {
+                    let mut bg_guard = bind_groups[i].lock().unwrap();
+                    let mut p_guard = providers[i].lock().unwrap();
+                    if let Some(ref mut p) = *p_guard {
+                        let new_bg = p(device, queue);
+                        drop(p_guard);
+                        *bg_guard = Some(new_bg);
+                    } else {
+                        drop(p_guard);
+                    }
+                    if let Some(bg) = bg_guard.clone() {
+                        result.push((entry.group_index, bg));
+                    }
+                }
+                result
+            }
+            MaterialState::B {
+                group_index,
+                provider: _,
+                bind_group: _,
+                ..
+            } => {
+                match self.ensure_bind_group(device, queue, pool) {
+                    Some(bg) => vec![(*group_index, bg)],
+                    None => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -746,6 +865,13 @@ impl Material {
         match &self.state {
             MaterialState::B { provider, .. } => {
                 *provider.lock().unwrap() = Some(Box::new(f));
+            }
+            MaterialState::SelfManaged { providers, .. } => {
+                // SelfManaged 有多个 provider，set_bind_group_provider 默认只设第一个。
+                // 多 provider 需直接操作 Material 内部状态。
+                if let Some(first) = providers.first() {
+                    *first.lock().unwrap() = Some(Box::new(f));
+                }
             }
             MaterialState::ZeroResource => panic!(
                 "set_bind_group_provider: this material has no group 3; \

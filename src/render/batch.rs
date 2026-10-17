@@ -255,14 +255,14 @@ pub(crate) struct TextureSegment {
     pub(crate) ndx_start: u32,
     pub(crate) ndx_count: u32,
     /// `None` = 白纹理路径（draw 时解析为 `gpu.white_bind_group`）
-    pub(crate) bind_group: Option<wgpu::BindGroup>,
+    pub(crate) bind_group: Option<wgpu::BindGroup >,
 }
 
 #[derive(Clone)]
 pub(crate) struct InstanceTextureSegment {
     pub(crate) instance_start: u32,
     pub(crate) instance_count: u32,
-    pub(crate) bind_group: Option<wgpu::BindGroup>,
+    pub(crate) bind_group: Option<wgpu::BindGroup >,
 }
 
 #[derive(Clone)]
@@ -270,7 +270,7 @@ pub(crate) enum BatchShapeCommand {
     Mesh {
         ndx_start: u32,
         ndx_count: u32,
-        bind_group: Option<wgpu::BindGroup>,
+        bind_group: Option<wgpu::BindGroup >,
         texture_generation: u32,
         geometry: bool,
         material: Option<Arc<Material>>,
@@ -280,7 +280,7 @@ pub(crate) enum BatchShapeCommand {
     Instances {
         instance_start: u32,
         instance_count: u32,
-        bind_group: Option<wgpu::BindGroup>,
+        bind_group: Option<wgpu::BindGroup >,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -289,7 +289,7 @@ pub(crate) enum BatchShapeCommand {
     Particles {
         particle_start: u32,
         particle_count: u32,
-        bind_group: Option<wgpu::BindGroup>,
+        bind_group: Option<wgpu::BindGroup >,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -301,7 +301,7 @@ pub(crate) enum BatchShapeCommand {
         template_vertex_start: u32,
         template_index_start: u32,
         index_count: u32,
-        bind_group: Option<wgpu::BindGroup>,
+        bind_group: Option<wgpu::BindGroup >,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -328,7 +328,7 @@ pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
-    pub(crate) bind_group: Option<wgpu::BindGroup>,
+    pub(crate) bind_group: Option<wgpu::BindGroup >,
     pub(crate) text_texture_view: Option<wgpu::TextureView>,
     pub(crate) texture_segments: Vec<TextureSegment>,
     pub(crate) instance_data: Vec<InstanceData>,
@@ -577,16 +577,32 @@ impl DrawBatch {
                         blend,
                         blend_constant,
                     } => {
-                        let seg_custom_bg: Option<wgpu::BindGroup> =
-                            match material.as_ref() {
-                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        // P3: resolve user bind groups for self-managed materials.
+                        let user_bind_groups = material
+                            .as_ref()
+                            .map(|m| {
+                                m.ensure_bind_groups(
                                     &ctx.gpu.device,
                                     &ctx.gpu.queue,
                                     &ctx.gpu.bind_group_pool,
-                                ),
-                                _ => None,
-                            };
+                                )
+                            })
+                            .unwrap_or_default();
+                        let is_self_managed = !user_bind_groups.is_empty();
+                        // Regular materials resolve seg_custom_bg for group 3 binding.
+                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                            material.as_ref().and_then(|m| {
+                                m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                )
+                            })
+                        } else {
+                            None
+                        };
                         if material.is_some()
+                            && !is_self_managed
                             && material.as_ref().is_some_and(|m| m.bgl().is_some())
                             && seg_custom_bg.is_none()
                         {
@@ -633,7 +649,7 @@ impl DrawBatch {
                                 } else {
                                     None
                                 };
-                            let use_custom_pipe = custom_pipe.is_some();
+                            let _use_custom_pipe = custom_pipe.is_some();
                             let pipe: &wgpu::RenderPipeline =
                                 if let Some(p) = custom_pipe.as_ref() {
                                     p
@@ -659,10 +675,17 @@ impl DrawBatch {
                                     &tmp_pipe
                                 };
                             pass.set_pipeline(pipe);
-                            pass.set_bind_group(0, camera_bg, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
-                            if use_custom_pipe && let Some(bg) = seg_custom_bg.as_ref() {
-                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, camera_bg, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
+                            if !is_self_managed {
+                                if let Some(bg) = seg_custom_bg.as_ref() {
+                                    pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                                }
                             }
                             pass.set_vertex_buffer(0, ctx.vertex_buf.slice(..));
                             pass.set_index_buffer(
@@ -680,7 +703,9 @@ impl DrawBatch {
                             pass.set_stencil_reference(info.stencil_ref);
                         }
                         Self::sync_blend_constant(pass, *blend, *blend_constant);
-                        pass.set_bind_group(1, bind_group, &[]);
+                        if !is_self_managed {
+                            pass.set_bind_group(1, bind_group, &[]);
+                        }
                         pass.draw_indexed(
                             *ndx_start..*ndx_start + *ndx_count,
                             info.base_vertex,
@@ -690,16 +715,31 @@ impl DrawBatch {
                     }
                     OrderedShapeSegment::Instances(segment) => {
                         let seg_material = &segment.material;
-                        let seg_custom_bg: Option<wgpu::BindGroup> =
-                            match seg_material.as_ref() {
-                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        // P3: resolve user bind groups for self-managed materials.
+                        let user_bind_groups = seg_material
+                            .as_ref()
+                            .map(|m| {
+                                m.ensure_bind_groups(
                                     &ctx.gpu.device,
                                     &ctx.gpu.queue,
                                     &ctx.gpu.bind_group_pool,
-                                ),
-                                _ => None,
-                            };
+                                )
+                            })
+                            .unwrap_or_default();
+                        let is_self_managed = !user_bind_groups.is_empty();
+                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                            seg_material.as_ref().and_then(|m| {
+                                m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                )
+                            })
+                        } else {
+                            None
+                        };
                         if seg_material.is_some()
+                            && !is_self_managed
                             && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
                             && seg_custom_bg.is_none()
                         {
@@ -740,11 +780,18 @@ impl DrawBatch {
                             };
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
-                            pass.set_bind_group(0, camera_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
-                            if let Some(bg) = seg_custom_bg.as_ref() {
-                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, camera_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
+                            if !is_self_managed {
+                                if let Some(bg) = seg_custom_bg.as_ref() {
+                                    pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                                }
                             }
                             pass.set_vertex_buffer(
                                 0,
@@ -780,9 +827,14 @@ Self::sync_blend_constant(
                                 segment.blend,
                             );
                             pass.set_pipeline(&instance_pipeline);
-                            pass.set_bind_group(0, camera_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, camera_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
                             pass.set_vertex_buffer(
                                 0,
                                 ctx.gpu.instance_quad_vertex_buf.slice(..),
@@ -815,16 +867,31 @@ Self::sync_blend_constant(
                             .renderer
                             .clock_camera_group(info.particle_clock);
                         let seg_material = &segment.material;
-                        let seg_custom_bg: Option<wgpu::BindGroup> =
-                            match seg_material.as_ref() {
-                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        // P3: resolve user bind groups for self-managed materials.
+                        let user_bind_groups = seg_material
+                            .as_ref()
+                            .map(|m| {
+                                m.ensure_bind_groups(
                                     &ctx.gpu.device,
                                     &ctx.gpu.queue,
                                     &ctx.gpu.bind_group_pool,
-                                ),
-                                _ => None,
-                            };
+                                )
+                            })
+                            .unwrap_or_default();
+                        let is_self_managed = !user_bind_groups.is_empty();
+                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                            seg_material.as_ref().and_then(|m| {
+                                m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                )
+                            })
+                        } else {
+                            None
+                        };
                         if seg_material.is_some()
+                            && !is_self_managed
                             && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
                             && seg_custom_bg.is_none()
                         {
@@ -869,9 +936,14 @@ Self::sync_blend_constant(
                             };
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
-                            pass.set_bind_group(0, &clock_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, &clock_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
                             if let Some(bg) = seg_custom_bg.as_ref() {
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
@@ -907,9 +979,14 @@ Self::sync_blend_constant(
                                 segment.blend,
                             );
                             pass.set_pipeline(&particle_pipeline);
-                            pass.set_bind_group(0, &clock_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, &clock_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
                             pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
                             pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
                             pass.set_index_buffer(
@@ -937,16 +1014,31 @@ Self::sync_blend_constant(
                     }
                     OrderedShapeSegment::GeoInstances(segment) => {
                         let seg_material = &segment.material;
-                        let seg_custom_bg: Option<wgpu::BindGroup> =
-                            match seg_material.as_ref() {
-                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        // P3: resolve user bind groups for self-managed materials.
+                        let user_bind_groups = seg_material
+                            .as_ref()
+                            .map(|m| {
+                                m.ensure_bind_groups(
                                     &ctx.gpu.device,
                                     &ctx.gpu.queue,
                                     &ctx.gpu.bind_group_pool,
-                                ),
-                                _ => None,
-                            };
+                                )
+                            })
+                            .unwrap_or_default();
+                        let is_self_managed = !user_bind_groups.is_empty();
+                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                            seg_material.as_ref().and_then(|m| {
+                                m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                )
+                            })
+                        } else {
+                            None
+                        };
                         if seg_material.is_some()
+                            && !is_self_managed
                             && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
                             && seg_custom_bg.is_none()
                         {
@@ -987,9 +1079,14 @@ Self::sync_blend_constant(
                             };
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
-                            pass.set_bind_group(0, camera_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, camera_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
                             if let Some(bg) = seg_custom_bg.as_ref() {
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
@@ -1029,9 +1126,14 @@ Self::sync_blend_constant(
                                 segment.blend,
                             );
                             pass.set_pipeline(&geo_pipeline);
-                            pass.set_bind_group(0, camera_bg, &[]);
-                            pass.set_bind_group(1, &segment.bind_group, &[]);
-                            pass.set_bind_group(2, engine_bg, &[]);
+                            if !is_self_managed {
+                                pass.set_bind_group(0, camera_bg, &[]);
+                                pass.set_bind_group(1, &segment.bind_group, &[]);
+                                pass.set_bind_group(2, engine_bg, &[]);
+                            }
+                            for (group_index, bg) in &user_bind_groups {
+                                pass.set_bind_group(*group_index, bg, &[]);
+                            }
                             pass.set_vertex_buffer(0, ctx.geo_template_vbuf.slice(..));
                             pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
                             pass.set_index_buffer(
@@ -1072,16 +1174,32 @@ Self::sync_blend_constant(
                 .map(|m| m.has_custom_vertex_shader())
                 .unwrap_or(false);
             let use_custom_particles = use_custom && !has_custom_vs;
-            let custom_bg: Option<wgpu::BindGroup> =
-                match info.custom_material.as_ref() {
-                    Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+            // P3: resolve user bind groups for self-managed materials.
+            let user_bind_groups = info
+                .custom_material
+                .as_ref()
+                .map(|m| {
+                    m.ensure_bind_groups(
                         &ctx.gpu.device,
                         &ctx.gpu.queue,
                         &ctx.gpu.bind_group_pool,
-                    ),
-                    _ => None,
-                };
+                    )
+                })
+                .unwrap_or_default();
+            let is_self_managed = !user_bind_groups.is_empty();
+            let custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                info.custom_material.as_ref().and_then(|m| {
+                    m.ensure_bind_group(
+                        &ctx.gpu.device,
+                        &ctx.gpu.queue,
+                        &ctx.gpu.bind_group_pool,
+                    )
+                })
+            } else {
+                None
+            };
             if info.custom_material.is_some()
+                && !is_self_managed
                 && info
                     .custom_material
                     .as_ref()
@@ -3166,7 +3284,7 @@ Self::sync_blend_constant(
     ///
     /// **文字**：无法从裸 bind group 取出 view，会清空文字画笔贴图
     ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`Self::set_texture`]。
-    pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
+    pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup >) {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
@@ -3211,7 +3329,7 @@ Self::sync_blend_constant(
     }
 
     /// 记录纹理段：自上次段以来的新索引归入此 bind group（`None` = 白纹理路径）。
-    pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+    pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
         let start = self
             .texture_segments
             .last()
@@ -3226,7 +3344,7 @@ Self::sync_blend_constant(
         }
     }
 
-    fn add_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+    fn add_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
         let start = self
             .instance_texture_segments
             .last()
@@ -3243,7 +3361,7 @@ Self::sync_blend_constant(
 
     /// 粒子纹理段：与 instance 段同机理，下标进 `particles` 表。
     /// 所有封 instance 段处同步封粒子段（空范围时 no-op）。
-    fn add_particle_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+    fn add_particle_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
         let start = self
             .particle_texture_segments
             .last()
@@ -3258,7 +3376,7 @@ Self::sync_blend_constant(
         }
     }
 
-    fn add_geo_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
+    fn add_geo_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
         let start = self
             .geo_instance_texture_segments
             .last()
