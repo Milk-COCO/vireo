@@ -433,12 +433,13 @@ pub(crate) struct BatchEncodeCtx<'a> {
     pub gpu: &'a GpuContext,
     pub camera_bind_group: &'a wgpu::BindGroup,
     pub engine_bg: &'a wgpu::BindGroup,
-    pub vertex_buf: &'a wgpu::Buffer,
-    pub index_buf: &'a wgpu::Buffer,
-    pub particle_buf: &'a wgpu::Buffer,
-    pub geo_template_vbuf: &'a wgpu::Buffer,
-    pub geo_template_ibuf: &'a wgpu::Buffer,
-    pub geo_instance_buf: &'a wgpu::Buffer,
+    /// 下列 buffer 只在对应内容存在时才创建；`encode_into` 仅在对应分支取用。
+    pub vertex_buf: Option<&'a wgpu::Buffer>,
+    pub index_buf: Option<&'a wgpu::Buffer>,
+    pub particle_buf: Option<&'a wgpu::Buffer>,
+    pub geo_template_vbuf: Option<&'a wgpu::Buffer>,
+    pub geo_template_ibuf: Option<&'a wgpu::Buffer>,
+    pub geo_instance_buf: Option<&'a wgpu::Buffer>,
     pub sample_count: u32,
     pub alpha_to_coverage: bool,
     pub ssaa: bool,
@@ -452,6 +453,8 @@ pub(crate) struct BatchEncodeInfo<'a> {
     pub base_vertex: i32,
     pub geometry: bool,
     pub blend: wgpu::BlendState,
+    /// MRT：每个颜色附件的混合状态，由 RenderTarget 提供；batch.blend 会覆盖第 0 个。
+    pub target_blends: &'a [Option<wgpu::BlendState>],
     pub custom_material: &'a Option<Arc<Material>>,
     pub segments: &'a [ShapeSegment],
     pub instances: &'a [InstanceSegment],
@@ -504,20 +507,42 @@ pub enum DepthStencilTarget {
     Engine(DepthStencilOps),
 }
 
-/// 渲染目标，封装用于 render pass 的 `TextureView`。
-///
-/// 窗口和离屏纹理都通过此类型编码绘制命令。
-pub struct RenderTarget {
+/// 单个颜色附件描述（MRT 支持多个）。
+pub struct ColorTargetDesc {
     pub view: wgpu::TextureView,
+    pub resolve_target: Option<wgpu::TextureView>,
+    /// 该目标的混合状态；`None` 表示不混合（全写）。
+    pub blend: Option<wgpu::BlendState>,
+}
+
+/// 渲染目标，封装用于 render pass 的一个或多个 `TextureView`（MRT）。
+///
+/// 窗口和离屏纹理都通过此类型编码绘制命令。`color_attachments` 非空时以
+/// 第 0 个为主；`draw()` 的 `clear_colors` 长度须与之相等。
+pub struct RenderTarget {
+    pub color_attachments: Vec<ColorTargetDesc>,
     /// 本帧 depth-stencil 附件（`None` = 引擎默认行为，见 [`DepthStencilTarget`]）。
     pub depth_stencil: Option<DepthStencilTarget>,
 }
 
 impl RenderTarget {
-    /// 从已有的 TextureView 创建
+    /// 从已有的 TextureView 创建（单目标，兼容旧调用）。
     pub fn from_texture_view(view: wgpu::TextureView) -> Self {
         Self {
-            view,
+            color_attachments: vec![ColorTargetDesc {
+                view,
+                resolve_target: None,
+                blend: None,
+            }],
+            depth_stencil: None,
+        }
+    }
+
+    /// 从多个颜色附件创建（MRT）。
+    pub fn from_color_attachments(attachments: Vec<ColorTargetDesc>) -> Self {
+        debug_assert!(!attachments.is_empty(), "color_attachments 不能为空");
+        Self {
+            color_attachments: attachments,
             depth_stencil: None,
         }
     }
@@ -534,14 +559,15 @@ impl RenderTarget {
     }
 
     /// 编码渲染命令到 `CommandBuffer`（**不** submit/present）。
-    /// 便捷包装：等价于 `renderer.draw(self, clear_color, batches)`。
+    /// `clear_colors` 长度须与 `color_attachments` 长度相等；`None` 表示该目标
+    /// 使用 `LoadOp::Load`（保留旧内容），`Some(c)` 表示 `LoadOp::Clear(c)`。
     pub fn draw(
         &self,
         renderer: &Renderer,
-        clear_color: Option<crate::color::Color>,
+        clear_colors: &[Option<crate::color::Color>],
         batches: &[&DrawBatch],
     ) -> wgpu::CommandBuffer {
-        renderer.draw(self, clear_color, batches)
+        renderer.draw(self, clear_colors, batches)
     }
 }
 
@@ -892,7 +918,7 @@ impl Renderer {
         sdf_batch.indices.push(1);
         sdf_batch.indices.push(2);
 
-        self.draw(target, Some(clear_color), &[&geo_batch, &sdf_batch]);
+        self.draw(target, &[Some(clear_color)], &[&geo_batch, &sdf_batch]);
     }
 
     fn ensure_vertex_buffer(&self, size: u64) {

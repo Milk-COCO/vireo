@@ -135,14 +135,25 @@ pub(crate) fn material_fragment_source(
             let offset = line_count(&vertex_out)
                 + line_count(MATERIAL_INPUT_WGSL)
                 + line_count(SHAPE_FRAGMENT_SUPPORT_WGSL);
-            (
-                format!(
-                    "{}\n{}\n{}\n{}\n{}",
-                    vertex_out,
-                    MATERIAL_INPUT_WGSL,
-                    SHAPE_FRAGMENT_SUPPORT_WGSL,
-                    source,
-                    r#"
+            // MRT：用户声明 `fn material_main(...) -> MaterialOutput` 时生成多输出包装。
+            // 契约：`MaterialOutput` 第 0 个字段必须名为 `color`（引擎在其上应用
+            // alpha / SDF），其余 location 原样输出，由用户 fragment shader 填写。
+            let fs_wrapper = if source.contains("-> MaterialOutput") {
+                r#"
+@fragment
+fn fs_main(in: VertexOutput) -> MaterialOutput {
+    let base = textureSample(vireo_base_texture, vireo_base_sampler, in.uv) * in.color;
+    let material_in = MaterialInput(
+        in.uv, in.uv, vec4<f32>(base.rgb, 1.0), in.local_pos, in.sdf_params, in.sdf_extra,
+        in.sdf_type, in.sdf_feather, 0u, 0u,
+    );
+    var out = material_main(material_in);
+    out.color = vireo_apply_sdf(in, vec4<f32>(out.color.rgb, out.color.a * base.a));
+    return out;
+}
+"#
+            } else {
+                r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let base = textureSample(vireo_base_texture, vireo_base_sampler, in.uv) * in.color;
@@ -155,6 +166,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vireo_apply_sdf(in, out_color);
 }
 "#
+            };
+            (
+                format!(
+                    "{}\n{}\n{}\n{}\n{}",
+                    vertex_out,
+                    MATERIAL_INPUT_WGSL,
+                    SHAPE_FRAGMENT_SUPPORT_WGSL,
+                    source,
+                    fs_wrapper
                 ),
                 offset,
             )
@@ -187,14 +207,30 @@ fn vireo_has_sdf_data() -> bool { return false; }
             let offset = line_count(&text_vertex_out)
                 + line_count(MATERIAL_INPUT_WGSL)
                 + line_count(text_support);
-            (
-                format!(
-                    "{}\n{}\n{}\n{}\n{}",
-                    text_vertex_out,
-                    MATERIAL_INPUT_WGSL,
-                    text_support,
-                    source,
-                    r#"
+            // 文字管线只有单颜色输出：若用户按 MRT 契约返回 `MaterialOutput`，
+            // 这里只取第 0 个 `color` 输出（text 在 MRT pass 中会被跳过）。
+            let text_fs_wrapper = if source.contains("-> MaterialOutput") {
+                r#"
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    var base: vec4<f32>;
+    if in.content_type == 0u {
+        base = textureSampleLevel(vireo_color_atlas, vireo_atlas_sampler, in.uv, 0.0);
+    } else {
+        let mask = textureSampleLevel(vireo_mask_atlas, vireo_atlas_sampler, in.uv, 0.0).x;
+        base = vec4<f32>(in.color.rgb, in.color.a * mask);
+    }
+    let material_in = MaterialInput(
+        in.uv, in.base_uv, vec4<f32>(base.rgb, 1.0), vec2<f32>(0.0), vec4<f32>(0.0), vec2<f32>(0.0),
+        0u, 0.0, in.content_type, 1u,
+    );
+    var out_color = material_main(material_in).color;
+    out_color.a *= base.a;
+    return out_color;
+}
+"#
+            } else {
+                r#"
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base: vec4<f32>;
@@ -213,6 +249,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return out_color;
 }
 "#
+            };
+            (
+                format!(
+                    "{}\n{}\n{}\n{}\n{}",
+                    text_vertex_out, MATERIAL_INPUT_WGSL, text_support, source, text_fs_wrapper
                 ),
                 offset,
             )
@@ -508,6 +549,17 @@ pub(crate) fn surface_format_bits(format: wgpu::TextureFormat) -> u32 {
     (h.finish() as u32) & 0x0FFF
 }
 
+/// 把多个颜色附件的混合状态折叠成管线缓存键的高位数值。
+pub(crate) fn blend_states_hash(blends: &[Option<wgpu::BlendState>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    (blends.len() as u64).hash(&mut h);
+    for b in blends {
+        b.hash(&mut h);
+    }
+    h.finish() & 0x0000_FFFF_FFFF_FFFF
+}
+
 pub(crate) fn material_pipeline_key(
     target: MaterialTarget,
     sample_count: u32,
@@ -520,6 +572,8 @@ pub(crate) fn material_pipeline_key(
     stencil_op: u32,
     shape_layout: ShapeVertexLayout,
     format: wgpu::TextureFormat,
+    num_targets: u32,
+    blend_hash: u64,
 ) -> u64 {
     let ssaa = ssaa && target == MaterialTarget::Shape;
     let layout_bits = if target == MaterialTarget::Shape {
@@ -527,6 +581,8 @@ pub(crate) fn material_pipeline_key(
     } else {
         0
     };
+    // num_targets 占 bits 40-43（wgpu 最大 8 个 color target，4 位足够）；
+    // blend_hash 占 bits 44-63（所有目标混合状态的哈希）。
     target as u64
         | ((sample_count as u64) << 4)
         | ((layout_bits) << 8)
@@ -538,6 +594,8 @@ pub(crate) fn material_pipeline_key(
         | ((surface_format_bits(format) as u64) << 20)
         | ((depth_write as u64) << 32)
         | ((crate::material::compare_to_u8(depth_compare) as u64) << 33)
+        | ((num_targets as u64) << 40)
+        | (blend_hash << 44)
 }
 
 /// 中性 depth-stencil 管线状态：深度 `Always`/不写、模板 `IGNORE`/不读写。
@@ -1177,7 +1235,8 @@ impl GpuContext {
         stencil_mode: bool,
         stencil_op: u32,
         shape_layout: ShapeVertexLayout,
-        blend: wgpu::BlendState,
+        // MRT：每个颜色附件的混合状态；第 0 个对应 batch.blend，其余取自 RenderTarget。
+        blends: &[Option<wgpu::BlendState>],
     ) -> Result<Arc<wgpu::RenderPipeline>, String> {
         let ssaa =
             ssaa && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
@@ -1193,7 +1252,7 @@ impl GpuContext {
         let key_blend = if stencil_mode && (stencil_op == 3 || stencil_op == 4) {
             wgpu::BlendState::ALPHA_BLENDING
         } else {
-            blend
+            blends[0].unwrap_or(wgpu::BlendState::ALPHA_BLENDING)
         };
         let key = (
             material_pipeline_key(
@@ -1208,6 +1267,8 @@ impl GpuContext {
                 stencil_op,
                 shape_layout,
                 self.surface_format(),
+                blends.len() as u32,
+                blend_states_hash(blends),
             ),
             key_blend,
         );
@@ -1216,23 +1277,20 @@ impl GpuContext {
             return Ok(p.clone());
         }
         // 确定 material bind group entries 和是否包含引擎组。
-        let (material_bgl_entries, include_engine_groups) =
-            match &material.state {
-                crate::material::MaterialState::SelfManaged { entries, .. } => {
-                    let es: Vec<(u32, &wgpu::BindGroupLayout)> = entries
-                        .iter()
-                        .map(|e| (e.group_index, &e.bgl))
-                        .collect();
-                    (es, false)
-                }
-                _ => {
-                    // State A / B / ZeroResource：material BGL（若有）固定放在 group 3，
-                    // 引擎组 0/1/2 始终包含。
-                    let entries: Vec<(u32, &wgpu::BindGroupLayout)> =
-                        material.bgl().map(|b| (3u32, b)).into_iter().collect();
-                    (entries, true)
-                }
-            };
+        let (material_bgl_entries, include_engine_groups) = match &material.state {
+            crate::material::MaterialState::SelfManaged { entries, .. } => {
+                let es: Vec<(u32, &wgpu::BindGroupLayout)> =
+                    entries.iter().map(|e| (e.group_index, &e.bgl)).collect();
+                (es, false)
+            }
+            _ => {
+                // State A / B / ZeroResource：material BGL（若有）固定放在 group 3，
+                // 引擎组 0/1/2 始终包含。
+                let entries: Vec<(u32, &wgpu::BindGroupLayout)> =
+                    material.bgl().map(|b| (3u32, b)).into_iter().collect();
+                (entries, true)
+            }
+        };
         let pipeline = self.create_material_pipeline_raw(
             &material.source,
             material.shape_vertex_source.as_deref(),
@@ -1248,7 +1306,7 @@ impl GpuContext {
             &material_bgl_entries,
             include_engine_groups,
             shape_layout,
-            key_blend,
+            blends,
         )?;
         let arc = Arc::new(pipeline);
         Ok(pipes.entry(key).or_insert(arc).clone())
@@ -1270,7 +1328,8 @@ impl GpuContext {
         material_bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
         include_engine_groups: bool,
         shape_layout: ShapeVertexLayout,
-        blend: wgpu::BlendState,
+        // MRT：每个颜色附件的混合状态；第 0 个对应 batch.blend，其余取自 RenderTarget。
+        blends: &[Option<wgpu::BlendState>],
     ) -> Result<wgpu::RenderPipeline, String> {
         let ssaa = ssaa && target == MaterialTarget::Shape && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1383,7 +1442,7 @@ impl GpuContext {
                     material_bgl_entries,
                     include_engine_groups,
                     shape_layout,
-                    blend,
+                    blends,
                 )
             }
             MaterialTarget::Text => self
@@ -1397,7 +1456,7 @@ impl GpuContext {
                     &fragment_source_str,
                     multisample,
                     depth_stencil,
-                    blend,
+                    blends[0].unwrap_or(wgpu::BlendState::ALPHA_BLENDING),
                 ),
         };
 
@@ -1412,68 +1471,69 @@ impl GpuContext {
         Ok(pipeline)
     }
 
-        fn create_shape_material_pipeline(
-            &self,
-            fragment_source: &str,
-            vertex_source: &str,
-            multisample: wgpu::MultisampleState,
-            depth_stencil: Option<wgpu::DepthStencilState>,
-            stencil_op: u32,
-            material_bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
-            include_engine_groups: bool,
-            shape_layout: ShapeVertexLayout,
-            blend: wgpu::BlendState,
-        ) -> wgpu::RenderPipeline {
-            let vertex = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("material shape vertex"),
-                    source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
-                });
-            let fragment = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("material shape fragment"),
-                    source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
-                });
-            // 构建 pipeline layout 的 bind group 列表。
-            // 旧行为：group 0 camera、group 1 texture、group 2 engine storage、group 3 material。
-            // 自管模式：仅用户 entries，不含引擎组。
-            let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if include_engine_groups {
-                let mut v = vec![
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ];
-                if let Some((gi, bgl)) = material_bgl_entries.first() {
-                    // 确保数组足够大，放在指定 group_index 处
-                    let needed = (*gi as usize) + 1;
-                    if v.len() < needed {
-                        v.resize(needed, None);
-                    }
-                    v[*gi as usize] = Some(*bgl);
+    fn create_shape_material_pipeline(
+        &self,
+        fragment_source: &str,
+        vertex_source: &str,
+        multisample: wgpu::MultisampleState,
+        depth_stencil: Option<wgpu::DepthStencilState>,
+        stencil_op: u32,
+        material_bgl_entries: &[(u32, &wgpu::BindGroupLayout)],
+        include_engine_groups: bool,
+        shape_layout: ShapeVertexLayout,
+        // MRT：每个颜色附件的混合状态
+        blends: &[Option<wgpu::BlendState>],
+    ) -> wgpu::RenderPipeline {
+        let vertex = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("material shape vertex"),
+                source: wgpu::ShaderSource::Wgsl(vertex_source.into()),
+            });
+        let fragment = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("material shape fragment"),
+                source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
+            });
+        // 构建 pipeline layout 的 bind group 列表。
+        // 旧行为：group 0 camera、group 1 texture、group 2 engine storage、group 3 material。
+        // 自管模式：仅用户 entries，不含引擎组。
+        let bgls: Vec<Option<&wgpu::BindGroupLayout>> = if include_engine_groups {
+            let mut v = vec![
+                Some(&self.camera_bind_group_layout),
+                Some(&self.texture_bind_group_layout),
+                Some(&self.engine_storage_bind_group_layout),
+            ];
+            if let Some((gi, bgl)) = material_bgl_entries.first() {
+                // 确保数组足够大，放在指定 group_index 处
+                let needed = (*gi as usize) + 1;
+                if v.len() < needed {
+                    v.resize(needed, None);
                 }
-                v
-            } else {
-                // 自管模式：仅用户 entries
-                let max_group = material_bgl_entries
-                    .iter()
-                    .map(|(gi, _)| *gi as usize)
-                    .max()
-                    .unwrap_or(0);
-                let mut v = vec![None; max_group + 1];
-                for (gi, bgl) in material_bgl_entries {
-                    v[*gi as usize] = Some(*bgl);
-                }
-                v
-            };
-            let layout = self
-                .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("material shape layout"),
-                    bind_group_layouts: &bgls,
-                    immediate_size: 0,
-                });
+                v[*gi as usize] = Some(*bgl);
+            }
+            v
+        } else {
+            // 自管模式：仅用户 entries
+            let max_group = material_bgl_entries
+                .iter()
+                .map(|(gi, _)| *gi as usize)
+                .max()
+                .unwrap_or(0);
+            let mut v = vec![None; max_group + 1];
+            for (gi, bgl) in material_bgl_entries {
+                v[*gi as usize] = Some(*bgl);
+            }
+            v
+        };
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("material shape layout"),
+                bind_group_layouts: &bgls,
+                immediate_size: 0,
+            });
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> = match shape_layout {
             ShapeVertexLayout::Mesh => vec![Some(Vertex::desc())],
             ShapeVertexLayout::SdfInstance => vec![Some(QuadVertex::desc())],
@@ -1497,15 +1557,20 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module: &fragment,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format(),
-                        blend: Some(blend),
-                        write_mask: if stencil_op == 3 || stencil_op == 4 {
-                            wgpu::ColorWrites::empty()
-                        } else {
-                            wgpu::ColorWrites::ALL
-                        },
-                    })],
+                    targets: &blends
+                        .iter()
+                        .map(|blend| {
+                            Some(wgpu::ColorTargetState {
+                                format: self.surface_format(),
+                                blend: *blend,
+                                write_mask: if stencil_op == 3 || stencil_op == 4 {
+                                    wgpu::ColorWrites::empty()
+                                } else {
+                                    wgpu::ColorWrites::ALL
+                                },
+                            })
+                        })
+                        .collect::<Vec<_>>(),
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -1547,6 +1612,8 @@ mod custom_material_tests {
             stencil_op,
             shape_layout,
             format,
+            1,
+            0,
         )
     }
 
@@ -1565,8 +1632,9 @@ mod custom_material_tests {
             0,
             ShapeVertexLayout::Mesh,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            0,
         );
-        // `mk_key` 包装即 ds 中性调用，键必须一致。
         assert_eq!(
             mk_key(
                 MaterialTarget::Shape,
@@ -1593,6 +1661,8 @@ mod custom_material_tests {
             0,
             ShapeVertexLayout::Mesh,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            0,
         );
         assert_ne!(neutral, ds);
 
@@ -1608,6 +1678,8 @@ mod custom_material_tests {
             0,
             ShapeVertexLayout::Mesh,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            0,
         );
         assert_ne!(ds, write);
 
@@ -1623,6 +1695,8 @@ mod custom_material_tests {
             0,
             ShapeVertexLayout::Mesh,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            0,
         );
         assert_ne!(write, compare);
     }
@@ -1664,7 +1738,7 @@ mod custom_material_tests {
                 true,
                 2,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Shape,
@@ -1686,7 +1760,7 @@ mod custom_material_tests {
                 true,
                 1,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Shape,
@@ -1708,7 +1782,7 @@ mod custom_material_tests {
                 true,
                 1,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Shape,
@@ -1731,7 +1805,7 @@ mod custom_material_tests {
                 true,
                 1,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Text,
@@ -1757,17 +1831,17 @@ mod custom_material_tests {
                 false,
                 0,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Shape,
                 4,
                 false,
-                true,
                 false,
-                0,
+                true,
+                1,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
         );
         assert_eq!(
@@ -1779,7 +1853,7 @@ mod custom_material_tests {
                 false,
                 0,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Text,
@@ -1789,7 +1863,7 @@ mod custom_material_tests {
                 false,
                 0,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
         );
     }
@@ -1853,7 +1927,7 @@ mod custom_material_tests {
                 false,
                 0,
                 ShapeVertexLayout::Mesh,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
             mk_key(
                 MaterialTarget::Text,
@@ -1863,7 +1937,7 @@ mod custom_material_tests {
                 false,
                 0,
                 ShapeVertexLayout::SdfInstance,
-                wgpu::TextureFormat::Rgba8UnormSrgb
+                wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
         );
     }

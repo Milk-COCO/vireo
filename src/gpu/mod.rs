@@ -1295,13 +1295,17 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         let mut shape_support = 0u8;
         // State A：material BGL 放在 group 3，引擎组 0/1/2 始终包含。
-        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> =
-            material_bgl.as_ref().map(|b| (3u32, b)).into_iter().collect();
+        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> = material_bgl
+            .as_ref()
+            .map(|b| (3u32, b))
+            .into_iter()
+            .collect();
         for layout in [
             ShapeVertexLayout::Mesh,
             ShapeVertexLayout::SdfInstance,
             ShapeVertexLayout::GeoInstance,
         ] {
+            let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
             let result = self.create_material_pipeline_raw(
                 &final_source,
                 shape_vertex_source.as_deref(),
@@ -1317,7 +1321,7 @@ impl GpuContext {
                 &material_bgl_entries,
                 true,
                 layout,
-                wgpu::BlendState::ALPHA_BLENDING,
+                &blends,
             );
             match (shape_vertex_source.is_some(), result) {
                 (_, Ok(pipeline)) => {
@@ -1336,6 +1340,8 @@ impl GpuContext {
                                 0,
                                 layout,
                                 self.surface_format(),
+                                1,
+                                blend_states_hash(&blends),
                             ),
                             wgpu::BlendState::ALPHA_BLENDING,
                         ),
@@ -1356,6 +1362,7 @@ impl GpuContext {
                     .to_owned(),
             );
         }
+        let text_blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
         let text_pipeline = self.create_material_pipeline_raw(
             &final_source,
             shape_vertex_source.as_deref(),
@@ -1371,7 +1378,7 @@ impl GpuContext {
             &material_bgl_entries,
             true,
             ShapeVertexLayout::Mesh,
-            wgpu::BlendState::ALPHA_BLENDING,
+            &text_blends,
         )?;
         pipelines.insert(
             (
@@ -1387,6 +1394,8 @@ impl GpuContext {
                     0,
                     ShapeVertexLayout::Mesh,
                     self.surface_format(),
+                    1,
+                    blend_states_hash(&text_blends),
                 ),
                 wgpu::BlendState::ALPHA_BLENDING,
             ),
@@ -1434,13 +1443,13 @@ impl GpuContext {
         let mut pipelines = FxHashMap::default();
         let mut shape_support = 0u8;
         // material_manual：BGL 放在 group 3，引擎组 0/1/2 始终包含。
-        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> =
-            vec![(3u32, bgl)];
+        let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> = vec![(3u32, bgl)];
         for layout in [
             ShapeVertexLayout::Mesh,
             ShapeVertexLayout::SdfInstance,
             ShapeVertexLayout::GeoInstance,
         ] {
+            let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
             let result = self.create_material_pipeline_raw(
                 &source,
                 shape_vertex_source.as_deref(),
@@ -1456,7 +1465,7 @@ impl GpuContext {
                 &material_bgl_entries,
                 true,
                 layout,
-                wgpu::BlendState::ALPHA_BLENDING,
+                &blends,
             );
             match (shape_vertex_source.is_some(), result) {
                 (_, Ok(pipeline)) => {
@@ -1475,6 +1484,8 @@ impl GpuContext {
                                 0,
                                 layout,
                                 self.surface_format(),
+                                1,
+                                blend_states_hash(&blends),
                             ),
                             wgpu::BlendState::ALPHA_BLENDING,
                         ),
@@ -1495,6 +1506,7 @@ impl GpuContext {
                     .to_owned(),
             );
         }
+        let text_blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
         let text_pipeline = self.create_material_pipeline_raw(
             &source,
             shape_vertex_source.as_deref(),
@@ -1510,7 +1522,7 @@ impl GpuContext {
             &material_bgl_entries,
             true,
             ShapeVertexLayout::Mesh,
-            wgpu::BlendState::ALPHA_BLENDING,
+            &text_blends,
         )?;
         pipelines.insert(
             (
@@ -1526,6 +1538,8 @@ impl GpuContext {
                     0,
                     ShapeVertexLayout::Mesh,
                     self.surface_format(),
+                    1,
+                    blend_states_hash(&text_blends),
                 ),
                 wgpu::BlendState::ALPHA_BLENDING,
             ),
@@ -1570,6 +1584,7 @@ impl GpuContext {
             ShapeVertexLayout::SdfInstance,
             ShapeVertexLayout::GeoInstance,
         ] {
+            let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
             let result = self.create_material_pipeline_raw(
                 &source,
                 None,
@@ -1585,7 +1600,7 @@ impl GpuContext {
                 entries,
                 false, // self-managed：不包含引擎组
                 layout,
-                wgpu::BlendState::ALPHA_BLENDING,
+                &blends,
             );
             match result {
                 Ok(pipeline) => {
@@ -1604,6 +1619,8 @@ impl GpuContext {
                                 0,
                                 layout,
                                 self.surface_format(),
+                                1,
+                                blend_states_hash(&blends),
                             ),
                             wgpu::BlendState::ALPHA_BLENDING,
                         ),

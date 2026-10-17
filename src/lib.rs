@@ -191,6 +191,7 @@ pub mod prelude {
     pub use crate::material::expand_includes;
     pub use crate::material::wgsl_snippets;
     pub use crate::render::BatchOverride;
+    pub use crate::render::ColorTargetDesc;
     pub use crate::render::DepthStencilOps;
     pub use crate::render::DepthStencilTarget;
     pub use crate::render::DrawBatch;

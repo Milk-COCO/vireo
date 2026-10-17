@@ -13,8 +13,10 @@ use crate::math::{
 };
 use crate::text::{TextDef, TextEntryList};
 
-use super::{BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
-    ShapeStats};
+use super::{
+    BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
+    ShapeStats,
+};
 
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
@@ -255,14 +257,14 @@ pub(crate) struct TextureSegment {
     pub(crate) ndx_start: u32,
     pub(crate) ndx_count: u32,
     /// `None` = 白纹理路径（draw 时解析为 `gpu.white_bind_group`）
-    pub(crate) bind_group: Option<wgpu::BindGroup >,
+    pub(crate) bind_group: Option<wgpu::BindGroup>,
 }
 
 #[derive(Clone)]
 pub(crate) struct InstanceTextureSegment {
     pub(crate) instance_start: u32,
     pub(crate) instance_count: u32,
-    pub(crate) bind_group: Option<wgpu::BindGroup >,
+    pub(crate) bind_group: Option<wgpu::BindGroup>,
 }
 
 #[derive(Clone)]
@@ -270,7 +272,7 @@ pub(crate) enum BatchShapeCommand {
     Mesh {
         ndx_start: u32,
         ndx_count: u32,
-        bind_group: Option<wgpu::BindGroup >,
+        bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         geometry: bool,
         material: Option<Arc<Material>>,
@@ -280,7 +282,7 @@ pub(crate) enum BatchShapeCommand {
     Instances {
         instance_start: u32,
         instance_count: u32,
-        bind_group: Option<wgpu::BindGroup >,
+        bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -289,7 +291,7 @@ pub(crate) enum BatchShapeCommand {
     Particles {
         particle_start: u32,
         particle_count: u32,
-        bind_group: Option<wgpu::BindGroup >,
+        bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -301,7 +303,7 @@ pub(crate) enum BatchShapeCommand {
         template_vertex_start: u32,
         template_index_start: u32,
         index_count: u32,
-        bind_group: Option<wgpu::BindGroup >,
+        bind_group: Option<wgpu::BindGroup>,
         texture_generation: u32,
         material: Option<Arc<Material>>,
         blend: wgpu::BlendState,
@@ -328,7 +330,7 @@ pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub texts: TextEntryList,
-    pub(crate) bind_group: Option<wgpu::BindGroup >,
+    pub(crate) bind_group: Option<wgpu::BindGroup>,
     pub(crate) text_texture_view: Option<wgpu::TextureView>,
     pub(crate) texture_segments: Vec<TextureSegment>,
     pub(crate) instance_data: Vec<InstanceData>,
@@ -564,6 +566,16 @@ impl DrawBatch {
 
         let engine_bg = ctx.engine_bg;
         let camera_bg = ctx.camera_bind_group;
+        // MRT：pass 有多个颜色附件时，只有 custom material（多 FS 输出）可用；
+        // 引擎形状/文字管线只有单颜色输出，跳过并 warn-once。
+        let mrt = info.target_blends.len() > 1;
+        let mut material_blends: Vec<Option<wgpu::BlendState>> = Vec::new();
+        // 旧式（非 ordered）legacy 路径只有 batch 级材质；无 custom material 时
+        // 引擎管线单颜色输出无法写入 MRT。
+        if mrt && info.ordered.is_empty() && info.custom_material.is_none() {
+            super::draw::mrt_warn_once("engine shape (legacy batch)");
+            return 0;
+        }
 
         if !info.ordered.is_empty() {
             for segment in info.ordered {
@@ -590,7 +602,7 @@ impl DrawBatch {
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
                         // Regular materials resolve seg_custom_bg for group 3 binding.
-                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                        let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
                             material.as_ref().and_then(|m| {
                                 m.ensure_bind_group(
                                     &ctx.gpu.device,
@@ -611,69 +623,84 @@ impl DrawBatch {
                         let seg_ptr: *const Material =
                             material.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
                         let seg_use_custom = material.is_some();
+                        if mrt && !seg_use_custom {
+                            super::draw::mrt_warn_once("engine shape (mesh)");
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
                         let need_rebind = !shapes_bound
                             || seg_ptr != last_custom_ptr
                             || (!seg_use_custom && last_geometry != Some(*geometry))
                             || (!seg_use_custom && last_blend != Some(*blend))
                             || (info.uses_stencil && info.pipe_op != last_stencil_op)
-                                || info.dynamic_offsets != last_dynamic_offsets.as_slice();
+                            || info.dynamic_offsets != last_dynamic_offsets.as_slice();
                         if need_rebind {
                             let tmp_pipe: wgpu::RenderPipeline;
-                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
-                                if seg_use_custom {
-                                    let mat = material.as_ref().unwrap();
-                                    match ctx.gpu.ensure_material_pipeline(
-                                        mat,
-                                        MaterialTarget::Shape,
-                                        ctx.sample_count,
-                                        ctx.alpha_to_coverage,
-                                        ctx.ssaa,
-                                        info.has_ds,
-                                        info.uses_stencil,
-                                        if info.uses_stencil {
-                                            info.pipe_op.min(4)
-                                        } else {
-                                            0
-                                        },
-                                        crate::gpu::ShapeVertexLayout::Mesh,
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if seg_use_custom {
+                                let mat = material.as_ref().unwrap();
+                                match ctx.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    info.has_ds,
+                                    info.uses_stencil,
+                                    if info.uses_stencil {
+                                        info.pipe_op.min(4)
+                                    } else {
+                                        0
+                                    },
+                                    crate::gpu::ShapeVertexLayout::Mesh,
+                                    Self::material_blends(
+                                        &mut material_blends,
                                         *blend,
-                                    ) {
-                                        Ok(p) => Some(p),
-                                        Err(err) => {
-                                            log::warn!(
-                                                "custom material pipeline unavailable (mesh layout): {err}"
-                                            );
-                                            None
-                                        }
+                                        info.target_blends,
+                                    ),
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (mesh layout): {err}"
+                                        );
+                                        None
                                     }
-                                } else {
-                                    None
-                                };
+                                }
+                            } else {
+                                None
+                            };
                             let _use_custom_pipe = custom_pipe.is_some();
-                            let pipe: &wgpu::RenderPipeline =
-                                if let Some(p) = custom_pipe.as_ref() {
-                                    p
-                                } else if info.uses_stencil {
-                                    tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
-                                        ctx.sample_count,
-                                        ctx.alpha_to_coverage,
-                                        ctx.ssaa,
-                                        *geometry,
-                                        info.pipe_op.min(4),
-                                        *blend,
-                                    );
-                                    &tmp_pipe
-                                } else {
-                                    tmp_pipe = ctx.gpu.ensure_pipeline(
-                                        ctx.sample_count,
-                                        ctx.alpha_to_coverage,
-                                        ctx.ssaa,
-                                        info.has_ds,
-                                        *geometry,
-                                        *blend,
-                                    );
-                                    &tmp_pipe
-                                };
+                            if mrt && custom_pipe.is_none() {
+                                super::draw::mrt_warn_once("custom material pipeline (mesh)");
+                                shapes_bound = false;
+                                last_geometry = None;
+                                continue;
+                            }
+                            let pipe: &wgpu::RenderPipeline = if let Some(p) = custom_pipe.as_ref()
+                            {
+                                p
+                            } else if info.uses_stencil {
+                                tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    *geometry,
+                                    info.pipe_op.min(4),
+                                    *blend,
+                                );
+                                &tmp_pipe
+                            } else {
+                                tmp_pipe = ctx.gpu.ensure_pipeline(
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    info.has_ds,
+                                    *geometry,
+                                    *blend,
+                                );
+                                &tmp_pipe
+                            };
                             pass.set_pipeline(pipe);
                             if !is_self_managed {
                                 pass.set_bind_group(0, camera_bg, &[]);
@@ -687,9 +714,12 @@ impl DrawBatch {
                                     pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                 }
                             }
-                            pass.set_vertex_buffer(0, ctx.vertex_buf.slice(..));
+                            pass.set_vertex_buffer(
+                                0,
+                                ctx.vertex_buf.expect("vertex buffer").slice(..),
+                            );
                             pass.set_index_buffer(
-                                ctx.index_buf.slice(..),
+                                ctx.index_buf.expect("index buffer").slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
                             shapes_bound = true;
@@ -727,7 +757,7 @@ impl DrawBatch {
                             })
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
-                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                        let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
                             seg_material.as_ref().and_then(|m| {
                                 m.ensure_bind_group(
                                     &ctx.gpu.device,
@@ -748,36 +778,45 @@ impl DrawBatch {
                             continue;
                         }
                         let seg_use_custom = seg_material.is_some();
-                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
-                            if seg_use_custom {
-                                let mat = seg_material.as_ref().unwrap();
-                                match ctx.gpu.ensure_material_pipeline(
-                                    mat,
-                                    MaterialTarget::Shape,
-                                    ctx.sample_count,
-                                    ctx.alpha_to_coverage,
-                                    ctx.ssaa,
-                                    info.has_ds,
-                                    info.uses_stencil,
-                                    if info.uses_stencil {
-                                        info.pipe_op.min(4)
-                                    } else {
-                                        0
-                                    },
-                                    crate::gpu::ShapeVertexLayout::SdfInstance,
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if seg_use_custom {
+                            let mat = seg_material.as_ref().unwrap();
+                            match ctx.gpu.ensure_material_pipeline(
+                                mat,
+                                MaterialTarget::Shape,
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                if info.uses_stencil {
+                                    info.pipe_op.min(4)
+                                } else {
+                                    0
+                                },
+                                crate::gpu::ShapeVertexLayout::SdfInstance,
+                                Self::material_blends(
+                                    &mut material_blends,
                                     segment.blend,
-                                ) {
-                                    Ok(p) => Some(p),
-                                    Err(err) => {
-                                        log::warn!(
-                                            "custom material pipeline unavailable (SDF instance layout): {err}"
-                                        );
-                                        None
-                                    }
+                                    info.target_blends,
+                                ),
+                            ) {
+                                Ok(p) => Some(p),
+                                Err(err) => {
+                                    log::warn!(
+                                        "custom material pipeline unavailable (SDF instance layout): {err}"
+                                    );
+                                    None
                                 }
-                            } else {
-                                None
-                            };
+                            }
+                        } else {
+                            None
+                        };
+                        if mrt && custom_pipe.is_none() {
+                            super::draw::mrt_warn_once("engine shape (instance layout)");
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -793,10 +832,7 @@ impl DrawBatch {
                                     pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                 }
                             }
-                            pass.set_vertex_buffer(
-                                0,
-                                ctx.gpu.instance_quad_vertex_buf.slice(..),
-                            );
+                            pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
                             pass.set_index_buffer(
                                 ctx.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -804,7 +840,7 @@ impl DrawBatch {
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -835,10 +871,7 @@ Self::sync_blend_constant(
                             for (group_index, bg) in &user_bind_groups {
                                 pass.set_bind_group(*group_index, bg, &[]);
                             }
-                            pass.set_vertex_buffer(
-                                0,
-                                ctx.gpu.instance_quad_vertex_buf.slice(..),
-                            );
+                            pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
                             pass.set_index_buffer(
                                 ctx.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -846,7 +879,7 @@ Self::sync_blend_constant(
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -863,9 +896,7 @@ Self::sync_blend_constant(
                         last_geometry = None;
                     }
                     OrderedShapeSegment::Particles(segment) => {
-                        let clock_bg = ctx
-                            .renderer
-                            .clock_camera_group(info.particle_clock);
+                        let clock_bg = ctx.renderer.clock_camera_group(info.particle_clock);
                         let seg_material = &segment.material;
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = seg_material
@@ -879,7 +910,7 @@ Self::sync_blend_constant(
                             })
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
-                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                        let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
                             seg_material.as_ref().and_then(|m| {
                                 m.ensure_bind_group(
                                     &ctx.gpu.device,
@@ -904,36 +935,47 @@ Self::sync_blend_constant(
                             .as_ref()
                             .map(|m| m.has_custom_vertex_shader())
                             .unwrap_or(false);
-                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
-                            if seg_use_custom && !has_custom_vs {
-                                let mat = seg_material.as_ref().unwrap();
-                                match ctx.gpu.ensure_material_pipeline(
-                                    mat,
-                                    MaterialTarget::Shape,
-                                    ctx.sample_count,
-                                    ctx.alpha_to_coverage,
-                                    ctx.ssaa,
-                                    info.has_ds,
-                                    info.uses_stencil,
-                                    if info.uses_stencil {
-                                        info.pipe_op.min(4)
-                                    } else {
-                                        0
-                                    },
-                                    crate::gpu::ShapeVertexLayout::Particle,
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if seg_use_custom
+                            && !has_custom_vs
+                        {
+                            let mat = seg_material.as_ref().unwrap();
+                            match ctx.gpu.ensure_material_pipeline(
+                                mat,
+                                MaterialTarget::Shape,
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                if info.uses_stencil {
+                                    info.pipe_op.min(4)
+                                } else {
+                                    0
+                                },
+                                crate::gpu::ShapeVertexLayout::Particle,
+                                Self::material_blends(
+                                    &mut material_blends,
                                     segment.blend,
-                                ) {
-                                    Ok(p) => Some(p),
-                                    Err(err) => {
-                                        log::warn!(
-                                            "custom material pipeline unavailable (particle layout): {err}"
-                                        );
-                                        None
-                                    }
+                                    info.target_blends,
+                                ),
+                            ) {
+                                Ok(p) => Some(p),
+                                Err(err) => {
+                                    log::warn!(
+                                        "custom material pipeline unavailable (particle layout): {err}"
+                                    );
+                                    None
                                 }
-                            } else {
-                                None
-                            };
+                            }
+                        } else {
+                            None
+                        };
+                        if mrt && custom_pipe.is_none() {
+                            super::draw::mrt_warn_once("engine shape (instance layout)");
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -948,7 +990,10 @@ Self::sync_blend_constant(
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                             pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
-                            pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                            pass.set_vertex_buffer(
+                                1,
+                                ctx.particle_buf.expect("particle buffer").slice(..),
+                            );
                             pass.set_index_buffer(
                                 ctx.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -956,7 +1001,7 @@ Self::sync_blend_constant(
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -988,7 +1033,10 @@ Self::sync_blend_constant(
                                 pass.set_bind_group(*group_index, bg, &[]);
                             }
                             pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
-                            pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                            pass.set_vertex_buffer(
+                                1,
+                                ctx.particle_buf.expect("particle buffer").slice(..),
+                            );
                             pass.set_index_buffer(
                                 ctx.gpu.instance_quad_index_buf.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -996,7 +1044,7 @@ Self::sync_blend_constant(
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -1026,7 +1074,7 @@ Self::sync_blend_constant(
                             })
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
-                        let seg_custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+                        let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
                             seg_material.as_ref().and_then(|m| {
                                 m.ensure_bind_group(
                                     &ctx.gpu.device,
@@ -1047,36 +1095,45 @@ Self::sync_blend_constant(
                             continue;
                         }
                         let seg_use_custom = seg_material.is_some();
-                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
-                            if seg_use_custom {
-                                let mat = seg_material.as_ref().unwrap();
-                                match ctx.gpu.ensure_material_pipeline(
-                                    mat,
-                                    MaterialTarget::Shape,
-                                    ctx.sample_count,
-                                    ctx.alpha_to_coverage,
-                                    ctx.ssaa,
-                                    info.has_ds,
-                                    info.uses_stencil,
-                                    if info.uses_stencil {
-                                        info.pipe_op.min(4)
-                                    } else {
-                                        0
-                                    },
-                                    crate::gpu::ShapeVertexLayout::GeoInstance,
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if seg_use_custom {
+                            let mat = seg_material.as_ref().unwrap();
+                            match ctx.gpu.ensure_material_pipeline(
+                                mat,
+                                MaterialTarget::Shape,
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                if info.uses_stencil {
+                                    info.pipe_op.min(4)
+                                } else {
+                                    0
+                                },
+                                crate::gpu::ShapeVertexLayout::GeoInstance,
+                                Self::material_blends(
+                                    &mut material_blends,
                                     segment.blend,
-                                ) {
-                                    Ok(p) => Some(p),
-                                    Err(err) => {
-                                        log::warn!(
-                                            "custom material pipeline unavailable (geo instance layout): {err}"
-                                        );
-                                        None
-                                    }
+                                    info.target_blends,
+                                ),
+                            ) {
+                                Ok(p) => Some(p),
+                                Err(err) => {
+                                    log::warn!(
+                                        "custom material pipeline unavailable (geo instance layout): {err}"
+                                    );
+                                    None
                                 }
-                            } else {
-                                None
-                            };
+                            }
+                        } else {
+                            None
+                        };
+                        if mrt && custom_pipe.is_none() {
+                            super::draw::mrt_warn_once("engine shape (instance layout)");
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -1092,17 +1149,24 @@ Self::sync_blend_constant(
                             }
                             pass.set_vertex_buffer(
                                 0,
-                                ctx.geo_template_vbuf.slice(..),
+                                ctx.geo_template_vbuf
+                                    .expect("geo template vertex buffer")
+                                    .slice(..),
                             );
-                            pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                            pass.set_vertex_buffer(
+                                1,
+                                ctx.geo_instance_buf.expect("geo instance buffer").slice(..),
+                            );
                             pass.set_index_buffer(
-                                ctx.geo_template_ibuf.slice(..),
+                                ctx.geo_template_ibuf
+                                    .expect("geo template index buffer")
+                                    .slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -1134,16 +1198,26 @@ Self::sync_blend_constant(
                             for (group_index, bg) in &user_bind_groups {
                                 pass.set_bind_group(*group_index, bg, &[]);
                             }
-                            pass.set_vertex_buffer(0, ctx.geo_template_vbuf.slice(..));
-                            pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                            pass.set_vertex_buffer(
+                                0,
+                                ctx.geo_template_vbuf
+                                    .expect("geo template vertex buffer")
+                                    .slice(..),
+                            );
+                            pass.set_vertex_buffer(
+                                1,
+                                ctx.geo_instance_buf.expect("geo instance buffer").slice(..),
+                            );
                             pass.set_index_buffer(
-                                ctx.geo_template_ibuf.slice(..),
+                                ctx.geo_template_ibuf
+                                    .expect("geo template index buffer")
+                                    .slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
                             if info.uses_stencil {
                                 pass.set_stencil_reference(info.stencil_ref);
                             }
-Self::sync_blend_constant(
+                            Self::sync_blend_constant(
                                 &mut pass,
                                 segment.blend,
                                 segment.blend_constant,
@@ -1179,21 +1253,13 @@ Self::sync_blend_constant(
                 .custom_material
                 .as_ref()
                 .map(|m| {
-                    m.ensure_bind_groups(
-                        &ctx.gpu.device,
-                        &ctx.gpu.queue,
-                        &ctx.gpu.bind_group_pool,
-                    )
+                    m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue, &ctx.gpu.bind_group_pool)
                 })
                 .unwrap_or_default();
             let is_self_managed = !user_bind_groups.is_empty();
-            let custom_bg: Option<wgpu::BindGroup > = if !is_self_managed {
+            let custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
                 info.custom_material.as_ref().and_then(|m| {
-                    m.ensure_bind_group(
-                        &ctx.gpu.device,
-                        &ctx.gpu.queue,
-                        &ctx.gpu.bind_group_pool,
-                    )
+                    m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue, &ctx.gpu.bind_group_pool)
                 })
             } else {
                 None
@@ -1213,7 +1279,7 @@ Self::sync_blend_constant(
                     || (!use_custom && last_geometry != Some(info.geometry))
                     || (!use_custom && last_blend != Some(info.blend))
                     || (info.uses_stencil && info.pipe_op != last_stencil_op)
-                                || info.dynamic_offsets != last_dynamic_offsets.as_slice();
+                    || info.dynamic_offsets != last_dynamic_offsets.as_slice();
                 if need_rebind {
                     let tmp_pipe: wgpu::RenderPipeline;
                     let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
@@ -1232,7 +1298,11 @@ Self::sync_blend_constant(
                                 0
                             },
                             crate::gpu::ShapeVertexLayout::Mesh,
-                            info.blend,
+                            Self::material_blends(
+                                &mut material_blends,
+                                info.blend,
+                                info.target_blends,
+                            ),
                         ) {
                             Ok(p) => Some(p),
                             Err(err) => {
@@ -1275,11 +1345,13 @@ Self::sync_blend_constant(
                     if use_custom_pipe && let Some(bg) = custom_bg.as_ref() {
                         pass.set_bind_group(3, bg, &info.dynamic_offsets);
                     }
-                    pass.set_vertex_buffer(0, ctx.vertex_buf.slice(..));
-                    pass.set_index_buffer(
-                        ctx.index_buf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    if !info.segments.is_empty() {
+                        pass.set_vertex_buffer(0, ctx.vertex_buf.expect("vertex buffer").slice(..));
+                        pass.set_index_buffer(
+                            ctx.index_buf.expect("index buffer").slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                    }
                     shapes_bound = true;
                     last_custom_ptr = custom_ptr;
                     last_geometry = Some(info.geometry);
@@ -1292,7 +1364,7 @@ Self::sync_blend_constant(
                 }
                 for seg in info.segments {
                     pass.set_bind_group(1, &seg.bind_group, &[]);
-                        Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
+                    Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
                     pass.draw_indexed(
                         seg.ndx_start..seg.ndx_start + seg.ndx_count,
                         info.base_vertex,
@@ -1317,7 +1389,11 @@ Self::sync_blend_constant(
                                 0
                             },
                             crate::gpu::ShapeVertexLayout::SdfInstance,
-                            info.blend,
+                            Self::material_blends(
+                                &mut material_blends,
+                                info.blend,
+                                info.target_blends,
+                            ),
                         ) {
                             Ok(p) => Some(p),
                             Err(err) => {
@@ -1349,10 +1425,7 @@ Self::sync_blend_constant(
                     for seg in info.instances {
                         pass.set_bind_group(1, &seg.bind_group, &[]);
                         pass.set_bind_group(2, engine_bg, &[]);
-                        pass.set_vertex_buffer(
-                            0,
-                            ctx.gpu.instance_quad_vertex_buf.slice(..),
-                        );
+                        pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
                         pass.set_index_buffer(
                             ctx.gpu.instance_quad_index_buf.slice(..),
                             wgpu::IndexFormat::Uint32,
@@ -1388,7 +1461,11 @@ Self::sync_blend_constant(
                                 0
                             },
                             crate::gpu::ShapeVertexLayout::GeoInstance,
-                            info.blend,
+                            Self::material_blends(
+                                &mut material_blends,
+                                info.blend,
+                                info.target_blends,
+                            ),
                         ) {
                             Ok(p) => Some(p),
                             Err(err) => {
@@ -1420,10 +1497,20 @@ Self::sync_blend_constant(
                     for seg in info.geo_instances {
                         pass.set_bind_group(1, &seg.bind_group, &[]);
                         pass.set_bind_group(2, engine_bg, &[]);
-                        pass.set_vertex_buffer(0, ctx.geo_template_vbuf.slice(..));
-                        pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                        pass.set_vertex_buffer(
+                            0,
+                            ctx.geo_template_vbuf
+                                .expect("geo template vertex buffer")
+                                .slice(..),
+                        );
+                        pass.set_vertex_buffer(
+                            1,
+                            ctx.geo_instance_buf.expect("geo instance buffer").slice(..),
+                        );
                         pass.set_index_buffer(
-                            ctx.geo_template_ibuf.slice(..),
+                            ctx.geo_template_ibuf
+                                .expect("geo template index buffer")
+                                .slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
                         if info.uses_stencil {
@@ -1431,11 +1518,9 @@ Self::sync_blend_constant(
                         }
                         Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
                         pass.draw_indexed(
-                            seg.template_index_start
-                                ..seg.template_index_start + seg.index_count,
+                            seg.template_index_start..seg.template_index_start + seg.index_count,
                             seg.template_vertex_start as i32,
-                            seg.geo_instance_start
-                                ..seg.geo_instance_start + seg.geo_instance_count,
+                            seg.geo_instance_start..seg.geo_instance_start + seg.geo_instance_count,
                         );
                         shape_draw_calls += 1;
                     }
@@ -1460,7 +1545,11 @@ Self::sync_blend_constant(
                                 0
                             },
                             crate::gpu::ShapeVertexLayout::Particle,
-                            info.blend,
+                            Self::material_blends(
+                                &mut material_blends,
+                                info.blend,
+                                info.target_blends,
+                            ),
                         ) {
                             Ok(p) => Some(p),
                             Err(err) => {
@@ -1493,7 +1582,10 @@ Self::sync_blend_constant(
                         pass.set_bind_group(1, &seg.bind_group, &[]);
                         pass.set_bind_group(2, engine_bg, &[]);
                         pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
-                        pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                        pass.set_vertex_buffer(
+                            1,
+                            ctx.particle_buf.expect("particle buffer").slice(..),
+                        );
                         pass.set_index_buffer(
                             ctx.gpu.instance_quad_index_buf.slice(..),
                             wgpu::IndexFormat::Uint32,
@@ -1526,6 +1618,21 @@ Self::sync_blend_constant(
         if blend.color.uses_constant() || blend.alpha.uses_constant() {
             pass.set_blend_constant(constant);
         }
+    }
+
+    /// 组装 custom material 的逐颜色目标 blend 清单：索引 0 用本段画笔 `blend`，
+    /// 其余目标沿用 `RenderTarget` 自身声明的 blend（单目标时长度 = 1）。
+    fn material_blends<'a>(
+        out: &'a mut Vec<Option<wgpu::BlendState>>,
+        base: wgpu::BlendState,
+        target_blends: &[Option<wgpu::BlendState>],
+    ) -> &'a [Option<wgpu::BlendState>] {
+        out.clear();
+        out.push(Some(base));
+        if target_blends.len() > 1 {
+            out.extend_from_slice(&target_blends[1..]);
+        }
+        out.as_slice()
     }
 
     /// 清空本批供下一帧复用：各缓冲只归零长度、保留容量（本批自身**无 children**时零堆分配；
@@ -3284,7 +3391,7 @@ Self::sync_blend_constant(
     ///
     /// **文字**：无法从裸 bind group 取出 view，会清空文字画笔贴图
     ///（之后 `text`/`push*` 走白 base）；需要文字贴图时请用 [`Self::set_texture`]。
-    pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup >) {
+    pub fn set_bind_group(&mut self, bg: Option<wgpu::BindGroup>) {
         self.record_pending_mesh_command();
         self.add_texture_segment(self.bind_group.clone());
         self.add_instance_texture_segment(self.bind_group.clone());
@@ -3329,7 +3436,7 @@ Self::sync_blend_constant(
     }
 
     /// 记录纹理段：自上次段以来的新索引归入此 bind group（`None` = 白纹理路径）。
-    pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
+    pub(crate) fn add_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
         let start = self
             .texture_segments
             .last()
@@ -3344,7 +3451,7 @@ Self::sync_blend_constant(
         }
     }
 
-    fn add_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
+    fn add_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
         let start = self
             .instance_texture_segments
             .last()
@@ -3361,7 +3468,7 @@ Self::sync_blend_constant(
 
     /// 粒子纹理段：与 instance 段同机理，下标进 `particles` 表。
     /// 所有封 instance 段处同步封粒子段（空范围时 no-op）。
-    fn add_particle_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
+    fn add_particle_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
         let start = self
             .particle_texture_segments
             .last()
@@ -3376,7 +3483,7 @@ Self::sync_blend_constant(
         }
     }
 
-    fn add_geo_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup >) {
+    fn add_geo_instance_texture_segment(&mut self, bg: Option<wgpu::BindGroup>) {
         let start = self
             .geo_instance_texture_segments
             .last()

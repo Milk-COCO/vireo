@@ -37,10 +37,7 @@ fn ds_load() -> DepthStencilTarget {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(
-        WindowDesc::new("depth_prepass", 640, 480),
-        None::<fn()>,
-    );
+    let window = app.window(WindowDesc::new("depth_prepass", 640, 480), None::<fn()>);
     let canvas = app.offscreen(640, 480, AntiAliasing::None);
 
     let material_red = app.material(FRAG).expect("material");

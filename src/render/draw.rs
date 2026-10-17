@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::gpu::{
     ClockIndex, GeoInstance, GeoVertex, InstanceData, MaterialTarget, ParticleInstance, Vertex,
@@ -42,6 +45,20 @@ static DS_WARNED: AtomicBool = AtomicBool::new(false);
 fn ds_warn_once(msg: &str) {
     if !DS_WARNED.swap(true, Ordering::Relaxed) {
         log::warn!("{msg}");
+    }
+}
+
+/// MRT（多颜色目标）pass 里引擎 shader / 文字管线只有单颜色输出，无法写入多目标。
+/// 进程级 warn-once，内容跳过而不是触发 wgpu 校验错误。
+static MRT_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+pub(crate) fn mrt_warn_once(what: &str) {
+    if !MRT_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "{what} skipped in a multi-target pass: engine shaders/text write a single color output; \
+             use a custom material whose fragment shader declares matching outputs"
+        );
     }
 }
 
@@ -127,7 +144,7 @@ impl Renderer {
     pub fn draw(
         &self,
         target: &RenderTarget,
-        clear_color: Option<crate::color::Color>,
+        clear_colors: &[Option<crate::color::Color>],
         batches: &[&DrawBatch],
     ) -> wgpu::CommandBuffer {
         // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
@@ -145,7 +162,7 @@ impl Renderer {
             &mut events,
         );
 
-        let has_content = clear_color.is_some()
+        let has_content = clear_colors.iter().any(|c| c.is_some())
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instance_data.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
             // 无内容：返回空 cmd_buf（不创建 render pass 即可）
@@ -170,17 +187,25 @@ impl Renderer {
                 label: Some("vireo encoder"),
             });
 
-        let load = match clear_color {
-            Some(c) => wgpu::LoadOp::Clear(wgpu::Color {
-                r: c.r as f64,
-                g: c.g as f64,
-                b: c.b as f64,
-                a: c.a as f64,
-            }),
+        let load = match clear_colors.first() {
+            Some(c) => match c {
+                Some(c) => wgpu::LoadOp::Clear(wgpu::Color {
+                    r: c.r as f64,
+                    g: c.g as f64,
+                    b: c.b as f64,
+                    a: c.a as f64,
+                }),
+                None => wgpu::LoadOp::Load,
+            },
             None => wgpu::LoadOp::Load,
         };
 
-        let target_view = &target.view;
+        let target_view = &target.color_attachments[0].view;
+        // MRT：>1 个颜色附件的 pass。引擎 MSAA / 文字 / 引擎形状均只支持单目标，
+        // MRT 由 custom material（多个 FS 输出）承担，其余内容跳过并 warn-once。
+        let mrt = target.color_attachments.len() > 1;
+        let target_blends: Vec<Option<wgpu::BlendState>> =
+            target.color_attachments.iter().map(|a| a.blend).collect();
         // 相机为逻辑像素正交；Pop 全屏四边形也用逻辑尺寸
         let lw = self.logical_width;
         let lh = self.logical_height;
@@ -1524,13 +1549,49 @@ impl Renderer {
             .any(|e| e.shape.is_some() || !e.text.is_empty());
         // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
         let mut shape_draw_calls: u32 = 0;
-        if has_any_content || clear_color.is_some() {
+        if has_any_content || clear_colors.iter().any(|c| c.is_some()) {
             let msaa_view = self.msaa_view(self.gpu.surface_format());
-            let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) =
-                match &msaa_view {
-                    Some(msaa) => (msaa, Some(target_view)),
-                    None => (target_view, None),
-                };
+            // 目标附件清单：MRT 直接使用用户的多个颜色附件（引擎 MSAA 仅单目标路径）；
+            // 单目标路径保持 MSAA resolve 到 target 0 的既有行为。
+            let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
+                Vec::with_capacity(target.color_attachments.len().max(1));
+            if mrt {
+                for (i, att) in target.color_attachments.iter().enumerate() {
+                    let load_i = match clear_colors.get(i) {
+                        Some(Some(c)) => wgpu::LoadOp::Clear(wgpu::Color {
+                            r: c.r as f64,
+                            g: c.g as f64,
+                            b: c.b as f64,
+                            a: c.a as f64,
+                        }),
+                        _ => wgpu::LoadOp::Load,
+                    };
+                    color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                        view: &att.view,
+                        resolve_target: att.resolve_target.as_ref(),
+                        ops: wgpu::Operations {
+                            load: load_i,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }));
+                }
+            } else {
+                let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) =
+                    match &msaa_view {
+                        Some(msaa) => (msaa, Some(target_view)),
+                        None => (target_view, None),
+                    };
+                color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: resolve,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                }));
+            }
             let dv;
             let ds_attachment = match &resolved_ds {
                 ResolvedDsOps::None => None,
@@ -1560,15 +1621,7 @@ impl Renderer {
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vireo render pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    resolve_target: resolve,
-                    ops: wgpu::Operations {
-                        load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: ds_attachment,
                 ..Default::default()
             });
@@ -1585,12 +1638,12 @@ impl Renderer {
                 gpu: &self.gpu,
                 camera_bind_group: &self.camera_bind_group,
                 engine_bg,
-                vertex_buf: &vbuf.as_ref().unwrap().0,
-                index_buf: &ibuf.as_ref().unwrap().0,
-                particle_buf: &particle_buf.as_ref().unwrap().0,
-                geo_template_vbuf: &geo_template_vbuf.as_ref().unwrap().0,
-                geo_template_ibuf: &geo_template_ibuf.as_ref().unwrap().0,
-                geo_instance_buf: &geo_instance_buf.as_ref().unwrap().0,
+                vertex_buf: vbuf.as_ref().map(|b| &b.0),
+                index_buf: ibuf.as_ref().map(|b| &b.0),
+                particle_buf: particle_buf.as_ref().map(|b| &b.0),
+                geo_template_vbuf: geo_template_vbuf.as_ref().map(|b| &b.0),
+                geo_template_ibuf: geo_template_ibuf.as_ref().map(|b| &b.0),
+                geo_instance_buf: geo_instance_buf.as_ref().map(|b| &b.0),
                 sample_count: self.sample_count,
                 alpha_to_coverage: self.alpha_to_coverage,
                 ssaa: self.ssaa,
@@ -1652,6 +1705,7 @@ impl Renderer {
                             base_vertex: shape.base_vertex,
                             geometry: shape.geometry,
                             blend: shape.blend,
+                            target_blends: &target_blends,
                             custom_material: &info.custom_material,
                             segments: &shape.segments,
                             instances: &shape.instances,
@@ -1668,7 +1722,9 @@ impl Renderer {
                         shape_draw_calls += batch.encode_into(&mut pass, &encode_info, &ctx);
                     }
                 }
-                if !info.text.is_empty() {
+                if !info.text.is_empty() && mrt {
+                    mrt_warn_once("text");
+                } else if !info.text.is_empty() {
                     // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
                     // Area 存在时：当前文本在 Area content level，测 (Test)。
                     let has_area_at_text =
@@ -1727,7 +1783,7 @@ impl Renderer {
                                     uses_stencil,
                                     if text_tests_stencil { 2 } else { 0 },
                                     crate::gpu::ShapeVertexLayout::Mesh,
-                                    segment.blend,
+                                    &[Some(segment.blend)],
                                 ) {
                                 Ok(p) => Some(p),
                                 Err(err) => {

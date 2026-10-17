@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 
 use crate::gpu::GpuContext;
 use crate::input::InputState;
-use crate::render::{DepthStencilOps, DepthStencilTarget, DrawBatch};
+use crate::render::{ColorTargetDesc, DepthStencilOps, DepthStencilTarget, DrawBatch};
 
 pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
@@ -566,7 +566,7 @@ impl VireoWindow {
     pub fn draw(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
         let report = {
             let _occupancy_guard = self.occupancy.lock().unwrap_or_else(|e| e.into_inner());
-            let r = self.draw_frame(clear_color, batches, None);
+            let r = self.draw_frame(clear_color, batches, None, &[]);
             *self.last_draw_outcome.lock() = Some(r.outcome);
             *self.last_draw_report.lock() = Some(r);
             match r.outcome {
@@ -662,7 +662,30 @@ impl VireoWindow {
         batches: &[&DrawBatch],
         ops: Option<DepthStencilOps>,
     ) -> DrawReport {
-        self.draw_frame(clear_color, batches, ops.map(DepthStencilTarget::Engine))
+        self.draw_frame(
+            clear_color,
+            batches,
+            ops.map(DepthStencilTarget::Engine),
+            &[],
+        )
+    }
+
+    /// 绘制一帧到多个颜色目标（MRT）。
+    ///
+    /// 第 0 个颜色目标恒为本窗口 surface（`clear_color` 清屏，present 到窗口）；
+    /// `extra_targets` 是追加的离屏颜色附件（通常由调用方事先创建 texture view），
+    /// 这些目标的 load 操作固定为 `LoadOp::Load`，混合状态取 `ColorTargetDesc::blend`。
+    ///
+    /// 只有 **custom material**（fragment shader 声明多个输出）能写入多个目标；
+    /// 引擎形状与文字只有单颜色输出，在 MRT pass 中会被跳过并 warn-once。
+    /// MRT 不使用引擎 MSAA 目标（`extra_targets` 的样本数须与管线 sample_count 一致）。
+    pub fn draw_mrt(
+        &self,
+        clear_color: crate::color::Color,
+        extra_targets: &[ColorTargetDesc],
+        batches: &[&DrawBatch],
+    ) -> DrawReport {
+        self.draw_frame(clear_color, batches, None, extra_targets)
     }
 
     fn draw_frame(
@@ -670,6 +693,7 @@ impl VireoWindow {
         clear_color: crate::color::Color,
         batches: &[&DrawBatch],
         ds: Option<DepthStencilTarget>,
+        extra_targets: &[ColorTargetDesc],
     ) -> DrawReport {
         if *self.closing.lock() {
             return DrawReport {
@@ -751,12 +775,22 @@ impl VireoWindow {
             let sc = aa.sample_count();
             let atc = aa.alpha_to_coverage();
             let ssaa = aa.is_ssaa();
-            let _ =
-                self.gpu
-                    .ensure_pipeline(sc, atc, ssaa, false, false, wgpu::BlendState::ALPHA_BLENDING);
-            let _ = self
-                .gpu
-                .ensure_pipeline(sc, atc, ssaa, false, true, wgpu::BlendState::ALPHA_BLENDING);
+            let _ = self.gpu.ensure_pipeline(
+                sc,
+                atc,
+                ssaa,
+                false,
+                false,
+                wgpu::BlendState::ALPHA_BLENDING,
+            );
+            let _ = self.gpu.ensure_pipeline(
+                sc,
+                atc,
+                ssaa,
+                false,
+                true,
+                wgpu::BlendState::ALPHA_BLENDING,
+            );
             self.renderer.lock().update_aa(aa);
         }
 
@@ -1103,14 +1137,41 @@ impl VireoWindow {
 
         // 4b) 编码
         let view = st.texture.create_view(&Default::default());
-        let mut target = crate::render::RenderTarget::from_texture_view(view);
+        let (mut target, clear_colors) = if extra_targets.is_empty() {
+            (
+                crate::render::RenderTarget::from_texture_view(view),
+                vec![Some(clear_color)],
+            )
+        } else {
+            let mut atts = Vec::with_capacity(extra_targets.len() + 1);
+            atts.push(crate::render::ColorTargetDesc {
+                view,
+                resolve_target: None,
+                blend: None,
+            });
+            atts.extend(
+                extra_targets
+                    .iter()
+                    .map(|t| crate::render::ColorTargetDesc {
+                        view: t.view.clone(),
+                        resolve_target: t.resolve_target.clone(),
+                        blend: t.blend,
+                    }),
+            );
+            let mut clears = vec![Some(clear_color)];
+            clears.resize(atts.len(), None);
+            (
+                crate::render::RenderTarget::from_color_attachments(atts),
+                clears,
+            )
+        };
         target.set_depth_stencil(ds);
         let batch_refs: Vec<&DrawBatch> = batches.to_vec();
         let t2 = std::time::Instant::now();
         let cmd_buf = self
             .renderer
             .lock()
-            .draw(&target, Some(clear_color), &batch_refs);
+            .draw(&target, &clear_colors, &batch_refs);
         // 5) submit
         self.gpu.queue.submit([cmd_buf]);
         let encode_secs = t2.elapsed().as_secs_f64();

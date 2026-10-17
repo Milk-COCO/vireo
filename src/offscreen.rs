@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::gpu::GpuContext;
-use crate::render::{DepthStencilTarget, DrawBatch, Renderer};
+use crate::render::{ColorTargetDesc, DepthStencilTarget, DrawBatch, RenderTarget, Renderer};
 use crate::texture::Texture;
 use crate::window::{AntiAliasing, OffscreenIndex};
 
@@ -79,35 +79,9 @@ impl OffscreenCanvas {
     /// 若创建后 `GpuContext::surface_format` 漂移（如 GLES 首帧由默认 sRGB
     /// 翻为线性格式），先按当前格式重建目标纹理再画，调用方无感。
     pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
-        let gpu = self.renderer.gpu();
-        let format = gpu.surface_format();
-        {
-            let tex = self.texture.lock();
-            if tex.format != format {
-                drop(tex);
-                let mut fresh = self.texture.lock();
-                // 双重检查：等待锁期间可能已被别的 draw 重建。
-                if fresh.format != format {
-                    let (w, h) = (fresh.width, fresh.height);
-                    log::warn!(
-                        "offscreen: surface format drifted ({:?} -> {:?}), recreating target",
-                        fresh.format,
-                        format
-                    );
-                    *fresh = Texture::new(
-                        &gpu.device,
-                        w,
-                        h,
-                        format,
-                        &gpu.texture_bind_group_layout,
-                        &gpu.default_sampler,
-                    );
-                    self.renderer.clear_msaa_ds();
-                }
-            }
-        }
+        self.ensure_target_format();
         let target = self.texture.lock().target();
-        let cmd_buf = target.draw(&self.renderer, clear_color, batches);
+        let cmd_buf = target.draw(&self.renderer, &[clear_color], batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }
 
@@ -118,37 +92,67 @@ impl OffscreenCanvas {
         batches: &[&DrawBatch],
         ds: Option<DepthStencilTarget>,
     ) {
-        let gpu = self.renderer.gpu();
-        let format = gpu.surface_format();
-        {
-            let tex = self.texture.lock();
-            if tex.format != format {
-                drop(tex);
-                let mut fresh = self.texture.lock();
-                // 双重检查：等待锁期间可能已被别的 draw 重建。
-                if fresh.format != format {
-                    let (w, h) = (fresh.width, fresh.height);
-                    log::warn!(
-                        "offscreen: surface format drifted ({:?} -> {:?}), recreating target",
-                        fresh.format,
-                        format
-                    );
-                    *fresh = Texture::new(
-                        &gpu.device,
-                        w,
-                        h,
-                        format,
-                        &gpu.texture_bind_group_layout,
-                        &gpu.default_sampler,
-                    );
-                    self.renderer.clear_msaa_ds();
-                }
-            }
-        }
+        self.ensure_target_format();
         let mut target = self.texture.lock().target();
         target.set_depth_stencil(ds);
-        let cmd_buf = target.draw(&self.renderer, clear_color, batches);
+        let cmd_buf = target.draw(&self.renderer, &[clear_color], batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
+    }
+
+    /// 渲染并提交到多个颜色目标（MRT）。
+    ///
+    /// 第 0 个目标是本画布自身纹理（`clear_color` 清屏）；`extra_targets` 为追加的
+    /// 颜色附件（load 固定 `LoadOp::Load`，blend 取 `ColorTargetDesc::blend`）。
+    /// 只有 custom material（fragment shader 声明多个输出）能写多目标。
+    pub fn draw_mrt(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        extra_targets: &[ColorTargetDesc],
+        batches: &[&DrawBatch],
+    ) {
+        self.ensure_target_format();
+        let prim = self.texture.lock().target();
+        let mut atts = prim.color_attachments;
+        atts.extend(extra_targets.iter().map(|t| ColorTargetDesc {
+            view: t.view.clone(),
+            resolve_target: t.resolve_target.clone(),
+            blend: t.blend,
+        }));
+        let mut clears = vec![clear_color];
+        clears.resize(atts.len(), None);
+        let target = RenderTarget::from_color_attachments(atts);
+        let cmd_buf = target.draw(&self.renderer, &clears, batches);
+        self.renderer.gpu().queue.submit(Some(cmd_buf));
+    }
+
+    /// 目标纹理格式与当前 `surface_format` 不一致时重建（GLES 首帧 sRGB→线性）。
+    fn ensure_target_format(&self) {
+        let gpu = self.renderer.gpu();
+        let format = gpu.surface_format();
+        let tex = self.texture.lock();
+        if tex.format == format {
+            return;
+        }
+        drop(tex);
+        let mut fresh = self.texture.lock();
+        // 双重检查：等待锁期间可能已被别的 draw 重建。
+        if fresh.format != format {
+            let (w, h) = (fresh.width, fresh.height);
+            log::warn!(
+                "offscreen: surface format drifted ({:?} -> {:?}), recreating target",
+                fresh.format,
+                format
+            );
+            *fresh = Texture::new(
+                &gpu.device,
+                w,
+                h,
+                format,
+                &gpu.texture_bind_group_layout,
+                &gpu.default_sampler,
+            );
+            self.renderer.clear_msaa_ds();
+        }
     }
 
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。

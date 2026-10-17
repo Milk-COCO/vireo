@@ -142,6 +142,25 @@
 
 ### Changed / 变更
 
+- **渲染能力四项落地（P1～P4）**：
+  - **深度/模板细粒度控制**：新增 `DepthStencilAttachment` / `DepthStencilOps` /
+    `DepthStencilTarget`（引擎 DS 或用户自带 view）；`RenderTarget::set_depth_stencil`
+    （链式 `with_depth_stencil`）；`Material::set_depth_write` / `set_depth_compare`；
+    `VireoWindow::draw_with_depth_stencil` / `OffscreenCanvas::draw_with_depth_stencil`。
+    缺失 aspect 自动补齐并 warn-once。支持深度预通道＋着色通道跨 draw 保留深度。
+  - **MRT 多目标**：`ColorTargetDesc { view, resolve_target, blend }` +
+    `RenderTarget::from_color_attachments`；`VireoWindow::draw_mrt` /
+    `OffscreenCanvas::draw_mrt`；`Renderer::draw` / `RenderTarget::draw` 改收
+    `clear_colors: &[Option<Color>]`（与颜色附件等长）。custom material 返回
+    `MaterialOutput`（第 0 个字段须名为 `color`，引擎在其上应用 alpha/SDF）即可写多目标；
+    pipeline key 含目标数量与逐目标 blend，双目标不同 blend 一次提交。引擎形状/文字与
+    引擎 MSAA 不参与 MRT（单颜色输出，跳过并 warn-once）。示例 `mrt`。
+  - **Bind Group 去硬编码**：`App::material_self_managed(source, &[(group, &bgl)])` /
+    `GpuContext::create_material_self_managed`——用户自带 BGL 与 group 编号，任意
+    `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。`Material::set_group_index`
+    可调整默认材质所在 group。示例 `custom_material_self_managed`。
+  - **Pass 接管**：`DrawBatch::encode_into` 内部化（`Renderer::draw` 复用同一实现），
+    绘制状态编码与数据合并解耦。属 `pub(crate)`，公开 API 面不变。
 - `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
     `surface_format` 自愈重建，见下）；`view()` / `bind_group()` 改返回
     owned 克隆（原返回内部引用，与锁共存不了）。`Texture` 新增 `format` 字段。

@@ -474,7 +474,13 @@ impl Material {
         assert_eq!(entries.len(), init_bind_groups.len());
         let providers: Vec<_> = entries
             .iter()
-            .map(|_| Mutex::new(None as Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>>))
+            .map(|_| {
+                Mutex::new(
+                    None as Option<
+                        Box<dyn FnMut(&wgpu::Device, &wgpu::Queue) -> wgpu::BindGroup + Send>,
+                    >,
+                )
+            })
             .collect();
         let bind_groups: Vec<_> = init_bind_groups
             .into_iter()
@@ -493,16 +499,6 @@ impl Material {
             depth_write: AtomicBool::new(false),
             depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
             pipelines: Mutex::new(pipelines),
-        }
-    }
-
-    /// 用户自管 BGL 的列表（group_index, BGL）。`ZeroResource` / `A` 返回空。
-    pub(crate) fn self_managed_entries(&self) -> Vec<(u32, &wgpu::BindGroupLayout)> {
-        match &self.state {
-            MaterialState::SelfManaged { entries, .. } => {
-                entries.iter().map(|e| (e.group_index, &e.bgl)).collect()
-            }
-            _ => Vec::new(),
         }
     }
 
@@ -689,12 +685,10 @@ impl Material {
                 provider: _,
                 bind_group: _,
                 ..
-            } => {
-                match self.ensure_bind_group(device, queue, pool) {
-                    Some(bg) => vec![(*group_index, bg)],
-                    None => Vec::new(),
-                }
-            }
+            } => match self.ensure_bind_group(device, queue, pool) {
+                Some(bg) => vec![(*group_index, bg)],
+                None => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }

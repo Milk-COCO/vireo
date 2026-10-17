@@ -3075,15 +3075,22 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     };
 
     // ---------- Pass 1：深度预通道，红色左半边（z=0 写入）----------
+    // 画布格式为 sRGB：用纯色（1/0）避免 sRGB 编码后阈值判断失真。
+    let pure_red = Color::new(1.0, 0.0, 0.0, 1.0);
     let mut b1 = DrawBatch::new();
     b1.set_custom_material(Some(material_red.clone()));
-    draw_rectangle(&mut b1, Pos::new(0.0, 0.0), 200.0, 300.0, Some(RED));
-    canvas.draw_with_depth_stencil(Some(BLACK), &[&b1], Some(DepthStencilTarget::Engine(ops_clear)));
+    draw_rectangle(&mut b1, Pos::new(0.0, 0.0), 200.0, 300.0, Some(pure_red));
+    canvas.draw_with_depth_stencil(
+        Some(BLACK),
+        &[&b1],
+        Some(DepthStencilTarget::Engine(ops_clear)),
+    );
 
     // ---------- Pass 2：着色通道，蓝色全屏（z=0，Less 测试）----------
+    let pure_blue = Color::new(0.0, 0.0, 1.0, 1.0);
     let mut b2 = DrawBatch::new();
     b2.set_custom_material(Some(material_blue.clone()));
-    draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 400.0, 300.0, Some(BLUE));
+    draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 400.0, 300.0, Some(pure_blue));
     canvas.draw_with_depth_stencil(None, &[&b2], Some(DepthStencilTarget::Engine(ops_load)));
 
     let pixels = canvas.read_pixels();
@@ -3099,17 +3106,71 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     // ---------- 对照：两 pass 均不挂载 DS，Pass 2 无深度测试应全部覆盖 ----------
     let mut b3 = DrawBatch::new();
     b3.set_custom_material(Some(material_red));
-    draw_rectangle(&mut b3, Pos::new(0.0, 0.0), 200.0, 300.0, Some(RED));
+    draw_rectangle(&mut b3, Pos::new(0.0, 0.0), 200.0, 300.0, Some(pure_red));
     canvas.draw_with_depth_stencil(Some(BLACK), &[&b3], None);
 
     let mut b4 = DrawBatch::new();
     b4.set_custom_material(Some(material_blue));
-    draw_rectangle(&mut b4, Pos::new(0.0, 0.0), 400.0, 300.0, Some(BLUE));
+    draw_rectangle(&mut b4, Pos::new(0.0, 0.0), 400.0, 300.0, Some(pure_blue));
     canvas.draw_with_depth_stencil(None, &[&b4], None);
 
     let pixels = canvas.read_pixels();
     assert!(
         region_is_blue(&pixels, 400, 20, 20, 100, 100),
         "无 DS 对照：Pass 2 不做深度测试，应全部覆为蓝"
+    );
+}
+
+/// MRT（P4）：一次 pass 写两个颜色目标，两个目标各自可回读不同颜色。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_writes_distinct_colors_to_both_targets() {
+    const MATERIAL_WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 200, 200);
+    let aux = OffscreenCanvas::new(&gpu, 200, 200);
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("MRT material pipelines");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(material));
+    draw_rectangle(&mut b, Pos::new(20.0, 20.0), 160.0, 160.0, Some(WHITE));
+
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let base_pixels = base.read_pixels();
+    assert!(
+        region_is_red(&base_pixels, 200, 40, 40, 160, 160),
+        "target 0 应写入 MRT shader 的 color 输出（红）"
+    );
+    let aux_pixels = aux.read_pixels();
+    assert!(
+        region_is_blue(&aux_pixels, 200, 40, 40, 160, 160),
+        "target 1 应写入 MRT shader 的 aux 输出（蓝）"
+    );
+    println!(
+        "  MRT: target0=red target1=blue draw_calls={}",
+        base.last_draw_calls()
     );
 }
