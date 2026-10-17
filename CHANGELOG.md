@@ -153,6 +153,16 @@
   （`DrawBatch` 内部字段随之改名 `instance_data`）；渲染行为与 draw call 合并不变。
   SDF instancing now pulls `InstanceData` from a storage buffer (stable,
   append-only ABI for custom vertex shaders).
+- **破坏性**：自定义顶点着色器（custom VS）不再回退 mesh，改为按绘制路径的契约参与实例化
+  —— `sdf_feather = Some(..)` 走 SDF storage 契约（顶点输入仅 `QuadVertex` @0，
+  实例经 `@builtin(instance_index)` 读 `InstanceData`）；`sdf_feather = None` 走 geo
+  模板契约（`TemplateVertex` @0/@1 + `GeoInstanceInput` @2/@3）。创建期按
+  Mesh / SdfInstance / GeoInstance 逐布局验证，全败才报错；形状所需布局不被支持时
+  该形状被跳过 + 警告日志（不静默画错）。插值限定须用普通 `@interpolate(linear)`
+  （`sample` 限定在 sample_count=1 验证失败）。示例与 GPU 回归已更新。
+  Breaking: custom vertex shaders now plug into the instance paths instead of
+  falling back to mesh; the shader must match the contract of its draw path
+  (SDF storage contract or geo template contract).
 
 ### Fixed / 修复
 

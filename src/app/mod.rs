@@ -1178,7 +1178,10 @@ impl App {
         self.gpu.create_material(source)
     }
 
-    /// 创建带自定义 vertex shader 的材质（需自行匹配 `VertexInput @0-7` 签名）。
+    /// 创建带自定义 vertex shader 的材质。VS 须匹配所在绘制路径的输入契约：
+    /// `sdf_feather = Some` → SDF 实例契约（`QuadVertex` + `InstanceData` storage）；
+    /// `None` → 几何实例契约（`TemplateVertex` + `GeoInstance`）；直接 push 的 mesh
+    /// 顶点用 `Vertex`（`@0-7`）。创建期按布局逐项验证，不支持的布局跳过形状 + 告警一次。
     pub fn material_with_vertex_shader(
         &self,
         source: &str,

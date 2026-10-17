@@ -396,14 +396,9 @@ impl Renderer {
                 DrawEvent::Batch(batch) => {
                     let info_idx = ei;
                     let instance_start = combined_instances.len() as u32;
-                    // fragment-only custom material（无 custom VS）可走 SDF instance path；
-                    // 带 custom VS 的 Material 必须落回 mesh（VS 与 instance 字段契约不一致）。
-                    let fragment_only = batch
-                        .custom_material
-                        .as_ref()
-                        .map(|m| !m.has_custom_vertex_shader())
-                        .unwrap_or(true);
-                    let use_instances = !batch.instance_data.is_empty() && fragment_only;
+                    // custom material 按绘制路径契约参与实例化（supported layout 校验在
+                    // 创建期完成）；记录期已按路径分派，实例数据与材质布局一致。
+                    let use_instances = !batch.instance_data.is_empty();
                     if use_instances {
                         let transform_base = batch_transform_bases[info_idx];
                         combined_instances.extend(batch.instance_data.iter().copied().map(
@@ -429,7 +424,7 @@ impl Renderer {
                         ));
                     }
                     let geo_instance_start = combined_geo_instances.len() as u32;
-                    let use_geo = !batch.geo_instances.is_empty() && fragment_only;
+                    let use_geo = !batch.geo_instances.is_empty();
                     // merge_geo_templates：把同模板实例重排到连续范围以便合并 draw call。
                     // 按（texture segment, 模板）分组重排，多纹理 batch 也可合并——
                     // 每个 texture segment 内部按模板聚拢，段间仍保持各自 bind group。
@@ -1580,45 +1575,60 @@ impl Renderer {
                                         || info.dynamic_offsets != *last_dynamic_offsets;
                                     if need_rebind {
                                         let tmp_pipe: wgpu::RenderPipeline;
-                                        let custom_pipe: Arc<wgpu::RenderPipeline>;
-                                        let pipe: &wgpu::RenderPipeline = if seg_use_custom {
-                                            let mat = material.as_ref().unwrap();
-                                            custom_pipe = self.gpu.ensure_material_pipeline(
-                                                mat,
-                                                MaterialTarget::Shape,
-                                                self.sample_count,
-                                                self.alpha_to_coverage,
-                                                self.ssaa,
-                                                uses_stencil,
-                                                if uses_stencil { pipe_op.min(4) } else { 0 },
-                                                crate::gpu::ShapeVertexLayout::Mesh,
-                                                *blend,
-                                            );
-                                            &custom_pipe
-                                        } else if uses_stencil {
-                                            tmp_pipe = self.gpu.ensure_stencil_pipeline(
-                                                self.sample_count,
-                                                self.alpha_to_coverage,
-                                                self.ssaa,
-                                                *geometry,
-                                                pipe_op.min(4),
-                                                *blend,
-                                            );
-                                            &tmp_pipe
-                                        } else {
-                                            tmp_pipe = self.gpu.ensure_pipeline(
-                                                self.sample_count,
-                                                self.alpha_to_coverage,
-                                                self.ssaa,
-                                                *geometry,
-                                                *blend,
-                                            );
-                                            &tmp_pipe
-                                        };
+                                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                            if seg_use_custom {
+                                                let mat = material.as_ref().unwrap();
+                                                match self.gpu.ensure_material_pipeline(
+                                                    mat,
+                                                    MaterialTarget::Shape,
+                                                    self.sample_count,
+                                                    self.alpha_to_coverage,
+                                                    self.ssaa,
+                                                    uses_stencil,
+                                                    if uses_stencil { pipe_op.min(4) } else { 0 },
+                                                    crate::gpu::ShapeVertexLayout::Mesh,
+                                                    *blend,
+                                                ) {
+                                                    Ok(p) => Some(p),
+                                                    Err(err) => {
+                                                        log::warn!(
+                                                            "custom material pipeline unavailable (mesh layout): {err}"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                        let use_custom_pipe = custom_pipe.is_some();
+                                        let pipe: &wgpu::RenderPipeline =
+                                            if let Some(p) = custom_pipe.as_ref() {
+                                                p
+                                            } else if uses_stencil {
+                                                tmp_pipe = self.gpu.ensure_stencil_pipeline(
+                                                    self.sample_count,
+                                                    self.alpha_to_coverage,
+                                                    self.ssaa,
+                                                    *geometry,
+                                                    pipe_op.min(4),
+                                                    *blend,
+                                                );
+                                                &tmp_pipe
+                                            } else {
+                                                tmp_pipe = self.gpu.ensure_pipeline(
+                                                    self.sample_count,
+                                                    self.alpha_to_coverage,
+                                                    self.ssaa,
+                                                    *geometry,
+                                                    *blend,
+                                                );
+                                                &tmp_pipe
+                                            };
                                         pass.set_pipeline(pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
-                                        if seg_use_custom && let Some(bg) = seg_custom_bg.as_ref() {
+                                        if use_custom_pipe && let Some(bg) = seg_custom_bg.as_ref()
+                                        {
                                             pass.set_bind_group(3, bg, &info.dynamic_offsets);
                                         }
                                         pass.set_vertex_buffer(
@@ -1669,25 +1679,33 @@ impl Renderer {
                                         continue;
                                     }
                                     let seg_use_custom = seg_material.is_some();
-                                    let has_custom_vs = seg_material
-                                        .as_ref()
-                                        .map(|m| m.has_custom_vertex_shader())
-                                        .unwrap_or(false);
-                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
-                                    if use_custom_instance {
-                                        let mat = seg_material.as_ref().unwrap();
-                                        let custom_pipe = self.gpu.ensure_material_pipeline(
-                                            mat,
-                                            MaterialTarget::Shape,
-                                            self.sample_count,
-                                            self.alpha_to_coverage,
-                                            self.ssaa,
-                                            uses_stencil,
-                                            if uses_stencil { pipe_op.min(4) } else { 0 },
-                                            crate::gpu::ShapeVertexLayout::SdfInstance,
-                                            segment.blend,
-                                        );
-                                        pass.set_pipeline(&custom_pipe);
+                                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                        if seg_use_custom {
+                                            let mat = seg_material.as_ref().unwrap();
+                                            match self.gpu.ensure_material_pipeline(
+                                                mat,
+                                                MaterialTarget::Shape,
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                uses_stencil,
+                                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                                crate::gpu::ShapeVertexLayout::SdfInstance,
+                                                segment.blend,
+                                            ) {
+                                                Ok(p) => Some(p),
+                                                Err(err) => {
+                                                    log::warn!(
+                                                        "custom material pipeline unavailable (SDF instance layout): {err}"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                        pass.set_pipeline(custom_pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
@@ -1787,21 +1805,33 @@ impl Renderer {
                                         .as_ref()
                                         .map(|m| m.has_custom_vertex_shader())
                                         .unwrap_or(false);
-                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
-                                    if use_custom_instance {
-                                        let mat = seg_material.as_ref().unwrap();
-                                        let custom_pipe = self.gpu.ensure_material_pipeline(
-                                            mat,
-                                            MaterialTarget::Shape,
-                                            self.sample_count,
-                                            self.alpha_to_coverage,
-                                            self.ssaa,
-                                            uses_stencil,
-                                            if uses_stencil { pipe_op.min(4) } else { 0 },
-                                            crate::gpu::ShapeVertexLayout::Particle,
-                                            segment.blend,
-                                        );
-                                        pass.set_pipeline(&custom_pipe);
+                                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                        if seg_use_custom && !has_custom_vs {
+                                            let mat = seg_material.as_ref().unwrap();
+                                            match self.gpu.ensure_material_pipeline(
+                                                mat,
+                                                MaterialTarget::Shape,
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                uses_stencil,
+                                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                                crate::gpu::ShapeVertexLayout::Particle,
+                                                segment.blend,
+                                            ) {
+                                                Ok(p) => Some(p),
+                                                Err(err) => {
+                                                    log::warn!(
+                                                        "custom material pipeline unavailable (particle layout): {err}"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                        pass.set_pipeline(custom_pipe);
                                         pass.set_bind_group(0, &clock_bg, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
@@ -1900,25 +1930,33 @@ impl Renderer {
                                         continue;
                                     }
                                     let seg_use_custom = seg_material.is_some();
-                                    let has_custom_vs = seg_material
-                                        .as_ref()
-                                        .map(|m| m.has_custom_vertex_shader())
-                                        .unwrap_or(false);
-                                    let use_custom_instance = seg_use_custom && !has_custom_vs;
-                                    if use_custom_instance {
-                                        let mat = seg_material.as_ref().unwrap();
-                                        let custom_pipe = self.gpu.ensure_material_pipeline(
-                                            mat,
-                                            MaterialTarget::Shape,
-                                            self.sample_count,
-                                            self.alpha_to_coverage,
-                                            self.ssaa,
-                                            uses_stencil,
-                                            if uses_stencil { pipe_op.min(4) } else { 0 },
-                                            crate::gpu::ShapeVertexLayout::GeoInstance,
-                                            segment.blend,
-                                        );
-                                        pass.set_pipeline(&custom_pipe);
+                                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                        if seg_use_custom {
+                                            let mat = seg_material.as_ref().unwrap();
+                                            match self.gpu.ensure_material_pipeline(
+                                                mat,
+                                                MaterialTarget::Shape,
+                                                self.sample_count,
+                                                self.alpha_to_coverage,
+                                                self.ssaa,
+                                                uses_stencil,
+                                                if uses_stencil { pipe_op.min(4) } else { 0 },
+                                                crate::gpu::ShapeVertexLayout::GeoInstance,
+                                                segment.blend,
+                                            ) {
+                                                Ok(p) => Some(p),
+                                                Err(err) => {
+                                                    log::warn!(
+                                                        "custom material pipeline unavailable (geo instance layout): {err}"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                        pass.set_pipeline(custom_pipe);
                                         pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                         pass.set_bind_group(1, &segment.bind_group, &[]);
                                         pass.set_bind_group(2, engine_bg, &[]);
@@ -2010,12 +2048,15 @@ impl Renderer {
                             .as_ref()
                             .map_or(std::ptr::null(), Arc::as_ptr);
                         let use_custom = info.custom_material.is_some();
+                        // custom VS 按绘制路径契约参与 SDF/geo 实例化（supported layout
+                        // 校验在创建期完成）；Particles 保持既有语义：记录期 custom VS
+                        // 已烘焙为 mesh，到达这里即忽略材料走内置粒子管线。
                         let has_custom_vs = info
                             .custom_material
                             .as_ref()
                             .map(|m| m.has_custom_vertex_shader())
                             .unwrap_or(false);
-                        let use_custom_instance = use_custom && !has_custom_vs;
+                        let use_custom_particles = use_custom && !has_custom_vs;
                         let custom_bg: Option<wgpu::BindGroup> = match info.custom_material.as_ref()
                         {
                             Some(m) if m.bgl().is_some() => m.ensure_bind_group(
@@ -2042,35 +2083,34 @@ impl Renderer {
                             || info.dynamic_offsets != *last_dynamic_offsets;
                         if need_rebind {
                             let tmp_pipe: wgpu::RenderPipeline;
-                            let custom_pipe: Arc<wgpu::RenderPipeline>;
-                            let pipe: &wgpu::RenderPipeline = if use_custom {
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
                                 let mat = info.custom_material.as_ref().unwrap();
-                                if uses_stencil {
-                                    custom_pipe = self.gpu.ensure_material_pipeline(
-                                        mat,
-                                        MaterialTarget::Shape,
-                                        self.sample_count,
-                                        self.alpha_to_coverage,
-                                        self.ssaa,
-                                        true,
-                                        pipe_op.min(4),
-                                        crate::gpu::ShapeVertexLayout::Mesh,
-                                        shape.blend,
-                                    );
-                                } else {
-                                    custom_pipe = self.gpu.ensure_material_pipeline(
-                                        mat,
-                                        MaterialTarget::Shape,
-                                        self.sample_count,
-                                        self.alpha_to_coverage,
-                                        self.ssaa,
-                                        false,
-                                        0,
-                                        crate::gpu::ShapeVertexLayout::Mesh,
-                                        shape.blend,
-                                    );
+                                match self.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    self.sample_count,
+                                    self.alpha_to_coverage,
+                                    self.ssaa,
+                                    uses_stencil,
+                                    if uses_stencil { pipe_op.min(4) } else { 0 },
+                                    crate::gpu::ShapeVertexLayout::Mesh,
+                                    shape.blend,
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (mesh layout): {err}"
+                                        );
+                                        None
+                                    }
                                 }
-                                &custom_pipe
+                            } else {
+                                None
+                            };
+                            let use_custom_pipe = custom_pipe.is_some();
+                            let pipe: &wgpu::RenderPipeline = if let Some(p) = custom_pipe.as_ref()
+                            {
+                                p
                             } else if uses_stencil {
                                 tmp_pipe = self.gpu.ensure_stencil_pipeline(
                                     self.sample_count,
@@ -2094,7 +2134,7 @@ impl Renderer {
                             pass.set_pipeline(pipe);
                             pass.set_bind_group(0, &self.camera_bind_group, &[]);
                             pass.set_bind_group(2, engine_bg, &[]);
-                            if use_custom && let Some(bg) = custom_bg.as_ref() {
+                            if use_custom_pipe && let Some(bg) = custom_bg.as_ref() {
                                 pass.set_bind_group(3, bg, &info.dynamic_offsets);
                             }
                             if let Some(vb) = vbuf.as_ref() {
@@ -2124,9 +2164,9 @@ impl Renderer {
                             shape_draw_calls += 1;
                         }
                         if !shape.instances.is_empty() {
-                            if use_custom_instance {
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
                                 let mat = info.custom_material.as_ref().unwrap();
-                                let custom_pipe = self.gpu.ensure_material_pipeline(
+                                match self.gpu.ensure_material_pipeline(
                                     mat,
                                     MaterialTarget::Shape,
                                     self.sample_count,
@@ -2136,8 +2176,20 @@ impl Renderer {
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::SdfInstance,
                                     shape.blend,
-                                );
-                                pass.set_pipeline(&custom_pipe);
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (SDF instance layout): {err}"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                pass.set_pipeline(custom_pipe);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                                 if let Some(bg) = custom_bg.as_ref() {
@@ -2214,20 +2266,33 @@ impl Renderer {
                         if !shape.particles.is_empty() {
                             // 本批时钟的 camera 组绑 group 0（legacy 路径同样）。
                             let clock_bg = self.clock_camera_group(shape.particle_clock);
-                            if use_custom_instance {
-                                let mat = info.custom_material.as_ref().unwrap();
-                                let custom_pipe = self.gpu.ensure_material_pipeline(
-                                    mat,
-                                    MaterialTarget::Shape,
-                                    self.sample_count,
-                                    self.alpha_to_coverage,
-                                    self.ssaa,
-                                    uses_stencil,
-                                    if uses_stencil { pipe_op.min(4) } else { 0 },
-                                    crate::gpu::ShapeVertexLayout::Particle,
-                                    shape.blend,
-                                );
-                                pass.set_pipeline(&custom_pipe);
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                if use_custom_particles {
+                                    let mat = info.custom_material.as_ref().unwrap();
+                                    match self.gpu.ensure_material_pipeline(
+                                        mat,
+                                        MaterialTarget::Shape,
+                                        self.sample_count,
+                                        self.alpha_to_coverage,
+                                        self.ssaa,
+                                        uses_stencil,
+                                        if uses_stencil { pipe_op.min(4) } else { 0 },
+                                        crate::gpu::ShapeVertexLayout::Particle,
+                                        shape.blend,
+                                    ) {
+                                        Ok(p) => Some(p),
+                                        Err(err) => {
+                                            log::warn!(
+                                                "custom material pipeline unavailable (particle layout): {err}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                            if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                pass.set_pipeline(custom_pipe);
                                 pass.set_bind_group(0, &clock_bg, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                                 if let Some(bg) = custom_bg.as_ref() {
@@ -2310,9 +2375,9 @@ impl Renderer {
                             last_geometry = None;
                         }
                         if !shape.geo_instances.is_empty() {
-                            if use_custom_instance {
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
                                 let mat = info.custom_material.as_ref().unwrap();
-                                let custom_pipe = self.gpu.ensure_material_pipeline(
+                                match self.gpu.ensure_material_pipeline(
                                     mat,
                                     MaterialTarget::Shape,
                                     self.sample_count,
@@ -2322,8 +2387,20 @@ impl Renderer {
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::GeoInstance,
                                     shape.blend,
-                                );
-                                pass.set_pipeline(&custom_pipe);
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (geo instance layout): {err}"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(custom_pipe) = custom_pipe.as_ref() {
+                                pass.set_pipeline(custom_pipe);
                                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                                 if let Some(bg) = custom_bg.as_ref() {
@@ -2459,8 +2536,9 @@ impl Renderer {
                         if last_text_key != Some(key) {
                             // custom 管线先行：raw 的 Text 臂内部 lock text_ctx，
                             // 此处必须 guard-free（临时的 guard 逐句释放）。
-                            text_mat_pipe = info.custom_material.as_ref().map(|m| {
-                                self.gpu.ensure_material_pipeline(
+                            text_mat_pipe = info.custom_material.as_ref().and_then(|m| match self
+                                .gpu
+                                .ensure_material_pipeline(
                                     m,
                                     MaterialTarget::Text,
                                     self.sample_count,
@@ -2470,7 +2548,14 @@ impl Renderer {
                                     if text_tests_stencil { 2 } else { 0 },
                                     crate::gpu::ShapeVertexLayout::Mesh,
                                     segment.blend,
-                                )
+                                ) {
+                                Ok(p) => Some(p),
+                                Err(err) => {
+                                    log::warn!(
+                                        "custom material pipeline unavailable (text): {err}"
+                                    );
+                                    None
+                                }
                             });
                             self.gpu.text_ctx.lock().unwrap().ensure_text_pipeline(
                                 &self.gpu.device,

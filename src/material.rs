@@ -1,7 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
+
+use crate::gpu::ShapeVertexLayout;
 
 /// group 3 纹理槽数量（tex0..tex3）。保留兼容旧 BGL layout 引用。
 pub const MATERIAL_TEX_SLOTS: usize = 4;
@@ -322,6 +324,13 @@ pub struct Material {
     pub(crate) state: MaterialState,
     pub(crate) source: String,
     pub(crate) shape_vertex_source: Option<String>,
+    /// 创建期预验证通过的 shape 顶点布局位集（bit = `ShapeVertexLayout as u8`）。
+    ///
+    /// 记录期按绘制路径检查：custom VS 只支持部分布局时，不支持的形状跳过
+    /// （不回落 mesh，避免契约不符）。
+    pub(crate) shape_layout_support: u8,
+    /// 已 warn 过的不支持布局位集（warn-once）。
+    pub(crate) warned_layouts: AtomicU8,
     /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
     pub(crate) pipelines: Mutex<FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>>,
 }
@@ -330,12 +339,15 @@ impl Material {
     pub(crate) fn new_zero_resource(
         source: String,
         shape_vertex_source: Option<String>,
+        shape_layout_support: u8,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
             state: MaterialState::ZeroResource,
             source,
             shape_vertex_source,
+            shape_layout_support,
+            warned_layouts: AtomicU8::new(0),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -347,6 +359,7 @@ impl Material {
         cache_policy: CachePolicy,
         source: String,
         shape_vertex_source: Option<String>,
+        shape_layout_support: u8,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
         device: wgpu::Device,
     ) -> Self {
@@ -364,6 +377,8 @@ impl Material {
             },
             source,
             shape_vertex_source,
+            shape_layout_support,
+            warned_layouts: AtomicU8::new(0),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -373,6 +388,7 @@ impl Material {
         init_bind_group: Option<wgpu::BindGroup>,
         source: String,
         shape_vertex_source: Option<String>,
+        shape_layout_support: u8,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
@@ -383,6 +399,8 @@ impl Material {
             },
             source,
             shape_vertex_source,
+            shape_layout_support,
+            warned_layouts: AtomicU8::new(0),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -403,11 +421,29 @@ impl Material {
     }
 
     /// 是否带自定义 vertex shader。
-    /// 决定 shape path 走 mesh（[`Vertex`](crate::gpu::Vertex)）还是 instance layout（`QuadVertex` / `InstanceData` /
-    /// `GeoVertex` / `GeoInstance`）。Fragment-only material 在 SDF/Geo batch 上可走 instance 路径；
-    /// 带 custom VS 时必须走 mesh（VS 与 instance 字段契约不一致）。
+    ///
+    /// 带 custom VS 时，形状按绘制路径选择输入契约（不再强制回落 mesh）：
+    /// - `sdf_feather = Some` → SDF 实例契约：`QuadVertex` + `InstanceData` storage；
+    /// - `sdf_feather = None` → 几何实例契约：`GeoVertex` + `GeoInstance`；
+    /// - 直接 push 的 mesh 顶点仍用 [`Vertex`](crate::gpu::Vertex)。
     pub fn has_custom_vertex_shader(&self) -> bool {
         self.shape_vertex_source.is_some()
+    }
+
+    /// 该材质的 custom VS 是否支持给定 shape 顶点布局（创建期预验证结果）。
+    pub(crate) fn supports_shape_layout(&self, layout: ShapeVertexLayout) -> bool {
+        self.shape_layout_support & (1u8 << layout as u8) != 0
+    }
+
+    /// 对不支持的布局只警告一次（记录期跳过该形状，不回落 mesh）。
+    pub(crate) fn warn_unsupported_once(&self, layout: ShapeVertexLayout) {
+        let bit = 1u8 << layout as u8;
+        let prev = self.warned_layouts.fetch_or(bit, Ordering::Relaxed);
+        if prev & bit == 0 {
+            log::warn!(
+                "custom material vertex shader does not support {layout:?} layout; shape skipped (draw path requires it)"
+            );
+        }
     }
 
     /// 确保 bind group 就绪（Dirty 检测/手动 provider），返回当前 bind group。

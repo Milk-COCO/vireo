@@ -2,7 +2,9 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::area::{Area, AreaGeom, effective_area};
-use crate::gpu::{ClockIndex, GeoInstance, GeoVertex, InstanceData, ParticleInstance, Vertex};
+use crate::gpu::{
+    ClockIndex, GeoInstance, GeoVertex, InstanceData, ParticleInstance, ShapeVertexLayout, Vertex,
+};
 use crate::material::Material;
 use crate::math::{
     Pos, Rect, Transform, UvRect, affine_rect_bounds, mul_affine_cols,
@@ -420,7 +422,10 @@ pub struct DrawBatch {
     /// 自定义材质（**画笔状态机**，同 `color`/`transform`/`sdf_feather`）。
     ///
     /// - `Some(mat)` = 后续 shape 走该材质的 fragment shader；
-    ///   shape 仍用对应顶点管线（SDF/geo/custom VS → mesh）；text 仍走 glyphon 顶点管线。
+    ///   shape 仍按绘制路径走对应顶点管线（`sdf_feather = Some` → SDF 实例，
+    ///   `None` → 几何实例）；带 custom VS 时须匹配该路径的输入契约，
+    ///   不支持则跳过该形状（`warn_unsupported_once`，不回落 mesh）；
+    ///   text 仍走 glyphon 顶点管线。
     /// - `None` = 内置管线（默认）。
     /// - 与 `clips_children` / Area stencil 兼容（自有 stencil pipeline 缓存）。
     ///
@@ -2409,15 +2414,14 @@ impl DrawBatch {
         let Some(feather) = self.sdf_feather else {
             return false;
         };
-        // Custom vertex shaders consume the public Vertex ABI, not the instance ABI.
-        // fragment-only material（无 custom VS）可走 instance path。
-        if self
-            .custom_material
-            .as_ref()
-            .map(|m| m.has_custom_vertex_shader())
-            .unwrap_or(false)
-        {
-            return false;
+        // custom VS 必须按 SDF 实例契约读取；不支持该布局时跳过形状（不回落 mesh）。
+        if let Some(material) = self.custom_material.as_ref() {
+            if material.has_custom_vertex_shader()
+                && !material.supports_shape_layout(ShapeVertexLayout::SdfInstance)
+            {
+                material.warn_unsupported_once(ShapeVertexLayout::SdfInstance);
+                return true;
+            }
         }
         let color = color.unwrap_or(self.color);
         if color.a == 0.0 || bounds[0] == bounds[2] || bounds[1] == bounds[3] {
@@ -2453,7 +2457,7 @@ impl DrawBatch {
 
     /// Add an instanced SDF rectangle.
     ///
-    /// Geometry mode and custom materials fall back to the ordinary path.
+    /// Geometry mode (`sdf_feather = None`) falls back to the ordinary mesh path.
     /// Mixed instance and mesh calls retain their original order.
     pub fn instance_rectangle(
         &mut self,
@@ -2673,14 +2677,7 @@ impl DrawBatch {
 
     /// Add an instanced convex SDF polygon. Points must be counter-clockwise.
     pub fn instance_polygon(&mut self, points: &[(f32, f32)], color: Option<crate::color::Color>) {
-        if self.sdf_feather.is_none()
-            || self
-                .custom_material
-                .as_ref()
-                .map(|m| m.has_custom_vertex_shader())
-                .unwrap_or(false)
-            || points.len() < 3
-        {
+        if self.sdf_feather.is_none() || points.len() < 3 {
             self.polygon(points, color);
             return;
         }
@@ -2726,15 +2723,7 @@ impl DrawBatch {
         thickness: f32,
         color: Option<crate::color::Color>,
     ) {
-        if self.sdf_feather.is_none()
-            || self
-                .custom_material
-                .as_ref()
-                .map(|m| m.has_custom_vertex_shader())
-                .unwrap_or(false)
-            || points.len() < 2
-            || thickness == 0.0
-        {
+        if self.sdf_feather.is_none() || points.len() < 2 || thickness == 0.0 {
             self.line_chain(points, thickness, color);
             return;
         }
@@ -2978,8 +2967,8 @@ impl DrawBatch {
 
     /// Draw any [`crate::shapes::Shape`] through the instanced SDF path.
     ///
-    /// This mirrors [`crate::shapes::draw_shape`]. In geometry mode or with a
-    /// custom material, individual calls fall back to the ordinary mesh path.
+    /// This mirrors [`crate::shapes::draw_shape`]. In geometry mode
+    /// (`sdf_feather = None`) individual calls fall back to the ordinary mesh path.
     pub fn instance_shape(
         &mut self,
         shape: &crate::shapes::Shape<'_>,
@@ -3138,6 +3127,15 @@ impl DrawBatch {
         opts: crate::shapes::ShapeOverride,
     ) {
         self.record_pending_mesh_command();
+        // custom VS 必须按几何实例契约读取；不支持该布局时跳过形状（不回落 mesh）。
+        if let Some(material) = self.custom_material.as_ref() {
+            if material.has_custom_vertex_shader()
+                && !material.supports_shape_layout(ShapeVertexLayout::GeoInstance)
+            {
+                material.warn_unsupported_once(ShapeVertexLayout::GeoInstance);
+                return;
+            }
+        }
         let saved_color = self.color;
         let saved_feather = self.sdf_feather;
         let saved_uv = self.uv;

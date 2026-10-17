@@ -473,20 +473,21 @@ pub(crate) enum MaterialTarget {
 /// 按 batch 类型自动选最优路径（mesh / SDF instance / Geo instance）。
 ///
 /// - `Mesh`：单 buffer `[Vertex]`（68B），用于 `DrawBatch.vertices` / Area 全屏 quad
-///   / custom VS Material 路径。
+///   / 直接 push 顶点的用户绘制。
 /// - `SdfInstance`：单 buffer `[QuadVertex]`（8B）+ group 2 binding 2 的
 ///   `InstanceData` storage（vertex-pulling，VS 按 `instance_index` 读取）；
 ///   1 dc 跨参数合并（round-38+ 父提交基线）。
-///   **仅 fragment-only Material 可用**（custom VS 路径需走 Mesh layout）。
+///   custom VS 须按 SDF 实例契约读取（`QuadVertex` + `instances` storage）。
 /// - `GeoInstance`：双 buffer `[GeoVertex, GeoInstance]`（16B + 32B），
 ///   共享模板 + 每实例 color/transform；支持 `merge_geo_templates` 合并。
-///   **仅 fragment-only Material 可用**。
+///   custom VS 须按几何实例契约读取（`GeoVertex` + `GeoInstance`）。
 /// - `Particle`：双 buffer `[QuadVertex, ParticleInstance]`（8B + 152B），
 ///   共享 unit quad + 每实例 spawn 参数；VS 按 `camera.time` 积分（pos/fade），
-///   FS 极简（tex×color，无 SDF）。
-///   **仅 fragment-only Material 可用**（custom VS 请用 mesh bake 回退，见 `draw_particles`）。
+///   FS 极简（tex×color，无 SDF）。**仅 fragment-only Material 可用**（custom VS 在
+///   `draw_particles` 记录期烘焙为 mesh）。
 ///
-/// `material_pipeline_key` 加 layout bit（bit 6-7）区分。
+/// custom VS 的布局支持集由创建期预验证决定，记录期按绘制路径检查。
+/// `material_pipeline_key` 用 bit 8-9 区分 layout。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShapeVertexLayout {
     Mesh = 0,
@@ -1114,7 +1115,7 @@ impl GpuContext {
         stencil_op: u32,
         shape_layout: ShapeVertexLayout,
         blend: wgpu::BlendState,
-    ) -> Arc<wgpu::RenderPipeline> {
+    ) -> Result<Arc<wgpu::RenderPipeline>, String> {
         let ssaa =
             ssaa && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
         // 空颜色掩码（shape stencil cover/erase）不写颜色：blend 归一化防重复管线。
@@ -1138,25 +1139,23 @@ impl GpuContext {
         );
         let mut pipes = material.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
-            return p.clone();
+            return Ok(p.clone());
         }
-        let pipeline = self
-            .create_material_pipeline_raw(
-                &material.source,
-                material.shape_vertex_source.as_deref(),
-                target,
-                sample_count,
-                alpha_to_coverage,
-                ssaa,
-                stencil_mode,
-                stencil_op,
-                material.bgl(),
-                shape_layout,
-                key_blend,
-            )
-            .expect("material WGSL was validated by create_material");
+        let pipeline = self.create_material_pipeline_raw(
+            &material.source,
+            material.shape_vertex_source.as_deref(),
+            target,
+            sample_count,
+            alpha_to_coverage,
+            ssaa,
+            stencil_mode,
+            stencil_op,
+            material.bgl(),
+            shape_layout,
+            key_blend,
+        )?;
         let arc = Arc::new(pipeline);
-        pipes.entry(key).or_insert(arc).clone()
+        Ok(pipes.entry(key).or_insert(arc).clone())
     }
 
     pub(crate) fn create_material_pipeline_raw(
@@ -1241,7 +1240,8 @@ impl GpuContext {
         let pipeline = match target {
             MaterialTarget::Shape => {
                 // layout 决定默认 VS：Mesh 用 default_shape，instance path 用各自 VS。
-                // instance path 不允许 custom VS（VS 与 instance 字段契约不一致）。
+                // custom VS 按绘制路径契约读取（Mesh/SDF/Geo）；Particle 仅 fragment-only
+                //（粒子 path 记录期已烘焙为 mesh，到此即错误用法）。
                 let default_vs = match shape_layout {
                     ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa, self.noflat),
                     ShapeVertexLayout::SdfInstance => {
@@ -1253,16 +1253,16 @@ impl GpuContext {
                     ShapeVertexLayout::Particle => default_particle_vertex_wgsl(ssaa, self.noflat),
                 };
                 let vs_source = match shape_layout {
-                    ShapeVertexLayout::Mesh => {
+                    ShapeVertexLayout::Mesh
+                    | ShapeVertexLayout::SdfInstance
+                    | ShapeVertexLayout::GeoInstance => {
                         shape_vertex_source.map(str::to_owned).unwrap_or(default_vs)
                     }
-                    ShapeVertexLayout::SdfInstance
-                    | ShapeVertexLayout::GeoInstance
-                    | ShapeVertexLayout::Particle => {
+                    ShapeVertexLayout::Particle => {
                         if shape_vertex_source.is_some() {
                             return Err(format!(
                                 "material: custom vertex shader is not supported with \
-                                 {:?} layout; use a fragment-only material or fall back to mesh",
+                                 {:?} layout; use a fragment-only material",
                                 shape_layout
                             ));
                         }

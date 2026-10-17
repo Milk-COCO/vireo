@@ -1033,26 +1033,38 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 }
 
 /// 带 custom vertex shader 的 Material + SDF instance：
-/// 应回退到 mesh 路径（draw call 数 = SDF instance 数，2000 dc），但仍正确绘制。
+/// custom VS 按 SDF 实例契约读取（QuadVertex + group2 binding2 实例 storage），
+/// 参与实例化路径（不 mesh 回退），跨实例合并为 1 dc。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
-fn material_custom_vs_sdf_falls_back_to_mesh() {
+fn material_custom_vs_sdf_instance_path() {
     const VERTEX_WGSL: &str = r#"
+struct QuadVertex {
+    @location(0) corner: vec2<f32>,
+};
+
+struct InstanceData {
+    bounds: vec4<f32>,
+    uv_bounds: vec4<f32>,
+    uv_rect: vec4<f32>,
+    color: vec4<f32>,
+    sdf_params: vec4<f32>,
+    sdf_extra: vec2<f32>,
+    sdf_type: u32,
+    sdf_feather: f32,
+    transform_index: u32,
+    _pad: u32,
+    _pad2: vec2<u32>,
+};
+
 struct Camera {
     projection: mat4x4<f32>,
     dpi_scale: f32,
 };
 
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) sdf_params: vec4<f32>,
-    @location(4) @interpolate(flat) sdf_type: u32,
-    @location(5) sdf_feather: f32,
-    @location(6) sdf_extra: vec2<f32>,
-    @location(7) @interpolate(flat) transform_index: u32,
-};
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+@group(2) @binding(2) var<storage> instances: array<InstanceData>;
 
 // 必须提供完整 VertexOutput（auto-generated material FS 契约）
 struct VertexOutput {
@@ -1066,21 +1078,23 @@ struct VertexOutput {
     @location(6) sdf_extra: vec2<f32>,
 };
 
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
-
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
+fn vs_main(vertex: QuadVertex, @builtin(instance_index) inst_idx: u32) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = transforms[in.transform_index] * vec3<f32>(in.position, 1.0);
+    let inst = instances[inst_idx];
+    let t = vertex.corner * 0.5 + vec2<f32>(0.5);
+    var local_pos = mix(inst.bounds.xy, inst.bounds.zw, t);
+    local_pos.x += 2.0 * sin(local_pos.y * 0.25);
+    let world_pos = transforms[inst.transform_index] * vec3<f32>(local_pos, 1.0);
     out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
-    out.uv = in.uv;
-    out.color = in.color;
-    out.sdf_params = in.sdf_params;
-    out.local_pos = in.position;
-    out.sdf_type = in.sdf_type;
-    out.sdf_feather = in.sdf_feather;
-    out.sdf_extra = in.sdf_extra;
+    let uv_t = (local_pos - inst.uv_bounds.xy) / (inst.uv_bounds.zw - inst.uv_bounds.xy);
+    out.uv = mix(inst.uv_rect.xy, inst.uv_rect.zw, uv_t);
+    out.color = inst.color;
+    out.sdf_params = inst.sdf_params;
+    out.local_pos = local_pos;
+    out.sdf_type = inst.sdf_type;
+    out.sdf_feather = inst.sdf_feather;
+    out.sdf_extra = inst.sdf_extra;
     return out;
 }
 "#;
@@ -1108,28 +1122,129 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         draw_rectangle(&mut b, Pos::new(0.0, 0.0), 40.0, 40.0, Some(WHITE));
     }
 
+    let stats = b.shape_stats();
+    println!("  custom VS Material + SDF stats = {stats:?}");
+    assert_eq!(
+        stats.sdf_instances, 20,
+        "custom VS 应走 SDF instance 路径（不 mesh 回退）"
+    );
+    assert_eq!(stats.mesh_vertices, 0);
+
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let draw_calls = canvas.last_draw_calls();
     println!("  custom VS Material + SDF x20 draw calls = {draw_calls}");
-    // custom VS 必须 mesh 路径 → 全部 mesh 段在 ordered path 合并为 1 个 draw call
-    assert_eq!(
-        draw_calls, 1,
-        "custom VS Material 应 mesh fallback（ordered 合并为 1 dc）"
-    );
+    assert_eq!(draw_calls, 1, "SDF instance 段应合并为 1 dc");
 
     let pixels = canvas.read_pixels();
     // 第一个矩形 (20, 20) ~ (60, 60)
     assert!(
         region_has_color(&pixels, 320, 22, 22, 58, 58),
-        "custom VS Material mesh fallback 像素应可见"
+        "custom VS Material SDF instance 像素应可见"
     );
 }
 
 /// 带 custom vertex shader 的 Material + Geo（sdf_feather=None）：
-/// 走 mesh fallback 路径时应正常绘制（不静默丢弃），draw call 与 mesh 段合并一致。
+/// custom VS 按 geo 契约读取（GeoVertex 模板 @0/@1 + GeoInstance 属性 @2/@3），
+/// 参与模板实例化路径（不 mesh 回退），同半径圆共享模板。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
-fn material_custom_vs_geo_falls_back_to_mesh() {
+fn material_custom_vs_geo_instance_path() {
+    const VERTEX_WGSL: &str = r#"
+struct TemplateVertex {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct GeoInstanceInput {
+    @location(2) color: vec4<f32>,
+    @location(3) @interpolate(flat) transform_index: u32,
+};
+
+struct Camera {
+    projection: mat4x4<f32>,
+    dpi_scale: f32,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+
+// 必须提供完整 VertexOutput（auto-generated material FS 契约）
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) sdf_params: vec4<f32>,
+    @location(3) @interpolate(linear) local_pos: vec2<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+};
+
+@vertex
+fn vs_main(vertex: TemplateVertex, instance: GeoInstanceInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world_pos = transforms[instance.transform_index] * vec3<f32>(vertex.position, 1.0);
+    out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
+    out.uv = vertex.uv;
+    out.color = instance.color;
+    out.sdf_params = vec4<f32>(0.0);
+    out.local_pos = vertex.position;
+    out.sdf_type = 0u;
+    out.sdf_feather = 0.0;
+    out.sdf_extra = vec2<f32>(0.0);
+    return out;
+}
+"#;
+    const FRAGMENT_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb * 0.3, in.color.a);
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 320, 180);
+    let material = gpu
+        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .expect("material with custom VS");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(material));
+    b.clear_sdf_feather();
+    for i in 0..20 {
+        let x = (i % 5) as f32 * 60.0 + 20.0;
+        let y = (i / 5) as f32 * 60.0 + 20.0;
+        b.set_position(x, y);
+        draw_circle(&mut b, Pos::new(20.0, 20.0), 20.0, Some(WHITE));
+    }
+
+    let stats = b.shape_stats();
+    println!("  custom VS Material + Geo stats = {stats:?}");
+    assert_eq!(
+        stats.geo_instances, 20,
+        "custom VS 应走 geo instance 路径（不 mesh 回退）"
+    );
+    assert_eq!(stats.geo_templates, 1, "同半径圆应共享 1 个模板");
+    assert_eq!(stats.mesh_vertices, 0);
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let draw_calls = canvas.last_draw_calls();
+    println!("  custom VS Material + Geo x20 draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 1, "geo instance 段应合并为 1 dc");
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_has_color(&pixels, 320, 42, 42, 78, 78),
+        "custom VS Material geo instance 像素应可见"
+    );
+}
+
+/// 带 custom vertex shader 的 Material 但 VS 只支持其它布局（纯 mesh 契约）：
+/// 与绘制路径所需布局不匹配时形状被跳过（不回落 mesh、不静默画错），像素保持清屏色。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn material_custom_vs_unsupported_layout_skips_shape() {
     const VERTEX_WGSL: &str = r#"
 struct Camera {
     projection: mat4x4<f32>,
@@ -1186,42 +1301,31 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
+    // mesh 契约 VS 可编译（Mesh layout 提供 @0-@7），但 SDF/geo 实例布局缺 @1..@7
     let material = gpu
         .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
-        .expect("material with custom VS");
+        .expect("mesh-only contract 仍可创建 material");
 
     let mut b = DrawBatch::new();
     b.set_custom_material(Some(material));
-    for i in 0..20 {
-        let x = (i % 5) as f32 * 60.0 + 20.0;
-        let y = (i / 5) as f32 * 60.0 + 20.0;
-        b.set_position(x, y);
-        draw_circle(&mut b, Pos::new(20.0, 20.0), 20.0, Some(WHITE));
-    }
+    b.set_sdf_feather(Some(1.0));
+    b.set_position(20.0, 20.0);
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 40.0, 40.0, Some(WHITE));
+
+    let stats = b.shape_stats();
+    println!("  unsupported custom VS stats = {stats:?}");
+    assert_eq!(stats.sdf_instances, 0, "布局不匹配时应跳过（不回落 mesh）");
+    assert_eq!(stats.mesh_vertices, 0);
 
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
-    let stats = b.shape_stats();
-    println!("  custom VS Material + Geo stats = {stats:?}");
-    assert_eq!(
-        stats.geo_instances, 0,
-        "custom VS Material 不应走 geo instance 路径"
-    );
-    assert!(
-        stats.mesh_vertices > 0,
-        "custom VS Material 应 mesh 展开（geo 网格顶点）"
-    );
-
     let draw_calls = canvas.last_draw_calls();
-    println!("  custom VS Material + Geo x20 draw calls = {draw_calls}");
-    assert_eq!(
-        draw_calls, 1,
-        "custom VS Material geo 应 mesh fallback（ordered 合并为 1 dc）"
-    );
+    println!("  unsupported custom VS draw calls = {draw_calls}");
+    assert_eq!(draw_calls, 0, "被跳过的形状不应产生 draw call");
 
     let pixels = canvas.read_pixels();
     assert!(
-        region_has_color(&pixels, 320, 42, 42, 78, 78),
-        "custom VS Material geo mesh fallback 像素应可见"
+        !region_has_color(&pixels, 320, 22, 22, 58, 58),
+        "被跳过的形状不应有像素（保持清屏色）"
     );
 }
 

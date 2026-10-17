@@ -323,76 +323,13 @@ impl<'a> Shape<'a> {
 pub fn draw_shape(batch: &mut DrawBatch, shape: &Shape<'_>, opts: ShapeOverride) {
     batch.record_pending_mesh_command();
     let effective_feather = opts.sdf_feather.unwrap_or(batch.sdf_feather);
-    // fragment-only custom material（无 custom VS）允许走 instance/geo instance 路径，
-    // 性能与无 material 相同（1 dc 跨参数合并）。custom VS 仍走 mesh。
-    let fragment_only = batch
-        .custom_material
-        .as_ref()
-        .map(|m| !m.has_custom_vertex_shader())
-        .unwrap_or(true);
-    if effective_feather.is_some() && fragment_only {
+    // 按绘制路径选实例通道：`sdf_feather = Some` 走 SDF 实例，`None` 走几何实例。
+    // custom VS 的布局支持由记录期门（`push_sdf_instance` / `geo_instance_shape`）检查。
+    if effective_feather.is_some() {
         batch.instance_shape(shape, opts);
-        return;
-    }
-    if effective_feather.is_none() && fragment_only {
+    } else {
         batch.geo_instance_shape(shape, opts);
-        return;
     }
-
-    let index_start = batch.indices.len() as u32;
-    let saved_color = batch.color;
-    let saved_feather = batch.sdf_feather;
-    let saved_uv = batch.uv;
-    let saved_xform = batch.transform;
-    let saved_xform_cache = batch.cached_transform_index;
-    let saved_bg = batch.bind_group.clone();
-    let tex_overridden = opts.bind_group.is_some();
-
-    if let Some(c) = opts.color {
-        batch.color = c;
-    }
-    if let Some(f) = opts.sdf_feather {
-        batch.sdf_feather = f;
-    }
-    if let Some(uv) = opts.uv {
-        batch.uv = uv;
-    }
-
-    let xform_set = shape.position().is_some() || opts.transform.is_some();
-    if xform_set {
-        let base = match shape.position() {
-            Some(p) => Transform::translation(p.x, p.y),
-            None => Transform::IDENTITY,
-        };
-        let cur = batch.transform.take();
-        batch.transform = Some(match (cur, opts.transform) {
-            (Some(existing), Some(t)) => existing.then(&base).then(&t),
-            (Some(existing), None) => existing.then(&base),
-            (None, Some(t)) => base.then(&t),
-            (None, None) => base,
-        });
-        batch.cached_transform_index = None;
-    }
-
-    if let Some(bg) = opts.bind_group {
-        batch.add_texture_segment(batch.bind_group.clone());
-        batch.advance_shape_texture_generation();
-        batch.bind_group = bg;
-    }
-
-    shape.append(batch, batch.color);
-    batch.record_mesh_command(index_start, batch.sdf_feather.is_none());
-
-    if tex_overridden {
-        batch.add_texture_segment(batch.bind_group.clone());
-        batch.advance_shape_texture_generation();
-        batch.bind_group = saved_bg;
-    }
-    batch.transform = saved_xform;
-    batch.cached_transform_index = saved_xform_cache;
-    batch.uv = saved_uv;
-    batch.sdf_feather = saved_feather;
-    batch.color = saved_color;
 }
 
 /// 通过共享 unit quad + instance buffer 绘制 [`Shape`]（手动强制 instance 路径）。
