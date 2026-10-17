@@ -921,6 +921,32 @@ fn region_has_color(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -
     false
 }
 
+/// 断言指定区域内全部像素「接近红色」（R 高、G/B 低）。
+fn region_is_red(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y * w + x) * 4) as usize;
+            if !(pixels[idx] > 150 && pixels[idx + 1] < 80 && pixels[idx + 2] < 80) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 断言指定区域内全部像素「接近蓝色」（B 高、R/G 低）。
+fn region_is_blue(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y * w + x) * 4) as usize;
+            if !(pixels[idx + 2] > 150 && pixels[idx] < 80 && pixels[idx + 1] < 80) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Fragment-only Custom Material + SDF instance path：
 /// - 2000 个交替参数 SDF instance 应合并为 1 个 draw call
 /// - 像素回读：material 修改颜色后矩形区域非空
@@ -3002,5 +3028,88 @@ fn colr_v1_perf_cold_vs_warm() {
     assert!(
         cold_avg < 500.0,
         "104 个 COLRv1 字形冷光栅化应 < 500ms，实际 {cold_avg:.3}ms"
+    );
+}
+
+/// P1 验收：深度预通道 + 着色通道，跨 Batch 深度保留。
+///
+/// Pass 1（深度预通道）：红色左半边，`depth_write=true`，写入 z=0。
+/// Pass 2（着色通道）：蓝色全屏，`depth_write=false`、`compare=Less`，z=0。
+///   - 左半边：已有深度 0，`0 < 0` 不通过，红保留。
+///   - 右半边：预通道未写（清空值 1.0），`0 < 1.0` 通过，蓝覆盖。
+/// 对照组：两 pass 均不挂载 DS → Pass 2 无深度测试，全部覆为蓝。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn depth_prepass_and_shading_preserve_depth() {
+    const FRAG: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(in.color.rgb, in.color.a);
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 300);
+
+    // pipeline 会按材质的 depth_write/depth_compare 做 key，故两 pass 用两个材质。
+    let material_red = gpu.create_material(FRAG).expect("material pipelines");
+    material_red.set_depth_write(true);
+    let material_blue = gpu.create_material(FRAG).expect("material pipelines");
+    material_blue.set_depth_write(false);
+    material_blue.set_depth_compare(wgpu::CompareFunction::Less);
+
+    let ops_clear = DepthStencilOps {
+        depth: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(1.0),
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil: None,
+    };
+    let ops_load = DepthStencilOps {
+        depth: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil: None,
+    };
+
+    // ---------- Pass 1：深度预通道，红色左半边（z=0 写入）----------
+    let mut b1 = DrawBatch::new();
+    b1.set_custom_material(Some(material_red.clone()));
+    draw_rectangle(&mut b1, Pos::new(0.0, 0.0), 200.0, 300.0, Some(RED));
+    canvas.draw_with_depth_stencil(Some(BLACK), &[&b1], Some(DepthStencilTarget::Engine(ops_clear)));
+
+    // ---------- Pass 2：着色通道，蓝色全屏（z=0，Less 测试）----------
+    let mut b2 = DrawBatch::new();
+    b2.set_custom_material(Some(material_blue.clone()));
+    draw_rectangle(&mut b2, Pos::new(0.0, 0.0), 400.0, 300.0, Some(BLUE));
+    canvas.draw_with_depth_stencil(None, &[&b2], Some(DepthStencilTarget::Engine(ops_load)));
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_is_red(&pixels, 400, 20, 20, 100, 100),
+        "深度预通道：左半边 red 写入 z=0，Pass 2 Less 测试应剔除"
+    );
+    assert!(
+        region_is_blue(&pixels, 400, 300, 20, 380, 100),
+        "深度预通道：右半边无已写深度，Pass 2 blue z=0 < 1.0 应覆盖"
+    );
+
+    // ---------- 对照：两 pass 均不挂载 DS，Pass 2 无深度测试应全部覆盖 ----------
+    let mut b3 = DrawBatch::new();
+    b3.set_custom_material(Some(material_red));
+    draw_rectangle(&mut b3, Pos::new(0.0, 0.0), 200.0, 300.0, Some(RED));
+    canvas.draw_with_depth_stencil(Some(BLACK), &[&b3], None);
+
+    let mut b4 = DrawBatch::new();
+    b4.set_custom_material(Some(material_blue));
+    draw_rectangle(&mut b4, Pos::new(0.0, 0.0), 400.0, 300.0, Some(BLUE));
+    canvas.draw_with_depth_stencil(None, &[&b4], None);
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_is_blue(&pixels, 400, 20, 20, 100, 100),
+        "无 DS 对照：Pass 2 不做深度测试，应全部覆为蓝"
     );
 }

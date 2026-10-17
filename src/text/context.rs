@@ -73,7 +73,8 @@ pub(crate) struct ResolvedGlyphCluster {
 }
 
 impl TextContext {
-    /// 确保 TextRenderer 匹配给定 sample_count（默认无 DS；随后由 `ensure_text_ds` 切换）。
+    /// 确保 TextRenderer 匹配给定 sample_count（默认无 DS；随后由
+    /// `ensure_text_stencil_mode` 按本帧 DS 切换）。
     pub fn ensure_sample_count(&mut self, device: &Device, count: u32) {
         if self.sample_count != count {
             self.text_renderer = TextRenderer::new(
@@ -129,18 +130,6 @@ impl TextContext {
             blend,
         );
         self.text_renderer.set_pipeline(pipeline);
-    }
-
-    /// 按帧粗选：无 DS 或默认 Test（细粒度用 `Self::ensure_text_stencil_mode`）。
-    pub fn ensure_text_ds(&mut self, device: &Device, use_stencil: bool) {
-        self.ensure_text_stencil_mode(
-            device,
-            if use_stencil {
-                TextStencilMode::Test
-            } else {
-                TextStencilMode::None
-            },
-        );
     }
 
     /// 兼容旧名：强制文字管线带 stencil Test。

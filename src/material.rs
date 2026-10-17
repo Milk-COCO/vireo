@@ -331,8 +331,36 @@ pub struct Material {
     pub(crate) shape_layout_support: u8,
     /// 已 warn 过的不支持布局位集（warn-once）。
     pub(crate) warned_layouts: AtomicU8,
+    /// 中性 depth-stencil 时是否写深度（默认 `false`）。
+    ///
+    /// 仅当本帧 render pass 挂载 depth-stencil、且本管线**没有** stencil 测试、
+    /// 且材质用于 shape 目标时生效；Text 目标恒为不写不测（见 [`Material::depth_compare`]）。
+    pub(crate) depth_write: AtomicBool,
+    /// 中性 depth-stencil 的深度比较函数（默认 `Always`，存 `CompareFunction as u8`）。
+    ///
+    /// 同 [`Material::depth_write`] 的生效条件。Text 目标忽略该值（恒 `Always`）。
+    pub(crate) depth_compare: AtomicU8,
     /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
     pub(crate) pipelines: Mutex<FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>>,
+}
+
+/// `wgpu::CompareFunction` → u8（枚举判别值即稳定编号）。
+pub(crate) fn compare_to_u8(compare: wgpu::CompareFunction) -> u8 {
+    compare as u8
+}
+
+/// u8 → `wgpu::CompareFunction`（未知值回落 `Always`）。
+pub(crate) fn u8_to_compare(value: u8) -> wgpu::CompareFunction {
+    match value {
+        1 => wgpu::CompareFunction::Never,
+        2 => wgpu::CompareFunction::Less,
+        3 => wgpu::CompareFunction::Equal,
+        4 => wgpu::CompareFunction::LessEqual,
+        5 => wgpu::CompareFunction::Greater,
+        6 => wgpu::CompareFunction::NotEqual,
+        7 => wgpu::CompareFunction::GreaterEqual,
+        _ => wgpu::CompareFunction::Always,
+    }
 }
 
 impl Material {
@@ -348,6 +376,8 @@ impl Material {
             shape_vertex_source,
             shape_layout_support,
             warned_layouts: AtomicU8::new(0),
+            depth_write: AtomicBool::new(false),
+            depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -379,6 +409,8 @@ impl Material {
             shape_vertex_source,
             shape_layout_support,
             warned_layouts: AtomicU8::new(0),
+            depth_write: AtomicBool::new(false),
+            depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -401,6 +433,8 @@ impl Material {
             shape_vertex_source,
             shape_layout_support,
             warned_layouts: AtomicU8::new(0),
+            depth_write: AtomicBool::new(false),
+            depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
             pipelines: Mutex::new(pipelines),
         }
     }
@@ -428,6 +462,40 @@ impl Material {
     /// - 直接 push 的 mesh 顶点仍用 [`Vertex`](crate::gpu::Vertex)。
     pub fn has_custom_vertex_shader(&self) -> bool {
         self.shape_vertex_source.is_some()
+    }
+
+    /// 设置中性 depth-stencil 时是否写深度（默认 `false`）。
+    ///
+    /// 生效条件（缺一不可）：
+    /// - 本帧 render pass 挂载了 depth-stencil（[`crate::render::DepthStencilTarget`]
+    ///   或 stencil 裁切）；
+    /// - 本管线没有 stencil 测试（有 stencil 裁切时深度状态由 stencil 管线决定）；
+    /// - 材质用于 shape 绘制（文字恒不写、不测深度）。
+    ///
+    /// 片元深度来自自定义 vertex shader 的 clip z（内置形状全为 0）；
+    /// 运行期修改在下一帧生效（pipeline 按值键缓存）。
+    pub fn set_depth_write(&self, enabled: bool) {
+        self.depth_write.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 当前深度写开关（默认 `false`）。见 [`Material::set_depth_write`]。
+    pub fn depth_write(&self) -> bool {
+        self.depth_write.load(Ordering::Relaxed)
+    }
+
+    /// 设置中性 depth-stencil 的深度比较函数（默认 `CompareFunction::Always`）。
+    ///
+    /// 生效条件同 [`Material::set_depth_write`]。`Less` + `depth_write(false)` 是
+    /// 「预通道已写深度、着色通道剔除被遮挡片元」的常用组合；
+    /// 运行期修改在下一帧生效。
+    pub fn set_depth_compare(&self, compare: wgpu::CompareFunction) {
+        self.depth_compare
+            .store(compare_to_u8(compare), Ordering::Relaxed);
+    }
+
+    /// 当前深度比较函数（默认 `Always`）。见 [`Material::set_depth_compare`]。
+    pub fn depth_compare(&self) -> wgpu::CompareFunction {
+        u8_to_compare(self.depth_compare.load(Ordering::Relaxed))
     }
 
     /// 该材质的 custom VS 是否支持给定 shape 顶点布局（创建期预验证结果）。

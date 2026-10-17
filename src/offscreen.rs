@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::gpu::GpuContext;
-use crate::render::{DrawBatch, Renderer};
+use crate::render::{DepthStencilTarget, DrawBatch, Renderer};
 use crate::texture::Texture;
 use crate::window::{AntiAliasing, OffscreenIndex};
 
@@ -107,6 +107,46 @@ impl OffscreenCanvas {
             }
         }
         let target = self.texture.lock().target();
+        let cmd_buf = target.draw(&self.renderer, clear_color, batches);
+        self.renderer.gpu().queue.submit(Some(cmd_buf));
+    }
+
+    /// 渲染并提交，挂载本帧 depth-stencil 附件（`None` = 与 `draw` 一致）。
+    pub fn draw_with_depth_stencil(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+        ds: Option<DepthStencilTarget>,
+    ) {
+        let gpu = self.renderer.gpu();
+        let format = gpu.surface_format();
+        {
+            let tex = self.texture.lock();
+            if tex.format != format {
+                drop(tex);
+                let mut fresh = self.texture.lock();
+                // 双重检查：等待锁期间可能已被别的 draw 重建。
+                if fresh.format != format {
+                    let (w, h) = (fresh.width, fresh.height);
+                    log::warn!(
+                        "offscreen: surface format drifted ({:?} -> {:?}), recreating target",
+                        fresh.format,
+                        format
+                    );
+                    *fresh = Texture::new(
+                        &gpu.device,
+                        w,
+                        h,
+                        format,
+                        &gpu.texture_bind_group_layout,
+                        &gpu.default_sampler,
+                    );
+                    self.renderer.clear_msaa_ds();
+                }
+            }
+        }
+        let mut target = self.texture.lock().target();
+        target.set_depth_stencil(ds);
         let cmd_buf = target.draw(&self.renderer, clear_color, batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }

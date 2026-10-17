@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 
 use crate::gpu::GpuContext;
 use crate::input::InputState;
-use crate::render::DrawBatch;
+use crate::render::{DepthStencilOps, DepthStencilTarget, DrawBatch};
 
 pub use winit::dpi::LogicalPosition;
 pub use winit::dpi::LogicalSize;
@@ -566,7 +566,7 @@ impl VireoWindow {
     pub fn draw(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
         let report = {
             let _occupancy_guard = self.occupancy.lock().unwrap_or_else(|e| e.into_inner());
-            let r = self.draw_frame(clear_color, batches);
+            let r = self.draw_frame(clear_color, batches, None);
             *self.last_draw_outcome.lock() = Some(r.outcome);
             *self.last_draw_report.lock() = Some(r);
             match r.outcome {
@@ -650,7 +650,27 @@ impl VireoWindow {
         *self.last_present.lock() = Some(now);
     }
 
-    fn draw_frame(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
+    /// 绘制一帧，挂载引擎管理的 depth-stencil 附件（`Depth24PlusStencil8`）。
+    ///
+    /// `ops` 为 `None` 时仅在本帧用到 stencil 裁切才挂载内部 DS（与 [`draw`] 一致）；
+    /// `Some(ops)` 时按 ops 挂载内部 DS：缺失的 aspect 在串行 stencil 裁切时自动补齐
+    /// `depth Clear(1.0)+Discard` / `stencil Clear(0)+Discard`，支持深度预通道等跨 pass
+    /// 的深度传递。
+    pub fn draw_with_depth_stencil(
+        &self,
+        clear_color: crate::color::Color,
+        batches: &[&DrawBatch],
+        ops: Option<DepthStencilOps>,
+    ) -> DrawReport {
+        self.draw_frame(clear_color, batches, ops.map(DepthStencilTarget::Engine))
+    }
+
+    fn draw_frame(
+        &self,
+        clear_color: crate::color::Color,
+        batches: &[&DrawBatch],
+        ds: Option<DepthStencilTarget>,
+    ) -> DrawReport {
         if *self.closing.lock() {
             return DrawReport {
                 outcome: DrawOutcome::Skipped(DrawSkipReason::Closing),
@@ -733,10 +753,10 @@ impl VireoWindow {
             let ssaa = aa.is_ssaa();
             let _ =
                 self.gpu
-                    .ensure_pipeline(sc, atc, ssaa, false, wgpu::BlendState::ALPHA_BLENDING);
+                    .ensure_pipeline(sc, atc, ssaa, false, false, wgpu::BlendState::ALPHA_BLENDING);
             let _ = self
                 .gpu
-                .ensure_pipeline(sc, atc, ssaa, true, wgpu::BlendState::ALPHA_BLENDING);
+                .ensure_pipeline(sc, atc, ssaa, false, true, wgpu::BlendState::ALPHA_BLENDING);
             self.renderer.lock().update_aa(aa);
         }
 
@@ -1083,7 +1103,8 @@ impl VireoWindow {
 
         // 4b) 编码
         let view = st.texture.create_view(&Default::default());
-        let target = crate::render::RenderTarget::from_texture_view(view);
+        let mut target = crate::render::RenderTarget::from_texture_view(view);
+        target.set_depth_stencil(ds);
         let batch_refs: Vec<&DrawBatch> = batches.to_vec();
         let t2 = std::time::Instant::now();
         let cmd_buf = self

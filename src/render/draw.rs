@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use crate::gpu::{
     ClockIndex, GeoInstance, GeoVertex, InstanceData, MaterialTarget, ParticleInstance, Vertex,
@@ -8,9 +8,9 @@ use crate::math::{IDENTITY_TRANSFORM_ROW, Transform, left_mul_view_table};
 
 use super::prepare_culling;
 use super::{
-    BatchShapeCommand, DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment,
-    OrderedShapeSegment, ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment,
-    TextRenderSegment,
+    BatchShapeCommand, DepthStencilOps, DepthStencilTarget, DrawBatch, DrawEvent, EventInfo,
+    GeoInstanceSegment, InstanceSegment, OrderedShapeSegment, ParticleSegment, RenderTarget,
+    Renderer, ShapeInfo, ShapeSegment, TextRenderSegment,
 };
 
 /// 同步 blend 常量：段用 `Constant` 系数时才调（小众路径；无条件设置，正确优先）。
@@ -22,6 +22,91 @@ fn sync_blend_constant(
 ) {
     if blend.color.uses_constant() || blend.alpha.uses_constant() {
         pass.set_blend_constant(constant);
+    }
+}
+
+/// DS 须为 `Depth24PlusStencil8`；本帧解析结果（不持借用，pass 构建处物化）。
+enum ResolvedDsOps {
+    /// 本帧无 DS attachment。
+    None,
+    /// 引擎 DS（默认或与用户 ops 合并后）。
+    Engine(DepthStencilOps),
+    /// 用户 view（ops 原样取自 `RenderTarget::depth_stencil`）。
+    External,
+}
+
+/// DS ops 问题进程级 warn-once，避免每帧刷屏。
+static DS_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn ds_warn_once(msg: &str) {
+    if !DS_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!("{msg}");
+    }
+}
+
+/// 把 `RenderTarget::depth_stencil` 与 stencil 需求解析成本帧 DS 计划。
+///
+/// - `None`（target 无 DS 配置）：uses_stencil 时用引擎默认（depth Clear(1.0)+Discard、
+///   stencil Clear(0)+Discard），兼容历史行为；否则无 DS。
+/// - `Engine(ops)`：与默认合并后使用引擎 DS 纹理；uses_stencil 时补齐缺失 aspect 的
+///   Clear+Discard；`!uses_stencil` 原样使用；两 aspect 皆 `None` → warn + 无 DS。
+/// - `External(att)`：直接使用用户 view；uses_stencil 且缺 aspect → 回退引擎默认 + warn；
+///   两 ops 皆 `None` → warn + 当无 DS。
+fn resolve_depth_stencil(target: &RenderTarget, uses_stencil: bool) -> ResolvedDsOps {
+    let default_ops = DepthStencilOps {
+        depth: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(1.0),
+            store: wgpu::StoreOp::Discard,
+        }),
+        stencil: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(0),
+            store: wgpu::StoreOp::Discard,
+        }),
+    };
+    match target.depth_stencil.as_ref() {
+        None => {
+            if uses_stencil {
+                ResolvedDsOps::Engine(default_ops)
+            } else {
+                ResolvedDsOps::None
+            }
+        }
+        Some(DepthStencilTarget::Engine(ops)) => {
+            if !uses_stencil {
+                if ops.depth.is_none() && ops.stencil.is_none() {
+                    ds_warn_once(
+                        "engine depth-stencil ops are empty (both None); drawing without DS",
+                    );
+                    ResolvedDsOps::None
+                } else {
+                    ResolvedDsOps::Engine(DepthStencilOps {
+                        depth: ops.depth,
+                        stencil: ops.stencil,
+                    })
+                }
+            } else {
+                ResolvedDsOps::Engine(DepthStencilOps {
+                    depth: ops.depth.or(default_ops.depth),
+                    stencil: ops.stencil.or(default_ops.stencil),
+                })
+            }
+        }
+        Some(DepthStencilTarget::External(att)) => {
+            if att.depth_ops.is_none() && att.stencil_ops.is_none() {
+                ds_warn_once(
+                    "external depth-stencil attachment ops are empty (both None); drawing without DS",
+                );
+                ResolvedDsOps::None
+            } else if uses_stencil && (att.depth_ops.is_none() || att.stencil_ops.is_none()) {
+                ds_warn_once(
+                    "external depth-stencil attachment is missing an aspect required by stencil; falling back to engine DS",
+                );
+                ResolvedDsOps::Engine(default_ops)
+            } else {
+                ResolvedDsOps::External
+            }
+        }
     }
 }
 
@@ -73,6 +158,10 @@ impl Renderer {
                     });
             return empty_encoder.finish();
         }
+
+        // ---- depth-stencil 计划（与目标对齐；warn-once 收敛）----
+        let resolved_ds = resolve_depth_stencil(target, uses_stencil);
+        let has_ds = !matches!(resolved_ds, ResolvedDsOps::None);
 
         let mut encoder = self
             .gpu
@@ -1293,7 +1382,14 @@ impl Renderer {
         {
             let mut tc = self.gpu.text_ctx.lock().unwrap();
             tc.ensure_sample_count(&self.gpu.device, self.sample_count);
-            tc.ensure_text_ds(&self.gpu.device, uses_stencil);
+            tc.ensure_text_stencil_mode(
+                &self.gpu.device,
+                if has_ds {
+                    crate::text::TextStencilMode::Pass
+                } else {
+                    crate::text::TextStencilMode::None
+                },
+            );
         }
         let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
         text_ctx.text_renderer.begin_frame();
@@ -1436,24 +1532,31 @@ impl Renderer {
                     None => (target_view, None),
                 };
             let dv;
-            let ds_attachment = if uses_stencil {
-                dv = self.ds_view();
-                // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
-                // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
-                // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。
-                Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &dv,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                })
-            } else {
-                None
+            let ds_attachment = match &resolved_ds {
+                ResolvedDsOps::None => None,
+                ResolvedDsOps::Engine(ops) => {
+                    dv = self.ds_view();
+                    // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
+                    // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
+                    // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。
+                    Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &dv,
+                        depth_ops: ops.depth,
+                        stencil_ops: ops.stencil,
+                    })
+                }
+                ResolvedDsOps::External => {
+                    // resolve 处已断言 `target.depth_stencil` 为 External；此处取其 view。
+                    let att = match target.depth_stencil.as_ref() {
+                        Some(DepthStencilTarget::External(att)) => att,
+                        _ => unreachable!("External resolve without external target"),
+                    };
+                    Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &att.view,
+                        depth_ops: att.depth_ops,
+                        stencil_ops: att.stencil_ops,
+                    })
+                }
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vireo render pass"),
@@ -1584,6 +1687,7 @@ impl Renderer {
                                                     self.sample_count,
                                                     self.alpha_to_coverage,
                                                     self.ssaa,
+                                                    has_ds,
                                                     uses_stencil,
                                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                                     crate::gpu::ShapeVertexLayout::Mesh,
@@ -1619,6 +1723,7 @@ impl Renderer {
                                                     self.sample_count,
                                                     self.alpha_to_coverage,
                                                     self.ssaa,
+                                                    has_ds,
                                                     *geometry,
                                                     *blend,
                                                 );
@@ -1687,8 +1792,9 @@ impl Renderer {
                                                 MaterialTarget::Shape,
                                                 self.sample_count,
                                                 self.alpha_to_coverage,
-                                                self.ssaa,
-                                                uses_stencil,
+                                                    self.ssaa,
+                                                    has_ds,
+                                                    uses_stencil,
                                                 if uses_stencil { pipe_op.min(4) } else { 0 },
                                                 crate::gpu::ShapeVertexLayout::SdfInstance,
                                                 segment.blend,
@@ -1740,6 +1846,7 @@ impl Renderer {
                                             self.sample_count,
                                             self.alpha_to_coverage,
                                             self.ssaa,
+                                            has_ds,
                                             uses_stencil,
                                             pipe_op,
                                             segment.blend,
@@ -1813,8 +1920,9 @@ impl Renderer {
                                                 MaterialTarget::Shape,
                                                 self.sample_count,
                                                 self.alpha_to_coverage,
-                                                self.ssaa,
-                                                uses_stencil,
+                                                    self.ssaa,
+                                                    has_ds,
+                                                    uses_stencil,
                                                 if uses_stencil { pipe_op.min(4) } else { 0 },
                                                 crate::gpu::ShapeVertexLayout::Particle,
                                                 segment.blend,
@@ -1870,6 +1978,7 @@ impl Renderer {
                                             self.sample_count,
                                             self.alpha_to_coverage,
                                             self.ssaa,
+                                            has_ds,
                                             uses_stencil,
                                             pipe_op,
                                             segment.blend,
@@ -1938,8 +2047,9 @@ impl Renderer {
                                                 MaterialTarget::Shape,
                                                 self.sample_count,
                                                 self.alpha_to_coverage,
-                                                self.ssaa,
-                                                uses_stencil,
+                                                    self.ssaa,
+                                                    has_ds,
+                                                    uses_stencil,
                                                 if uses_stencil { pipe_op.min(4) } else { 0 },
                                                 crate::gpu::ShapeVertexLayout::GeoInstance,
                                                 segment.blend,
@@ -1998,6 +2108,7 @@ impl Renderer {
                                             self.sample_count,
                                             self.alpha_to_coverage,
                                             self.ssaa,
+                                            has_ds,
                                             uses_stencil,
                                             pipe_op,
                                             segment.blend,
@@ -2091,6 +2202,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::Mesh,
@@ -2126,6 +2238,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     shape.geometry,
                                     shape.blend,
                                 );
@@ -2172,6 +2285,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::SdfInstance,
@@ -2226,6 +2340,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     pipe_op,
                                     shape.blend,
@@ -2274,8 +2389,9 @@ impl Renderer {
                                         MaterialTarget::Shape,
                                         self.sample_count,
                                         self.alpha_to_coverage,
-                                        self.ssaa,
-                                        uses_stencil,
+                                    self.ssaa,
+                                    has_ds,
+                                    uses_stencil,
                                         if uses_stencil { pipe_op.min(4) } else { 0 },
                                         crate::gpu::ShapeVertexLayout::Particle,
                                         shape.blend,
@@ -2333,6 +2449,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     pipe_op,
                                     shape.blend,
@@ -2383,6 +2500,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     if uses_stencil { pipe_op.min(4) } else { 0 },
                                     crate::gpu::ShapeVertexLayout::GeoInstance,
@@ -2443,6 +2561,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     self.ssaa,
+                                    has_ds,
                                     uses_stencil,
                                     pipe_op,
                                     shape.blend,
@@ -2494,7 +2613,7 @@ impl Renderer {
                     // Area 存在时：当前文本在 Area content level，测 (Test)。
                     let has_area_at_text =
                         info.area_op.is_some() || info.stencil_op == 1 || info.stencil_op == 2;
-                    let text_mode = if !uses_stencil {
+                    let text_mode = if !has_ds {
                         crate::text::TextStencilMode::None
                     } else if has_area_at_text {
                         crate::text::TextStencilMode::Test
@@ -2544,6 +2663,7 @@ impl Renderer {
                                     self.sample_count,
                                     self.alpha_to_coverage,
                                     false,
+                                    has_ds,
                                     uses_stencil,
                                     if text_tests_stencil { 2 } else { 0 },
                                     crate::gpu::ShapeVertexLayout::Mesh,

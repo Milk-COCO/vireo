@@ -423,17 +423,71 @@ struct EventInfo {
     dynamic_offsets: Vec<u32>,
 }
 
+/// 自带的 depth-stencil 附件（用户自己的 `TextureView` + 读写操作）。
+///
+/// 约束：
+/// - 纹理格式必须为 `Depth24PlusStencil8`（vireo 全部内置管线固定该格式）；
+/// - `sample_count` 必须与本次绘制的 sample count 一致（`AntiAliasing::Msaa { samples }`
+///   时用多重采样纹理；`None`/`Ssaa` 时用 1）——否则 wgpu 校验失败。
+///
+/// `depth_ops` / `stencil_ops` 为 `None` 表示该 aspect 只读（不 load/clear/store）；
+/// 两者都为 `None` 时本次绘制视为**没有** depth-stencil（告警一次）。
+pub struct DepthStencilAttachment {
+    pub view: wgpu::TextureView,
+    pub depth_ops: Option<wgpu::Operations<f32>>,
+    pub stencil_ops: Option<wgpu::Operations<u32>>,
+}
+
+/// 引擎管理的 DS 附件操作（view 由渲染器提供）。
+///
+/// 语义（与 [`DepthStencilTarget::External`] 同）：`None` = 该 aspect 只读；
+/// 两者都 `None` = 本次绘制视为没有 depth-stencil（告警一次）。
+/// 绘制命令带 stencil 裁切时，缺失的 aspect 自动补为
+/// depth `Clear(1.0)+Discard`、stencil `Clear(0)+Discard`。
+#[derive(Clone, Debug, Default)]
+pub struct DepthStencilOps {
+    pub depth: Option<wgpu::Operations<f32>>,
+    pub stencil: Option<wgpu::Operations<u32>>,
+}
+
+/// 本帧的 depth-stencil 附件来源。
+///
+/// - `None`（`RenderTarget::depth_stencil` 为 `None`）= 与历史行为一致：
+///   仅 stencil 裁切帧挂载内部 DS；
+/// - `Engine`：挂载渲染器内部 DS 纹理，只给 load/store 操作；
+/// - `External`：挂载用户自带的 view（可做深度预通道等跨帧/跨 draw 的深度传递）。
+pub enum DepthStencilTarget {
+    External(DepthStencilAttachment),
+    Engine(DepthStencilOps),
+}
+
 /// 渲染目标，封装用于 render pass 的 `TextureView`。
 ///
 /// 窗口和离屏纹理都通过此类型编码绘制命令。
 pub struct RenderTarget {
     pub view: wgpu::TextureView,
+    /// 本帧 depth-stencil 附件（`None` = 引擎默认行为，见 [`DepthStencilTarget`]）。
+    pub depth_stencil: Option<DepthStencilTarget>,
 }
 
 impl RenderTarget {
     /// 从已有的 TextureView 创建
     pub fn from_texture_view(view: wgpu::TextureView) -> Self {
-        Self { view }
+        Self {
+            view,
+            depth_stencil: None,
+        }
+    }
+
+    /// 设置本帧 depth-stencil 附件（builder，默认 `None`）。
+    pub fn with_depth_stencil(mut self, depth_stencil: Option<DepthStencilTarget>) -> Self {
+        self.depth_stencil = depth_stencil;
+        self
+    }
+
+    /// 设置本帧 depth-stencil 附件（默认 `None`）。
+    pub fn set_depth_stencil(&mut self, depth_stencil: Option<DepthStencilTarget>) {
+        self.depth_stencil = depth_stencil;
     }
 
     /// 编码渲染命令到 `CommandBuffer`（**不** submit/present）。
