@@ -160,7 +160,7 @@ pub(crate) enum DrawEvent<'a> {
     ScissorPop,
 }
 
-struct ShapeSegment {
+pub(crate) struct ShapeSegment {
     ndx_start: u32,
     ndx_count: u32,
     bind_group: wgpu::BindGroup,
@@ -168,7 +168,7 @@ struct ShapeSegment {
     blend_constant: wgpu::Color,
 }
 
-struct InstanceSegment {
+pub(crate) struct InstanceSegment {
     instance_start: u32,
     instance_count: u32,
     bind_group: wgpu::BindGroup,
@@ -177,9 +177,17 @@ struct InstanceSegment {
     blend_constant: wgpu::Color,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GeoTemplate {
+    vertex_start: u32,
+    index_start: u32,
+    index_count: u32,
+    vertex_count: u32,
+}
+
 /// 粒子段：`combined_particles` 的一段，共享 unit quad（与 `InstanceSegment` 同机理，
 /// 缓冲不同）。`material` 逐段捕获（画笔状态机，不同材质不合并）。
-struct ParticleSegment {
+pub(crate) struct ParticleSegment {
     particle_start: u32,
     particle_count: u32,
     bind_group: wgpu::BindGroup,
@@ -189,7 +197,7 @@ struct ParticleSegment {
 }
 
 #[derive(Clone)]
-struct GeoInstanceSegment {
+pub(crate) struct GeoInstanceSegment {
     geo_instance_start: u32,
     geo_instance_count: u32,
     template_vertex_start: u32,
@@ -201,17 +209,7 @@ struct GeoInstanceSegment {
     blend_constant: wgpu::Color,
 }
 
-/// 几何模板：batch 内 `geo_template_vertices` / `geo_template_indices` 的一段。
-/// 模板数据与 color/transform 无关，可被多个 `GeoInstance` 共享。
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GeoTemplate {
-    vertex_start: u32,
-    index_start: u32,
-    index_count: u32,
-    vertex_count: u32,
-}
-
-enum OrderedShapeSegment {
+pub(crate) enum OrderedShapeSegment {
     Mesh {
         ndx_start: u32,
         ndx_count: u32,
@@ -423,6 +421,51 @@ struct EventInfo {
     dynamic_offsets: Vec<u32>,
 }
 
+/// 单批次编码到已有 `RenderPass` 所需的渲染器资源。
+///
+/// 由 `Renderer::draw` 的合并阶段提供：合并后的顶点/索引/实例/几何 buffer、
+/// 相机与引擎存储 bind group、采样参数。`encode_into` 只负责把本批次的形状
+/// 命令发给 GPU，不负责合并数据或创建 pass，因此同一批 `ctx` 可复用到多个
+/// pass（深度预通道＋着色通道、场景／后处理／UI 同一 Pass 内分段），用户
+/// 自管 Pass 结构，无需额外全屏采样合成回主屏。
+pub(crate) struct BatchEncodeCtx<'a> {
+    pub renderer: &'a Renderer,
+    pub gpu: &'a GpuContext,
+    pub camera_bind_group: &'a wgpu::BindGroup,
+    pub engine_bg: &'a wgpu::BindGroup,
+    pub vertex_buf: &'a wgpu::Buffer,
+    pub index_buf: &'a wgpu::Buffer,
+    pub particle_buf: &'a wgpu::Buffer,
+    pub geo_template_vbuf: &'a wgpu::Buffer,
+    pub geo_template_ibuf: &'a wgpu::Buffer,
+    pub geo_instance_buf: &'a wgpu::Buffer,
+    pub sample_count: u32,
+    pub alpha_to_coverage: bool,
+    pub ssaa: bool,
+}
+
+/// 单批次在本次合并后的绘制状态。
+///
+/// 段内的 `ndx_start`/`instance_start` 等已偏移到合并 buffer 的全局位置；
+/// `encode_into` 直接按段发 `draw_indexed`，不再做数据合并。
+pub(crate) struct BatchEncodeInfo<'a> {
+    pub base_vertex: i32,
+    pub geometry: bool,
+    pub blend: wgpu::BlendState,
+    pub custom_material: &'a Option<Arc<Material>>,
+    pub segments: &'a [ShapeSegment],
+    pub instances: &'a [InstanceSegment],
+    pub geo_instances: &'a [GeoInstanceSegment],
+    pub particles: &'a [ParticleSegment],
+    pub ordered: &'a [OrderedShapeSegment],
+    pub particle_clock: ClockIndex,
+    pub stencil_ref: u32,
+    pub dynamic_offsets: &'a [u32],
+    pub pipe_op: u32,
+    pub uses_stencil: bool,
+    pub has_ds: bool,
+}
+
 /// 自带的 depth-stencil 附件（用户自己的 `TextureView` + 读写操作）。
 ///
 /// 约束：
@@ -554,7 +597,7 @@ pub struct Renderer {
     scratch_batch_poly_base: Mutex<Vec<u32>>,
     scratch_batch_geo_vertex_base: Mutex<Vec<u32>>,
     scratch_batch_geo_index_base: Mutex<Vec<u32>>,
-    scratch_last_dynamic_offsets: Mutex<Vec<u32>>,
+
     scratch_scissor_stack: Mutex<Vec<(u32, u32, u32, u32)>>,
     scratch_instances: Mutex<Vec<InstanceData>>,
     scratch_particles: Mutex<Vec<ParticleInstance>>,
@@ -650,7 +693,6 @@ impl Renderer {
             scratch_batch_poly_base: Mutex::new(Vec::new()),
             scratch_batch_geo_vertex_base: Mutex::new(Vec::new()),
             scratch_batch_geo_index_base: Mutex::new(Vec::new()),
-            scratch_last_dynamic_offsets: Mutex::new(Vec::new()),
             scratch_scissor_stack: Mutex::new(Vec::new()),
             scratch_instances: Mutex::new(Vec::new()),
             scratch_particles: Mutex::new(Vec::new()),

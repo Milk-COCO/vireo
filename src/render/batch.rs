@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use crate::area::{Area, AreaGeom, effective_area};
 use crate::gpu::{
-    ClockIndex, GeoInstance, GeoVertex, InstanceData, ParticleInstance, ShapeVertexLayout, Vertex,
+    ClockIndex, GeoInstance, GeoVertex, InstanceData, MaterialTarget, ParticleInstance,
+    ShapeVertexLayout, Vertex,
 };
 use crate::material::Material;
 use crate::math::{
@@ -12,7 +13,8 @@ use crate::math::{
 };
 use crate::text::{TextDef, TextEntryList};
 
-use super::{BatchOverride, DrawEvent, GeoTemplate, ShapeStats};
+use super::{BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
+    ShapeStats};
 
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
@@ -534,6 +536,877 @@ impl DrawBatch {
             dynamic_offsets: Vec::new(),
             preserve_order: true,
             merge_geo_templates: false,
+        }
+    }
+
+    /// 将本批次的形状命令编码到已有的 `RenderPass` 中（由渲染器合并阶段计算好偏移
+    /// 与管线状态，此处只负责发 GPU 绘制命令）。
+    ///
+    /// 这是 `Renderer::draw` 的单 pass 路径内部使用；对外暴露后，用户可自行组织
+    /// Pass 结构（深度预通道＋着色通道、场景／后处理／UI 同一 Pass 内分段），把多个
+    /// batch 编码进同一个 Pass，无需额外全屏采样合成回主屏。
+    ///
+    /// 返回本批次发出的 `draw_indexed` 调用次数。
+    #[allow(unused_assignments)]
+    pub(crate) fn encode_into(
+        &self,
+        mut pass: &mut wgpu::RenderPass,
+        info: &BatchEncodeInfo,
+        ctx: &BatchEncodeCtx,
+    ) -> u32 {
+        let mut shape_draw_calls: u32 = 0;
+        let mut shapes_bound = false;
+        let mut last_geometry: Option<bool> = None;
+        let mut last_stencil_op: u32 = u32::MAX;
+        let mut last_custom_ptr: *const Material = std::ptr::null();
+        let mut last_blend: Option<wgpu::BlendState> = None;
+        let mut last_dynamic_offsets: Vec<u32> = Vec::new();
+
+        let engine_bg = ctx.engine_bg;
+        let camera_bg = ctx.camera_bind_group;
+
+        if !info.ordered.is_empty() {
+            for segment in info.ordered {
+                match segment {
+                    OrderedShapeSegment::Mesh {
+                        ndx_start,
+                        ndx_count,
+                        bind_group,
+                        geometry,
+                        material,
+                        blend,
+                        blend_constant,
+                    } => {
+                        let seg_custom_bg: Option<wgpu::BindGroup> =
+                            match material.as_ref() {
+                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                ),
+                                _ => None,
+                            };
+                        if material.is_some()
+                            && material.as_ref().is_some_and(|m| m.bgl().is_some())
+                            && seg_custom_bg.is_none()
+                        {
+                            continue;
+                        }
+                        let seg_ptr: *const Material =
+                            material.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
+                        let seg_use_custom = material.is_some();
+                        let need_rebind = !shapes_bound
+                            || seg_ptr != last_custom_ptr
+                            || (!seg_use_custom && last_geometry != Some(*geometry))
+                            || (!seg_use_custom && last_blend != Some(*blend))
+                            || (info.uses_stencil && info.pipe_op != last_stencil_op)
+                                || info.dynamic_offsets != last_dynamic_offsets.as_slice();
+                        if need_rebind {
+                            let tmp_pipe: wgpu::RenderPipeline;
+                            let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                                if seg_use_custom {
+                                    let mat = material.as_ref().unwrap();
+                                    match ctx.gpu.ensure_material_pipeline(
+                                        mat,
+                                        MaterialTarget::Shape,
+                                        ctx.sample_count,
+                                        ctx.alpha_to_coverage,
+                                        ctx.ssaa,
+                                        info.has_ds,
+                                        info.uses_stencil,
+                                        if info.uses_stencil {
+                                            info.pipe_op.min(4)
+                                        } else {
+                                            0
+                                        },
+                                        crate::gpu::ShapeVertexLayout::Mesh,
+                                        *blend,
+                                    ) {
+                                        Ok(p) => Some(p),
+                                        Err(err) => {
+                                            log::warn!(
+                                                "custom material pipeline unavailable (mesh layout): {err}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                            let use_custom_pipe = custom_pipe.is_some();
+                            let pipe: &wgpu::RenderPipeline =
+                                if let Some(p) = custom_pipe.as_ref() {
+                                    p
+                                } else if info.uses_stencil {
+                                    tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
+                                        ctx.sample_count,
+                                        ctx.alpha_to_coverage,
+                                        ctx.ssaa,
+                                        *geometry,
+                                        info.pipe_op.min(4),
+                                        *blend,
+                                    );
+                                    &tmp_pipe
+                                } else {
+                                    tmp_pipe = ctx.gpu.ensure_pipeline(
+                                        ctx.sample_count,
+                                        ctx.alpha_to_coverage,
+                                        ctx.ssaa,
+                                        info.has_ds,
+                                        *geometry,
+                                        *blend,
+                                    );
+                                    &tmp_pipe
+                                };
+                            pass.set_pipeline(pipe);
+                            pass.set_bind_group(0, camera_bg, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if use_custom_pipe && let Some(bg) = seg_custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(0, ctx.vertex_buf.slice(..));
+                            pass.set_index_buffer(
+                                ctx.index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            shapes_bound = true;
+                            last_custom_ptr = seg_ptr;
+                            last_geometry = Some(*geometry);
+                            last_blend = Some(*blend);
+                            last_stencil_op = info.pipe_op;
+                            last_dynamic_offsets.copy_from_slice(info.dynamic_offsets);
+                        }
+                        if info.uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        Self::sync_blend_constant(pass, *blend, *blend_constant);
+                        pass.set_bind_group(1, bind_group, &[]);
+                        pass.draw_indexed(
+                            *ndx_start..*ndx_start + *ndx_count,
+                            info.base_vertex,
+                            0..1,
+                        );
+                        shape_draw_calls += 1;
+                    }
+                    OrderedShapeSegment::Instances(segment) => {
+                        let seg_material = &segment.material;
+                        let seg_custom_bg: Option<wgpu::BindGroup> =
+                            match seg_material.as_ref() {
+                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                ),
+                                _ => None,
+                            };
+                        if seg_material.is_some()
+                            && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
+                            && seg_custom_bg.is_none()
+                        {
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
+                        let seg_use_custom = seg_material.is_some();
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                            if seg_use_custom {
+                                let mat = seg_material.as_ref().unwrap();
+                                match ctx.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    info.has_ds,
+                                    info.uses_stencil,
+                                    if info.uses_stencil {
+                                        info.pipe_op.min(4)
+                                    } else {
+                                        0
+                                    },
+                                    crate::gpu::ShapeVertexLayout::SdfInstance,
+                                    segment.blend,
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (SDF instance layout): {err}"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(custom_pipe) = custom_pipe.as_ref() {
+                            pass.set_pipeline(custom_pipe);
+                            pass.set_bind_group(0, camera_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if let Some(bg) = seg_custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(
+                                0,
+                                ctx.gpu.instance_quad_vertex_buf.slice(..),
+                            );
+                            pass.set_index_buffer(
+                                ctx.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                segment.instance_start
+                                    ..segment.instance_start + segment.instance_count,
+                            );
+                            shape_draw_calls += 1;
+                        } else {
+                            let instance_pipeline = ctx.gpu.ensure_instance_pipeline(
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                info.pipe_op,
+                                segment.blend,
+                            );
+                            pass.set_pipeline(&instance_pipeline);
+                            pass.set_bind_group(0, camera_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            pass.set_vertex_buffer(
+                                0,
+                                ctx.gpu.instance_quad_vertex_buf.slice(..),
+                            );
+                            pass.set_index_buffer(
+                                ctx.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                segment.instance_start
+                                    ..segment.instance_start + segment.instance_count,
+                            );
+                            shape_draw_calls += 1;
+                        }
+                        shapes_bound = false;
+                        last_geometry = None;
+                    }
+                    OrderedShapeSegment::Particles(segment) => {
+                        let clock_bg = ctx
+                            .renderer
+                            .clock_camera_group(info.particle_clock);
+                        let seg_material = &segment.material;
+                        let seg_custom_bg: Option<wgpu::BindGroup> =
+                            match seg_material.as_ref() {
+                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                ),
+                                _ => None,
+                            };
+                        if seg_material.is_some()
+                            && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
+                            && seg_custom_bg.is_none()
+                        {
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
+                        let seg_use_custom = seg_material.is_some();
+                        let has_custom_vs = seg_material
+                            .as_ref()
+                            .map(|m| m.has_custom_vertex_shader())
+                            .unwrap_or(false);
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                            if seg_use_custom && !has_custom_vs {
+                                let mat = seg_material.as_ref().unwrap();
+                                match ctx.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    info.has_ds,
+                                    info.uses_stencil,
+                                    if info.uses_stencil {
+                                        info.pipe_op.min(4)
+                                    } else {
+                                        0
+                                    },
+                                    crate::gpu::ShapeVertexLayout::Particle,
+                                    segment.blend,
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (particle layout): {err}"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(custom_pipe) = custom_pipe.as_ref() {
+                            pass.set_pipeline(custom_pipe);
+                            pass.set_bind_group(0, &clock_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if let Some(bg) = seg_custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
+                            pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                            pass.set_index_buffer(
+                                ctx.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                segment.particle_start
+                                    ..segment.particle_start + segment.particle_count,
+                            );
+                            shape_draw_calls += 1;
+                        } else {
+                            let particle_pipeline = ctx.gpu.ensure_particle_pipeline(
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                info.pipe_op,
+                                segment.blend,
+                            );
+                            pass.set_pipeline(&particle_pipeline);
+                            pass.set_bind_group(0, &clock_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
+                            pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                            pass.set_index_buffer(
+                                ctx.gpu.instance_quad_index_buf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                0..6,
+                                0,
+                                segment.particle_start
+                                    ..segment.particle_start + segment.particle_count,
+                            );
+                            shape_draw_calls += 1;
+                        }
+                        shapes_bound = false;
+                        last_geometry = None;
+                    }
+                    OrderedShapeSegment::GeoInstances(segment) => {
+                        let seg_material = &segment.material;
+                        let seg_custom_bg: Option<wgpu::BindGroup> =
+                            match seg_material.as_ref() {
+                                Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                                    &ctx.gpu.device,
+                                    &ctx.gpu.queue,
+                                    &ctx.gpu.bind_group_pool,
+                                ),
+                                _ => None,
+                            };
+                        if seg_material.is_some()
+                            && seg_material.as_ref().is_some_and(|m| m.bgl().is_some())
+                            && seg_custom_bg.is_none()
+                        {
+                            shapes_bound = false;
+                            last_geometry = None;
+                            continue;
+                        }
+                        let seg_use_custom = seg_material.is_some();
+                        let custom_pipe: Option<Arc<wgpu::RenderPipeline>> =
+                            if seg_use_custom {
+                                let mat = seg_material.as_ref().unwrap();
+                                match ctx.gpu.ensure_material_pipeline(
+                                    mat,
+                                    MaterialTarget::Shape,
+                                    ctx.sample_count,
+                                    ctx.alpha_to_coverage,
+                                    ctx.ssaa,
+                                    info.has_ds,
+                                    info.uses_stencil,
+                                    if info.uses_stencil {
+                                        info.pipe_op.min(4)
+                                    } else {
+                                        0
+                                    },
+                                    crate::gpu::ShapeVertexLayout::GeoInstance,
+                                    segment.blend,
+                                ) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "custom material pipeline unavailable (geo instance layout): {err}"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(custom_pipe) = custom_pipe.as_ref() {
+                            pass.set_pipeline(custom_pipe);
+                            pass.set_bind_group(0, camera_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            if let Some(bg) = seg_custom_bg.as_ref() {
+                                pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                            }
+                            pass.set_vertex_buffer(
+                                0,
+                                ctx.geo_template_vbuf.slice(..),
+                            );
+                            pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                            pass.set_index_buffer(
+                                ctx.geo_template_ibuf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                segment.template_index_start
+                                    ..segment.template_index_start + segment.index_count,
+                                segment.template_vertex_start as i32,
+                                segment.geo_instance_start
+                                    ..segment.geo_instance_start + segment.geo_instance_count,
+                            );
+                            shape_draw_calls += 1;
+                        } else {
+                            let geo_pipeline = ctx.gpu.ensure_geo_instance_pipeline(
+                                ctx.sample_count,
+                                ctx.alpha_to_coverage,
+                                ctx.ssaa,
+                                info.has_ds,
+                                info.uses_stencil,
+                                info.pipe_op,
+                                segment.blend,
+                            );
+                            pass.set_pipeline(&geo_pipeline);
+                            pass.set_bind_group(0, camera_bg, &[]);
+                            pass.set_bind_group(1, &segment.bind_group, &[]);
+                            pass.set_bind_group(2, engine_bg, &[]);
+                            pass.set_vertex_buffer(0, ctx.geo_template_vbuf.slice(..));
+                            pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                            pass.set_index_buffer(
+                                ctx.geo_template_ibuf.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            if info.uses_stencil {
+                                pass.set_stencil_reference(info.stencil_ref);
+                            }
+Self::sync_blend_constant(
+                                &mut pass,
+                                segment.blend,
+                                segment.blend_constant,
+                            );
+                            pass.draw_indexed(
+                                segment.template_index_start
+                                    ..segment.template_index_start + segment.index_count,
+                                segment.template_vertex_start as i32,
+                                segment.geo_instance_start
+                                    ..segment.geo_instance_start + segment.geo_instance_count,
+                            );
+                            shape_draw_calls += 1;
+                        }
+                        shapes_bound = false;
+                        last_geometry = None;
+                    }
+                }
+            }
+        } else {
+            let custom_ptr: *const Material = info
+                .custom_material
+                .as_ref()
+                .map_or(std::ptr::null(), Arc::as_ptr);
+            let use_custom = info.custom_material.is_some();
+            let has_custom_vs = info
+                .custom_material
+                .as_ref()
+                .map(|m| m.has_custom_vertex_shader())
+                .unwrap_or(false);
+            let use_custom_particles = use_custom && !has_custom_vs;
+            let custom_bg: Option<wgpu::BindGroup> =
+                match info.custom_material.as_ref() {
+                    Some(m) if m.bgl().is_some() => m.ensure_bind_group(
+                        &ctx.gpu.device,
+                        &ctx.gpu.queue,
+                        &ctx.gpu.bind_group_pool,
+                    ),
+                    _ => None,
+                };
+            if info.custom_material.is_some()
+                && info
+                    .custom_material
+                    .as_ref()
+                    .is_some_and(|m| m.bgl().is_some())
+                && custom_bg.is_none()
+            {
+                // skip whole batch
+            } else {
+                let need_rebind = !shapes_bound
+                    || custom_ptr != last_custom_ptr
+                    || (!use_custom && last_geometry != Some(info.geometry))
+                    || (!use_custom && last_blend != Some(info.blend))
+                    || (info.uses_stencil && info.pipe_op != last_stencil_op)
+                                || info.dynamic_offsets != last_dynamic_offsets.as_slice();
+                if need_rebind {
+                    let tmp_pipe: wgpu::RenderPipeline;
+                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
+                        let mat = info.custom_material.as_ref().unwrap();
+                        match ctx.gpu.ensure_material_pipeline(
+                            mat,
+                            MaterialTarget::Shape,
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            if info.uses_stencil {
+                                info.pipe_op.min(4)
+                            } else {
+                                0
+                            },
+                            crate::gpu::ShapeVertexLayout::Mesh,
+                            info.blend,
+                        ) {
+                            Ok(p) => Some(p),
+                            Err(err) => {
+                                log::warn!(
+                                    "custom material pipeline unavailable (mesh layout): {err}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let use_custom_pipe = custom_pipe.is_some();
+                    let pipe: &wgpu::RenderPipeline = if let Some(p) = custom_pipe.as_ref() {
+                        p
+                    } else if info.uses_stencil {
+                        tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.geometry,
+                            info.pipe_op.min(4),
+                            info.blend,
+                        );
+                        &tmp_pipe
+                    } else {
+                        tmp_pipe = ctx.gpu.ensure_pipeline(
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.geometry,
+                            info.blend,
+                        );
+                        &tmp_pipe
+                    };
+                    pass.set_pipeline(pipe);
+                    pass.set_bind_group(0, camera_bg, &[]);
+                    pass.set_bind_group(2, engine_bg, &[]);
+                    if use_custom_pipe && let Some(bg) = custom_bg.as_ref() {
+                        pass.set_bind_group(3, bg, &info.dynamic_offsets);
+                    }
+                    pass.set_vertex_buffer(0, ctx.vertex_buf.slice(..));
+                    pass.set_index_buffer(
+                        ctx.index_buf.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    shapes_bound = true;
+                    last_custom_ptr = custom_ptr;
+                    last_geometry = Some(info.geometry);
+                    last_blend = Some(info.blend);
+                    last_stencil_op = info.pipe_op;
+                    last_dynamic_offsets.copy_from_slice(info.dynamic_offsets);
+                }
+                if info.uses_stencil {
+                    pass.set_stencil_reference(info.stencil_ref);
+                }
+                for seg in info.segments {
+                    pass.set_bind_group(1, &seg.bind_group, &[]);
+                        Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
+                    pass.draw_indexed(
+                        seg.ndx_start..seg.ndx_start + seg.ndx_count,
+                        info.base_vertex,
+                        0..1,
+                    );
+                    shape_draw_calls += 1;
+                }
+                if !info.instances.is_empty() {
+                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
+                        let mat = info.custom_material.as_ref().unwrap();
+                        match ctx.gpu.ensure_material_pipeline(
+                            mat,
+                            MaterialTarget::Shape,
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            if info.uses_stencil {
+                                info.pipe_op.min(4)
+                            } else {
+                                0
+                            },
+                            crate::gpu::ShapeVertexLayout::SdfInstance,
+                            info.blend,
+                        ) {
+                            Ok(p) => Some(p),
+                            Err(err) => {
+                                log::warn!(
+                                    "custom material pipeline unavailable (SDF instance layout): {err}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                        pass.set_pipeline(custom_pipe);
+                        pass.set_bind_group(0, camera_bg, &[]);
+                    } else {
+                        let instance_pipeline = ctx.gpu.ensure_instance_pipeline(
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            info.pipe_op,
+                            info.blend,
+                        );
+                        pass.set_pipeline(&instance_pipeline);
+                        pass.set_bind_group(0, camera_bg, &[]);
+                    }
+                    for seg in info.instances {
+                        pass.set_bind_group(1, &seg.bind_group, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
+                        pass.set_vertex_buffer(
+                            0,
+                            ctx.gpu.instance_quad_vertex_buf.slice(..),
+                        );
+                        pass.set_index_buffer(
+                            ctx.gpu.instance_quad_index_buf.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        if info.uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
+                        pass.draw_indexed(
+                            0..6,
+                            0,
+                            seg.instance_start..seg.instance_start + seg.instance_count,
+                        );
+                        shape_draw_calls += 1;
+                    }
+                    shapes_bound = false;
+                    last_geometry = None;
+                }
+                if !info.geo_instances.is_empty() {
+                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom {
+                        let mat = info.custom_material.as_ref().unwrap();
+                        match ctx.gpu.ensure_material_pipeline(
+                            mat,
+                            MaterialTarget::Shape,
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            if info.uses_stencil {
+                                info.pipe_op.min(4)
+                            } else {
+                                0
+                            },
+                            crate::gpu::ShapeVertexLayout::GeoInstance,
+                            info.blend,
+                        ) {
+                            Ok(p) => Some(p),
+                            Err(err) => {
+                                log::warn!(
+                                    "custom material pipeline unavailable (geo instance layout): {err}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                        pass.set_pipeline(custom_pipe);
+                        pass.set_bind_group(0, camera_bg, &[]);
+                    } else {
+                        let geo_pipeline = ctx.gpu.ensure_geo_instance_pipeline(
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            info.pipe_op,
+                            info.blend,
+                        );
+                        pass.set_pipeline(&geo_pipeline);
+                        pass.set_bind_group(0, camera_bg, &[]);
+                    }
+                    for seg in info.geo_instances {
+                        pass.set_bind_group(1, &seg.bind_group, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
+                        pass.set_vertex_buffer(0, ctx.geo_template_vbuf.slice(..));
+                        pass.set_vertex_buffer(1, ctx.geo_instance_buf.slice(..));
+                        pass.set_index_buffer(
+                            ctx.geo_template_ibuf.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        if info.uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
+                        pass.draw_indexed(
+                            seg.template_index_start
+                                ..seg.template_index_start + seg.index_count,
+                            seg.template_vertex_start as i32,
+                            seg.geo_instance_start
+                                ..seg.geo_instance_start + seg.geo_instance_count,
+                        );
+                        shape_draw_calls += 1;
+                    }
+                    shapes_bound = false;
+                    last_geometry = None;
+                }
+                if !info.particles.is_empty() {
+                    let clock_bg = ctx.renderer.clock_camera_group(info.particle_clock);
+                    let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom_particles {
+                        let mat = info.custom_material.as_ref().unwrap();
+                        match ctx.gpu.ensure_material_pipeline(
+                            mat,
+                            MaterialTarget::Shape,
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            if info.uses_stencil {
+                                info.pipe_op.min(4)
+                            } else {
+                                0
+                            },
+                            crate::gpu::ShapeVertexLayout::Particle,
+                            info.blend,
+                        ) {
+                            Ok(p) => Some(p),
+                            Err(err) => {
+                                log::warn!(
+                                    "custom material pipeline unavailable (particle layout): {err}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(custom_pipe) = custom_pipe.as_ref() {
+                        pass.set_pipeline(custom_pipe);
+                        pass.set_bind_group(0, &clock_bg, &[]);
+                    } else {
+                        let particle_pipeline = ctx.gpu.ensure_particle_pipeline(
+                            ctx.sample_count,
+                            ctx.alpha_to_coverage,
+                            ctx.ssaa,
+                            info.has_ds,
+                            info.uses_stencil,
+                            info.pipe_op,
+                            info.blend,
+                        );
+                        pass.set_pipeline(&particle_pipeline);
+                        pass.set_bind_group(0, &clock_bg, &[]);
+                    }
+                    for seg in info.particles {
+                        pass.set_bind_group(1, &seg.bind_group, &[]);
+                        pass.set_bind_group(2, engine_bg, &[]);
+                        pass.set_vertex_buffer(0, ctx.gpu.instance_quad_vertex_buf.slice(..));
+                        pass.set_vertex_buffer(1, ctx.particle_buf.slice(..));
+                        pass.set_index_buffer(
+                            ctx.gpu.instance_quad_index_buf.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        if info.uses_stencil {
+                            pass.set_stencil_reference(info.stencil_ref);
+                        }
+                        Self::sync_blend_constant(pass, seg.blend, seg.blend_constant);
+                        pass.draw_indexed(
+                            0..6,
+                            0,
+                            seg.particle_start..seg.particle_start + seg.particle_count,
+                        );
+                        shape_draw_calls += 1;
+                    }
+                    shapes_bound = false;
+                    last_geometry = None;
+                }
+            }
+        }
+
+        shape_draw_calls
+    }
+
+    fn sync_blend_constant(
+        pass: &mut wgpu::RenderPass,
+        blend: wgpu::BlendState,
+        constant: wgpu::Color,
+    ) {
+        if blend.color.uses_constant() || blend.alpha.uses_constant() {
+            pass.set_blend_constant(constant);
         }
     }
 
