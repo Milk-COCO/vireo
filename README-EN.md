@@ -103,8 +103,13 @@ async fn main() {
 - Affine transform table (vertex `transform_index`; slot 0 reserved as identity)
 - Text: shape cache, HUD parts, `StableText`, custom fonts / attrs
 - **Custom Material**: one `material_main(MaterialInput)` for shape / text; MSAA, stencil, and SDF aware
+- **Self-managed Bind Groups**: bring your own BGLs with arbitrary group indices (`material_self_managed`)
+- **MRT**: `draw_mrt` writes several color attachments in one submission (multi-output custom material, per-target blend)
+- **Depth / stencil control**: `draw_with_depth_stencil`, material `depth_write` / `depth_compare`, external DS views
+- **GPU compute**: `compute_pipeline` + `dispatch` (writes visible to subsequent render passes)
 - Multi-window + offscreen rendering
 - Textures (file / bytes / RGBA, UV subregions)
+- Particles (`particle_burst`, VS analytic integration)
 - Window controls (fullscreen, icon, PresentMode, AA, custom dpi override, …)
 - Runtime dynamic window creation
 - Frame stats + input (polling / events / touch / IME)
@@ -136,6 +141,17 @@ Internal 4-group layout: `0` view, `1` engine textures, `2` transform/polygon, `
 (1024B storage + 4 texture/sampler pairs). Shape and text share this ABI. The default shape VS
 selects per-pixel or per-sample interpolation for MSAA/SSAA; a custom shape VS stays per-pixel
 across AA modes.
+
+**MRT**: return `MaterialOutput` from `material_main` (field 0 must be named `color`; the engine
+applies alpha / SDF to it, other locations pass through) and call
+`draw_mrt(clear, &extra_targets, batches)` for a single multi-target submission with per-target blend.
+
+**Depth**: `Material::set_depth_write` / `set_depth_compare` plus `draw_with_depth_stencil`
+(depth prepass, depth preserved across batches).
+
+**Self-managed Bind Groups**: `App::material_self_managed(source, &[(group, &bgl)])` — bring your
+own BGLs and group indices; engine groups 0/1/2 are not inserted. Compute resources use the same
+group model.
 
 ## Examples
 
@@ -169,6 +185,7 @@ cargo run --example transform_stack
 cargo run --example texture
 cargo run --example texture_rgba
 cargo run --example texture_region
+cargo run --example texture_repeat
 cargo run --example texture_sdf_geo
 cargo run --example texture_fun
 
@@ -179,8 +196,15 @@ cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
 cargo run --example batch_scissor_clip
 cargo run --example batch_override
-cargo run --example batch_extend
 cargo run --example batch_view
+
+# Render targets / compute
+cargo run --example depth_stencil
+cargo run --example mrt
+cargo run --example compute
+
+# Particles
+cargo run --example particle_burst
 
 # Custom Material
 cargo run --example custom_material
@@ -191,6 +215,7 @@ cargo run --example custom_material_text
 cargo run --example custom_material_post
 cargo run --example custom_material_dynamic
 cargo run --example custom_material_manual
+cargo run --example custom_material_self_managed
 
 # Window / input / offscreen
 cargo run --example window_create
@@ -209,12 +234,16 @@ cargo run --example layout_follow
 cargo run --example deferred
 cargo run --example multi_loop
 
+# Resources
+cargo run --example resource_io
+
 # Stress / diagnostics
 cargo run --example bench
 cargo run --example frame_stats
 cargo run --example frame_stats_multi
 cargo run --example frame_time_probe
 cargo run --example msaa_clamp
+cargo run --example loop_panic
 ```
 
 ## Build & Test

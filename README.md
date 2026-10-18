@@ -102,8 +102,13 @@ async fn main() {
 - 仿射变换表（顶点 `transform_index`；槽 0 固定单位阵）
 - 文本：shape 缓存、HUD 分段、`StableText`、自定义字体 / attrs
 - **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text；MSAA/stencil/SDF 兼容
+- **自管 Bind Group**：用户自带 BGL + 任意 group 编号（`material_self_managed`）
+- **MRT 多目标**：`draw_mrt` 一次提交写多张颜色附件（custom material 多 FS 输出、逐目标 Blend）
+- **深度 / 模板控制**：`draw_with_depth_stencil`、材质 `depth_write` / `depth_compare`、外部 DS view
+- **GPU compute**：`compute_pipeline` + `dispatch`（写入对后续 render pass 可见）
 - 多窗口 + 离屏渲染
 - 纹理（文件 / 字节 / RGBA，UV 子区域）
+- 粒子（`particle_burst`，VS 解析积分）
 - 窗口控制（全屏、图标、PresentMode、AA、自定义 dpi 覆盖等）
 - 运行时动态建窗
 - 帧统计 + 输入（轮询 / 事件 / 触摸 / IME）
@@ -133,6 +138,16 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 引擎内部 4-group：`0` 视口、`1` 引擎纹理、`2` transform/polygon、`3` 用户 Material（1024B storage + 4 组 tex/sampler）。
 Shape / text 共用 ABI；默认 shape VS 按 MSAA/SSAA 选 per-pixel / per-sample；自定义 shape VS 全 AA 模式保持 per-pixel。
+
+**MRT**：改写成 `fn material_main(...) -> MaterialOutput`（第 0 个字段必须名为 `color`，
+引擎在其上应用 alpha / SDF；其余 location 原样输出），配 `draw_mrt(clear, &extra_targets, batches)`
+逐目标 Blend 一次提交。
+
+**深度**：`Material::set_depth_write` / `set_depth_compare` + `draw_with_depth_stencil`
+（深度预通道、跨 batch 深度保留）。
+
+**自管 Bind Group**：`App::material_self_managed(source, &[(group, &bgl)])` —— 用户自带 BGL
+与任意 group 编号，引擎不再插入 group 0/1/2。compute 的资源创建沿用同一 group 模型。
 
 ## 示例
 
@@ -166,6 +181,7 @@ cargo run --example transform_stack
 cargo run --example texture
 cargo run --example texture_rgba
 cargo run --example texture_region
+cargo run --example texture_repeat
 cargo run --example texture_sdf_geo
 cargo run --example texture_fun
 
@@ -176,8 +192,15 @@ cargo run --example batch_nest_clip
 cargo run --example batch_area_clip
 cargo run --example batch_scissor_clip
 cargo run --example batch_override
-cargo run --example batch_extend
 cargo run --example batch_view
+
+# 渲染目标 / 计算
+cargo run --example depth_stencil
+cargo run --example mrt
+cargo run --example compute
+
+# 粒子
+cargo run --example particle_burst
 
 # 自定义 Material
 cargo run --example custom_material
@@ -188,6 +211,7 @@ cargo run --example custom_material_text
 cargo run --example custom_material_post
 cargo run --example custom_material_dynamic
 cargo run --example custom_material_manual
+cargo run --example custom_material_self_managed
 
 # 窗口 / 输入 / 离屏
 cargo run --example window_create
@@ -206,12 +230,16 @@ cargo run --example layout_follow
 cargo run --example deferred
 cargo run --example multi_loop
 
+# 资源
+cargo run --example resource_io
+
 # 压力 / 诊断
 cargo run --example bench
 cargo run --example frame_stats
 cargo run --example frame_stats_multi
 cargo run --example frame_time_probe
 cargo run --example msaa_clamp
+cargo run --example loop_panic
 ```
 
 ## 构建与测试
