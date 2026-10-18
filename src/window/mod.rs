@@ -20,6 +20,7 @@ pub use winit::monitor::MonitorHandle;
 pub use winit::monitor::VideoModeHandle;
 pub use winit::window::Cursor;
 pub use winit::window::CursorGrabMode;
+pub use winit::window::CursorIcon;
 pub use winit::window::Fullscreen;
 pub use winit::window::Icon;
 pub use winit::window::ImePurpose;
