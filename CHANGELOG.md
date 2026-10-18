@@ -124,9 +124,8 @@
   ⚠️ 这**不是「vireo 帮你防 OOM」**：vireo 侧能回收的只有 glyph atlas，
   显存大头（用户贴图）因 `App.textures` 是 append-only 而**结构上释放不了**。
 - `DrawBatch::clip_self`（默认 `false`）：让本 batch 自身内容也受自己的矩形
-  `scissor` 裁剪。默认仍只裁子 batch（旧行为不变）；显式 `scissor` + 自身内容 +
-  未开 `clip_self` 时首次打一条 `warn!`（此前是静默不裁）。`clips_children` /
-  `scissor` / `text_clip` 的作用域与坐标空间已在字段文档写清。
+  `scissor` 裁剪。默认仍只裁子 batch（旧行为不变）；`clips_children` /
+  `scissor` / `text_clip` 的作用域与坐标空间已在字段文档写清（不再依赖行内注释）。
   `DrawBatch::clip_self`: the batch's own content now opts into its scissor window.
 - `Area::rect(Rect)`：由逻辑像素矩形直接构建 Area（SDF 掩码），免去手搓
   `AreaGeom`；`Area::geom` 在 debug 构建校验索引（整三角形、不越界），

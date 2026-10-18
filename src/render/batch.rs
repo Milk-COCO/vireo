@@ -1,6 +1,5 @@
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::area::{Area, AreaGeom, effective_area};
 use crate::gpu::{
@@ -18,19 +17,6 @@ use super::{
     BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
     ShapeStats,
 };
-
-/// 一次性告警：`scissor` 设在本 batch 上、但本 batch 也画了自己的内容。
-static SCISSOR_SELF_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn warn_scissor_does_not_clip_self() {
-    if !SCISSOR_SELF_WARNED.swap(true, Ordering::Relaxed) {
-        log::warn!(
-            "batch has `scissor` and also draws its own shapes/text: the scissor only clips \
-             child batches. Set `clip_self = true` to clip this batch's own content, or move \
-             the content into a child batch"
-        );
-    }
-}
 
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
@@ -2372,11 +2358,7 @@ impl DrawBatch {
             || !self.geo_instances.is_empty()
             || !self.particles.is_empty();
         // scissor 作用域：默认只包子节点；`clip_self` 时连自身内容一起包。
-        // 显式 scissor + 自身有内容 + 未开 `clip_self` → 旧语义（只裁子），首次告警。
         let has_own_draw = has_geom || !self.texts.entries.is_empty();
-        if self.scissor.is_some() && has_own_draw && !self.clip_self {
-            warn_scissor_does_not_clip_self();
-        }
         let wraps_self = self.clip_self && has_own_draw;
         let scissor_active = use_scissor && (wraps_self || !self.children.is_empty());
         if scissor_active
