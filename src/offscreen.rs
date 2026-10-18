@@ -188,6 +188,11 @@ impl OffscreenCanvas {
         self.renderer.last_draw_calls()
     }
 
+    /// 上一帧参与绘制的 batch（扁平化顺序）实际使用的裁剪路径（诊断）。
+    pub fn last_clip_paths(&self) -> Vec<crate::render::ClipPath> {
+        self.renderer.last_clip_paths()
+    }
+
     /// 底层 GpuContext（供基准/诊断等待 GPU 排空）。
     pub fn gpu(&self) -> &crate::gpu::GpuContext {
         self.renderer.gpu()

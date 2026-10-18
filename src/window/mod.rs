@@ -1283,6 +1283,12 @@ impl VireoWindow {
         self.renderer.lock().last_draw_calls()
     }
 
+    /// 上一帧参与绘制的 batch（扁平化顺序）实际使用的裁剪路径（诊断）。
+    /// 详见 [`crate::render::Renderer::last_clip_paths`]。
+    pub fn last_clip_paths(&self) -> Vec<crate::render::ClipPath> {
+        self.renderer.lock().last_clip_paths()
+    }
+
     /// 强制 GPU 端 PSO 编译（DX12 懒编译需要）。
     /// 新流程下 draw 自带尺寸同步 + acquire + present，首帧 PSO 编译卡一次可接受。
     /// 保留此函数为 no-op 以维持 API 兼容。

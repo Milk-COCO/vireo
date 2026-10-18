@@ -739,6 +739,8 @@ pub struct Renderer {
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（真实 draw call 数）。
     /// `preserve_order=false` 重排合并后此值下降（bench 场景 3 混合可 1000→2）。
     last_draw_calls: Mutex<u32>,
+    /// 上一帧参与绘制的 batch（扁平化顺序）实际使用的裁剪路径（诊断）。
+    last_clip_paths: Mutex<Vec<ClipPath>>,
 }
 
 impl Renderer {
@@ -832,6 +834,7 @@ impl Renderer {
             scratch_geo_merge_order: Mutex::new(Vec::new()),
             scratch_geo_merge_sorted: Mutex::new(None),
             last_draw_calls: Mutex::new(0),
+            last_clip_paths: Mutex::new(Vec::new()),
             logical_width,
             logical_height,
         }
@@ -841,6 +844,14 @@ impl Renderer {
     /// 由 [`Self::draw`] 在每帧统计；未 draw 时为 0。
     pub fn last_draw_calls(&self) -> u32 {
         *self.last_draw_calls.lock()
+    }
+
+    /// 上一帧参与绘制的 batch（含子 batch，按扁平化顺序）实际使用的裁剪路径。
+    ///
+    /// 只统计通过剔除的 batch；未 draw / 空帧时为空。诊断用 —— 例如确认矩形裁剪
+    /// 实际走了 scissor 还是自动探测，或 Area 是否生效。
+    pub fn last_clip_paths(&self) -> Vec<ClipPath> {
+        self.last_clip_paths.lock().clone()
     }
 
     /// 更新抗锯齿设置（样本数 / alpha_to_coverage / SSAA）。

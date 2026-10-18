@@ -185,6 +185,16 @@ impl Renderer {
 
         let has_content = clear_colors.iter().any(|c| c.is_some())
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instance_data.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
+        {
+            // 诊断：本帧实际参与绘制的 batch 各自走哪条裁剪路径。
+            let mut paths = self.last_clip_paths.lock();
+            paths.clear();
+            for event in &events {
+                if let DrawEvent::Batch(batch) = event {
+                    paths.push(batch.clip_path());
+                }
+            }
+        }
         if !has_content {
             // 无内容：不创建 render pass，编码器保持为空。
             *self.last_draw_calls.lock() = 0;

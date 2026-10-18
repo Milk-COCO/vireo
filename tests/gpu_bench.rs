@@ -969,6 +969,11 @@ fn area_rect_clips_own_content() {
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let pixels = canvas.read_pixels();
     assert_eq!(canvas.last_draw_calls(), 3, "cover + content + erase");
+    assert_eq!(
+        canvas.last_clip_paths(),
+        vec![ClipPath::AreaStencil],
+        "诊断表应报告 Area 路径"
+    );
     assert!(
         region_is_red(&pixels, 200, 70, 70, 130, 130),
         "Area::rect 内应显示红色矩形"
