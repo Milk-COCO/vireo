@@ -11,9 +11,10 @@ use crate::math::{IDENTITY_TRANSFORM_ROW, Transform, left_mul_view_table};
 
 use super::prepare_culling;
 use super::{
-    BatchEncodeCtx, BatchEncodeInfo, BatchShapeCommand, DepthStencilOps, DepthStencilTarget,
-    DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment, OrderedShapeSegment,
-    ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment, TextRenderSegment,
+    BatchEncodeCtx, BatchEncodeInfo, BatchShapeCommand, ClipPath, DepthStencilOps,
+    DepthStencilTarget, DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment,
+    OrderedShapeSegment, ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment,
+    TextRenderSegment,
 };
 
 /// 同步 blend 常量：段用 `Constant` 系数时才调（小众路径；无条件设置，正确优先）。
@@ -36,6 +37,28 @@ enum ResolvedDsOps {
     Engine(DepthStencilOps),
     /// 用户 view（ops 原样取自 `RenderTarget::depth_stencil`）。
     External,
+}
+
+/// 已准备的一帧：剔除 / flatten / 合并 / 上传 / 文字 prepare 全部完成。
+///
+/// 由 [`Renderer::prepare_frame`] 创建；生命周期内持有本帧的 `EventInfo` 与
+/// 附件计划。`encode` 只读，可安全地编码进任意满足契约的 pass。
+pub(crate) struct PreparedFrame<'a> {
+    renderer: &'a Renderer,
+    target: &'a RenderTarget,
+    events: Vec<DrawEvent<'a>>,
+    event_infos: Vec<EventInfo>,
+    engine_bg: wgpu::BindGroup,
+    target_blends: Vec<Option<wgpu::BlendState>>,
+    loads: Vec<wgpu::LoadOp<wgpu::Color>>,
+    ds: ResolvedDsOps,
+    has_ds: bool,
+    uses_stencil: bool,
+    mrt: bool,
+    wants_pass: bool,
+    clip_paths: Vec<ClipPath>,
+    draw_calls: std::cell::Cell<u32>,
+    _active: FrameActiveGuard<'a>,
 }
 
 /// DS ops 问题进程级 warn-once，避免每帧刷屏。
@@ -157,17 +180,17 @@ impl Renderer {
         encoder.finish()
     }
 
-    /// 把本帧编码进调用方提供的 `CommandEncoder`（**不** finish / submit）。
+    /// 准备一帧：剔除 / flatten / 合并 / 上传 / 文字 prepare。
     ///
-    /// 供 `draw_with_passes` 在引擎 pass **之后**追加自定义 pass（后处理链、
-    /// 额外 compute 等），最终一次 submit。`draw` 是它的便捷封装。
-    pub(crate) fn draw_into(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &RenderTarget,
+    /// 结果 [`PreparedFrame`] 可被编码进任意满足契约的 `RenderPass`；引擎自己的
+    /// pass 由 [`PreparedFrame::begin_engine_pass`] 创建。
+    pub(crate) fn prepare_frame<'a>(
+        &'a self,
+        target: &'a RenderTarget,
         clear_colors: &[Option<crate::color::Color>],
-        batches: &[&DrawBatch],
-    ) {
+        batches: &'a [&'a DrawBatch],
+    ) -> PreparedFrame<'a> {
+        let active = FrameActiveGuard::acquire(&self.frame_active);
         // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
         // 可见 = 祖先 stencil ∧ batch 自身有效 Area。
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
@@ -183,42 +206,22 @@ impl Renderer {
             &mut events,
         );
 
-        let has_content = clear_colors.iter().any(|c| c.is_some())
-            || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instance_data.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
-        {
-            // 诊断：本帧实际参与绘制的 batch 各自走哪条裁剪路径。
-            let mut paths = self.last_clip_paths.lock();
-            paths.clear();
-            for event in &events {
-                if let DrawEvent::Batch(batch) = event {
-                    paths.push(batch.clip_path());
-                }
-            }
-        }
-        if !has_content {
-            // 无内容：不创建 render pass，编码器保持为空。
-            *self.last_draw_calls.lock() = 0;
-            return;
-        }
-
         // ---- depth-stencil 计划（与目标对齐；warn-once 收敛）----
         let resolved_ds = resolve_depth_stencil(target, uses_stencil);
         let has_ds = !matches!(resolved_ds, ResolvedDsOps::None);
 
-        let load = match clear_colors.first() {
-            Some(c) => match c {
-                Some(c) => wgpu::LoadOp::Clear(wgpu::Color {
+        let loads: Vec<wgpu::LoadOp<wgpu::Color>> = (0..target.color_attachments.len())
+            .map(|i| match clear_colors.get(i) {
+                Some(Some(c)) => wgpu::LoadOp::Clear(wgpu::Color {
                     r: c.r as f64,
                     g: c.g as f64,
                     b: c.b as f64,
                     a: c.a as f64,
                 }),
-                None => wgpu::LoadOp::Load,
-            },
-            None => wgpu::LoadOp::Load,
-        };
+                _ => wgpu::LoadOp::Load,
+            })
+            .collect();
 
-        let target_view = &target.color_attachments[0].view;
         // MRT：>1 个颜色附件的 pass。引擎 MSAA / 文字 / 引擎形状均只支持单目标，
         // MRT 由 custom material（多个 FS 输出）承担，其余内容跳过并 warn-once。
         let mrt = target.color_attachments.len() > 1;
@@ -229,7 +232,7 @@ impl Renderer {
         let lh = self.logical_height;
 
         // ---- 在 pass 外写入所有 batch 的 vertex/index 数据 ----
-        let mut event_infos = self.scratch_event_infos.lock();
+        let mut event_infos = std::mem::take(&mut *self.scratch_event_infos.lock());
         event_infos.clear();
         let vertex_count: u32 = 0;
         let ndx_accum: u32 = 0;
@@ -1614,248 +1617,216 @@ impl Renderer {
             cache.clone().unwrap()
         };
 
-        // ---- 单 pass：仅 clips_children 帧挂 DS（热路径无 DS 开销）----
+        // ---- 组装 PreparedFrame（pass 由调用方创建）----
         let has_any_content = event_infos
             .iter()
             .any(|e| e.shape.is_some() || !e.text.is_empty());
-        // clear-only draw 也必须开启 pass，否则 LoadOp::Clear 不会执行。
+        let wants_pass =
+            has_any_content || loads.iter().any(|l| matches!(l, wgpu::LoadOp::Clear(_)));
+        let clip_paths: Vec<ClipPath> = events
+            .iter()
+            .filter_map(|event| match event {
+                DrawEvent::Batch(batch) => Some(batch.clip_path()),
+                _ => None,
+            })
+            .collect();
+        PreparedFrame {
+            renderer: self,
+            target,
+            events,
+            event_infos,
+            engine_bg: engine_storage_bind_group,
+            target_blends,
+            loads,
+            ds: resolved_ds,
+            has_ds,
+            uses_stencil,
+            mrt,
+            wants_pass,
+            clip_paths,
+            draw_calls: std::cell::Cell::new(0),
+            _active: active,
+        }
+    }
+
+    /// 兼容入口：准备 + 引擎 pass + 编码 + finish 交给调用方。
+    pub(crate) fn draw_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &RenderTarget,
+        clear_colors: &[Option<crate::color::Color>],
+        batches: &[&DrawBatch],
+    ) {
+        let frame = self.prepare_frame(target, clear_colors, batches);
+        if frame.wants_pass() {
+            let mut pass = frame.begin_engine_pass(encoder);
+            frame.encode(&mut pass);
+        }
+    }
+}
+
+impl PreparedFrame<'_> {
+    pub(crate) fn wants_pass(&self) -> bool {
+        self.wants_pass
+    }
+
+    /// 把已准备的内容编码进调用方的 `RenderPass`。
+    ///
+    /// 可重复调用（每次都重发全部绘制）。返回本次发出的 draw call 数。
+    pub(crate) fn encode(&self, pass: &mut wgpu::RenderPass<'_>) -> u32 {
+        let r = self.renderer;
         let mut shape_draw_calls: u32 = 0;
-        if has_any_content || clear_colors.iter().any(|c| c.is_some()) {
-            let msaa_view = self.msaa_view(self.gpu.surface_format());
-            // 目标附件清单：MRT 直接使用用户的多个颜色附件（引擎 MSAA 仅单目标路径）；
-            // 单目标路径保持 MSAA resolve 到 target 0 的既有行为。
-            let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
-                Vec::with_capacity(target.color_attachments.len().max(1));
-            if mrt {
-                for (i, att) in target.color_attachments.iter().enumerate() {
-                    let load_i = match clear_colors.get(i) {
-                        Some(Some(c)) => wgpu::LoadOp::Clear(wgpu::Color {
-                            r: c.r as f64,
-                            g: c.g as f64,
-                            b: c.b as f64,
-                            a: c.a as f64,
-                        }),
-                        _ => wgpu::LoadOp::Load,
-                    };
-                    color_attachments.push(Some(wgpu::RenderPassColorAttachment {
-                        view: &att.view,
-                        resolve_target: att.resolve_target.as_ref(),
-                        ops: wgpu::Operations {
-                            load: load_i,
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    }));
-                }
-            } else {
-                let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) =
-                    match &msaa_view {
-                        Some(msaa) => (msaa, Some(target_view)),
-                        None => (target_view, None),
-                    };
-                color_attachments.push(Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    resolve_target: resolve,
-                    ops: wgpu::Operations {
-                        load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                }));
+        let vbuf = r.vertex_buf.lock();
+        let ibuf = r.index_buf.lock();
+        let particle_buf = r.particle_buf.lock();
+        let geo_template_vbuf = r.geo_template_vertex_buf.lock();
+        let geo_template_ibuf = r.geo_template_index_buf.lock();
+        let geo_instance_buf = r.geo_instance_buf.lock();
+        let ctx = BatchEncodeCtx {
+            renderer: r,
+            gpu: &r.gpu,
+            camera_bind_group: &r.camera_bind_group,
+            engine_bg: &self.engine_bg,
+            vertex_buf: vbuf.as_ref().map(|b| &b.0),
+            index_buf: ibuf.as_ref().map(|b| &b.0),
+            particle_buf: particle_buf.as_ref().map(|b| &b.0),
+            geo_template_vbuf: geo_template_vbuf.as_ref().map(|b| &b.0),
+            geo_template_ibuf: geo_template_ibuf.as_ref().map(|b| &b.0),
+            geo_instance_buf: geo_instance_buf.as_ref().map(|b| &b.0),
+            sample_count: r.sample_count,
+            alpha_to_coverage: r.alpha_to_coverage,
+            ssaa: r.ssaa,
+        };
+        let mut scissor_stack = r.scratch_scissor_stack.lock();
+        scissor_stack.clear();
+        scissor_stack.push((0, 0, r.physical_width, r.physical_height));
+
+        for (ei, _event) in self.events.iter().enumerate() {
+            let info = &self.event_infos[ei];
+            // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
+            if let Some(scissor_rect) = info.scissor_push {
+                let sx = r.physical_width as f32 / r.logical_width.max(1.0);
+                let sy = r.physical_height as f32 / r.logical_height.max(1.0);
+                let fw = r.physical_width as f32;
+                let fh = r.physical_height as f32;
+                // 负坐标 / 越界：先 float 裁到视口再转 u32，避免 as u32 回绕
+                let x0 = (scissor_rect.x * sx).clamp(0.0, fw);
+                let y0 = (scissor_rect.y * sy).clamp(0.0, fh);
+                let x1 = ((scissor_rect.x + scissor_rect.w) * sx).clamp(0.0, fw);
+                let y1 = ((scissor_rect.y + scissor_rect.h) * sy).clamp(0.0, fh);
+                let px = x0.floor() as u32;
+                let py = y0.floor() as u32;
+                let pr = x1.ceil() as u32;
+                let pb = y1.ceil() as u32;
+                let (cx, cy, cw, ch) =
+                    *scissor_stack
+                        .last()
+                        .unwrap_or(&(0, 0, r.physical_width, r.physical_height));
+                let ix = px.max(cx);
+                let iy = py.max(cy);
+                let ir = pr.min(cx + cw);
+                let ib = pb.min(cy + ch);
+                let (nx, ny, nw, nh) = if ir > ix && ib > iy {
+                    (ix, iy, ir - ix, ib - iy)
+                } else {
+                    (0u32, 0u32, 0u32, 0u32)
+                };
+                pass.set_scissor_rect(nx, ny, nw, nh);
+                scissor_stack.push((nx, ny, nw, nh));
             }
-            let dv;
-            let ds_attachment = match &resolved_ds {
-                ResolvedDsOps::None => None,
-                ResolvedDsOps::Engine(ops) => {
-                    dv = self.ds_view();
-                    // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
-                    // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
-                    // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。
-                    Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &dv,
-                        depth_ops: ops.depth,
-                        stencil_ops: ops.stencil,
-                    })
-                }
-                ResolvedDsOps::External => {
-                    // resolve 处已断言 `target.depth_stencil` 为 External；此处取其 view。
-                    let att = match target.depth_stencil.as_ref() {
-                        Some(DepthStencilTarget::External(att)) => att,
-                        _ => unreachable!("External resolve without external target"),
-                    };
-                    Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &att.view,
-                        depth_ops: att.depth_ops,
-                        stencil_ops: att.stencil_ops,
-                    })
-                }
-            };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vireo render pass"),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: ds_attachment,
-                ..Default::default()
-            });
+            if info.scissor_pop {
+                scissor_stack.pop();
+                let (cx, cy, cw, ch) =
+                    *scissor_stack
+                        .last()
+                        .unwrap_or(&(0, 0, r.physical_width, r.physical_height));
+                pass.set_scissor_rect(cx, cy, cw, ch);
+            }
 
-            let engine_bg = &engine_storage_bind_group;
-            let vbuf = self.vertex_buf.lock();
-            let ibuf = self.index_buf.lock();
-            let particle_buf = self.particle_buf.lock();
-            let geo_template_vbuf = self.geo_template_vertex_buf.lock();
-            let geo_template_ibuf = self.geo_template_index_buf.lock();
-            let geo_instance_buf = self.geo_instance_buf.lock();
-            let ctx = BatchEncodeCtx {
-                renderer: self,
-                gpu: &self.gpu,
-                camera_bind_group: &self.camera_bind_group,
-                engine_bg,
-                vertex_buf: vbuf.as_ref().map(|b| &b.0),
-                index_buf: ibuf.as_ref().map(|b| &b.0),
-                particle_buf: particle_buf.as_ref().map(|b| &b.0),
-                geo_template_vbuf: geo_template_vbuf.as_ref().map(|b| &b.0),
-                geo_template_ibuf: geo_template_ibuf.as_ref().map(|b| &b.0),
-                geo_instance_buf: geo_instance_buf.as_ref().map(|b| &b.0),
-                sample_count: self.sample_count,
-                alpha_to_coverage: self.alpha_to_coverage,
-                ssaa: self.ssaa,
-            };
-            let mut scissor_stack = self.scratch_scissor_stack.lock();
-            scissor_stack.clear();
-            scissor_stack.push((0, 0, self.physical_width, self.physical_height));
-
-            for (ei, _event) in events.iter().enumerate() {
-                let info = &event_infos[ei];
-                // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
-                if let Some(scissor_rect) = info.scissor_push {
-                    let sx = self.physical_width as f32 / self.logical_width.max(1.0);
-                    let sy = self.physical_height as f32 / self.logical_height.max(1.0);
-                    let fw = self.physical_width as f32;
-                    let fh = self.physical_height as f32;
-                    // 负坐标 / 越界：先 float 裁到视口再转 u32，避免 as u32 回绕
-                    let x0 = (scissor_rect.x * sx).clamp(0.0, fw);
-                    let y0 = (scissor_rect.y * sy).clamp(0.0, fh);
-                    let x1 = ((scissor_rect.x + scissor_rect.w) * sx).clamp(0.0, fw);
-                    let y1 = ((scissor_rect.y + scissor_rect.h) * sy).clamp(0.0, fh);
-                    let px = x0.floor() as u32;
-                    let py = y0.floor() as u32;
-                    let pr = x1.ceil() as u32;
-                    let pb = y1.ceil() as u32;
-                    let (cx, cy, cw, ch) = *scissor_stack.last().unwrap_or(&(
-                        0,
-                        0,
-                        self.physical_width,
-                        self.physical_height,
-                    ));
-                    let ix = px.max(cx);
-                    let iy = py.max(cy);
-                    let ir = pr.min(cx + cw);
-                    let ib = pb.min(cy + ch);
-                    let (nx, ny, nw, nh) = if ir > ix && ib > iy {
-                        (ix, iy, ir - ix, ib - iy)
-                    } else {
-                        (0u32, 0u32, 0u32, 0u32)
-                    };
-                    pass.set_scissor_rect(nx, ny, nw, nh);
-                    scissor_stack.push((nx, ny, nw, nh));
-                }
-                if info.scissor_pop {
-                    scissor_stack.pop();
-                    let (cx, cy, cw, ch) = *scissor_stack.last().unwrap_or(&(
-                        0,
-                        0,
-                        self.physical_width,
-                        self.physical_height,
-                    ));
-                    pass.set_scissor_rect(cx, cy, cw, ch);
-                }
-
-                // 形状事件：`Batch` 自身的几何，以及 AreaOp 的掩码几何（op 3/4）。
-                // 两者都由 `info.shape` 承载；`encode_into` 不依赖 batch 字段。
-                if let Some(shape) = &info.shape {
-                    let pipe_op = info.area_op.unwrap_or(info.stencil_op);
-                    let encode_info = BatchEncodeInfo {
-                        base_vertex: shape.base_vertex,
-                        geometry: shape.geometry,
-                        blend: shape.blend,
-                        target_blends: &target_blends,
-                        custom_material: &info.custom_material,
-                        segments: &shape.segments,
-                        instances: &shape.instances,
-                        geo_instances: &shape.geo_instances,
-                        particles: &shape.particles,
-                        ordered: &shape.ordered,
-                        particle_clock: shape.particle_clock,
-                        stencil_ref: info.stencil_ref,
-                        dynamic_offsets: &info.dynamic_offsets,
-                        pipe_op,
-                        uses_stencil,
-                        has_ds,
-                    };
-                    shape_draw_calls += DrawBatch::encode_into(&mut pass, &encode_info, &ctx);
-                }
-                if !info.text.is_empty() && mrt {
-                    mrt_warn_once("text");
-                } else if !info.text.is_empty() {
-                    // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
-                    // Area 存在时：当前文本在 Area content level，测 (Test)。
-                    let has_area_at_text =
-                        info.area_op.is_some() || info.stencil_op == 1 || info.stencil_op == 2;
-                    let text_mode = if !has_ds {
-                        crate::text::TextStencilMode::None
-                    } else if has_area_at_text {
-                        crate::text::TextStencilMode::Test
-                    } else {
-                        crate::text::TextStencilMode::Pass
-                    };
-                    // 管线由段循环按（mode, blend, material）逐段 ensure（见下），此处不预建。
-                    // Push 后 mask 已 Inc：父文字测 new_level = ref+1
-                    let text_ref = if info.stencil_op == 1 {
-                        info.stencil_ref + 1
-                    } else {
-                        info.stencil_ref
-                    };
-                    // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
-                    // 否则部分后端会把 ref 重置为 0。
-                    // 文字管线按（mode, blend, material）去重：段连续同状态只建一次
-                    //（custom material 的 glyphon 管线无缓存，重建很贵）。
-                    // 文字路径：材质取 batch 最终值（text 无 per-shape command）。
-                    let material_bg = match info.custom_material.as_ref() {
-                        Some(m) if m.bgl().is_some() => m.ensure_bind_group(
-                            &self.gpu.device,
-                            &self.gpu.queue,
-                            &self.gpu.bind_group_pool,
-                        ),
-                        _ => None,
-                    };
-                    let material_bg = material_bg.as_ref();
-                    let text_tests_stencil = uses_stencil
-                        && (info.stencil_op == 1 || info.stencil_op == 2 || info.area_op.is_some());
-                    let mut last_text_key: Option<(
-                        crate::text::TextStencilMode,
-                        wgpu::BlendState,
-                        Option<*const Material>,
-                    )> = None;
-                    let mut text_mat_pipe: Option<Arc<wgpu::RenderPipeline>> = None;
-                    for segment in &info.text {
-                        let mat_key = info.custom_material.as_ref().map(Arc::as_ptr);
-                        let key = (text_mode, segment.blend, mat_key);
-                        if last_text_key != Some(key) {
-                            // custom 管线先行：raw 的 Text 臂内部 lock text_ctx，
-                            // 此处必须 guard-free（临时的 guard 逐句释放）。
-                            text_mat_pipe = info.custom_material.as_ref().and_then(|m| match self
-                                .gpu
-                                .ensure_material_pipeline(
-                                    m,
-                                    MaterialTarget::Text,
-                                    self.sample_count,
-                                    self.alpha_to_coverage,
-                                    false,
-                                    has_ds,
-                                    uses_stencil,
-                                    if text_tests_stencil { 2 } else { 0 },
-                                    crate::gpu::ShapeVertexLayout::Mesh,
-                                    &[Some(segment.blend)],
-                                ) {
+            // 形状事件：`Batch` 自身的几何，以及 AreaOp 的掩码几何（op 3/4）。
+            // 两者都由 `info.shape` 承载；`encode_into` 不依赖 batch 字段。
+            if let Some(shape) = &info.shape {
+                let pipe_op = info.area_op.unwrap_or(info.stencil_op);
+                let encode_info = BatchEncodeInfo {
+                    base_vertex: shape.base_vertex,
+                    geometry: shape.geometry,
+                    blend: shape.blend,
+                    target_blends: &self.target_blends,
+                    custom_material: &info.custom_material,
+                    segments: &shape.segments,
+                    instances: &shape.instances,
+                    geo_instances: &shape.geo_instances,
+                    particles: &shape.particles,
+                    ordered: &shape.ordered,
+                    particle_clock: shape.particle_clock,
+                    stencil_ref: info.stencil_ref,
+                    dynamic_offsets: &info.dynamic_offsets,
+                    pipe_op,
+                    uses_stencil: self.uses_stencil,
+                    has_ds: self.has_ds,
+                };
+                shape_draw_calls += DrawBatch::encode_into(&mut *pass, &encode_info, &ctx);
+            }
+            if !info.text.is_empty() && self.mrt {
+                mrt_warn_once("text");
+            } else if !info.text.is_empty() {
+                // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
+                // Area 存在时：当前文本在 Area content level，测 (Test)。
+                let has_area_at_text =
+                    info.area_op.is_some() || info.stencil_op == 1 || info.stencil_op == 2;
+                let text_mode = if !self.has_ds {
+                    crate::text::TextStencilMode::None
+                } else if has_area_at_text {
+                    crate::text::TextStencilMode::Test
+                } else {
+                    crate::text::TextStencilMode::Pass
+                };
+                // 管线由段循环按（mode, blend, material）逐段 ensure（见下），此处不预建。
+                // Push 后 mask 已 Inc：父文字测 new_level = ref+1
+                let text_ref = if info.stencil_op == 1 {
+                    info.stencil_ref + 1
+                } else {
+                    info.stencil_ref
+                };
+                // 必须在 set_pipeline（render_range 内）之后再 set_stencil_reference，
+                // 否则部分后端会把 ref 重置为 0。
+                // 文字管线按（mode, blend, material）去重：段连续同状态只建一次
+                //（custom material 的 glyphon 管线无缓存，重建很贵）。
+                // 文字路径：材质取 batch 最终值（text 无 per-shape command）。
+                let material_bg = match info.custom_material.as_ref() {
+                    Some(m) if m.bgl().is_some() => {
+                        m.ensure_bind_group(&r.gpu.device, &r.gpu.queue, &r.gpu.bind_group_pool)
+                    }
+                    _ => None,
+                };
+                let material_bg = material_bg.as_ref();
+                let text_tests_stencil = self.uses_stencil
+                    && (info.stencil_op == 1 || info.stencil_op == 2 || info.area_op.is_some());
+                let mut last_text_key: Option<(
+                    crate::text::TextStencilMode,
+                    wgpu::BlendState,
+                    Option<*const Material>,
+                )> = None;
+                let mut text_mat_pipe: Option<Arc<wgpu::RenderPipeline>> = None;
+                for segment in &info.text {
+                    let mat_key = info.custom_material.as_ref().map(Arc::as_ptr);
+                    let key = (text_mode, segment.blend, mat_key);
+                    if last_text_key != Some(key) {
+                        // custom 管线先行：raw 的 Text 臂内部 lock text_ctx，
+                        // 此处必须 guard-free（临时的 guard 逐句释放）。
+                        text_mat_pipe = info.custom_material.as_ref().and_then(|m| {
+                            match r.gpu.ensure_material_pipeline(
+                                m,
+                                MaterialTarget::Text,
+                                r.sample_count,
+                                r.alpha_to_coverage,
+                                false,
+                                self.has_ds,
+                                self.uses_stencil,
+                                if text_tests_stencil { 2 } else { 0 },
+                                crate::gpu::ShapeVertexLayout::Mesh,
+                                &[Some(segment.blend)],
+                            ) {
                                 Ok(p) => Some(p),
                                 Err(err) => {
                                     log::warn!(
@@ -1863,36 +1834,150 @@ impl Renderer {
                                     );
                                     None
                                 }
-                            });
-                            self.gpu.text_ctx.lock().unwrap().ensure_text_pipeline(
-                                &self.gpu.device,
-                                text_mode,
-                                segment.blend,
-                            );
-                            last_text_key = Some(key);
-                        }
-                        sync_blend_constant(&mut pass, segment.blend, segment.blend_constant);
-                        let text_ctx = self.gpu.text_ctx.lock().unwrap();
-                        if let Err(e) = text_ctx.text_renderer.render_range_with_material(
-                            &text_ctx.text_atlas,
-                            &text_ctx.viewport,
-                            &mut pass,
-                            engine_bg,
-                            segment.vertex_start,
-                            segment.vertex_count,
-                            if uses_stencil { Some(text_ref) } else { None },
-                            segment.bind_group.as_ref(),
-                            text_mat_pipe.as_deref(),
-                            material_bg,
-                            &info.dynamic_offsets,
-                        ) {
-                            log::warn!("glyphon text render failed (skipped segment): {:?}", e);
-                        }
+                            }
+                        });
+                        r.gpu.text_ctx.lock().unwrap().ensure_text_pipeline(
+                            &r.gpu.device,
+                            text_mode,
+                            segment.blend,
+                        );
+                        last_text_key = Some(key);
+                    }
+                    sync_blend_constant(&mut *pass, segment.blend, segment.blend_constant);
+                    let text_ctx = r.gpu.text_ctx.lock().unwrap();
+                    if let Err(e) = text_ctx.text_renderer.render_range_with_material(
+                        &text_ctx.text_atlas,
+                        &text_ctx.viewport,
+                        &mut *pass,
+                        &self.engine_bg,
+                        segment.vertex_start,
+                        segment.vertex_count,
+                        if self.uses_stencil {
+                            Some(text_ref)
+                        } else {
+                            None
+                        },
+                        segment.bind_group.as_ref(),
+                        text_mat_pipe.as_deref(),
+                        material_bg,
+                        &info.dynamic_offsets,
+                    ) {
+                        log::warn!("glyphon text render failed (skipped segment): {:?}", e);
                     }
                 }
             }
         }
 
-        *self.last_draw_calls.lock() = shape_draw_calls;
+        self.draw_calls
+            .set(self.draw_calls.get().saturating_add(shape_draw_calls));
+        shape_draw_calls
+    }
+
+    /// 用引擎的附件计划（颜色 / MSAA resolve / DS）创建 pass。
+    ///
+    /// 与 [`Self::encode`] 配合即“方案 1”：同一个 pass 里先画引擎批次、再画用户内容。
+    pub(crate) fn begin_engine_pass<'e>(
+        &self,
+        encoder: &'e mut wgpu::CommandEncoder,
+    ) -> wgpu::RenderPass<'e> {
+        let r = self.renderer;
+        let msaa_view = r.msaa_view(r.gpu.surface_format());
+        // 目标附件清单：MRT 直接使用用户的多个颜色附件（引擎 MSAA 仅单目标路径）；
+        // 单目标路径保持 MSAA resolve 到 target 0 的既有行为。
+        let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
+            Vec::with_capacity(self.target.color_attachments.len().max(1));
+        if self.mrt {
+            for (i, att) in self.target.color_attachments.iter().enumerate() {
+                let load = self.loads.get(i).copied().unwrap_or(wgpu::LoadOp::Load);
+                color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                    view: &att.view,
+                    resolve_target: att.resolve_target.as_ref(),
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                }));
+            }
+        } else {
+            let target_view = &self.target.color_attachments[0].view;
+            let load = self.loads.first().copied().unwrap_or(wgpu::LoadOp::Load);
+            let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) =
+                match &msaa_view {
+                    Some(msaa) => (msaa, Some(target_view)),
+                    None => (target_view, None),
+                };
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                resolve_target: resolve,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            }));
+        }
+        let dv;
+        let ds_attachment = match &self.ds {
+            ResolvedDsOps::None => None,
+            ResolvedDsOps::Engine(ops) => {
+                dv = r.ds_view();
+                // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
+                // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
+                // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &dv,
+                    depth_ops: ops.depth,
+                    stencil_ops: ops.stencil,
+                })
+            }
+            ResolvedDsOps::External => {
+                // resolve 处已断言 `target.depth_stencil` 为 External；此处取其 view。
+                let att = match self.target.depth_stencil.as_ref() {
+                    Some(DepthStencilTarget::External(att)) => att,
+                    _ => unreachable!("External resolve without external target"),
+                };
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &att.view,
+                    depth_ops: att.depth_ops,
+                    stencil_ops: att.stencil_ops,
+                })
+            }
+        };
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vireo render pass"),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: ds_attachment,
+            ..Default::default()
+        })
+    }
+}
+
+impl Drop for PreparedFrame<'_> {
+    fn drop(&mut self) {
+        let r = self.renderer;
+        *r.last_draw_calls.lock() = self.draw_calls.get();
+        *r.last_clip_paths.lock() = std::mem::take(&mut self.clip_paths);
+        // 归还 scratch 容量，避免每帧重新分配 EventInfo 向量。
+        *r.scratch_event_infos.lock() = std::mem::take(&mut self.event_infos);
+    }
+}
+
+/// 防止 `prepare_frame` 重入（嵌套会破坏 scratch 状态）。
+struct FrameActiveGuard<'a>(&'a AtomicBool);
+
+impl<'a> FrameActiveGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Self {
+        assert!(
+            !flag.swap(true, Ordering::AcqRel),
+            "nested Renderer::prepare_frame is not supported (a PreparedFrame is still alive)"
+        );
+        Self(flag)
+    }
+}
+
+impl Drop for FrameActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }

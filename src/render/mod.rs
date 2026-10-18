@@ -741,6 +741,8 @@ pub struct Renderer {
     last_draw_calls: Mutex<u32>,
     /// 上一帧参与绘制的 batch（扁平化顺序）实际使用的裁剪路径（诊断）。
     last_clip_paths: Mutex<Vec<ClipPath>>,
+    /// `prepare_frame` 重入保护（嵌套 prep 会破坏 scratch 状态）。
+    frame_active: std::sync::atomic::AtomicBool,
 }
 
 impl Renderer {
@@ -835,6 +837,7 @@ impl Renderer {
             scratch_geo_merge_sorted: Mutex::new(None),
             last_draw_calls: Mutex::new(0),
             last_clip_paths: Mutex::new(Vec::new()),
+            frame_active: std::sync::atomic::AtomicBool::new(false),
             logical_width,
             logical_height,
         }
