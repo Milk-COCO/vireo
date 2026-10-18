@@ -131,6 +131,13 @@
   `AreaGeom`；`Area::geom` 在 debug 构建校验索引（整三角形、不越界），
   SDF 路径却没有 `sdf_type != 0` 顶点时首次 `warn!`（掩码会退化成外接矩形）。
   `Area::rect`: build a rectangular stencil mask from a logical rect.
+- `DrawBatch::clip_path() -> ClipPath`：查询本 batch 实际走的裁剪路径
+  （`None` / `AreaStencil` / `Scissor { rect, automatic, clips_self }` / `Stencil`），
+  纯查询、不推进状态。矩形裁剪请优先 `scissor`（见 `area` 模块文档）。
+- `VireoWindow::draw_with_passes` / `OffscreenCanvas::draw_with_passes`：在引擎 pass
+  **之后**用同一个 `CommandEncoder` 追加自定义 pass（后处理链、额外 compute），
+  整帧只 submit 一次；引擎 pass 的 DS 不延续，需要时由回调自建。
+  `draw_with_passes`: append custom passes to the same encoder after the engine pass.
 
 ### Changed / 变更
 
@@ -172,6 +179,10 @@
   Breaking: custom vertex shaders now plug into the instance paths instead of
   falling back to mesh; the shader must match the contract of its draw path
   (SDF storage contract or geo template contract).
+- `preserve_order = false` 的段排序键纳入 material / blend / blend constant /
+  geo 模板身份：同类段按状态聚拢，减少管线与绑定切换（**不改变**可合并条件——
+  仍要求状态相等且底层范围连续，因此 draw call 数不变）。
+  Reordered segments now sort by full draw state, reducing pipeline/bind switches.
 
 ### Fixed / 修复
 
