@@ -1501,7 +1501,11 @@ fn clip_self_does_not_affect_stencil_path() {
         &Transform::IDENTITY,
         &mut FxHashMap::default(),
     );
-    assert!(events.iter().all(|e| !matches!(e, DrawEvent::ScissorPush(_))));
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, DrawEvent::ScissorPush(_)))
+    );
     assert!(matches!(events.last(), Some(DrawEvent::StencilPop)));
 }
 
