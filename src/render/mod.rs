@@ -152,6 +152,27 @@ impl BatchOverride {
 ///   走 stencil 管线 op 3（Erase）或 op 4（Cover），无色。
 /// - `ScissorPush(Rect)`：用 scissor 代替 stencil（`scissor` + `clips_children`）。
 /// - `ScissorPop`：恢复前一级 scissor。
+/// `DrawBatch::clip_path` 的诊断结果：本 batch 实际走的裁剪路径。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClipPath {
+    /// 无裁剪。
+    None,
+    /// Area stencil：`area_include` / `area_exclude` 生效。自身与子树都受 Area 约束；
+    /// 若同时 `clips_children`，子树还叠加几何 mask。
+    AreaStencil,
+    /// 矩形 scissor。
+    Scissor {
+        /// 逻辑世界坐标窗口。
+        rect: Rect,
+        /// `true` = `clips_children` 从单矩形几何自动探测；`false` = 显式 `scissor`。
+        automatic: bool,
+        /// 自身内容是否也被裁（`clip_self` 且自身有可绘制内容）。
+        clips_self: bool,
+    },
+    /// `clips_children` + 非矩形几何：stencil mask 只作用于子 batch。
+    Stencil,
+}
+
 pub(crate) enum DrawEvent<'a> {
     Batch(&'a DrawBatch),
     StencilPop,

@@ -14,8 +14,8 @@ use crate::math::{
 use crate::text::{TextDef, TextEntryList};
 
 use super::{
-    BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
-    ShapeStats,
+    BatchEncodeCtx, BatchEncodeInfo, BatchOverride, ClipPath, DrawEvent, GeoTemplate,
+    OrderedShapeSegment, ShapeStats,
 };
 
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
@@ -1787,6 +1787,37 @@ impl DrawBatch {
     /// 有效可见区：`include.unwrap_or(Full) \ exclude.unwrap_or(Empty)`；皆 None 则 `None`。
     pub fn effective_area(&self) -> Option<Area> {
         effective_area(self.area_include.as_ref(), self.area_exclude.as_ref())
+    }
+
+    /// 本 batch 实际使用的裁剪路径（纯查询，不推进任何渲染状态）。
+    ///
+    /// 优先级与 `Renderer::draw` 一致：Area → scissor（显式 / auto）→
+    /// `clips_children` 的 stencil mask → 无裁剪。
+    /// `Scissor::clips_self` 反映自身内容是否**真的**被裁（`clip_self` 且自身有内容）。
+    pub fn clip_path(&self) -> ClipPath {
+        let has_area = matches!(&self.effective_area(), Some(a) if !a.is_empty());
+        if has_area {
+            return ClipPath::AreaStencil;
+        }
+        let has_geom = !self.vertices.is_empty()
+            || !self.instance_data.is_empty()
+            || !self.geo_instances.is_empty()
+            || !self.particles.is_empty();
+        let has_own_draw = has_geom || !self.texts.entries.is_empty();
+        if self.uses_scissor_path(false)
+            && let Some(rect) = self.scissor.or_else(|| self.auto_scissor())
+        {
+            return ClipPath::Scissor {
+                rect,
+                automatic: self.scissor.is_none(),
+                clips_self: self.clip_self && has_own_draw,
+            };
+        }
+        if self.clips_children && has_geom {
+            ClipPath::Stencil
+        } else {
+            ClipPath::None
+        }
     }
 
     /// 从 `transform_table` 取 index 对应列（越界 → 单位阵）。

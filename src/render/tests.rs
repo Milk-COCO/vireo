@@ -1519,6 +1519,56 @@ fn clip_self_resets_on_clear_and_carries_on_clone() {
 }
 
 #[test]
+fn clip_path_reports_effective_path() {
+    assert_eq!(DrawBatch::new().clip_path(), ClipPath::None);
+
+    let mut b = DrawBatch::new();
+    b.scissor = Some(Rect::new(1.0, 2.0, 30.0, 40.0));
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(WHITE));
+    assert_eq!(
+        b.clip_path(),
+        ClipPath::Scissor {
+            rect: Rect::new(1.0, 2.0, 30.0, 40.0),
+            automatic: false,
+            clips_self: false,
+        }
+    );
+    b.clip_self = true;
+    assert!(matches!(
+        b.clip_path(),
+        ClipPath::Scissor {
+            clips_self: true,
+            ..
+        }
+    ));
+
+    let mut b = DrawBatch::new();
+    b.clips_children = true;
+    b.set_sdf_feather(None);
+    draw_rectangle(&mut b, Pos::new(10.0, 20.0), 30.0, 40.0, Some(WHITE));
+    match b.clip_path() {
+        ClipPath::Scissor {
+            rect,
+            automatic: true,
+            clips_self: false,
+        } => {
+            assert!((rect.w - 30.0).abs() < 1e-4 && (rect.h - 40.0).abs() < 1e-4);
+        }
+        other => panic!("expected auto scissor, got {other:?}"),
+    }
+
+    let mut b = DrawBatch::new();
+    b.clips_children = true;
+    draw_circle(&mut b, Pos::new(20.0, 20.0), 10.0, Some(WHITE));
+    assert_eq!(b.clip_path(), ClipPath::Stencil);
+
+    let mut b = DrawBatch::new();
+    b.scissor = Some(Rect::new(0.0, 0.0, 10.0, 10.0));
+    b.area_include = Some(Area::rect(Rect::new(0.0, 0.0, 20.0, 20.0)));
+    assert_eq!(b.clip_path(), ClipPath::AreaStencil);
+}
+
+#[test]
 fn scissor_does_not_set_uses_stencil() {
     let mut b = DrawBatch::new();
     b.clips_children = true;
