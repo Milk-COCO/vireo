@@ -146,6 +146,36 @@ impl OffscreenCanvas {
         self.renderer.gpu().queue.submit(Some(encoder.finish()));
     }
 
+    /// 渲染并提交，由调用方自行创建 `RenderPass` 并决定引擎批次的插入位置。
+    ///
+    /// 契约与 [`VireoWindow::draw_with_frame`](crate::window::VireoWindow::draw_with_frame)
+    /// 相同：颜色附件复用 `frame.target()` 的 view，`sample_count` / `has_ds`
+    /// 必须对齐；引擎批次不会自动编码，需自己调用 `frame.encode`。
+    pub fn draw_with_frame<F>(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+        f: F,
+    ) where
+        F: FnOnce(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
+    {
+        self.ensure_target_format();
+        let target = self.texture.lock().target();
+        let mut encoder =
+            self.renderer
+                .gpu()
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vireo offscreen custom encoder"),
+                });
+        let frame = self
+            .renderer
+            .prepare_frame(&target, &[clear_color], batches);
+        f(&frame, &mut encoder);
+        drop(frame);
+        self.renderer.gpu().queue.submit(Some(encoder.finish()));
+    }
+
     /// 渲染并提交，挂载本帧 depth-stencil 附件（`None` = 与 `draw` 一致）。
     pub fn draw_with_depth_stencil(
         &self,

@@ -41,9 +41,18 @@ enum ResolvedDsOps {
 
 /// 已准备的一帧：剔除 / flatten / 合并 / 上传 / 文字 prepare 全部完成。
 ///
-/// 由 [`Renderer::prepare_frame`] 创建；生命周期内持有本帧的 `EventInfo` 与
-/// 附件计划。`encode` 只读，可安全地编码进任意满足契约的 pass。
-pub(crate) struct PreparedFrame<'a> {
+/// 由窗口/离屏的 `draw_with_frame` 回调交出；生命周期内持有本帧的 `EventInfo`
+/// 与附件计划。**只在回调期间有效**，不要保存到回调之外。
+///
+/// # 自定义 pass 的契约
+///
+/// `encode` 使用引擎的 pipeline（按 renderer 的格式 / 采样数构建），因此自建 pass 必须：
+/// - 颜色附件使用 [`Self::target`] 里的同一组 view（`sample_count()` 为 1 时可直接用；
+///   >1 时需自建 MSAA target 并 resolve 到该 view）；
+/// - 附件数量与 [`Self::target`] 相同；
+/// - [`Self::has_ds`] 为真时挂 `Depth24PlusStencil8` depth-stencil 附件；
+/// - 尺寸与 renderer 一致（文字 viewport / scissor 换算依赖它）。
+pub struct PreparedFrame<'a> {
     renderer: &'a Renderer,
     target: &'a RenderTarget,
     events: Vec<DrawEvent<'a>>,
@@ -1666,14 +1675,43 @@ impl Renderer {
 }
 
 impl PreparedFrame<'_> {
+    /// 本帧是否会产生任何 pass（有批次内容或某个颜色附件需要 clear）。
+    pub fn is_empty(&self) -> bool {
+        !self.wants_pass
+    }
+
+    /// 本帧渲染目标（自定义 pass 应复用其中的颜色 view）。
+    pub fn target(&self) -> &RenderTarget {
+        self.target
+    }
+
+    /// 引擎 pipeline 构建时使用的颜色格式。
+    pub fn target_format(&self) -> wgpu::TextureFormat {
+        self.renderer.gpu.surface_format()
+    }
+
+    /// 引擎 pipeline 的 sample count（`1` = 无 MSAA）。
+    pub fn sample_count(&self) -> u32 {
+        self.renderer.sample_count
+    }
+
+    /// `encode` 是否会按“有 depth-stencil”选择管线。
+    ///
+    /// 为 true 时自建 pass 必须挂 `Depth24PlusStencil8` 附件。
+    pub fn has_ds(&self) -> bool {
+        self.has_ds
+    }
+
     pub(crate) fn wants_pass(&self) -> bool {
         self.wants_pass
     }
 
     /// 把已准备的内容编码进调用方的 `RenderPass`。
     ///
-    /// 可重复调用（每次都重发全部绘制）。返回本次发出的 draw call 数。
-    pub(crate) fn encode(&self, pass: &mut wgpu::RenderPass<'_>) -> u32 {
+    /// 可重复调用（每次都重发全部绘制，不支持只编码部分批次）。
+    /// 返回本次发出的 draw call 数；整帧累计值在帧结束时发布到
+    /// `Renderer::last_draw_calls`。
+    pub fn encode(&self, pass: &mut wgpu::RenderPass<'_>) -> u32 {
         let r = self.renderer;
         let mut shape_draw_calls: u32 = 0;
         let vbuf = r.vertex_buf.lock();
@@ -1875,8 +1913,9 @@ impl PreparedFrame<'_> {
 
     /// 用引擎的附件计划（颜色 / MSAA resolve / DS）创建 pass。
     ///
-    /// 与 [`Self::encode`] 配合即“方案 1”：同一个 pass 里先画引擎批次、再画用户内容。
-    pub(crate) fn begin_engine_pass<'e>(
+    /// 与 [`Self::encode`] 配合即“引擎 pass 内自定义绘制”：同一个 pass 里先画引擎
+    /// 批次、再画用户内容。`draw_with_inline` 是它的便捷封装。
+    pub fn begin_engine_pass<'e>(
         &self,
         encoder: &'e mut wgpu::CommandEncoder,
     ) -> wgpu::RenderPass<'e> {

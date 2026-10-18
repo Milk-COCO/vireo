@@ -201,6 +201,7 @@ pub mod prelude {
     pub use crate::render::DrawBatch;
     pub use crate::render::InheritFromParent;
     pub use crate::render::Pos;
+    pub use crate::render::PreparedFrame;
     pub use crate::render::Rect;
     pub use crate::render::RenderTarget;
     pub use crate::render::Renderer;

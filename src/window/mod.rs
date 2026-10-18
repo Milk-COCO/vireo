@@ -620,6 +620,55 @@ impl VireoWindow {
         self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], Some(&mut encode), None))
     }
 
+    /// 绘制一帧，由调用方自行创建 `RenderPass` 并决定引擎批次的插入位置。
+    ///
+    /// 回调拿到 [`PreparedFrame`](crate::render::PreparedFrame) 与同一个
+    /// `CommandEncoder`；引擎批次**不会**自动编码，必须自己调用 `frame.encode`。
+    /// 典型用法：
+    ///
+    /// ```ignore
+    /// win.draw_with_frame(clear, &[&batch], |frame, encoder| {
+    ///     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    ///         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+    ///             view: &frame.target().color_attachments[0].view,
+    ///             resolve_target: None,
+    ///             ops: wgpu::Operations { load: wgpu::LoadOp::Clear(c), store: wgpu::StoreOp::Store },
+    ///             depth_slice: None,
+    ///         })],
+    ///         depth_stencil_attachment: None, // frame.has_ds() 为真时必须自建
+    ///         ..Default::default()
+    ///     });
+    ///     frame.encode(&mut pass);
+    /// });
+    /// ```
+    ///
+    /// # 契约
+    /// - 颜色附件必须复用 `frame.target()` 的 view（数量 / 格式一致）；
+    /// - `frame.sample_count() > 1` 时需自建 MSAA target 并 resolve 到该 view；
+    /// - `frame.has_ds()` 为真时必须挂 `Depth24PlusStencil8`；
+    /// - 尺寸必须与窗口一致（文字 viewport / scissor 换算依赖它）。
+    ///
+    /// `clear_color` 只影响 `frame.is_empty()` 判定与 `begin_engine_pass` 的 load；
+    /// 自建 pass 的 load 由调用方决定。回调里不要再次调用任何 `draw*`。
+    pub fn draw_with_frame<F>(
+        &self,
+        clear_color: crate::color::Color,
+        batches: &[&DrawBatch],
+        f: F,
+    ) -> DrawReport
+    where
+        F: FnOnce(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
+    {
+        let mut f = Some(f);
+        let mut encode = |frame: &crate::render::PreparedFrame<'_>,
+                          encoder: &mut wgpu::CommandEncoder| {
+            if let Some(f) = f.take() {
+                f(frame, encoder);
+            }
+        };
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], Some(&mut encode), None))
+    }
+
     /// 帧记账（outcome/统计）＋窗口级帧率节流；`frame` 执行实际渲染。
     fn run_frame(&self, frame: impl FnOnce() -> DrawReport) -> DrawReport {
         let report = {

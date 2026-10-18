@@ -3605,3 +3605,110 @@ fn fs() -> @location(0) vec4<f32> {
         &pixels[i..i + 4]
     );
 }
+
+/// `draw_with_frame`：用户自建 pass，按契约编码引擎批次。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn offscreen_draw_with_frame_creates_own_pass() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    let mut scene = DrawBatch::new();
+    draw_rectangle(
+        &mut scene,
+        Pos::new(0.0, 0.0),
+        32.0,
+        64.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    let mut contract = None;
+    canvas.draw_with_frame(
+        Some(Color::new(0.0, 0.0, 0.0, 1.0)),
+        &[&scene],
+        |frame, encoder| {
+            contract = Some((
+                frame.sample_count(),
+                frame.has_ds(),
+                frame.is_empty(),
+                frame.target_format(),
+            ));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("custom scene pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.target().color_attachments[0].view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 1.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            assert_eq!(frame.encode(&mut pass), 1, "引擎批次应发出 1 个 draw call");
+        },
+    );
+
+    let (sample_count, has_ds, is_empty, fmt) = contract.expect("回调应执行");
+    assert_eq!(sample_count, 1);
+    assert!(!has_ds);
+    assert!(!is_empty);
+    assert_eq!(fmt, gpu.surface_format());
+    assert_eq!(canvas.last_draw_calls(), 1);
+
+    let pixels = canvas.read_pixels();
+    assert!(
+        region_is_red(&pixels, 64, 5, 5, 25, 25),
+        "引擎红色矩形应可见"
+    );
+    assert!(
+        region_is_blue(&pixels, 64, 40, 5, 60, 25),
+        "自建 pass 的蓝色 clear 应在引擎批次之外保留"
+    );
+}
+
+/// 嵌套 `prepare_frame` 会 panic（不会静默死锁），且 unwind 后状态可恢复。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn nested_prepare_panics_and_recovers() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    let mut b = DrawBatch::new();
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        64.0,
+        64.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        canvas.draw_with_frame(
+            Some(Color::new(0.0, 0.0, 0.0, 1.0)),
+            &[&b],
+            |_frame, _encoder| {
+                canvas.draw_with_inline(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b], |_| {});
+            },
+        );
+    }));
+    assert!(res.is_err(), "嵌套 prepare 应 panic");
+
+    // 恢复：guard 在 unwind 时已复位，后续绘制正常。
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    assert!(region_is_red(&pixels, 64, 20, 20, 44, 44));
+}
