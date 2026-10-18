@@ -164,8 +164,8 @@
     引擎 MSAA 不参与 MRT（单颜色输出，跳过并 warn-once）。示例 `mrt`。
   - **Bind Group 去硬编码**：`App::material_self_managed(source, &[(group, &bgl)])` /
     `GpuContext::create_material_self_managed`——用户自带 BGL 与 group 编号，任意
-    `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。`Material::set_group_index`
-    可调整默认材质所在 group。示例 `custom_material_self_managed`。
+    `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。默认材质仍在 group 3
+    （`MaterialState::B` 的 `group_index` 构造期固定）。示例 `custom_material_self_managed`。
   - **Pass 接管**：`DrawBatch::encode_into` 内部化（`Renderer::draw` 复用同一实现），
     绘制状态编码与数据合并解耦。属 `pub(crate)`，公开 API 面不变。
 - `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
