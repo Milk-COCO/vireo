@@ -134,6 +134,13 @@
 - `DrawBatch::clip_path() -> ClipPath`：查询本 batch 实际走的裁剪路径
   （`None` / `AreaStencil` / `Scissor { rect, automatic, clips_self }` / `Stencil`），
   纯查询、不推进状态。矩形裁剪请优先 `scissor`（见 `area` 模块文档）。
+  配套 `Renderer::last_clip_paths()` / `VireoWindow::last_clip_paths()` /
+  `OffscreenCanvas::last_clip_paths()`：上一帧实际参与绘制的 batch 裁剪路径表。
+- `DrawBatch::merge_instance_states`（默认 `false`）：`preserve_order = false` 时把
+  SDF 实例按 `(bind group, material, blend, blend constant)` 重排到连续范围，使同状态
+  实例可合并 draw call（1000 个交替 blend 实例从 1000 dc → 2 dc）。代价同 `preserve_order`
+  ——同 batch 内层叠顺序不再保留。
+  `merge_instance_states`: reorder instances by draw state to merge draw calls.
 - `VireoWindow::draw_with_passes` / `OffscreenCanvas::draw_with_passes`：在引擎 pass
   **之后**用同一个 `CommandEncoder` 追加自定义 pass（后处理链、额外 compute），
   整帧只 submit 一次；引擎 pass 的 DS 不延续，需要时由回调自建。
