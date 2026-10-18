@@ -979,6 +979,65 @@ fn area_rect_clips_own_content() {
     );
 }
 
+/// `OffscreenCanvas::draw_with_passes`：回调在引擎 pass 之后、submit 之前执行，
+/// 同一 command buffer 内追加的 clear pass 覆盖引擎内容。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn offscreen_draw_with_passes_runs_after_engine() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    let mut b = DrawBatch::new();
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        64.0,
+        64.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    let mut calls = 0u32;
+    canvas.draw_with_passes(
+        Some(Color::new(0.0, 0.0, 0.0, 1.0)),
+        &[&b],
+        |encoder, target| {
+            calls += 1;
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.color_attachments[0].view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 1.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        },
+    );
+    assert_eq!(calls, 1, "回调应执行一次");
+
+    let pixels = canvas.read_pixels();
+    let i = (32 * 64 + 32) * 4;
+    assert!(
+        pixels[i + 1] > 200 && pixels[i] < 50 && pixels[i + 2] < 50,
+        "自定义 pass 应覆盖引擎内容，实际像素 {:?}",
+        &pixels[i..i + 4]
+    );
+}
+
 /// Fragment-only Custom Material + SDF instance path：
 /// - 2000 个交替参数 SDF instance 应合并为 1 个 draw call
 /// - 像素回读：material 修改颜色后矩形区域非空

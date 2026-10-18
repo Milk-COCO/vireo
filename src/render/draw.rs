@@ -147,6 +147,27 @@ impl Renderer {
         clear_colors: &[Option<crate::color::Color>],
         batches: &[&DrawBatch],
     ) -> wgpu::CommandBuffer {
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vireo encoder"),
+            });
+        self.draw_into(&mut encoder, target, clear_colors, batches);
+        encoder.finish()
+    }
+
+    /// 把本帧编码进调用方提供的 `CommandEncoder`（**不** finish / submit）。
+    ///
+    /// 供 `draw_with_passes` 在引擎 pass **之后**追加自定义 pass（后处理链、
+    /// 额外 compute 等），最终一次 submit。`draw` 是它的便捷封装。
+    pub(crate) fn draw_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &RenderTarget,
+        clear_colors: &[Option<crate::color::Color>],
+        batches: &[&DrawBatch],
+    ) {
         // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
         // 可见 = 祖先 stencil ∧ batch 自身有效 Area。
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
@@ -165,27 +186,14 @@ impl Renderer {
         let has_content = clear_colors.iter().any(|c| c.is_some())
             || events.iter().any(|e| matches!(e, DrawEvent::Batch(b) if !b.vertices.is_empty() || !b.instance_data.is_empty() || !b.geo_instances.is_empty() || !b.particles.is_empty() || !b.texts.entries.is_empty()));
         if !has_content {
-            // 无内容：返回空 cmd_buf（不创建 render pass 即可）
+            // 无内容：不创建 render pass，编码器保持为空。
             *self.last_draw_calls.lock() = 0;
-            let empty_encoder =
-                self.gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("vireo empty encoder"),
-                    });
-            return empty_encoder.finish();
+            return;
         }
 
         // ---- depth-stencil 计划（与目标对齐；warn-once 收敛）----
         let resolved_ds = resolve_depth_stencil(target, uses_stencil);
         let has_ds = !matches!(resolved_ds, ResolvedDsOps::None);
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vireo encoder"),
-            });
 
         let load = match clear_colors.first() {
             Some(c) => match c {
@@ -1823,6 +1831,5 @@ impl Renderer {
         }
 
         *self.last_draw_calls.lock() = shape_draw_calls;
-        encoder.finish()
     }
 }

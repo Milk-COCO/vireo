@@ -565,9 +565,35 @@ impl VireoWindow {
     ///
     /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
     pub fn draw(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], None))
+    }
+
+    /// 绘制一帧，并在引擎 pass **之后**用同一个 `CommandEncoder` 追加自定义 pass。
+    ///
+    /// 回调在渲染线程、引擎 pass 结束之后、`submit` / `present` 之前执行；整帧只提交
+    /// 一次 command buffer（适合后处理链、额外的 compute 或叠加 pass）。
+    ///
+    /// - `target` 包含本帧颜色附件（第 0 个是窗口 surface view）；传入的 view 只在回调
+    ///   期间有效，不要保存到回调之外。
+    /// - 引擎的 depth-stencil 附件在引擎 pass 结束时已结束；回调里需要 DS 请自建。
+    /// - 回调里不要再次调用 `draw`（会嵌套 acquire/present）。
+    pub fn draw_with_passes<F>(
+        &self,
+        clear_color: crate::color::Color,
+        batches: &[&DrawBatch],
+        mut extra: F,
+    ) -> DrawReport
+    where
+        F: FnMut(&mut wgpu::CommandEncoder, &crate::render::RenderTarget),
+    {
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], Some(&mut extra)))
+    }
+
+    /// 帧记账（outcome/统计）＋窗口级帧率节流；`frame` 执行实际渲染。
+    fn run_frame(&self, frame: impl FnOnce() -> DrawReport) -> DrawReport {
         let report = {
             let _occupancy_guard = self.occupancy.lock().unwrap_or_else(|e| e.into_inner());
-            let r = self.draw_frame(clear_color, batches, None, &[]);
+            let r = frame();
             *self.last_draw_outcome.lock() = Some(r.outcome);
             *self.last_draw_report.lock() = Some(r);
             match r.outcome {
@@ -668,6 +694,7 @@ impl VireoWindow {
             batches,
             ops.map(DepthStencilTarget::Engine),
             &[],
+            None,
         )
     }
 
@@ -686,7 +713,7 @@ impl VireoWindow {
         extra_targets: &[ColorTargetDesc],
         batches: &[&DrawBatch],
     ) -> DrawReport {
-        self.draw_frame(clear_color, batches, None, extra_targets)
+        self.draw_frame(clear_color, batches, None, extra_targets, None)
     }
 
     fn draw_frame(
@@ -695,6 +722,9 @@ impl VireoWindow {
         batches: &[&DrawBatch],
         ds: Option<DepthStencilTarget>,
         extra_targets: &[ColorTargetDesc],
+        extra_passes: Option<
+            &mut dyn FnMut(&mut wgpu::CommandEncoder, &crate::render::RenderTarget),
+        >,
     ) -> DrawReport {
         if *self.closing.lock() {
             return DrawReport {
@@ -1169,12 +1199,21 @@ impl VireoWindow {
         target.set_depth_stencil(ds);
         let batch_refs: Vec<&DrawBatch> = batches.to_vec();
         let t2 = std::time::Instant::now();
-        let cmd_buf = self
-            .renderer
-            .lock()
-            .draw(&target, &clear_colors, &batch_refs);
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vireo frame encoder"),
+            });
+        {
+            let renderer = self.renderer.lock();
+            renderer.draw_into(&mut encoder, &target, &clear_colors, &batch_refs);
+        }
+        if let Some(cb) = extra_passes {
+            cb(&mut encoder, &target);
+        }
         // 5) submit
-        self.gpu.queue.submit([cmd_buf]);
+        self.gpu.queue.submit([encoder.finish()]);
         let encode_secs = t2.elapsed().as_secs_f64();
 
         // 6) present

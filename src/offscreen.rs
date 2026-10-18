@@ -85,6 +85,34 @@ impl OffscreenCanvas {
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }
 
+    /// 渲染并提交，并在引擎 pass **之后**用同一个 `CommandEncoder` 追加自定义 pass。
+    ///
+    /// 回调在引擎 pass 结束之后、`submit` 之前执行；整帧只提交一次。
+    /// `target` 的第 0 个颜色附件是本画布纹理；view 只在回调期间有效。
+    /// 需要 depth-stencil 时由回调自建（引擎 DS 在引擎 pass 结束时已结束）。
+    pub fn draw_with_passes<F>(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        batches: &[&DrawBatch],
+        mut extra: F,
+    ) where
+        F: FnMut(&mut wgpu::CommandEncoder, &RenderTarget),
+    {
+        self.ensure_target_format();
+        let target = self.texture.lock().target();
+        let mut encoder =
+            self.renderer
+                .gpu()
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vireo offscreen encoder"),
+                });
+        self.renderer
+            .draw_into(&mut encoder, &target, &[clear_color], batches);
+        extra(&mut encoder, &target);
+        self.renderer.gpu().queue.submit(Some(encoder.finish()));
+    }
+
     /// 渲染并提交，挂载本帧 depth-stencil 附件（`None` = 与 `draw` 一致）。
     pub fn draw_with_depth_stencil(
         &self,
