@@ -41,26 +41,12 @@
   - ⚠️ 轮询是**电平**语义：手指按住期间每帧都在结果里。「按一下触发一次」必须
     自己按 `id` 差分，或改用 `on_touch` 的 `Started` 边沿。文档内有示例。
   - 触摸**仍不**模拟鼠标按键：`mouse_left()` 在纯触摸设备上恒为 `false`。
-- **修复** `App::on_*(WindowIndex, ..)` 注册**静默失效**（零日志）：当回调先于
-  窗口创建到达时，host drain `cb_rx` 时 `window_callbacks.get_mut(handle)` 返回
-  `None`，整个注册被丢弃。根因是 `App::window()` 走 `create_tx`、`on_*` 走
-  `cb_tx`，**两个独立 channel 跨 channel 无顺序保证** —— 一轮 `about_to_wait` 里
-  可能「建窗请求还没进（槽 len=0）但回调已到」。Android 的跨线程入口下**必现**
-  （实测 pre-run 的 `app.on_touch(idx, ..)` 全部丢失；此前误判为「`cb_tx` 未就绪」，
-  实际它一直是 `Some`）。现在 drain 时按 handle 提前建槽（回调注册本就只依赖
-  `WindowIndex`，与窗口对象何时创建无关），并对超出 `MAX_CALLBACK_SLOTS` 的
-  无效索引告警丢弃。**`on_*` 现在可以在 `app.run(..)` 之前正常注册。**
 - Android `onStop` 生命周期：`App::on_stopped` 回调 + `App::is_stopped()` /
   `android_lifecycle::is_stopped()`。只对「暂停期间 activity 变得不可见」的
   暂停触发，用来区分「半透明弹窗 / 权限对话框」这类短暂中断与「回桌面 / 锁屏」
   这类彻底离开（`onPause` 两者都触发）。
   `is_stopped()` 是「已暂停 && 本次暂停发生过 onStop」的派生量，恢复后自动翻回。
   Android `onStop` lifecycle: distinguish a brief interruption from a real departure.
-- **修复** Android 上 `App::on_paused` **从不触发**：渲染线程的生命周期闸门排在
-  代号检查之前，进闸门后阻塞到恢复，醒来时 `is_paused()` 已是 `false`，回调于是
-  永远走 resumed 分支。现改为先判代号、先发回调、再进闸门 —— `on_paused` 在暂停
-  生效时触发。
-  Fixed `App::on_paused` never firing on Android (gate ran before the generation check).
 - **生命周期暂停闸门可接管**：`App::set_auto_pause(false)`（默认 `true`，老代码零改动）。
   关掉后切后台不再阻塞渲染循环，由用户自己决定跑什么 / 画不画 —— 引擎不替用户
   决定功耗策略。「策略」（`auto_pause()`）与「状态」（`is_paused()`）刻意用不同词。
@@ -68,7 +54,7 @@
   `App::wait_until(timeout, cond)` + `App::notify_waiters()`（通用条件）。
   会被窗口关闭 / 设备丢失 / activity 销毁打断，不会挂死；平台生命周期变化自动唤醒，
   自己的条件变化需自己 `notify_waiters`。
-  - Android `onDestroy` 生命周期：`App::is_destroyed()` + `App::on_destroyed()`。
+- Android `onDestroy` 生命周期：`App::is_destroyed()` + `App::on_destroyed()`。
   唯一能回答「用户是切走了还是主动关了我」的信号（`is_paused` / `is_stopped`
   在划掉任务时都会照常触发），也是 `set_auto_pause(false)` 之后唯一的退出条件。
   ⚠️ **进程被系统杀掉时不触发**，所以不能用于资源清理或存档。
@@ -121,8 +107,6 @@
   - 文字与弱 GPU：系统字体白名单加载（可定制扫描）＋ COLRv1 emoji＋
     noflat GLES 回退＋离屏格式漂移自愈。
 
-### Added / 新增
-
 - **GPU Compute 入口（P5）**：`App::compute_pipeline(wgsl, entry, &[(group, &bgl)])` /
   `GpuContext::create_compute_pipeline` 创建 compute 管线（用户自带 BGL 与任意 group 编号，
   复用 P3 的自管 group 模型；WGSL/布局错误返回 `Err` 而不是 panic）；
@@ -140,16 +124,9 @@
   ⚠️ 这**不是「vireo 帮你防 OOM」**：vireo 侧能回收的只有 glyph atlas，
   显存大头（用户贴图）因 `App.textures` 是 append-only 而**结构上释放不了**。
 
-### Fixed / 修复
-
-- 首版打磨（均为 Android 真机逐个修；构建八卦与内部测试锁不记）：输入法
-  `show/hide_soft_input` 跳变去重（未聚焦零 post，5 秒 ANR 消除）/ 组合态重发窗口
-  移除 / 触摸双重换算修正＋`mouse_pos` 同步 / 横屏 extract 白条改下发
-  `IME_FLAG_NO_EXTRACT_UI`。
-
 ### Changed / 变更
 
-- **渲染能力四项落地（P1～P4）**：
+- **渲染能力三项落地（P1 / P3 / P4）**：
   - **深度/模板细粒度控制**：新增 `DepthStencilAttachment` / `DepthStencilOps` /
     `DepthStencilTarget`（引擎 DS 或用户自带 view）；`RenderTarget::set_depth_stencil`
     （链式 `with_depth_stencil`）；`Material::set_depth_write` / `set_depth_compare`；
@@ -166,8 +143,6 @@
     `GpuContext::create_material_self_managed`——用户自带 BGL 与 group 编号，任意
     `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。默认材质仍在 group 3
     （`MaterialState::B` 的 `group_index` 构造期固定）。示例 `custom_material_self_managed`。
-  - **Pass 接管**：`DrawBatch::encode_into` 内部化（`Renderer::draw` 复用同一实现），
-    绘制状态编码与数据合并解耦。属 `pub(crate)`，公开 API 面不变。
 - `OffscreenCanvas.texture` 改为 `Mutex<Texture>`（`draw` 内按当前
     `surface_format` 自愈重建，见下）；`view()` / `bind_group()` 改返回
     owned 克隆（原返回内部引用，与锁共存不了）。`Texture` 新增 `format` 字段。
@@ -192,6 +167,13 @@
 
 ### Fixed / 修复
 
+- `App::on_*(WindowIndex, ..)` 注册**静默失效**（零日志）：当回调先于窗口创建到达时，
+  host drain `cb_rx` 时 `window_callbacks.get_mut(handle)` 返回 `None`，整个注册被丢弃。
+  根因是 `App::window()` 走 `create_tx`、`on_*` 走 `cb_tx`，**两个独立 channel
+  跨 channel 无顺序保证** —— 一轮 `about_to_wait` 里可能「建窗请求还没进（槽 len=0）
+  但回调已到」。现在 drain 时按 handle 提前建槽（回调注册本就只依赖 `WindowIndex`，
+  与窗口对象何时创建无关），并对超出 `MAX_CALLBACK_SLOTS` 的无效索引告警丢弃。
+  **`on_*` 现在可以在 `app.run(..)` 之前正常注册。**
 - 无焦点时自动退出挂起：窗口已关闭但进程不退。根因是 winit 0.30 Windows 的
   `exit()` 只置标志不唤醒等待者，而 `run_app` 的退出检查点全在无限 park 返回之后，
   无焦点零事件时 park 永不返回。修为 `exit()` 后自发一次 wake（多余时无害）；
@@ -202,9 +184,10 @@
   while `run_app` only checks it after an infinite park; fixed with a self-wake after
   `exit()`, plus exit handshake hardening (ack, timeouts, backstop, trace).
 
-  ## [0.1.2]
+## [0.1.2]
 
 ### Fixed / 修复
+
 - vireo-main 结束（正常返回或 panic）即关闭所有窗口并退出进程：
   loop/main panic 后不再留下冻住的窗口与僵尸进程（此前须 taskkill）。
   收尾走逐窗 close 路径（与 X 关闭一致）；手动 `App::run`/`spawn`
