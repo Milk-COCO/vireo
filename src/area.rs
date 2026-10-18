@@ -4,6 +4,21 @@
 //! 与 `clips_children` / `InheritFromParent` 正交。
 
 use crate::gpu::Vertex;
+use crate::math::Rect;
+
+/// 一次性告警：Area 选了 SDF 路径，但所有顶点 `sdf_type == 0`（掩码退化成外接矩形）。
+static SDF_MISMATCH_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_sdf_area_without_sdf_vertices() {
+    if !SDF_MISMATCH_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(
+            "Area::geom: the SDF mask path is selected but every vertex has sdf_type = 0; \
+             the mask degenerates to its bounding rectangle. Use `Area::rect(..)` for a \
+             rectangular mask, or bake geometry with `DrawBatch::to_area()`"
+        );
+    }
+}
 
 /// 已烘焙的填充几何（含 transform 表），用作 Area 叶子。
 #[derive(Clone, Debug)]
@@ -56,13 +71,64 @@ impl Area {
     }
 
     /// 由烘焙几何构建 Area（空几何自动化简为 Empty）。
+    ///
+    /// 校验（debug 构建）：索引必须整三角形且不越界。若走 SDF 路径却没有任何
+    /// `sdf_type != 0` 的顶点，掩码会退化成外接矩形 —— 首次发生打一条 `warn!`，
+    /// 矩形掩码请直接用 [`Area::rect`]。
     #[inline]
     pub fn geom(g: AreaGeom) -> Self {
         if g.is_empty() {
-            Area::Empty
-        } else {
-            Area::Geom(g)
+            return Area::Empty;
         }
+        debug_assert!(
+            g.indices.len() % 3 == 0,
+            "Area::geom: indices length {} is not a multiple of 3",
+            g.indices.len()
+        );
+        debug_assert!(
+            g.indices.iter().all(|&i| (i as usize) < g.vertices.len()),
+            "Area::geom: index out of range ({} vertices)",
+            g.vertices.len()
+        );
+        let sdf_path = g.has_sdf || g.sdf_feather.is_some();
+        if sdf_path && g.vertices.iter().all(|v| v.sdf_type == 0) {
+            warn_sdf_area_without_sdf_vertices();
+        }
+        Area::Geom(g)
+    }
+
+    /// 由逻辑像素矩形直接构建 Area（SDF 矩形掩码），免去手搓 [`AreaGeom`]。
+    ///
+    /// - `w <= 0.0 || h <= 0.0` → [`Area::Empty`]；
+    /// - 顶点是世界坐标，`transform_table` 为空（恒等）；
+    /// - `sdf_feather = Some(0.0)`：掩码边缘与矩形严格对齐（不带 1px 柔边外扩）。
+    pub fn rect(r: Rect) -> Self {
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return Area::Empty;
+        }
+        let params = [r.x + r.w * 0.5, r.y + r.h * 0.5, r.w * 0.5, r.h * 0.5];
+        let corners = [
+            (r.x, r.y),
+            (r.x + r.w, r.y),
+            (r.x + r.w, r.y + r.h),
+            (r.x, r.y + r.h),
+        ];
+        let mut vertices = Vec::with_capacity(4);
+        for (x, y) in corners {
+            let mut v = Vertex::new_uv_xform(x, y, 0.0, 0.0, crate::color::colors::WHITE, 0);
+            v.sdf_params = params;
+            v.sdf_type = 2;
+            v.sdf_feather = 0.0;
+            vertices.push(v);
+        }
+        Area::geom(AreaGeom {
+            vertices,
+            indices: vec![0, 1, 2, 0, 2, 3],
+            transform_table: Vec::new(),
+            polygon_edges: Vec::new(),
+            has_sdf: true,
+            sdf_feather: Some(0.0),
+        })
     }
 
     /// 是否为 Full。
@@ -302,6 +368,32 @@ mod tests {
             has_sdf: false,
             sdf_feather: None,
         }
+    }
+
+    #[test]
+    fn rect_area_builds_sdf_quad_in_world_space() {
+        let a = Area::rect(Rect::new(10.0, 20.0, 100.0, 50.0));
+        let g = match &a {
+            Area::Geom(g) => g,
+            _ => panic!("expected Area::Geom"),
+        };
+        assert_eq!(g.vertices.len(), 4);
+        assert_eq!(g.indices, vec![0, 1, 2, 0, 2, 3]);
+        assert!(g.has_sdf);
+        assert_eq!(g.sdf_feather, Some(0.0));
+        assert!(g.transform_table.is_empty());
+        assert!(g.vertices.iter().all(|v| v.sdf_type == 2));
+        assert!(
+            g.vertices
+                .iter()
+                .all(|v| v.sdf_params == [60.0, 45.0, 50.0, 25.0])
+        );
+    }
+
+    #[test]
+    fn rect_area_degenerate_is_empty() {
+        assert!(Area::rect(Rect::new(0.0, 0.0, 0.0, 10.0)).is_empty());
+        assert!(Area::rect(Rect::new(0.0, 0.0, 10.0, -1.0)).is_empty());
     }
 
     #[test]

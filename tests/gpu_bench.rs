@@ -947,6 +947,38 @@ fn region_is_blue(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> 
     true
 }
 
+/// `Area::rect` 走 SDF stencil：掩码内可见、掩码外保持 clear 色。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn area_rect_clips_own_content() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 200, 200);
+
+    let mut b = DrawBatch::new();
+    b.area_include = Some(Area::rect(Rect::new(50.0, 50.0, 100.0, 100.0)));
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        200.0,
+        200.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let pixels = canvas.read_pixels();
+    assert_eq!(canvas.last_draw_calls(), 3, "cover + content + erase");
+    assert!(
+        region_is_red(&pixels, 200, 70, 70, 130, 130),
+        "Area::rect 内应显示红色矩形"
+    );
+    assert!(
+        !region_has_color(&pixels, 200, 0, 0, 40, 40),
+        "Area::rect 外应保持 clear 色"
+    );
+}
+
 /// Fragment-only Custom Material + SDF instance path：
 /// - 2000 个交替参数 SDF instance 应合并为 1 个 draw call
 /// - 像素回读：material 修改颜色后矩形区域非空
