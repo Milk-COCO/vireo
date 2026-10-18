@@ -18,6 +18,7 @@ mod draw;
 pub(crate) use batch::BatchShapeCommand;
 pub use batch::{DrawBatch, InheritFromParent};
 pub(crate) use cull::{AabbMap, ViewMap, prepare_culling};
+pub(crate) use draw::PreparedFrame;
 
 /// CPU 真实数据分布（诊断用）。
 ///

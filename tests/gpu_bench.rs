@@ -3516,3 +3516,92 @@ fn merge_instance_states_reduces_draw_calls() {
     assert_eq!(dc_off, 1000, "未重排：交替 blend 每段 1 dc");
     assert_eq!(dc_on, 2, "重排后：两种 blend 各合并为 1 dc");
 }
+
+/// `draw_with_inline`：hook 在引擎批次之后、同一个 pass 内绘制（自定义管线覆盖引擎内容）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn offscreen_draw_with_inline_runs_in_engine_pass() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    let shader = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("inline test shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    return vec4<f32>(p[i], 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#
+                .into(),
+            ),
+        });
+    let layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("inline test layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+    let pipeline = gpu
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("inline test pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+    let mut b = DrawBatch::new();
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        64.0,
+        64.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    let mut called = false;
+    canvas.draw_with_inline(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b], |pass| {
+        called = true;
+        pass.set_pipeline(&pipeline);
+        pass.draw(0..3, 0..1);
+    });
+    assert!(called, "inline hook 应被执行");
+
+    let pixels = canvas.read_pixels();
+    let i = (32 * 64 + 32) * 4;
+    assert!(
+        pixels[i + 1] > 200 && pixels[i] < 50 && pixels[i + 2] < 50,
+        "hook 应与引擎批次在同一 pass 内、覆盖引擎内容，实际 {:?}",
+        &pixels[i..i + 4]
+    );
+}

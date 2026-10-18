@@ -565,7 +565,7 @@ impl VireoWindow {
     ///
     /// 返回 [`DrawReport`]：`outcome` 描述本帧结局，`timings` 提供分段耗时。
     pub fn draw(&self, clear_color: crate::color::Color, batches: &[&DrawBatch]) -> DrawReport {
-        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], None))
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], None, None))
     }
 
     /// 绘制一帧，并在引擎 pass **之后**用同一个 `CommandEncoder` 追加自定义 pass。
@@ -586,7 +586,38 @@ impl VireoWindow {
     where
         F: FnMut(&mut wgpu::CommandEncoder, &crate::render::RenderTarget),
     {
-        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], Some(&mut extra)))
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], None, Some(&mut extra)))
+    }
+
+    /// 绘制一帧，并在**引擎 pass 内部**、引擎批次之后追加自定义绘制。
+    ///
+    /// 回调拿到的是引擎配置好的 pass（颜色附件、MSAA resolve、depth-stencil 一致），
+    /// 适合叠加 UI / 描边等，无需额外 pass 或全屏采样；整帧只 submit / present 一次。
+    ///
+    /// - 回调里不要再次调用任何 `draw*`（会重入 `occupancy` 锁）。
+    /// - 自定义管线须匹配颜色格式与 `sample_count`（窗口开 MSAA 时也要用 MSAA 变体）。
+    /// - 引擎 pass 的 stencil 栈在编码结束时已平衡；回调可自由设置自己的状态。
+    pub fn draw_with_inline<F>(
+        &self,
+        clear_color: crate::color::Color,
+        batches: &[&DrawBatch],
+        hook: F,
+    ) -> DrawReport
+    where
+        F: FnOnce(&mut wgpu::RenderPass),
+    {
+        let mut hook = Some(hook);
+        let mut encode = |frame: &crate::render::PreparedFrame<'_>,
+                          encoder: &mut wgpu::CommandEncoder| {
+            if frame.wants_pass() {
+                let mut pass = frame.begin_engine_pass(encoder);
+                frame.encode(&mut pass);
+                if let Some(h) = hook.take() {
+                    h(&mut pass);
+                }
+            }
+        };
+        self.run_frame(|| self.draw_frame(clear_color, batches, None, &[], Some(&mut encode), None))
     }
 
     /// 帧记账（outcome/统计）＋窗口级帧率节流；`frame` 执行实际渲染。
@@ -695,6 +726,7 @@ impl VireoWindow {
             ops.map(DepthStencilTarget::Engine),
             &[],
             None,
+            None,
         )
     }
 
@@ -713,7 +745,7 @@ impl VireoWindow {
         extra_targets: &[ColorTargetDesc],
         batches: &[&DrawBatch],
     ) -> DrawReport {
-        self.draw_frame(clear_color, batches, None, extra_targets, None)
+        self.draw_frame(clear_color, batches, None, extra_targets, None, None)
     }
 
     fn draw_frame(
@@ -722,6 +754,9 @@ impl VireoWindow {
         batches: &[&DrawBatch],
         ds: Option<DepthStencilTarget>,
         extra_targets: &[ColorTargetDesc],
+        encode: Option<
+            &mut dyn FnMut(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
+        >,
         extra_passes: Option<
             &mut dyn FnMut(&mut wgpu::CommandEncoder, &crate::render::RenderTarget),
         >,
@@ -1207,7 +1242,16 @@ impl VireoWindow {
             });
         {
             let renderer = self.renderer.lock();
-            renderer.draw_into(&mut encoder, &target, &clear_colors, &batch_refs);
+            let frame = renderer.prepare_frame(&target, &clear_colors, &batch_refs);
+            match encode {
+                Some(cb) => cb(&frame, &mut encoder),
+                None => {
+                    if frame.wants_pass() {
+                        let mut pass = frame.begin_engine_pass(&mut encoder);
+                        frame.encode(&mut pass);
+                    }
+                }
+            }
         }
         if let Some(cb) = extra_passes {
             cb(&mut encoder, &target);
