@@ -3474,3 +3474,40 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     println!("  compute: storage texture 写入对 render pass 可见");
 }
+
+/// `merge_instance_states`：同 batch 内交替 blend 的 SDF 实例按状态重排后可合并 dc。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn merge_instance_states_reduces_draw_calls() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 400);
+
+    let build = |merge: bool| {
+        let mut b = DrawBatch::new();
+        b.preserve_order = false;
+        b.merge_instance_states = merge;
+        for i in 0..1000u32 {
+            b.set_blend_state(if i % 2 == 0 {
+                wgpu::BlendState::ALPHA_BLENDING
+            } else {
+                wgpu::BlendState::REPLACE
+            });
+            b.set_position((i % 40) as f32 * 9.0 + 5.0, (i / 40) as f32 * 15.0 + 5.0);
+            draw_rectangle(&mut b, Pos::new(0.0, 0.0), 8.0, 8.0, Some(RED));
+        }
+        b
+    };
+
+    let clear = Some(Color::new(0.0, 0.0, 0.0, 1.0));
+    let off = build(false);
+    canvas.draw(clear, &[&off]);
+    let dc_off = canvas.last_draw_calls();
+    let on = build(true);
+    canvas.draw(clear, &[&on]);
+    let dc_on = canvas.last_draw_calls();
+    println!("  merge_instance_states: off={dc_off} on={dc_on}");
+    assert_eq!(dc_off, 1000, "未重排：交替 blend 每段 1 dc");
+    assert_eq!(dc_on, 2, "重排后：两种 blend 各合并为 1 dc");
+}

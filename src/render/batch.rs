@@ -499,6 +499,15 @@ pub struct DrawBatch {
     /// 与 [`Self::preserve_order`] 独立：此属性只作用于 geo 实例路径；
     /// `preserve_order` 控制的是重排后的段是否按 sort_key 再排序合并。
     pub merge_geo_templates: bool,
+    /// 是否把本 batch 的 SDF 实例按绘制状态重排到连续范围（默认 `false`）。
+    ///
+    /// - `true`：draw 阶段按 `(bind group, material, blend, blend constant)` 重排
+    ///   实例数据，使同状态实例物理连续，从而可合并 draw call（交替 blend / 材质的
+    ///   场景可从「每段一 dc」降到「状态种类数」个 dc）。
+    /// - 仅在 `preserve_order = false` 且 `shape_commands` 有效时生效；代价是
+    ///   同 batch 内的层叠顺序不再保留（与 `preserve_order = false` 的语义一致）。
+    /// - geo 实例请用 [`Self::merge_geo_templates`]（按模板分组）。
+    pub merge_instance_states: bool,
 }
 
 impl Default for DrawBatch {
@@ -563,6 +572,7 @@ impl DrawBatch {
             dynamic_offsets: Vec::new(),
             preserve_order: true,
             merge_geo_templates: false,
+            merge_instance_states: false,
         }
     }
 
@@ -1709,6 +1719,7 @@ impl DrawBatch {
         self.dynamic_offsets.clear();
         self.preserve_order = true;
         self.merge_geo_templates = false;
+        self.merge_instance_states = false;
     }
     pub fn to_area(&self) -> Area {
         if (self.vertices.is_empty() || self.indices.is_empty())
@@ -3451,6 +3462,7 @@ impl DrawBatch {
             dynamic_offsets: self.dynamic_offsets.clone(),
             preserve_order: self.preserve_order,
             merge_geo_templates: self.merge_geo_templates,
+            merge_instance_states: self.merge_instance_states,
         }
     }
 

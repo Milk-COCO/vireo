@@ -521,17 +521,65 @@ impl Renderer {
                     // custom material 按绘制路径契约参与实例化（supported layout 校验在
                     // 创建期完成）；记录期已按路径分派，实例数据与材质布局一致。
                     let use_instances = !batch.instance_data.is_empty();
+                    // 实例按状态重排（opt-in）：把同 (bind group, material, blend,
+                    // blend constant) 的实例范围排到连续，使 ordered 段可合并 dc。
+                    // 仅在 preserve_order=false 且 shape_commands 有效时生效。
+                    let mut instance_remap: rustc_hash::FxHashMap<u32, u32> =
+                        rustc_hash::FxHashMap::default();
                     if use_instances {
                         let transform_base = batch_transform_bases[info_idx];
-                        combined_instances.extend(batch.instance_data.iter().copied().map(
-                            |mut instance| {
-                                instance.transform_index += transform_base;
-                                if instance.sdf_type == 6 || instance.sdf_type == 7 {
-                                    instance.sdf_params[0] += batch_poly_base[info_idx] as f32;
+                        let poly_base = batch_poly_base[info_idx] as f32;
+                        let patch = |mut instance: InstanceData| -> InstanceData {
+                            instance.transform_index += transform_base;
+                            if instance.sdf_type == 6 || instance.sdf_type == 7 {
+                                instance.sdf_params[0] += poly_base;
+                            }
+                            instance
+                        };
+                        if batch.merge_instance_states
+                            && !batch.preserve_order
+                            && !batch.shape_commands.is_empty()
+                            && batch.shape_commands_valid()
+                        {
+                            let mut ranges: Vec<(u32, u32, u64)> = Vec::new();
+                            for command in &batch.shape_commands {
+                                if let BatchShapeCommand::Instances {
+                                    instance_start: local_start,
+                                    instance_count,
+                                    bind_group,
+                                    material,
+                                    blend,
+                                    blend_constant,
+                                    ..
+                                } = command
+                                {
+                                    let bg = bind_group.clone().unwrap_or_else(|| {
+                                        self.gpu.white_bind_group.as_ref().clone()
+                                    });
+                                    let key = super::segment_state_hash(
+                                        material.as_ref().map(Arc::as_ptr),
+                                        blend,
+                                        *blend_constant,
+                                        super::bind_group_id(&bg),
+                                    );
+                                    ranges.push((*local_start, *instance_count, key));
                                 }
-                                instance
-                            },
-                        ));
+                            }
+                            ranges.sort_by_key(|r| r.2);
+                            for (local_start, count, _) in ranges {
+                                instance_remap.insert(local_start, combined_instances.len() as u32);
+                                combined_instances.extend(
+                                    batch.instance_data
+                                        [local_start as usize..(local_start + count) as usize]
+                                        .iter()
+                                        .copied()
+                                        .map(&patch),
+                                );
+                            }
+                        } else {
+                            combined_instances
+                                .extend(batch.instance_data.iter().copied().map(&patch));
+                        }
                     }
                     // 粒子恒走 instance 路径（record 期 custom VS 已烘焙为 mesh，
                     // `particles` 非空即实例安全，无需 fragment_only 门）。
@@ -999,10 +1047,15 @@ impl Renderer {
                                             ..
                                         } => {
                                             if use_instances {
+                                                // merge_instance_states 重排后，局部范围
+                                                // 已不连续：按 local_start 查新绝对起点。
+                                                let abs_start = instance_remap
+                                                    .get(local_start)
+                                                    .copied()
+                                                    .unwrap_or(instance_start + *local_start);
                                                 ordered.push(OrderedShapeSegment::Instances(
                                                     InstanceSegment {
-                                                        instance_start: instance_start
-                                                            + *local_start,
+                                                        instance_start: abs_start,
                                                         instance_count: *instance_count,
                                                         bind_group: resolve_bg(bind_group.clone()),
                                                         material: material.clone(),

@@ -1600,6 +1600,16 @@ fn segment_state_hash_distinguishes_blend_and_constant() {
 }
 
 #[test]
+fn merge_instance_states_defaults_false_and_resets() {
+    let mut b = DrawBatch::new();
+    assert!(!b.merge_instance_states);
+    b.merge_instance_states = true;
+    assert!(b.clone_batch().merge_instance_states);
+    b.clear();
+    assert!(!b.merge_instance_states);
+}
+
+#[test]
 fn scissor_does_not_set_uses_stencil() {
     let mut b = DrawBatch::new();
     b.clips_children = true;
