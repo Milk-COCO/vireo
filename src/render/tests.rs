@@ -1436,6 +1436,85 @@ fn scissor_without_clips_children_still_emits_scissor() {
 }
 
 #[test]
+fn clip_self_wraps_own_content_in_scissor() {
+    let mut b = DrawBatch::new();
+    b.scissor = Some(Rect::new(10.0, 10.0, 200.0, 150.0));
+    b.clip_self = true;
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 500.0, 400.0, Some(WHITE));
+    let mut events: Vec<DrawEvent> = Vec::new();
+    b.flatten_events(
+        &mut events,
+        0,
+        None,
+        &FxHashMap::default(),
+        &Transform::IDENTITY,
+        &mut FxHashMap::default(),
+    );
+    assert_eq!(events.len(), 3);
+    assert!(
+        matches!(&events[0], DrawEvent::ScissorPush(r) if *r == Rect::new(10.0, 10.0, 200.0, 150.0))
+    );
+    assert!(matches!(&events[1], DrawEvent::Batch(_)));
+    assert!(matches!(&events[2], DrawEvent::ScissorPop));
+}
+
+#[test]
+fn clip_self_with_children_wraps_self_and_children() {
+    let mut b = DrawBatch::new();
+    b.scissor = Some(Rect::new(0.0, 0.0, 50.0, 50.0));
+    b.clip_self = true;
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 10.0, 10.0, Some(WHITE));
+    let mut child = DrawBatch::new();
+    draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
+    b.push_child(child);
+    let mut events: Vec<DrawEvent> = Vec::new();
+    b.flatten_events(
+        &mut events,
+        0,
+        None,
+        &FxHashMap::default(),
+        &Transform::IDENTITY,
+        &mut FxHashMap::default(),
+    );
+    assert_eq!(events.len(), 4);
+    assert!(matches!(&events[0], DrawEvent::ScissorPush(_)));
+    assert!(matches!(&events[1], DrawEvent::Batch(_)));
+    assert!(matches!(&events[2], DrawEvent::Batch(_)));
+    assert!(matches!(&events[3], DrawEvent::ScissorPop));
+}
+
+#[test]
+fn clip_self_does_not_affect_stencil_path() {
+    let mut b = DrawBatch::new();
+    b.clips_children = true;
+    b.clip_self = true;
+    draw_circle(&mut b, Pos::new(50.0, 50.0), 40.0, Some(WHITE));
+    let mut child = DrawBatch::new();
+    draw_rectangle(&mut child, Pos::new(0.0, 0.0), 5.0, 5.0, Some(WHITE));
+    b.push_child(child);
+    let mut events: Vec<DrawEvent> = Vec::new();
+    b.flatten_events(
+        &mut events,
+        0,
+        None,
+        &FxHashMap::default(),
+        &Transform::IDENTITY,
+        &mut FxHashMap::default(),
+    );
+    assert!(events.iter().all(|e| !matches!(e, DrawEvent::ScissorPush(_))));
+    assert!(matches!(events.last(), Some(DrawEvent::StencilPop)));
+}
+
+#[test]
+fn clip_self_resets_on_clear_and_carries_on_clone() {
+    let mut b = DrawBatch::new();
+    b.clip_self = true;
+    assert!(b.clone_batch().clip_self);
+    b.clear();
+    assert!(!b.clip_self);
+}
+
+#[test]
 fn scissor_does_not_set_uses_stencil() {
     let mut b = DrawBatch::new();
     b.clips_children = true;

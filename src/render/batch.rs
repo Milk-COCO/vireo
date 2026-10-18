@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::area::{Area, AreaGeom, effective_area};
 use crate::gpu::{
@@ -17,6 +18,19 @@ use super::{
     BatchEncodeCtx, BatchEncodeInfo, BatchOverride, DrawEvent, GeoTemplate, OrderedShapeSegment,
     ShapeStats,
 };
+
+/// 一次性告警：`scissor` 设在本 batch 上、但本 batch 也画了自己的内容。
+static SCISSOR_SELF_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn warn_scissor_does_not_clip_self() {
+    if !SCISSOR_SELF_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "batch has `scissor` and also draws its own shapes/text: the scissor only clips \
+             child batches. Set `clip_self = true` to clip this batch's own content, or move \
+             the content into a child batch"
+        );
+    }
+}
 
 /// 子 batch 从父继承哪些画笔 / 裁切行为。
 ///
@@ -400,9 +414,23 @@ pub struct DrawBatch {
     pub(crate) cached_transform_index: Option<u32>,
     /// 子 batch（绘制顺序：本 batch 的 shapes → texts → 各 child 递归）。
     pub children: Vec<DrawBatch>,
-    /// 若为 `true`，本 batch 的几何将作为子 batch 的裁切区（stencil 裁剪）。
-    /// 默认 `false`（仅顺序层叠，不裁切）。
+    /// 本 batch 的几何作为**子 batch** 的裁切区，默认 `false`（仅顺序层叠）。
+    ///
+    /// 作用域（易错点）：
+    /// - **只裁子 batch，不裁自身** —— 自身几何就是 mask 的来源（stencil 写掩码）。
+    /// - 自身也要被裁：用 `area_include`（Area 裁自身）或 [`Self::clip_self`]（矩形窗口）。
+    /// - 自身无几何且无 `scissor` 时裁剪不会生效（dev 构建 `debug_assert` 提示）。
+    ///
+    /// 路径选择：几何为单个轴对齐矩形时用 scissor（`auto_scissor`），否则 stencil。
     pub clips_children: bool,
+    /// 本 batch 自身内容是否也受本 batch 的**矩形 scissor 窗口**裁剪，默认 `false`。
+    ///
+    /// - 仅 scissor 路径有效：显式 [`Self::scissor`]，或 `clips_children` 触发的
+    ///   auto-scissor（几何本身是单个轴对齐矩形）。
+    /// - stencil 路径（`clips_children` + 非矩形几何）中自身几何就是 mask，不存在
+    ///   "再裁一次"；mask 之外的内容应放进子 batch。
+    /// - Area 路径本来就裁自身（见 [`Self::area_include`]），与 stencil 正交。
+    pub clip_self: bool,
     /// 被 `push_child` 挂到父下时，从父写入本节点（及 transform 时整棵子树）的属性。
     pub inherit: InheritFromParent,
     /// 本 batch 可见区 include（`None` = Full）。与 `area_exclude` 合成有效 Area。
@@ -416,12 +444,21 @@ pub struct DrawBatch {
     /// - `Some(Some(rect))`：手动指定最终的世界坐标轴对齐 AABB；不会再应用 batch
     ///   或父节点 transform，transform 改变后需由调用者同步更新
     pub bounds: Option<Option<Rect>>,
-    /// 当 `clips_children=true` 时，用此矩形 scissor 代替 stencil。
-    /// 逻辑世界坐标，必须轴对齐。`None` = 走 stencil。
+    /// 矩形裁剪窗口（逻辑世界坐标，必须轴对齐）。
+    ///
+    /// - 默认**只裁子 batch**；自身内容要一起裁请设 [`Self::clip_self`] = `true`。
+    /// - 独立于 `clips_children`：设了本字段就走 scissor 路径（即使 `clips_children=false`）。
+    /// - 与 Area 互斥：`area_include`/`area_exclude` 生效时走 stencil，本字段被忽略。
+    /// - `None` = 不走矩形窗口（`clips_children` 且几何恰为单矩形时会自动探测）。
     pub scissor: Option<Rect>,
-    /// 文本裁剪默认值。启用后，所有 `text()`/`text_stable()` 中字元超出此区域的部分
-    /// 会被 CPU 裁切（glyphon per-glyph clip）。`None` = 不裁。
-    /// 可通过 `TextOverride.clip` 单条覆盖。
+    /// 文本裁剪默认值（**逻辑像素、batch 局部坐标**）。超出区域的字元被 CPU 裁切
+    /// （glyphon per-glyph clip）；`None` = 不裁。可被 `TextOverride.clip` 单条覆盖。
+    ///
+    /// - 坐标空间：先 × DPI 转物理、再随 batch `transform` / `view` 变换 —— 传的是
+    ///   变换**前**的局部坐标（带 `set_position`/`set_scale` 时不要传屏幕坐标）。
+    /// - **不被 `push_child` 继承**（`InheritFromParent` 只覆盖 color / sdf_feather /
+    ///   uv / transform）；子 batch 需要就各自设置。
+    /// - 与 `scissor` / Area 无关：那是 GPU 裁剪，本字段是逐字形 CPU 裁切。
     pub text_clip: Option<crate::glyphon::TextBounds>,
     /// 自定义材质（**画笔状态机**，同 `color`/`transform`/`sdf_feather`）。
     ///
@@ -526,6 +563,7 @@ impl DrawBatch {
             cached_transform_index: None,
             children: Vec::new(),
             clips_children: false,
+            clip_self: false,
             inherit: InheritFromParent::NONE,
             area_include: None,
             area_exclude: None,
@@ -1672,6 +1710,7 @@ impl DrawBatch {
         self.cached_transform_index = None;
         self.children.clear();
         self.clips_children = false;
+        self.clip_self = false;
         self.inherit = InheritFromParent::NONE;
         self.area_include = None;
         self.area_exclude = None;
@@ -2326,13 +2365,28 @@ impl DrawBatch {
                 out.push(DrawEvent::AreaOp { op, is_setup: true });
             }
         }
-        out.push(DrawEvent::Batch(self));
         // 与 draw 阶段 `compute_stencil_at_level` 的 has_geom 一致：geo-instance
-        // 路径（sdf_feather=None 的默认几何）也算有几何，否则 clips_children 的
-        // geo-only batch 只 Push 不 Pop，clip_depth 泄漏。
+        // 路径（sdf_feather=None 的默认几何）与粒子也算有几何，否则 clips_children
+        // 的纯实例 batch 只 Push 不 Pop，clip_depth 泄漏。
         let has_geom = !self.vertices.is_empty()
             || !self.instance_data.is_empty()
-            || !self.geo_instances.is_empty();
+            || !self.geo_instances.is_empty()
+            || !self.particles.is_empty();
+        // scissor 作用域：默认只包子节点；`clip_self` 时连自身内容一起包。
+        // 显式 scissor + 自身有内容 + 未开 `clip_self` → 旧语义（只裁子），首次告警。
+        let has_own_draw = has_geom || !self.texts.entries.is_empty();
+        if self.scissor.is_some() && has_own_draw && !self.clip_self {
+            warn_scissor_does_not_clip_self();
+        }
+        let wraps_self = self.clip_self && has_own_draw;
+        let scissor_active = use_scissor && (wraps_self || !self.children.is_empty());
+        if scissor_active
+            && wraps_self
+            && let Some(r) = effective_clip
+        {
+            out.push(DrawEvent::ScissorPush(r));
+        }
+        out.push(DrawEvent::Batch(self));
         // 子树 stencil base（与 draw 的 content_level 抬升一致）：
         // Area cover → +1；clips_children 且走 stencil Push → 再 +1；scissor 不抬 stencil。
         let child_level = level
@@ -2342,9 +2396,9 @@ impl DrawBatch {
             } else {
                 0
             };
-        // scissor 仅包住子节点；无子则不发 Push/Pop
-        if use_scissor
-            && !self.children.is_empty()
+        // `clip_self=false` 时 scissor 只包住子节点；无子则不发 Push/Pop
+        if scissor_active
+            && !wraps_self
             && let Some(r) = effective_clip
         {
             out.push(DrawEvent::ScissorPush(r));
@@ -2352,7 +2406,7 @@ impl DrawBatch {
         for child in &self.children {
             child.flatten_events(out, child_level, viewport, aabb_map, &eff_view, view_map);
         }
-        if use_scissor && !self.children.is_empty() {
+        if scissor_active {
             out.push(DrawEvent::ScissorPop);
         } else if self.clips_children && has_geom && !use_scissor {
             // 与 draw Push 成对：即使子全被 cull 也要 Pop，避免 clip_depth 泄漏
@@ -3371,6 +3425,7 @@ impl DrawBatch {
             cached_transform_index: self.cached_transform_index,
             children: self.children.iter().map(|c| c.clone_batch()).collect(),
             clips_children: self.clips_children,
+            clip_self: self.clip_self,
             inherit: self.inherit,
             area_include: self.area_include.clone(),
             area_exclude: self.area_exclude.clone(),

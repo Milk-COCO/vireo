@@ -1,11 +1,12 @@
-//! scissor scissor 裁剪演示
+//! scissor 裁剪演示
 //!
 //! ```bash
-//! cargo run --example scissor_demo
+//! cargo run --example batch_scissor_clip
 //! ```
 //!
 //! 关键点：
-//! - 父 batch 自身内容**不**被裁
+//! - `clip_self = true`：父 batch 自身内容也被裁
+//!   （默认 `false`，即只裁子 batch；要裁自身就显式打开）
 //! - 子 batch 被裁（GPU scissor）
 //! - 对比组：无 scissor，子内容越界可见
 
@@ -42,8 +43,10 @@ async fn main() {
         let mut scissor_batch = DrawBatch::new();
         scissor_batch.clips_children = false;
         scissor_batch.scissor = Some(Rect::new(50.0, 50.0, 300.0, 220.0));
+        // 自身内容也裁（默认 false 时只裁子 batch）
+        scissor_batch.clip_self = true;
 
-        // 父 batch 自身内容：画一个贯穿 scissor 的大矩形（应不被裁）
+        // 父 batch 自身内容：画一个贯穿 scissor 的大矩形（自身也被裁）
         draw_rectangle(
             &mut scissor_batch,
             Pos::new(0.0, 0.0),
@@ -53,9 +56,9 @@ async fn main() {
         );
         label(
             &mut scissor_batch,
-            "父内容不被裁（此文字超出 scissor 仍可见）",
-            10.0,
-            290.0,
+            "父内容也裁（clip_self = true）",
+            60.0,
+            60.0,
         );
 
         // 子 batch：色块在 scissor 内外摆动
@@ -137,7 +140,7 @@ async fn main() {
         // ===== 说明文字 =====
         draw_text(
             &mut ui.texts,
-            "左：子 batch 色块超出 scissor 的部分被裁断    右：无 scissor，越界完全可见",
+            "左：父 + 子都被 scissor 裁断    右：无 scissor，越界完全可见",
             Pos::new(20.0, 510.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),
