@@ -1569,6 +1569,37 @@ fn clip_path_reports_effective_path() {
 }
 
 #[test]
+fn segment_state_hash_distinguishes_blend_and_constant() {
+    let base = segment_state_hash(
+        None,
+        &wgpu::BlendState::ALPHA_BLENDING,
+        wgpu::Color::TRANSPARENT,
+        0,
+    );
+    let other_blend = segment_state_hash(
+        None,
+        &wgpu::BlendState::REPLACE,
+        wgpu::Color::TRANSPARENT,
+        0,
+    );
+    let other_constant = segment_state_hash(
+        None,
+        &wgpu::BlendState::ALPHA_BLENDING,
+        wgpu::Color::WHITE,
+        0,
+    );
+    let other_extra = segment_state_hash(
+        None,
+        &wgpu::BlendState::ALPHA_BLENDING,
+        wgpu::Color::TRANSPARENT,
+        7,
+    );
+    assert_ne!(base, other_blend);
+    assert_ne!(base, other_constant);
+    assert_ne!(base, other_extra);
+}
+
+#[test]
 fn scissor_does_not_set_uses_stencil() {
     let mut b = DrawBatch::new();
     b.clips_children = true;

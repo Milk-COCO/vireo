@@ -246,20 +246,70 @@ pub(crate) enum OrderedShapeSegment {
 }
 
 impl OrderedShapeSegment {
-    /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, 3 = particles, geometry/bg)`。
-    /// 同类且同 bind group 的段会被排到一起以便合并。
-    /// blend 不进键（`try_merge` 要求相等；混 blend 重排本就层叠自负，见 `preserve_order`）。
+    /// 排序键：`(0 = mesh, 1 = instances, 2 = geo instances, 3 = particles,
+    /// geometry, bind_group, state)`。
+    ///
+    /// 同类 + 同 bind group + 同状态（material / blend / blend constant / geo 模板）
+    /// 的段会被排到一起，减少管线与绑定切换。**真正合并仍要求底层范围连续**
+    /// （见 [`Self::try_merge`]）——本键只改善排序，不改变可合并性。
     #[inline]
-    fn sort_key(&self) -> (u8, u8, u64) {
+    fn sort_key(&self) -> (u8, u8, u64, u64) {
         match self {
             OrderedShapeSegment::Mesh {
                 bind_group,
                 geometry,
+                material,
+                blend,
+                blend_constant,
                 ..
-            } => (0, *geometry as u8, bind_group_id(bind_group)),
-            OrderedShapeSegment::Instances(s) => (1, 0, bind_group_id(&s.bind_group)),
-            OrderedShapeSegment::GeoInstances(s) => (2, 0, bind_group_id(&s.bind_group)),
-            OrderedShapeSegment::Particles(s) => (3, 0, bind_group_id(&s.bind_group)),
+            } => (
+                0,
+                *geometry as u8,
+                bind_group_id(bind_group),
+                segment_state_hash(
+                    material.as_ref().map(Arc::as_ptr),
+                    blend,
+                    *blend_constant,
+                    0,
+                ),
+            ),
+            OrderedShapeSegment::Instances(s) => (
+                1,
+                0,
+                bind_group_id(&s.bind_group),
+                segment_state_hash(
+                    s.material.as_ref().map(Arc::as_ptr),
+                    &s.blend,
+                    s.blend_constant,
+                    0,
+                ),
+            ),
+            OrderedShapeSegment::GeoInstances(s) => (
+                2,
+                0,
+                bind_group_id(&s.bind_group),
+                segment_state_hash(
+                    s.material.as_ref().map(Arc::as_ptr),
+                    &s.blend,
+                    s.blend_constant,
+                    geo_template_key(
+                        s.template_vertex_start,
+                        s.template_index_start,
+                        s.index_count,
+                    ),
+                ),
+            ),
+            OrderedShapeSegment::Particles(s) => (
+                3,
+                0,
+                bind_group_id(&s.bind_group),
+                segment_state_hash(
+                    s.material.as_ref().map(Arc::as_ptr),
+                    &s.blend,
+                    s.blend_constant,
+                    0,
+                ),
+            ),
         }
     }
 
@@ -405,6 +455,38 @@ fn bind_group_id(bg: &wgpu::BindGroup) -> u64 {
     use std::hash::BuildHasher;
 
     rustc_hash::FxBuildHasher.hash_one(bg)
+}
+
+/// 段的状态指纹：material 指针 / blend / blend constant / 额外键（geo 模板）。
+///
+/// 只用于 `preserve_order=false` 的排序分组；哈希碰撞只会少合并一次（`try_merge`
+/// 仍做逐字段相等比较），不影响正确性。
+fn segment_state_hash(
+    material: Option<*const Material>,
+    blend: &wgpu::BlendState,
+    blend_constant: wgpu::Color,
+    extra: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::hash::DefaultHasher::new();
+    material.hash(&mut h);
+    blend.hash(&mut h);
+    blend_constant.r.to_bits().hash(&mut h);
+    blend_constant.g.to_bits().hash(&mut h);
+    blend_constant.b.to_bits().hash(&mut h);
+    blend_constant.a.to_bits().hash(&mut h);
+    extra.hash(&mut h);
+    h.finish()
+}
+
+/// geo 模板身份（顶点起点 / 索引起点 / 索引数）。
+fn geo_template_key(vertex_start: u32, index_start: u32, index_count: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::hash::DefaultHasher::new();
+    (vertex_start, index_start, index_count).hash(&mut h);
+    h.finish()
 }
 
 struct ShapeInfo {
