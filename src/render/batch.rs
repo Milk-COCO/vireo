@@ -589,7 +589,6 @@ impl DrawBatch {
     /// 返回本批次发出的 `draw_indexed` 调用次数。
     #[allow(unused_assignments)]
     pub(crate) fn encode_into(
-        &self,
         mut pass: &mut wgpu::RenderPass,
         info: &BatchEncodeInfo,
         ctx: &BatchEncodeCtx,

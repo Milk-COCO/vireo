@@ -1652,7 +1652,7 @@ impl Renderer {
             scissor_stack.clear();
             scissor_stack.push((0, 0, self.physical_width, self.physical_height));
 
-            for (ei, event) in events.iter().enumerate() {
+            for (ei, _event) in events.iter().enumerate() {
                 let info = &event_infos[ei];
                 // ScissorPush: 计算物理像素 scissor rect，与当前 scissor 求交
                 if let Some(scissor_rect) = info.scissor_push {
@@ -1698,29 +1698,29 @@ impl Renderer {
                     pass.set_scissor_rect(cx, cy, cw, ch);
                 }
 
-                if let DrawEvent::Batch(batch) = event {
-                    if let Some(shape) = &info.shape {
-                        let pipe_op = info.area_op.unwrap_or(info.stencil_op);
-                        let encode_info = BatchEncodeInfo {
-                            base_vertex: shape.base_vertex,
-                            geometry: shape.geometry,
-                            blend: shape.blend,
-                            target_blends: &target_blends,
-                            custom_material: &info.custom_material,
-                            segments: &shape.segments,
-                            instances: &shape.instances,
-                            geo_instances: &shape.geo_instances,
-                            particles: &shape.particles,
-                            ordered: &shape.ordered,
-                            particle_clock: shape.particle_clock,
-                            stencil_ref: info.stencil_ref,
-                            dynamic_offsets: &info.dynamic_offsets,
-                            pipe_op,
-                            uses_stencil,
-                            has_ds,
-                        };
-                        shape_draw_calls += batch.encode_into(&mut pass, &encode_info, &ctx);
-                    }
+                // 形状事件：`Batch` 自身的几何，以及 AreaOp 的掩码几何（op 3/4）。
+                // 两者都由 `info.shape` 承载；`encode_into` 不依赖 batch 字段。
+                if let Some(shape) = &info.shape {
+                    let pipe_op = info.area_op.unwrap_or(info.stencil_op);
+                    let encode_info = BatchEncodeInfo {
+                        base_vertex: shape.base_vertex,
+                        geometry: shape.geometry,
+                        blend: shape.blend,
+                        target_blends: &target_blends,
+                        custom_material: &info.custom_material,
+                        segments: &shape.segments,
+                        instances: &shape.instances,
+                        geo_instances: &shape.geo_instances,
+                        particles: &shape.particles,
+                        ordered: &shape.ordered,
+                        particle_clock: shape.particle_clock,
+                        stencil_ref: info.stencil_ref,
+                        dynamic_offsets: &info.dynamic_offsets,
+                        pipe_op,
+                        uses_stencil,
+                        has_ds,
+                    };
+                    shape_draw_calls += DrawBatch::encode_into(&mut pass, &encode_info, &ctx);
                 }
                 if !info.text.is_empty() && mrt {
                     mrt_warn_once("text");
