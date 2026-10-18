@@ -145,6 +145,20 @@
   **之后**用同一个 `CommandEncoder` 追加自定义 pass（后处理链、额外 compute），
   整帧只 submit 一次；引擎 pass 的 DS 不延续，需要时由回调自建。
   `draw_with_passes`: append custom passes to the same encoder after the engine pass.
+- `PreparedFrame` + `draw_with_inline` / `draw_with_frame`：把“准备”与“编码”拆开，
+  两种用法共用一条流水线。
+  - `draw_with_inline(|pass| ..)`：回调在**引擎 pass 内部**、引擎批次之后执行，
+    pass 的颜色/MSAA resolve/DS 已配对好（同 pass 叠加 UI/描边，无额外全屏采样）。
+  - `draw_with_frame(|frame, encoder| ..)`：回调自建 pass，用 `frame.encode(&mut pass)`
+    写入引擎批次。`PreparedFrame` 暴露 `target()` / `target_format()` /
+    `sample_count()` / `has_ds()` / `is_empty()`。
+  - **契约**：自建 pass 必须复用 `frame.target()` 的同一组颜色 view（数量/格式一致）；
+    `sample_count() > 1` 时需自建 MSAA target 并 resolve；`has_ds()` 为真时必须挂
+    `Depth24PlusStencil8`；尺寸须与 renderer 一致。**不支持只编码部分批次**，
+    多次 `encode` 会重复绘制全帧。
+  - 嵌套 `prepare`（回调里再次 `draw*`）会 panic 并给出明确消息，不会静默死锁。
+  `PreparedFrame` + `draw_with_inline` / `draw_with_frame`: prepare/encode split with
+  an engine-pass hook and a user-created pass.
 
 ### Changed / 变更
 
