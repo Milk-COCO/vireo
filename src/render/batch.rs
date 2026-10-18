@@ -432,6 +432,7 @@ pub struct DrawBatch {
     pub bounds: Option<Option<Rect>>,
     /// 矩形裁剪窗口（逻辑世界坐标，必须轴对齐）。
     ///
+    /// - **矩形裁剪优先用本字段**；非矩形或需要布尔组合时用 `area_include` + stencil。
     /// - 默认**只裁子 batch**；自身内容要一起裁请设 [`Self::clip_self`] = `true`。
     /// - 独立于 `clips_children`：设了本字段就走 scissor 路径（即使 `clips_children=false`）。
     /// - 与 Area 互斥：`area_include`/`area_exclude` 生效时走 stencil，本字段被忽略。

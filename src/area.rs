@@ -2,6 +2,9 @@
 //!
 //! CPU 侧只存树；`Renderer::draw` 解释为 stencil 掩码 pass（无 compute CSG）。
 //! 与 `clips_children` / `InheritFromParent` 正交。
+//!
+//! **矩形裁剪优先用 [`crate::render::DrawBatch::scissor`]**（`clip_self` 决定是否
+//! 裁自身）；只有非矩形或需要布尔组合时才用 Area。最简单的矩形掩码是 [`Area::rect`]。
 
 use crate::gpu::Vertex;
 use crate::math::Rect;
@@ -73,8 +76,10 @@ impl Area {
     /// 由烘焙几何构建 Area（空几何自动化简为 Empty）。
     ///
     /// 校验（debug 构建）：索引必须整三角形且不越界。若走 SDF 路径却没有任何
-    /// `sdf_type != 0` 的顶点，掩码会退化成外接矩形 —— 首次发生打一条 `warn!`，
-    /// 矩形掩码请直接用 [`Area::rect`]。
+    /// `sdf_type != 0` 的顶点，掩码会退化成外接矩形 —— 首次发生打一条 `warn!`。
+    ///
+    /// **矩形裁剪优先用 `DrawBatch::scissor`**（无 stencil 开销）；需要在 Area
+    /// 树上组合（∪ / ∩ / \）时用 [`Area::rect`] 作叶子。
     #[inline]
     pub fn geom(g: AreaGeom) -> Self {
         if g.is_empty() {
@@ -102,6 +107,8 @@ impl Area {
     /// - `w <= 0.0 || h <= 0.0` → [`Area::Empty`]；
     /// - 顶点是世界坐标，`transform_table` 为空（恒等）；
     /// - `sdf_feather = Some(0.0)`：掩码边缘与矩形严格对齐（不带 1px 柔边外扩）。
+    ///
+    /// 若不需要布尔组合，直接用 `DrawBatch::scissor` 更轻（GPU scissor，无 stencil）。
     pub fn rect(r: Rect) -> Self {
         if r.w <= 0.0 || r.h <= 0.0 {
             return Area::Empty;
