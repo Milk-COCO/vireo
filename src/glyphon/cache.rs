@@ -28,6 +28,7 @@ type InnerCache = Mutex<
         MultisampleState,
         Option<DepthStencilState>,
         BlendState,
+        u32, // 颜色目标数（MRT pass 需要目标数匹配的管线变体）
         RenderPipeline,
     )>,
 >;
@@ -247,6 +248,8 @@ impl Cache {
         })
     }
 
+    /// `num_targets`：pass 的颜色附件数。管线目标数必须与 pass 一致；文字 shader 只写
+    /// `@location(0)`，附加目标用"同格式 + 空写掩码"占位（不写字节，保留载入内容）。
     pub(crate) fn get_or_create_pipeline(
         &self,
         device: &Device,
@@ -254,7 +257,9 @@ impl Cache {
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
         blend: BlendState,
+        num_targets: u32,
     ) -> RenderPipeline {
+        let n_targets = num_targets.max(1);
         let Inner {
             cache,
             pipeline_layout,
@@ -267,10 +272,14 @@ impl Cache {
 
         cache
             .iter()
-            .find(|(fmt, ms, ds, b, _)| {
-                fmt == &format && ms == &multisample && ds == &depth_stencil && b == &blend
+            .find(|(fmt, ms, ds, b, n, _)| {
+                fmt == &format
+                    && ms == &multisample
+                    && ds == &depth_stencil
+                    && b == &blend
+                    && n == &n_targets
             })
-            .map(|(_, _, _, _, p)| p.clone())
+            .map(|(_, _, _, _, _, p)| p.clone())
             .unwrap_or_else(|| {
                 let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
                     label: Some("glyphon pipeline"),
@@ -284,11 +293,22 @@ impl Cache {
                     fragment: Some(FragmentState {
                         module: shader,
                         entry_point: Some("fs_main"),
-                        targets: &[Some(ColorTargetState {
-                            format,
-                            blend: Some(blend),
-                            write_mask: ColorWrites::default(),
-                        })],
+                        targets: &{
+                            let mut t = vec![Some(ColorTargetState {
+                                format,
+                                blend: Some(blend),
+                                write_mask: ColorWrites::default(),
+                            })];
+                            t.extend(std::iter::repeat_n(
+                                Some(ColorTargetState {
+                                    format,
+                                    blend: None,
+                                    write_mask: ColorWrites::empty(),
+                                }),
+                                (n_targets - 1) as usize,
+                            ));
+                            t
+                        },
                         compilation_options: PipelineCompilationOptions::default(),
                     }),
                     primitive: PrimitiveState {
@@ -301,13 +321,22 @@ impl Cache {
                     multiview_mask: None,
                 });
 
-                cache.push((format, multisample, depth_stencil, blend, pipeline.clone()));
+                cache.push((
+                    format,
+                    multisample,
+                    depth_stencil,
+                    blend,
+                    n_targets,
+                    pipeline.clone(),
+                ));
 
                 pipeline
             })
             .clone()
     }
 
+    /// `num_targets`：pass 的颜色附件数。文字 shader 只写 `@location(0)`，附加目标用
+    /// "同格式 + 空写掩码"占位（不写字节，保留载入内容），否则多附件 pass 会校验失败。
     pub(crate) fn create_material_pipeline(
         &self,
         device: &Device,
@@ -317,7 +346,9 @@ impl Cache {
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
         blend: BlendState,
+        num_targets: u32,
     ) -> RenderPipeline {
+        let n_targets = num_targets.max(1);
         let fragment = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("glyphon material fragment"),
             source: ShaderSource::Wgsl(Cow::Borrowed(fragment_source)),
@@ -353,11 +384,22 @@ impl Cache {
             fragment: Some(FragmentState {
                 module: &fragment,
                 entry_point: Some("fs_main"),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(blend),
-                    write_mask: ColorWrites::default(),
-                })],
+                targets: &{
+                    let mut t = vec![Some(ColorTargetState {
+                        format,
+                        blend: Some(blend),
+                        write_mask: ColorWrites::default(),
+                    })];
+                    t.extend(std::iter::repeat_n(
+                        Some(ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: ColorWrites::empty(),
+                        }),
+                        (n_targets - 1) as usize,
+                    ));
+                    t
+                },
                 compilation_options: PipelineCompilationOptions::default(),
             }),
             primitive: PrimitiveState {

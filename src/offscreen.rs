@@ -186,6 +186,45 @@ impl OffscreenCanvas {
         self.renderer.gpu().queue.submit(Some(encoder.finish()));
     }
 
+    /// 同 [`Self::draw_with_frame`]，但帧绑定到**多个颜色目标**（MRT）。
+    ///
+    /// `frame.target()` 会含 `1 + extra_targets.len()` 个颜色附件，回调里可用
+    /// `frame.begin_engine_pass(&mut encoder)` 直接编码引擎批次，或自己 `frame.encode`。
+    /// 附加目标的 load 语义与 [`Self::draw_mrt`] 一致（`LoadOp::Load`）。
+    pub fn draw_with_frame_mrt<F>(
+        &self,
+        clear_color: Option<crate::color::Color>,
+        extra_targets: &[ColorTargetDesc],
+        batches: &[&DrawBatch],
+        f: F,
+    ) where
+        F: FnOnce(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
+    {
+        self.ensure_target_format();
+        let prim = self.render_target();
+        let mut atts = prim.color_attachments;
+        atts.extend(extra_targets.iter().map(|t| ColorTargetDesc {
+            view: t.view.clone(),
+            resolve_target: t.resolve_target.clone(),
+            blend: t.blend,
+        }));
+        let mut clears = vec![clear_color];
+        clears.resize(atts.len(), None);
+        let mut target = RenderTarget::from_color_attachments(atts);
+        target.set_aa(self.aa.into());
+        let mut encoder =
+            self.renderer
+                .gpu()
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vireo offscreen custom encoder (mrt)"),
+                });
+        let frame = self.renderer.prepare_frame(&target, &clears, batches);
+        f(&frame, &mut encoder);
+        drop(frame);
+        self.renderer.gpu().queue.submit(Some(encoder.finish()));
+    }
+
     /// 渲染并提交，挂载本帧 depth-stencil 附件（`None` = 与 `draw` 一致）。
     pub fn draw_with_depth_stencil(
         &self,

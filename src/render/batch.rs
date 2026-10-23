@@ -600,16 +600,7 @@ impl DrawBatch {
 
         let engine_bg = ctx.engine_bg;
         let camera_bg = ctx.camera_bind_group;
-        // MRT：pass 有多个颜色附件时，只有 custom material（多 FS 输出）可用；
-        // 引擎形状/文字管线只有单颜色输出，跳过并 warn-once。
-        let mrt = info.target_blends.len() > 1;
         let mut material_blends: Vec<Option<wgpu::BlendState>> = Vec::new();
-        // 旧式（非 ordered）legacy 路径只有 batch 级材质；无 custom material 时
-        // 引擎管线单颜色输出无法写入 MRT。
-        if mrt && info.ordered.is_empty() && info.custom_material.is_none() {
-            super::draw::mrt_warn_once("engine shape (legacy batch)");
-            return 0;
-        }
 
         if !info.ordered.is_empty() {
             for segment in info.ordered {
@@ -647,12 +638,7 @@ impl DrawBatch {
                         let seg_ptr: *const Material =
                             material.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
                         let seg_use_custom = material.is_some();
-                        if mrt && !seg_use_custom {
-                            super::draw::mrt_warn_once("engine shape (mesh)");
-                            shapes_bound = false;
-                            last_geometry = None;
-                            continue;
-                        }
+
                         let need_rebind = !shapes_bound
                             || seg_ptr != last_custom_ptr
                             || (!seg_use_custom && last_geometry != Some(*geometry))
@@ -695,12 +681,7 @@ impl DrawBatch {
                                 None
                             };
                             let _use_custom_pipe = custom_pipe.is_some();
-                            if mrt && custom_pipe.is_none() {
-                                super::draw::mrt_warn_once("custom material pipeline (mesh)");
-                                shapes_bound = false;
-                                last_geometry = None;
-                                continue;
-                            }
+
                             let pipe: &wgpu::RenderPipeline = if let Some(p) = custom_pipe.as_ref()
                             {
                                 p
@@ -712,6 +693,7 @@ impl DrawBatch {
                                     *geometry,
                                     info.pipe_op.min(4),
                                     *blend,
+                                    info.target_blends.len().max(1) as u32,
                                 );
                                 &tmp_pipe
                             } else {
@@ -722,6 +704,7 @@ impl DrawBatch {
                                     info.has_ds,
                                     *geometry,
                                     *blend,
+                                    info.target_blends.len().max(1) as u32,
                                 );
                                 &tmp_pipe
                             };
@@ -825,12 +808,7 @@ impl DrawBatch {
                         } else {
                             None
                         };
-                        if mrt && custom_pipe.is_none() {
-                            super::draw::mrt_warn_once("engine shape (instance layout)");
-                            shapes_bound = false;
-                            last_geometry = None;
-                            continue;
-                        }
+
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -875,6 +853,7 @@ impl DrawBatch {
                                 info.uses_stencil,
                                 info.pipe_op,
                                 segment.blend,
+                                info.target_blends.len().max(1) as u32,
                             );
                             pass.set_pipeline(&instance_pipeline);
                             if !is_self_managed {
@@ -974,12 +953,7 @@ impl DrawBatch {
                         } else {
                             None
                         };
-                        if mrt && custom_pipe.is_none() {
-                            super::draw::mrt_warn_once("engine shape (instance layout)");
-                            shapes_bound = false;
-                            last_geometry = None;
-                            continue;
-                        }
+
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -1026,6 +1000,7 @@ impl DrawBatch {
                                 info.uses_stencil,
                                 info.pipe_op,
                                 segment.blend,
+                                info.target_blends.len().max(1) as u32,
                             );
                             pass.set_pipeline(&particle_pipeline);
                             if !is_self_managed {
@@ -1122,12 +1097,7 @@ impl DrawBatch {
                         } else {
                             None
                         };
-                        if mrt && custom_pipe.is_none() {
-                            super::draw::mrt_warn_once("engine shape (instance layout)");
-                            shapes_bound = false;
-                            last_geometry = None;
-                            continue;
-                        }
+
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
@@ -1182,6 +1152,7 @@ impl DrawBatch {
                                 info.uses_stencil,
                                 info.pipe_op,
                                 segment.blend,
+                                info.target_blends.len().max(1) as u32,
                             );
                             pass.set_pipeline(&geo_pipeline);
                             if !is_self_managed {
@@ -1318,6 +1289,7 @@ impl DrawBatch {
                             info.geometry,
                             info.pipe_op.min(4),
                             info.blend,
+                            info.target_blends.len().max(1) as u32,
                         );
                         &tmp_pipe
                     } else {
@@ -1328,6 +1300,7 @@ impl DrawBatch {
                             info.has_ds,
                             info.geometry,
                             info.blend,
+                            info.target_blends.len().max(1) as u32,
                         );
                         &tmp_pipe
                     };
@@ -1410,6 +1383,7 @@ impl DrawBatch {
                             info.uses_stencil,
                             info.pipe_op,
                             info.blend,
+                            info.target_blends.len().max(1) as u32,
                         );
                         pass.set_pipeline(&instance_pipeline);
                         pass.set_bind_group(0, camera_bg, &[]);
@@ -1482,6 +1456,7 @@ impl DrawBatch {
                             info.uses_stencil,
                             info.pipe_op,
                             info.blend,
+                            info.target_blends.len().max(1) as u32,
                         );
                         pass.set_pipeline(&geo_pipeline);
                         pass.set_bind_group(0, camera_bg, &[]);
@@ -1566,6 +1541,7 @@ impl DrawBatch {
                             info.uses_stencil,
                             info.pipe_op,
                             info.blend,
+                            info.target_blends.len().max(1) as u32,
                         );
                         pass.set_pipeline(&particle_pipeline);
                         pass.set_bind_group(0, &clock_bg, &[]);
@@ -1614,7 +1590,7 @@ impl DrawBatch {
 
     /// 组装 custom material 的逐颜色目标 blend 清单：索引 0 用本段画笔 `blend`，
     /// 其余目标沿用 `RenderTarget` 自身声明的 blend（单目标时长度 = 1）。
-    fn material_blends<'a>(
+    pub(crate) fn material_blends<'a>(
         out: &'a mut Vec<Option<wgpu::BlendState>>,
         base: wgpu::BlendState,
         target_blends: &[Option<wgpu::BlendState>],

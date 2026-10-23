@@ -422,7 +422,12 @@ impl TextEntryList {
             .map(|e| e.blend())
             .unwrap_or(wgpu::BlendState::ALPHA_BLENDING);
         let mut text_ctx = gpu.text_ctx.lock().unwrap();
-        text_ctx.ensure_text_pipeline(&gpu.device, crate::text::TextStencilMode::None, first_blend);
+        text_ctx.ensure_text_pipeline(
+            &gpu.device,
+            crate::text::TextStencilMode::None,
+            first_blend,
+            1,
+        );
         if let Err(e) = text_ctx.text_renderer.render(
             &text_ctx.text_atlas,
             &text_ctx.viewport,

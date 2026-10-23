@@ -789,8 +789,8 @@ impl VireoWindow {
     /// `extra_targets` 是追加的离屏颜色附件（通常由调用方事先创建 texture view），
     /// 这些目标的 load 操作固定为 `LoadOp::Load`，混合状态取 `ColorTargetDesc::blend`。
     ///
-    /// 只有 **custom material**（fragment shader 声明多个输出）能写入多个目标；
-    /// 引擎形状与文字只有单颜色输出，在 MRT pass 中会被跳过并 warn-once。
+    /// 引擎形状/文字也能画进这个 pass：它们只写第 0 个目标，其余附件保留
+    /// `LoadOp::Load` 载入内容；要写多路数据用 **custom material**。
     /// 采样点数由窗口的 `AntiAliasing` 决定并逐附件补齐：每个附件只要本身是单采样
     /// 且没有自带 `resolve_target`，引擎就会按该采样点数自建 MSAA 并 resolve 回去，
     /// 因此 MRT 与 MSAA/SSAA 可以同时使用。
@@ -801,6 +801,39 @@ impl VireoWindow {
         batches: &[&DrawBatch],
     ) -> DrawReport {
         self.draw_frame(clear_color, batches, None, extra_targets, None, None)
+    }
+
+    /// 同 [`Self::draw_with_frame`]，但帧绑定到**多个颜色目标**（MRT）。
+    ///
+    /// 回调里的 `frame.target()` 会含 `1 + extra_targets.len()` 个颜色附件，
+    /// 可用 `frame.begin_engine_pass(&mut encoder)` 直接编码引擎批次。
+    pub fn draw_with_frame_mrt<F>(
+        &self,
+        clear_color: crate::color::Color,
+        extra_targets: &[ColorTargetDesc],
+        batches: &[&DrawBatch],
+        f: F,
+    ) -> DrawReport
+    where
+        F: FnOnce(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
+    {
+        let mut f = Some(f);
+        let mut encode = |frame: &crate::render::PreparedFrame<'_>,
+                          encoder: &mut wgpu::CommandEncoder| {
+            if let Some(f) = f.take() {
+                f(frame, encoder);
+            }
+        };
+        self.run_frame(|| {
+            self.draw_frame(
+                clear_color,
+                batches,
+                None,
+                extra_targets,
+                Some(&mut encode),
+                None,
+            )
+        })
     }
 
     fn draw_frame(
@@ -2857,6 +2890,7 @@ impl VireoWindow {
             false,
             false,
             wgpu::BlendState::ALPHA_BLENDING,
+            1,
         );
         let _ = self.gpu.ensure_pipeline(
             ta.samples,
@@ -2865,6 +2899,7 @@ impl VireoWindow {
             false,
             true,
             wgpu::BlendState::ALPHA_BLENDING,
+            1,
         );
     }
 

@@ -104,16 +104,18 @@ impl TextContext {
     /// 设置文字管线 DS 模式（与当前 render pass / 是否测裁切一致）。
     /// 默认混合（ALPHA）；逐段 blend 由 draw 循环经 [`Self::ensure_text_pipeline`] 覆盖。
     pub(crate) fn ensure_text_stencil_mode(&mut self, device: &Device, mode: TextStencilMode) {
-        self.ensure_text_pipeline(device, mode, wgpu::BlendState::ALPHA_BLENDING);
+        self.ensure_text_pipeline(device, mode, wgpu::BlendState::ALPHA_BLENDING, 1);
     }
 
     /// 设置文字管线（含混合）：DS 由 mode 定，blend 逐段传。
     /// draw 循环对每段调一次（缓存命中＋句柄交换，无重建）。
+    /// `num_targets`：本 pass 的颜色附件数（多附件 pass 需要目标数匹配的管线变体）。
     pub(crate) fn ensure_text_pipeline(
         &mut self,
         device: &Device,
         mode: TextStencilMode,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) {
         let ds = match mode {
             TextStencilMode::None => None,
@@ -128,6 +130,7 @@ impl TextContext {
             },
             ds,
             blend,
+            num_targets,
         );
         self.text_renderer.set_pipeline(pipeline);
     }

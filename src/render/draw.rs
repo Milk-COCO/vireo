@@ -79,19 +79,9 @@ fn ds_warn_once(msg: &str) {
     }
 }
 
-/// MRT（多颜色目标）pass 里引擎 shader / 文字管线只有单颜色输出，无法写入多目标。
-/// 进程级 warn-once，内容跳过而不是触发 wgpu 校验错误。
-static MRT_WARNED: AtomicBool = AtomicBool::new(false);
-
-#[inline]
-pub(crate) fn mrt_warn_once(what: &str) {
-    if !MRT_WARNED.swap(true, Ordering::Relaxed) {
-        log::warn!(
-            "{what} skipped in a multi-target pass: engine shaders/text write a single color output; \
-             use a custom material whose fragment shader declares matching outputs"
-        );
-    }
-}
+/// MRT（多颜色目标）pass 不再需要"跳过"任何内容：引擎形状/文字管线都按 pass 的
+/// 颜色附件数取变体，shader 只声明 `@location(0)`，附加目标用同格式 + 空写掩码占位
+/// ——不写字节，因此保留 `LoadOp::Load` 载入的内容（掩码/法线等通道不会被擦掉）。
 
 /// 把 `RenderTarget::depth_stencil` 与 stencil 需求解析成本帧 DS 计划。
 ///
@@ -1804,10 +1794,9 @@ impl PreparedFrame<'_> {
                 };
                 shape_draw_calls += DrawBatch::encode_into(&mut *pass, &encode_info, &ctx);
             }
-            // 文字管线只有单颜色输出：附件数不为 1 时无法写进本 pass。
-            if !info.text.is_empty() && self.target.color_attachments.len() != 1 {
-                mrt_warn_once("text");
-            } else if !info.text.is_empty() {
+            // 文字在多附件 pass 里也照画：管线按目标数取变体（附加目标空写掩码占位），
+            // 因此只写 target 0，其余附件保留载入内容。
+            if !info.text.is_empty() {
                 // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
                 // Area 存在时：当前文本在 Area content level，测 (Test)。
                 let has_area_at_text =
@@ -1846,6 +1835,13 @@ impl PreparedFrame<'_> {
                     Option<*const Material>,
                 )> = None;
                 let mut text_mat_pipe: Option<Arc<wgpu::RenderPipeline>> = None;
+                // pass 自身声明的逐目标 blend（索引 0 由本段 blend 覆盖）
+                let pass_target_blends: Vec<Option<wgpu::BlendState>> = self
+                    .target
+                    .color_attachments
+                    .iter()
+                    .map(|a| a.blend)
+                    .collect();
                 for segment in &info.text {
                     let mat_key = info.custom_material.as_ref().map(Arc::as_ptr);
                     let key = (text_mode, segment.blend, mat_key);
@@ -1853,6 +1849,15 @@ impl PreparedFrame<'_> {
                         // custom 管线先行：raw 的 Text 臂内部 lock text_ctx，
                         // 此处必须 guard-free（临时的 guard 逐句释放）。
                         text_mat_pipe = info.custom_material.as_ref().and_then(|m| {
+                            // 逐目标 blend：索引 0 用本段 blend，其余沿用 pass 声明 ——
+                            // 目标数组长度必须等于 pass 附件数，不能写死成 1。
+                            let mut blends =
+                                Vec::with_capacity(self.target.color_attachments.len().max(1));
+                            let blends = DrawBatch::material_blends(
+                                &mut blends,
+                                segment.blend,
+                                &pass_target_blends,
+                            );
                             match r.gpu.ensure_material_pipeline(
                                 m,
                                 MaterialTarget::Text,
@@ -1863,7 +1868,7 @@ impl PreparedFrame<'_> {
                                 self.uses_stencil,
                                 if text_tests_stencil { 2 } else { 0 },
                                 crate::gpu::ShapeVertexLayout::Mesh,
-                                &[Some(segment.blend)],
+                                blends,
                             ) {
                                 Ok(p) => Some(p),
                                 Err(err) => {
@@ -1878,6 +1883,7 @@ impl PreparedFrame<'_> {
                             &r.gpu.device,
                             text_mode,
                             segment.blend,
+                            self.target.color_attachments.len().max(1) as u32,
                         );
                         last_text_key = Some(key);
                     }

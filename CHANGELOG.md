@@ -192,8 +192,8 @@
 - **BREAKING｜移除 `CachePolicy`**：`AlwaysRebuild` 的"每帧重建"承诺被内部 bind group
   池按指纹命中掩盖，从未真正生效；`Dirty`（任一 `set_*` 置位即重建）是唯一实际语义。
   需要每帧重建的场合用 `set_bind_group_provider`。
-- **MRT 不再按"附件数 > 1"关掉引擎能力**：删掉跨阶段传递的 `mrt` 布尔，判定落在使用点
-  （引擎形状/文字管线单颜色输出，附件数不为 1 时跳过 + warn-once）。
+- **MRT 不再按"附件数 > 1"关掉引擎能力**：删掉跨阶段传递的 `mrt` 布尔，判定落在使用点。
+  引擎形状/文字现已能进多附件 pass（管线按附件数取变体，附加目标空写、保留载入内容）。
 - 多边形/折线的边索引基址补丁（`sdf_params[0] += poly_base`）从 4 处重复实现收敛为
   `patch_instance_poly_base` / `patch_vertex_poly_base`；默认顶点着色器变体从四个
   `default_*_vertex_wgsl(ssaa, noflat)` 收敛为 `shape_vertex_wgsl(layout, ShapeShaderFlags)`。
@@ -209,9 +209,15 @@
     `OffscreenCanvas::draw_mrt`；`Renderer::draw` / `RenderTarget::draw` 改收
     `clear_colors: &[Option<Color>]`（与颜色附件等长）。custom material 返回
     `MaterialOutput`（第 0 个字段须名为 `color`，引擎在其上应用 alpha/SDF）即可写多目标；
-    pipeline key 含目标数量与逐目标 blend，双目标不同 blend 一次提交。引擎形状/文字
-    单颜色输出，不参与 MRT（跳过并 warn-once）；引擎 MSAA 自本次起按附件逐目标补齐
-    （见下方采样契约条目）。示例 `mrt`。
+    pipeline key 含目标数量与逐目标 blend，双目标不同 blend 一次提交。引擎形状/文字也能
+    进 MRT pass：管线按附件数取变体，附加目标以"同格式 + 空写掩码"占位，只写 target 0、
+    其余附件保留 `LoadOp::Load` 载入内容（此前被跳过并 warn-once）。反过来 MRT 材质也可
+    用于单附件 pass（多余 fragment 输出被丢弃）。引擎 MSAA 自本次起按附件逐目标补齐
+    （见下方采样契约条目）。**`draw_with_frame_mrt`**（窗口 + 离屏）把 `PreparedFrame`
+    绑到多附件目标，自定义 pass 因此可与 MRT 组合。示例 `mrt`。
+    Engine shapes/text now render inside MRT passes (color only; extra targets keep their
+    loaded contents), and MRT materials work in single-target passes.
+    `draw_with_frame_mrt` binds a `PreparedFrame` to multiple color attachments.
   - **Bind Group 去硬编码**：`App::material_self_managed(source, &[(group, &bgl)])` /
     `GpuContext::create_material_self_managed`——用户自带 BGL 与 group 编号，任意
     `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。默认材质仍在 group 3

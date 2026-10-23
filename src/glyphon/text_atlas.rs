@@ -439,9 +439,16 @@ impl TextAtlas {
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
         blend: BlendState,
+        num_targets: u32,
     ) -> RenderPipeline {
-        self.cache
-            .get_or_create_pipeline(device, self.format, multisample, depth_stencil, blend)
+        self.cache.get_or_create_pipeline(
+            device,
+            self.format,
+            multisample,
+            depth_stencil,
+            blend,
+            num_targets,
+        )
     }
 
     pub(crate) fn create_material_pipeline(
@@ -452,6 +459,7 @@ impl TextAtlas {
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
         blend: BlendState,
+        num_targets: u32,
     ) -> RenderPipeline {
         self.cache.create_material_pipeline(
             device,
@@ -461,6 +469,7 @@ impl TextAtlas {
             multisample,
             depth_stencil,
             blend,
+            num_targets,
         )
     }
 

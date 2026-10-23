@@ -587,6 +587,30 @@ pub(crate) fn material_pipeline_key(
         | (blend_hash << 44)
 }
 
+/// 引擎管线的颜色目标数组：第 0 个由调用方给出，其余是"格式匹配但不写"的占位。
+///
+/// 引擎 shader（含各条实例路径）只声明 `@location(0)`。wgpu 要求管线的目标数
+/// 等于 pass 的附件数，且每个附件都要有**格式匹配**的状态——填 `None` 会被判成
+/// 格式不兼容。所以附加目标填同格式 + `ColorWrites::empty()`：不写任何字节，
+/// 保留 pass 的 `LoadOp::Load` 内容。引擎形状因此可以安全地画进多附件 pass，
+/// 不会擦掉掩码/法线等通道。
+fn engine_color_targets(
+    first: Option<wgpu::ColorTargetState>,
+    num_targets: u32,
+) -> Vec<Option<wgpu::ColorTargetState>> {
+    let filler = first.as_ref().map(|t| wgpu::ColorTargetState {
+        format: t.format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::empty(),
+    });
+    std::iter::once(first)
+        .chain(std::iter::repeat_n(
+            filler,
+            (num_targets.max(1) - 1) as usize,
+        ))
+        .collect()
+}
+
 /// 中性 depth-stencil 管线状态：深度 `Always`/不写、模板 `IGNORE`/不读写。
 ///
 /// 用于「pass 挂载了 DS 但本管线不需要 stencil 测试」的场景（wgpu 要求管线
@@ -626,17 +650,21 @@ impl GpuContext {
         ds: bool,
         geometry: bool,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) -> wgpu::RenderPipeline {
         // bit19 = use_stencil=0 → 与 stencil 管线缓存键不冲突。
         // bit25 = 中性 DS（该位其余生成器均未使用）。
+        // bits20-23 = 颜色目标数（MRT pass 需要目标数匹配的管线变体）。
         // bits4-15 = surface format（macOS Metal 为 Bgra8UnormSrgb），格式不同
         // 的管线键不同，避免复用首窗口同步前的默认 Rgba8 管线。
         // blend 不进 bit（`BlendState` 全 Hash，进元组键后半）。
+        let n_targets = num_targets.max(1);
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
                 | ((ssaa as u32) << 17)
                 | ((geometry as u32) << 18)
+                | ((n_targets.min(15)) << 20)
                 | ((ds as u32) << 25)
                 | (surface_format_bits(self.surface_format()) << 4),
             blend,
@@ -663,6 +691,14 @@ impl GpuContext {
                 ],
                 immediate_size: 0,
             });
+        let targets = engine_color_targets(
+            Some(wgpu::ColorTargetState {
+                format: self.surface_format(),
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            n_targets,
+        );
         let p = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -677,11 +713,7 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format(),
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &targets,
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -720,7 +752,9 @@ impl GpuContext {
         geometry: bool,
         stencil_op: u32,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) -> wgpu::RenderPipeline {
+        let n_targets = num_targets.max(1);
         let op = stencil_op.min(4);
         // op3/4 不写颜色（blend=None）：blend 归一化回 Alpha，防建重复管线。
         let no_color = op == 3 || op == 4;
@@ -729,7 +763,8 @@ impl GpuContext {
         } else {
             blend
         };
-        // bit19 = use_stencil=1；bits20-22 = stencil_op；bits4-15 = surface format
+        // bit19 = use_stencil=1；bits20-22 = stencil_op；bits23-26 = 颜色目标数；
+        // bits4-15 = surface format
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
@@ -737,6 +772,7 @@ impl GpuContext {
                 | ((geometry as u32) << 18)
                 | (1u32 << 19)
                 | (op << 20)
+                | ((n_targets.min(15)) << 23)
                 | (surface_format_bits(self.surface_format()) << 4),
             key_blend,
         );
@@ -778,6 +814,8 @@ impl GpuContext {
                 write_mask: wgpu::ColorWrites::ALL,
             })
         };
+
+        let stencil_targets = engine_color_targets(color_target, n_targets);
 
         let (face, read_mask, write_mask) = match op {
             0 => (wgpu::StencilFaceState::IGNORE, 0u32, 0u32),
@@ -839,7 +877,7 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some(frag_entry),
-                    targets: &[color_target],
+                    targets: &stencil_targets,
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -868,7 +906,9 @@ impl GpuContext {
         use_stencil: bool,
         stencil_op: u32,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) -> wgpu::RenderPipeline {
+        let n_targets = num_targets.max(1);
         let op = stencil_op.min(2);
         // bit18 = 中性 DS（该位在 instance/geo/particle 生成器中空闲）。
         let key = (
@@ -952,11 +992,14 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format(),
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &engine_color_targets(
+                        Some(wgpu::ColorTargetState {
+                            format: self.surface_format(),
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        n_targets,
+                    ),
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -987,7 +1030,9 @@ impl GpuContext {
         use_stencil: bool,
         stencil_op: u32,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) -> wgpu::RenderPipeline {
+        let n_targets = num_targets.max(1);
         let op = stencil_op.min(2);
         let key = (
             sample_count
@@ -1066,11 +1111,14 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format(),
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &engine_color_targets(
+                        Some(wgpu::ColorTargetState {
+                            format: self.surface_format(),
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        n_targets,
+                    ),
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -1102,7 +1150,9 @@ impl GpuContext {
         use_stencil: bool,
         stencil_op: u32,
         blend: wgpu::BlendState,
+        num_targets: u32,
     ) -> wgpu::RenderPipeline {
+        let n_targets = num_targets.max(1);
         let op = stencil_op.min(2);
         let key = (
             sample_count
@@ -1185,11 +1235,14 @@ impl GpuContext {
                 fragment: Some(wgpu::FragmentState {
                     module,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format(),
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &engine_color_targets(
+                        Some(wgpu::ColorTargetState {
+                            format: self.surface_format(),
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        n_targets,
+                    ),
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -1443,6 +1496,7 @@ impl GpuContext {
                     multisample,
                     depth_stencil,
                     blends[0].unwrap_or(wgpu::BlendState::ALPHA_BLENDING),
+                    blends.len().max(1) as u32,
                 ),
         };
 

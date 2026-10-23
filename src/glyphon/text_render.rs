@@ -43,6 +43,7 @@ impl TextRenderer {
             multisample,
             depth_stencil,
             BlendState::ALPHA_BLENDING,
+            1,
         );
 
         Self {

@@ -935,6 +935,18 @@ fn region_is_red(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> b
 }
 
 /// 断言指定区域内全部像素「接近蓝色」（B 高、R/G 低）。
+/// 区域内是否全为绿色（G 高、R/B 低）。
+fn region_is_green(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y * w + x) * 4) as usize;
+            if !(pixels[idx + 1] > 150 && pixels[idx] < 80 && pixels[idx + 2] < 80) {
+                return false;
+            }
+        }
+    }
+    true
+}
 fn region_is_blue(pixels: &[u8], w: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
     for y in y0..y1 {
         for x in x0..x1 {
@@ -3277,6 +3289,804 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         "  MRT: target0=red target1=blue draw_calls={}",
         base.last_draw_calls()
     );
+}
+
+/// MRT + MSAA：主目标开 4x MSAA、附加目标是单采样，引擎应**逐附件**各建一份
+/// MSAA 再 resolve 回去。管线 sample_count 与附件必须一致，否则 wgpu 会直接报
+/// validation error —— 所以"能跑通且两个目标都有内容"本身就是这条机制的护栏。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_with_msaa_resolves_both_targets() {
+    println!("\n=== MRT + 4x MSAA：逐附件 MSAA/resolve ===");
+    const MATERIAL_WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);   // 固定红
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);     // 第二路固定蓝
+    return out;
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    // 主目标走引擎 MSAA（表面纹理仍是单采样）；附加目标保持单采样，
+    // resolve 由引擎按 `TargetAa.samples` 逐附件补齐。
+    let base = OffscreenCanvas::with_aa(
+        &gpu,
+        200,
+        200,
+        AntiAliasing::Msaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
+        0.0,
+    );
+    let aux = OffscreenCanvas::new(&gpu, 200, 200);
+    let material = gpu
+        .create_material(MATERIAL_WGSL)
+        .expect("MRT material pipelines");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(material));
+    draw_rectangle(&mut b, Pos::new(20.0, 20.0), 160.0, 160.0, Some(WHITE));
+
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let base_pixels = base.read_pixels();
+    assert!(
+        region_is_red(&base_pixels, 200, 40, 40, 160, 160),
+        "target 0 应被 MSAA resolve 出红色内容"
+    );
+    let aux_pixels = aux.read_pixels();
+    assert!(
+        region_is_blue(&aux_pixels, 200, 40, 40, 160, 160),
+        "target 1（附加、单采样）也应被逐附件 MSAA resolve 出蓝色内容"
+    );
+    println!(
+        "  MRT+MSAA: target0=red target1=blue draw_calls={}",
+        base.last_draw_calls()
+    );
+
+    // 第二阶段：证明目标上的 `samples = 4` **真的**是多重采样，而不是被悄悄忽略。
+    // 用硬边几何（关掉 SDF feather，只剩光栅化）旋转绘制：4x MSAA 会产生边缘过渡像素，
+    // 1 采样则只有纯色/背景两种值。
+    const PLAIN_WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return in.color;
+}
+"#;
+    let plain = gpu
+        .create_material(PLAIN_WGSL)
+        .expect("plain material pipelines");
+
+    let count_partial = |pixels: &[u8]| -> usize {
+        let mut n = 0;
+        for px in pixels.chunks_exact(4) {
+            // 既不是近黑背景，也不是近纯白填充 → 边缘覆盖率介于两者之间
+            if px[0] > 30 && px[0] < 225 {
+                n += 1;
+            }
+        }
+        n
+    };
+
+    let draw_edge = |canvas: &OffscreenCanvas| {
+        let mut b = DrawBatch::new();
+        b.set_custom_material(Some(plain.clone()));
+        b.clear_sdf_feather(); // 走几何模板路径：边缘只有光栅化覆盖
+        b.set_position(100.0, 100.0);
+        b.set_rad(0.37);
+        draw_rectangle(&mut b, Pos::new(-70.0, -70.0), 140.0, 90.0, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b]);
+        count_partial(&canvas.read_pixels())
+    };
+
+    let msaa_edges = draw_edge(&OffscreenCanvas::with_aa(
+        &gpu,
+        200,
+        200,
+        AntiAliasing::Msaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
+        0.0,
+    ));
+    let noaa_edges = draw_edge(&OffscreenCanvas::new(&gpu, 200, 200));
+    println!("  硬边过渡像素：4x MSAA={msaa_edges}  无 AA={noaa_edges}");
+    assert!(
+        msaa_edges > 30,
+        "4x MSAA 下旋转硬边应出现大量过渡像素（实际 {msaa_edges}）"
+    );
+    assert!(
+        noaa_edges * 4 < msaa_edges,
+        "无 AA 的硬边不应有大量过渡像素（实际 {noaa_edges}）"
+    );
+}
+
+/// MRT：**引擎形状**（无 custom material）可以直接画进多附件 pass —— shader 只写
+/// `@location(0)`，附加目标填 `None`（不写），因此保留 pass 载入时的内容，不会把
+/// 掩码/法线等通道擦掉。这是"引擎形状在 MRT 里被跳过"被移除后的行为护栏。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn engine_shape_writes_first_target_only() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 200, 200);
+    let aux = OffscreenCanvas::new(&gpu, 200, 200);
+
+    // 预填 aux 为绿色（单附件 draw）
+    let fill = gpu
+        .create_material(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }",
+        )
+        .expect("fill material");
+    let mut fb = DrawBatch::new();
+    fb.set_custom_material(Some(fill));
+    draw_rectangle(&mut fb, Pos::new(0.0, 0.0), 200.0, 200.0, Some(WHITE));
+    aux.draw(Some(BLACK), &[&fb]);
+    assert!(
+        region_is_green(&aux.read_pixels(), 200, 20, 20, 160, 160),
+        "预填 aux 应为绿色"
+    );
+
+    // 引擎形状（无 custom material）画进双附件 pass
+    let mut b = DrawBatch::new();
+    draw_rectangle(
+        &mut b,
+        Pos::new(20.0, 20.0),
+        160.0,
+        160.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let base_pixels = base.read_pixels();
+    assert!(
+        region_is_red(&base_pixels, 200, 40, 40, 160, 160),
+        "引擎形状应写进 target 0"
+    );
+    let aux_pixels = aux.read_pixels();
+    assert!(
+        region_is_green(&aux_pixels, 200, 40, 40, 160, 160),
+        "附加目标应保持载入内容（不被引擎形状写坏）"
+    );
+    println!(
+        "  engine shape in MRT: target0=red target1=green(kept) draw_calls={}",
+        base.last_draw_calls()
+    );
+}
+
+/// MRT：**文字**也能画进多附件 pass —— glyphon 管线按附件数取变体，附加目标空写，
+/// 所以文字只落在 target 0，其余通道保持载入内容。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_draws_in_multi_target_pass() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 320, 180);
+    let aux = OffscreenCanvas::new(&gpu, 320, 180);
+
+    // 预填 aux 为绿色
+    let fill = gpu
+        .create_material(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }",
+        )
+        .expect("fill material");
+    let mut fb = DrawBatch::new();
+    fb.set_custom_material(Some(fill));
+    draw_rectangle(&mut fb, Pos::new(0.0, 0.0), 320.0, 180.0, Some(WHITE));
+    aux.draw(Some(BLACK), &[&fb]);
+
+    // 文字画进双附件 pass
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "MRT text 123",
+        Pos::new(30.0, 60.0),
+        TextDef::default().font_size(30.0),
+        TextOverride::from_color(WHITE),
+    );
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let base_pixels = base.read_pixels();
+    let lit = base_pixels.chunks_exact(4).filter(|p| p[0] > 40).count();
+    assert!(lit > 40, "文字应写进 target 0（非黑像素实际 {lit} 个）");
+    let aux_pixels = aux.read_pixels();
+    assert!(
+        region_is_green(&aux_pixels, 320, 20, 20, 300, 160),
+        "附加目标应保持预填内容（文字不写其它通道）"
+    );
+    println!("  text in MRT: target0 非黑像素={lit} target1=green(kept)");
+}
+
+/// MRT：**文字的自定义材质**也要按 pass 附件数建管线（曾把目标数组写死成 1 个，
+/// 多附件 pass 会直接 wgpu 校验失败）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn custom_text_material_in_multi_target_pass() {
+    const WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 320, 180);
+    let aux = OffscreenCanvas::new(&gpu, 320, 180);
+
+    let fill = gpu
+        .create_material(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }",
+        )
+        .expect("fill material");
+    let mut fb = DrawBatch::new();
+    fb.set_custom_material(Some(fill));
+    draw_rectangle(&mut fb, Pos::new(0.0, 0.0), 320.0, 180.0, Some(WHITE));
+    aux.draw(Some(BLACK), &[&fb]);
+
+    let mat = gpu.create_material(WGSL).expect("text material");
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_text(
+        &mut b.texts,
+        "MRT custom text",
+        Pos::new(20.0, 60.0),
+        TextDef::default().font_size(28.0),
+        TextOverride::from_color(WHITE),
+    );
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let base_pixels = base.read_pixels();
+    let lit = base_pixels.chunks_exact(4).filter(|p| p[0] > 40).count();
+    assert!(
+        lit > 40,
+        "文字自定义材质应写进 target 0（实际 {lit} 个非黑像素）"
+    );
+    let aux_pixels = aux.read_pixels();
+    assert!(
+        region_is_green(&aux_pixels, 320, 20, 20, 300, 160),
+        "附加目标应保持预填内容"
+    );
+    println!("  custom text material in MRT: target0 非黑像素={lit} target1=green(kept)");
+}
+
+/// MRT：**3 个颜色附件**各自独立接收输出（管线/材质的目标数装配到 3 也成立）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn three_color_attachments_are_independently_written() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+    @location(2) aux2: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    out.aux = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    out.aux2 = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux2 = OffscreenCanvas::new(&gpu, 128, 128);
+    let mat = gpu.create_material(WGSL).expect("3-output material");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rectangle(&mut b, Pos::new(16.0, 16.0), 96.0, 96.0, Some(WHITE));
+
+    let t1 = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    let t2 = ColorTargetDesc {
+        view: aux2.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[t1, t2], &[&b]);
+
+    assert!(
+        region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
+        "target 0 应为红"
+    );
+    assert!(
+        region_is_green(&aux.read_pixels(), 128, 32, 32, 96, 96),
+        "target 1 应为绿"
+    );
+    assert!(
+        region_is_blue(&aux2.read_pixels(), 128, 32, 32, 96, 96),
+        "target 2 应为蓝"
+    );
+    println!("  3 attachments: target0=red target1=green target2=blue");
+}
+
+/// MRT：**逐附件独立 blend** 真的生效（附加目标用加性混合，而非全写）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn per_attachment_blend_is_applied() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);   // 不动 target 0
+    out.aux = vec4<f32>(0.25, 0.25, 0.25, 1.0);
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+
+    // 预填 aux = 0.5（线性）→ sRGB ≈ 188
+    let fill = gpu
+        .create_material(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vec4<f32>(0.5, 0.5, 0.5, 1.0); }",
+        )
+        .expect("fill material");
+    let mut fb = DrawBatch::new();
+    fb.set_custom_material(Some(fill));
+    draw_rectangle(&mut fb, Pos::new(0.0, 0.0), 128.0, 128.0, Some(WHITE));
+    aux.draw(Some(BLACK), &[&fb]);
+    let pre = aux.read_pixels();
+    let i = ((64 * 128 + 64) * 4) as usize;
+    let pre_v = pre[i];
+    assert!(
+        (170..=205).contains(&pre_v),
+        "预填值应约 188（实际 {pre_v}）"
+    );
+
+    // 附加目标用加性混合：0.5 + 0.25 = 0.75 → sRGB ≈ 225
+    let add = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    let mat = gpu.create_material(WGSL).expect("2-output material");
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rectangle(&mut b, Pos::new(16.0, 16.0), 96.0, 96.0, Some(WHITE));
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: Some(add),
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    let post = aux.read_pixels();
+    let post_v = post[i];
+    assert!(
+        post_v > 210,
+        "加性混合后应约 225（0.5+0.25 线性），实际 {post_v}（若为全写会是 ~137）"
+    );
+    println!("  per-attachment blend: aux {pre_v} -> {post_v}（加性）");
+}
+
+/// MRT：**带 stencil 的裁切**（`clips_children`）在双附件 pass 里也成立 ——
+/// 引擎会按需自建 DS，管线状态的目标数也要匹配附件数。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_with_stencil_clipping() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+
+    // 父 batch 开裁切（圆形），子 batch 画满宽的红条
+    let mut parent = DrawBatch::new();
+    parent.clips_children = true;
+    draw_circle(&mut parent, Pos::new(64.0, 64.0), 50.0, Some(WHITE));
+
+    let mut child = DrawBatch::new();
+    draw_rectangle(
+        &mut child,
+        Pos::new(0.0, 54.0),
+        128.0,
+        20.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+    parent.push_child(child);
+
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&parent]);
+
+    let p = base.read_pixels();
+    let at = |x: u32, y: u32| {
+        let i = ((y * 128 + x) * 4) as usize;
+        [p[i], p[i + 1], p[i + 2]]
+    };
+    let inside = at(64, 64);
+    let outside = at(6, 64);
+    assert!(inside[0] > 150, "裁切内的红条应可见，实际 {inside:?}");
+    assert!(outside[0] < 40, "圆外的部分应被裁掉，实际 {outside:?}");
+    println!("  MRT + stencil clip: inside={inside:?} outside={outside:?}");
+}
+
+/// MRT：手搓 `RenderTarget` + **引擎 DS** 的双附件组合也要成立
+/// （`draw_mrt` 不接 DS，这条是唯一能显式挂 DS 的多附件入口）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_manual_render_target_with_depth_stencil() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+    let mat = gpu.create_material(WGSL).expect("material");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rectangle(&mut b, Pos::new(16.0, 16.0), 96.0, 96.0, Some(WHITE));
+
+    // 自建 Renderer：`OffscreenCanvas` 的 renderer 字段是私有的
+    let renderer = Renderer::new(gpu.clone(), 128.0, 128.0, 128, 128, 1.0, 1.0);
+    let mut target = RenderTarget::from_color_attachments(vec![
+        ColorTargetDesc {
+            view: base.texture.lock().view.clone(),
+            resolve_target: None,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        },
+        ColorTargetDesc {
+            view: aux.texture.lock().view.clone(),
+            resolve_target: None,
+            blend: None,
+        },
+    ]);
+    target.set_depth_stencil(Some(DepthStencilTarget::Engine(DepthStencilOps::default())));
+    let cmds = target.draw(&renderer, &[Some(BLACK), None], &[&b]);
+    gpu.queue.submit(Some(cmds));
+
+    assert!(
+        region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
+        "target 0 应为红"
+    );
+    assert!(
+        region_is_blue(&aux.read_pixels(), 128, 32, 32, 96, 96),
+        "target 1 应为蓝"
+    );
+    println!("  manual RenderTarget + DS: target0=red target1=blue ok");
+}
+
+/// MRT：**SSAA（per-sample 着色）** 与逐附件 MSAA/resolve 的组合也要成立。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_with_ssaa_per_sample_shading() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::with_aa(
+        &gpu,
+        128,
+        128,
+        AntiAliasing::Ssaa {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
+        0.0,
+    );
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+    let mat = gpu.create_material(WGSL).expect("material");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rectangle(&mut b, Pos::new(16.0, 16.0), 96.0, 96.0, Some(WHITE));
+
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    assert!(
+        region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
+        "target 0 应为红（SSAA 下也应 resolve 出内容）"
+    );
+    assert!(
+        region_is_blue(&aux.read_pixels(), 128, 32, 32, 96, 96),
+        "target 1 应为蓝（附加目标逐附件 SSAA resolve）"
+    );
+    println!("  MRT + SSAA(4): target0=red target1=blue ok");
+}
+
+/// MRT：附加目标在**下一次 draw 里保持内容**（`LoadOp::Load`）——引擎形状/文字画在上面
+/// 不会把它清零，只有显式写多目标的 custom material 才会改它。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn extra_target_survives_later_draws() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);   // 不动 target 0
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);     // aux 全局写蓝
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+
+    // 第 1 次 draw：custom 材质把 aux 整屏写蓝
+    let mat = gpu.create_material(WGSL).expect("material");
+    let mut b1 = DrawBatch::new();
+    b1.set_custom_material(Some(mat));
+    draw_rectangle(&mut b1, Pos::new(0.0, 0.0), 128.0, 128.0, Some(WHITE));
+    base.draw_mrt(
+        Some(BLACK),
+        &[ColorTargetDesc {
+            view: aux.texture.lock().view.clone(),
+            resolve_target: None,
+            blend: None,
+        }],
+        &[&b1],
+    );
+    assert!(
+        region_is_blue(&aux.read_pixels(), 128, 16, 16, 112, 112),
+        "第 1 次 draw 后 aux 应为蓝"
+    );
+
+    // 第 2 次 draw：只用引擎形状画 target 0，aux 不该被清零
+    let mut b2 = DrawBatch::new();
+    draw_rectangle(
+        &mut b2,
+        Pos::new(16.0, 16.0),
+        96.0,
+        96.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+    base.draw_mrt(
+        Some(BLACK),
+        &[ColorTargetDesc {
+            view: aux.texture.lock().view.clone(),
+            resolve_target: None,
+            blend: None,
+        }],
+        &[&b2],
+    );
+
+    assert!(
+        region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
+        "第 2 次 draw 应写 target 0"
+    );
+    assert!(
+        region_is_blue(&aux.read_pixels(), 128, 16, 16, 112, 112),
+        "aux 应保持第 1 次 draw 的内容（引擎形状不写附加目标）"
+    );
+    println!("  extra target kept across draws: aux still blue, target0 red");
+}
+
+/// MRT：引擎的 SDF 羽化 / alpha 只作用在 `out.color` 上，**其余输出原样写出**。
+///
+/// 这条是 `mrt_glass` 手算覆盖度的前提：附加目标不会自动获得抗锯齿边缘，
+/// 想要平滑掩码必须自己在材质里按 SDF 距离算。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn mrt_feather_applies_only_to_color_output() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    out.aux = vec4<f32>(1.0, 1.0, 1.0, 1.0);   // 恒 1，不做任何羽化
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+    let mat = gpu.create_material(WGSL).expect("material");
+
+    // 圆角矩形 + 默认 SDF 羽化（1px），边缘应有分析性抗锯齿
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rounded_rect(&mut b, Pos::new(24.0, 24.0), 80.0, 80.0, 12.0, Some(WHITE));
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    base.draw_mrt(Some(BLACK), &[aux_target], &[&b]);
+
+    // 统计穿过上边缘一列里的"中间值"像素数（既非 0 也非满值）
+    let count_mid = |pixels: &[u8]| -> usize {
+        let x = 64usize;
+        (20..108)
+            .filter(|y| {
+                let v = pixels[(y * 128 + x) * 4];
+                v > 12 && v < 243
+            })
+            .count()
+    };
+    let color_mid = count_mid(&base.read_pixels());
+    let aux_mid = count_mid(&aux.read_pixels());
+    assert!(
+        color_mid > 0,
+        "target 0 的边缘应有抗锯齿过渡像素（实际 {color_mid}）"
+    );
+    assert!(
+        aux_mid < color_mid,
+        "附加目标不该有羽化过渡：aux 中间值 {aux_mid} 应少于 color 的 {color_mid}"
+    );
+    println!("  羽化只作用于 color：color 过渡像素={color_mid} aux 过渡像素={aux_mid}");
+}
+
+/// MRT + 自定义 Pass：`draw_with_frame_mrt` 把 `PreparedFrame` 绑到多附件目标上，
+/// 回调里用 `begin_engine_pass` 编码引擎批次，其余附件保持载入内容。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn custom_pass_with_mrt_target() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let base = OffscreenCanvas::new(&gpu, 128, 128);
+    let aux = OffscreenCanvas::new(&gpu, 128, 128);
+
+    // aux 预填绿色，方便判断"引擎批次有没有写坏附加目标"
+    let fill = gpu
+        .create_material(
+            "fn material_main(in: MaterialInput) -> vec4<f32> { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }",
+        )
+        .expect("fill");
+    let mut fb = DrawBatch::new();
+    fb.set_custom_material(Some(fill));
+    draw_rectangle(&mut fb, Pos::new(0.0, 0.0), 128.0, 128.0, Some(WHITE));
+    aux.draw(Some(BLACK), &[&fb]);
+
+    let mut b = DrawBatch::new();
+    draw_rectangle(
+        &mut b,
+        Pos::new(16.0, 16.0),
+        96.0,
+        96.0,
+        Some(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
+
+    let aux_target = ColorTargetDesc {
+        view: aux.texture.lock().view.clone(),
+        resolve_target: None,
+        blend: None,
+    };
+    let mut attached = 0usize;
+    base.draw_with_frame_mrt(Some(BLACK), &[aux_target], &[&b], |frame, encoder| {
+        attached = frame.target().color_attachments.len();
+        let mut pass = frame.begin_engine_pass(encoder);
+        frame.encode(&mut pass);
+    });
+
+    assert_eq!(attached, 2, "PreparedFrame 应绑定 2 个颜色附件");
+    assert!(
+        region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
+        "自定义 pass 应把批次编码进 target 0"
+    );
+    assert!(
+        region_is_green(&aux.read_pixels(), 128, 16, 16, 112, 112),
+        "附加目标应保持预填内容"
+    );
+    println!("  custom pass + MRT: 2 attachments, target0=red target1=green(kept)");
+}
+
+/// MRT 材质（2 个 fragment 输出）也能用于**单附件** pass：wgpu 允许多余输出被丢弃，
+/// 这正是"MRT 材质不能进单附件 pass"那个错误结论的反例。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn multi_output_material_in_single_target_pass() {
+    const WGSL: &str = r#"
+struct MaterialOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) aux: vec4<f32>,
+};
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var out: MaterialOutput;
+    out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    out.aux = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let mat = gpu.create_material(WGSL).expect("2-output material");
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(mat));
+    draw_rectangle(&mut b, Pos::new(0.0, 0.0), 64.0, 64.0, Some(WHITE));
+    canvas.draw(Some(BLACK), &[&b]);
+    assert!(
+        region_is_red(&canvas.read_pixels(), 64, 16, 16, 32, 32),
+        "2 输出材质的 color 输出应正常写进单附件 pass"
+    );
+    println!("  multi-output material in single-target pass: ok");
 }
 
 /// P5：compute dispatch 写 storage buffer，CPU 回读校验。

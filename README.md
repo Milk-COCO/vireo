@@ -103,7 +103,8 @@ async fn main() {
 - 文本：shape 缓存、HUD 分段、`StableText`、自定义字体 / attrs
 - **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text；MSAA/stencil/SDF 兼容
 - **自管 Bind Group**：用户自带 BGL + 任意 group 编号（`material_self_managed`）
-- **MRT 多目标**：`draw_mrt` 一次提交写多张颜色附件（custom material 多 FS 输出、逐目标 Blend）
+- **MRT 多目标**：`draw_mrt` 一次提交写多张颜色附件（custom material 多 FS 输出、逐目标 Blend）；
+  引擎形状/文字也能进 MRT pass（只写第 0 个目标，其余附件保留载入内容）
 - **深度 / 模板控制**：`draw_with_depth_stencil`、材质 `depth_write` / `depth_compare`、外部 DS view
 - **GPU compute**：`compute_pipeline` + `dispatch`（写入对后续 render pass 可见）
 - 多窗口 + 离屏渲染
@@ -141,7 +142,8 @@ Shape / text 共用 ABI；默认 shape VS 按 MSAA/SSAA 选 per-pixel / per-samp
 
 **MRT**：改写成 `fn material_main(...) -> MaterialOutput`（第 0 个字段必须名为 `color`，
 引擎在其上应用 alpha / SDF；其余 location 原样输出），配 `draw_mrt(clear, &extra_targets, batches)`
-逐目标 Blend 一次提交。
+逐目标 Blend 一次提交。引擎自带的形状/文字**也能**画进 MRT pass：它们只写第 0 个目标，
+其余附件保持 `LoadOp::Load` 载入值（不会被清零）；反过来，多输出的材质也能用于单目标 pass。
 
 **深度**：`Material::set_depth_write` / `set_depth_compare` + `draw_with_depth_stencil`
 （深度预通道、跨 batch 深度保留）。

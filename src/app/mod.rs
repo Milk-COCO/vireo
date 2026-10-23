@@ -705,10 +705,17 @@ impl App {
             false,
             false,
             wgpu::BlendState::ALPHA_BLENDING,
+            1,
         );
-        let _ =
-            self.gpu
-                .ensure_pipeline(sc, atc, ssaa, false, true, wgpu::BlendState::ALPHA_BLENDING);
+        let _ = self.gpu.ensure_pipeline(
+            sc,
+            atc,
+            ssaa,
+            false,
+            true,
+            wgpu::BlendState::ALPHA_BLENDING,
+            1,
+        );
         let init_duration = start.elapsed().as_secs_f64();
         let mut guard = self.offscreens.lock();
         let idx = guard.len();
@@ -1036,10 +1043,17 @@ impl App {
             false,
             false,
             wgpu::BlendState::ALPHA_BLENDING,
+            1,
         );
-        let _ =
-            self.gpu
-                .ensure_pipeline(sc, atc, ssaa, false, true, wgpu::BlendState::ALPHA_BLENDING);
+        let _ = self.gpu.ensure_pipeline(
+            sc,
+            atc,
+            ssaa,
+            false,
+            true,
+            wgpu::BlendState::ALPHA_BLENDING,
+            1,
+        );
         let init_duration = start.elapsed().as_secs_f64();
         let handle = *self.next_handle.lock();
         *self.next_handle.lock() = handle + 1;
