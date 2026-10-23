@@ -106,8 +106,10 @@ async fn main() {
                 sdf.set_texture(Some(&*t));
                 sdf.set_sdf_feather(Some(1.0));
                 draw_shapes(&mut sdf);
-                draw_text(
-                    &mut sdf.texts,
+                // 必须用 `batch.text(...)`：`draw_text(&mut batch.texts, ..)` 记的是
+                // `transform_index = 0`（单位阵），不吃 batch 的 `set_position`，
+                // 标签会落回上半段的位置和上面那行重叠。
+                sdf.text(
                     "SDF (sdf_feather = 1.0)",
                     Pos::new(10.0, 155.0),
                     TextDef::default().font_size(14.0),
