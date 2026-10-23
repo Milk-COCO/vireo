@@ -159,8 +159,44 @@
   - 嵌套 `prepare`（回调里再次 `draw*`）会 panic 并给出明确消息，不会静默死锁。
   `PreparedFrame` + `draw_with_inline` / `draw_with_frame`: prepare/encode split with
   an engine-pass hook and a user-created pass.
+- **采样契约类型**：`TargetAa { samples, per_sample, alpha_to_coverage }`（`none` /
+  `msaa` / `ssaa` / `with_alpha_to_coverage` 构造 + `From<AntiAliasing>`）；
+  `RenderTarget::aa`（公开字段）/ `with_aa` / `set_aa`；`PreparedFrame::target_aa()`；
+  `VireoWindow::anti_aliasing()`。自建 pass 时可据此逐项对齐附件。
+- **顶点布局 ABI 公开**：`ShapeVertexLayout`（`Mesh` / `SdfInstance` / `GeoInstance` /
+  `Particle`，prelude 导出）与 `Material::shape_layout()`，让自定义顶点着色器能在
+  创建期显式声明契约、而不是靠编译结果猜。
 
 ### Changed / 变更
+
+- **BREAKING｜采样契约随目标传入**：新增 `TargetAa { samples, per_sample,
+  alpha_to_coverage }` 与 `RenderTarget::aa`（`with_aa` / `set_aa`，构造期从附件推导）。
+  `Renderer::new` 去掉 `aa` 参数，移除 `Renderer::update_aa`；`AntiAliasing` 退化为
+  窗口/离屏自己的配置（`VireoWindow::anti_aliasing()` 可读）。AA 的 5 处同步点
+  （update_aa / resize 清理 / msaa_view 比对 / ds_view 比对 / pending_aa）随之消失：
+  引擎 MSAA/DS 视图按 `samples` 逐附件惰性创建，运行期 `set_anti_aliasing` 不再抢
+  渲染器锁。附带能力：**MRT 与 MSAA/SSAA 可同时使用**（此前引擎 MSAA 只服务单目标）。
+  Sampling is now a property of the render target (`TargetAa`) instead of renderer
+  state; MSAA/depth views are allocated per attachment, so MRT + MSAA works.
+- **BREAKING｜custom VS 必须显式声明顶点布局**：`ShapeVertexLayout` 公开并进入 prelude
+  （`Mesh` / `SdfInstance` / `GeoInstance` / `Particle`）；
+  `App::material_with_vertex_shader`、`material_with_resources_and_vertex_shader`、
+  `material_manual_with_vertex_shader` 及 `GpuContext` 同名入口新增必填 `layout`。
+  创建期只验证声明的那一个布局（失败即报错），不再用"哪个布局能编译通过"反推支持集
+  （那会放过"类型匹配、编译通过、语义错"的着色器）；声明之外的绘制路径跳过并 warn-once，
+  不回落 mesh。`Material::shape_layout()` 可查询。
+- **BREAKING｜贴图归调用方所有**：`App::load_texture` / `load_texture_asset` 返回
+  `Arc<Texture>`，移除 `App::texture` / `AppInner.textures` /
+  `VireoError::TextureNotFound`。引擎不再持有 append-only 的贴图表，最后一个引用 drop
+  即释放显存（此前结构上无法释放）。
+- **BREAKING｜移除 `CachePolicy`**：`AlwaysRebuild` 的"每帧重建"承诺被内部 bind group
+  池按指纹命中掩盖，从未真正生效；`Dirty`（任一 `set_*` 置位即重建）是唯一实际语义。
+  需要每帧重建的场合用 `set_bind_group_provider`。
+- **MRT 不再按"附件数 > 1"关掉引擎能力**：删掉跨阶段传递的 `mrt` 布尔，判定落在使用点
+  （引擎形状/文字管线单颜色输出，附件数不为 1 时跳过 + warn-once）。
+- 多边形/折线的边索引基址补丁（`sdf_params[0] += poly_base`）从 4 处重复实现收敛为
+  `patch_instance_poly_base` / `patch_vertex_poly_base`；默认顶点着色器变体从四个
+  `default_*_vertex_wgsl(ssaa, noflat)` 收敛为 `shape_vertex_wgsl(layout, ShapeShaderFlags)`。
 
 - **渲染能力三项落地（P1 / P3 / P4）**：
   - **深度/模板细粒度控制**：新增 `DepthStencilAttachment` / `DepthStencilOps` /
@@ -173,8 +209,9 @@
     `OffscreenCanvas::draw_mrt`；`Renderer::draw` / `RenderTarget::draw` 改收
     `clear_colors: &[Option<Color>]`（与颜色附件等长）。custom material 返回
     `MaterialOutput`（第 0 个字段须名为 `color`，引擎在其上应用 alpha/SDF）即可写多目标；
-    pipeline key 含目标数量与逐目标 blend，双目标不同 blend 一次提交。引擎形状/文字与
-    引擎 MSAA 不参与 MRT（单颜色输出，跳过并 warn-once）。示例 `mrt`。
+    pipeline key 含目标数量与逐目标 blend，双目标不同 blend 一次提交。引擎形状/文字
+    单颜色输出，不参与 MRT（跳过并 warn-once）；引擎 MSAA 自本次起按附件逐目标补齐
+    （见下方采样契约条目）。示例 `mrt`。
   - **Bind Group 去硬编码**：`App::material_self_managed(source, &[(group, &bgl)])` /
     `GpuContext::create_material_self_managed`——用户自带 BGL 与 group 编号，任意
     `@group(n)` 布局；自管材质不再绑定引擎 group 0/1/2。默认材质仍在 group 3
@@ -207,6 +244,12 @@
 
 ### Fixed / 修复
 
+- **dynamic uniform 槽换 buffer 后绘制仍读旧数据**：bind group 缓存用「资源句柄字段的
+  地址」做指纹，而 `set_uniform_bytes` 对 dynamic 槽扩容时是**原地替换** buffer 句柄
+  （地址不变）→ 指纹不变 → 命中旧 bind group，写入进新 buffer、绘制读旧 buffer；
+  同一缓存还会无界增长（`clear()` 从未被调用）。改为按 `dirty` 重建后，`BindGroupPool`
+  整体移除（每材质自身的 bind group 缓存 + `dirty` 已覆盖全部路径）。
+  Fixed stale bind group after a dynamic uniform slot reallocates its buffer.
 - `App::on_*(WindowIndex, ..)` 注册**静默失效**（零日志）：当回调先于窗口创建到达时，
   host drain `cb_rx` 时 `window_callbacks.get_mut(handle)` 返回 `None`，整个注册被丢弃。
   根因是 `App::window()` 走 `create_tx`、`on_*` 走 `cb_tx`，**两个独立 channel
