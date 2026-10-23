@@ -12,6 +12,11 @@ use vireo::prelude::*;
 fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
     if sdf > 0.0 {
         batch.set_sdf_feather(Some(sdf));
+    } else {
+        // `DrawBatch::new()` 默认 sdf_feather = Some(1.0)（走 SDF 实例路径）。
+        // 想对比「几何光栅化」必须显式清掉，否则三条路径全是 SDF，No AA 窗口
+        // 也会带着 SDF 的分析性抗锯齿。
+        batch.clear_sdf_feather();
     }
     draw_rounded_rect(
         batch,

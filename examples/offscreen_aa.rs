@@ -9,6 +9,9 @@ use vireo::prelude::*;
 fn draw_off(batch: &mut DrawBatch, sdf: f32) {
     if sdf > 0.0 {
         batch.set_sdf_feather(Some(sdf));
+    } else {
+        // 默认就是 Some(1.0)（SDF 路径），对比几何光栅化必须显式清除。
+        batch.clear_sdf_feather();
     }
     draw_circle(
         batch,
