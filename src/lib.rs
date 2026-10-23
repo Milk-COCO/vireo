@@ -177,11 +177,11 @@ pub mod prelude {
     pub use crate::gpu::GpuContext;
     pub use crate::gpu::InstanceData;
     pub use crate::gpu::ParticleInstance;
+    pub use crate::gpu::ShapeVertexLayout;
     pub use crate::gpu::VIREO_TARGET_SHAPE;
     pub use crate::gpu::VIREO_TARGET_TEXT;
     pub use crate::gpu::Vertex;
     pub use crate::hud_format;
-    pub use crate::material::CachePolicy;
     pub use crate::material::MATERIAL_TEX_SLOTS;
     pub use crate::material::MATERIAL_UNIFORM_SIZE;
     pub use crate::material::Material;

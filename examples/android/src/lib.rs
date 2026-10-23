@@ -856,20 +856,19 @@ async fn main(app: App) {
                 // 「短暂中断 vs 彻底离开」的价值所在。
                 // 随包贴图：assets/logo.png 解码成功才会画出真图；读不到时 vireo 给出
                 // ffcc00/6699ff 棋盘（一眼能分辨「读不到」与「读到了」）。
-                if let Ok(t) = ctx.app().texture(asset_tex) {
-                    let h = 96.0_f32.min(vh * 0.16);
-                    let s = h / t.height.max(1) as f32;
-                    batch.set_texture(Some(&*t));
-                    draw_rectangle(
-                        &mut batch,
-                        Pos::new(vw - t.width as f32 * s - pad.r - 8.0, pad.t + 8.0),
-                        t.width as f32 * s,
-                        h,
-                        Some(WHITE),
-                    );
-                    // 贴图画完必须清画笔状态，否则后面的形状会继续采样这张图
-                    batch.set_texture(None);
-                }
+                let t = &*asset_tex;
+                let h = 96.0_f32.min(vh * 0.16);
+                let s = h / t.height.max(1) as f32;
+                batch.set_texture(Some(t));
+                draw_rectangle(
+                    &mut batch,
+                    Pos::new(vw - t.width as f32 * s - pad.r - 8.0, pad.t + 8.0),
+                    t.width as f32 * s,
+                    h,
+                    Some(WHITE),
+                );
+                // 贴图画完必须清画笔状态，否则后面的形状会继续采样这张图
+                batch.set_texture(None);
 
                 win.draw(BLACK, &[&batch]);
             }

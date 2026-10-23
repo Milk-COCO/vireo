@@ -81,7 +81,6 @@ pub struct AppInner {
     /// 默认取可执行文件名（去扩展名）；[`App::set_storage_name`] 可改。
     /// 构造时经 [`crate::storage::sanitize_dir_name`] 压成安全的单层分量。
     storage_name: Mutex<String>,
-    textures: Mutex<Vec<Arc<Texture>>>,
     offscreens: Mutex<Vec<Arc<OffscreenCanvas>>>,
     pub init_duration: f64,
     max_fps: Mutex<Option<u32>>,
@@ -667,7 +666,6 @@ impl App {
                 handle_to_id: Mutex::new(FxHashMap::default()),
                 next_handle: Mutex::new(0),
                 default_icon: Mutex::new(default_icon),
-                textures: Mutex::new(Vec::new()),
                 offscreens: Mutex::new(Vec::new()),
                 init_duration,
                 max_fps: Mutex::new(Some(240)),
@@ -727,12 +725,16 @@ impl App {
         }
     }
 
-    pub fn load_texture(&self, path: impl AsRef<std::path::Path>) -> usize {
-        let tex = Texture::from_file(path, &self.gpu);
-        let mut guard = self.textures.lock();
-        let idx = guard.len();
-        guard.push(Arc::new(tex));
-        idx
+    /// 从文件加载贴图（`png` / `jpg` / `bmp`），返回**由调用方持有**的句柄。
+    ///
+    /// 引擎不再保存贴图表：`Arc<Texture>` 交给你，最后一个引用 drop 时显存随之释放。
+    /// 需要在 `run` 闭包里长期使用时，把返回值 `clone()` 进闭包即可；
+    /// 绘制时用 [`batch.set_texture`](crate::render::DrawBatch::set_texture) 传
+    /// `&tex.view`。
+    ///
+    /// 读失败时打 `error` 日志并返回一张 ffcc00/6699ff 棋盘 missing 纹理（不 panic）。
+    pub fn load_texture(&self, path: impl AsRef<std::path::Path>) -> Arc<Texture> {
+        Arc::new(Texture::from_file(path, &self.gpu))
     }
 
     // ---- 随包资源（assets）------------------------------------------------
@@ -804,11 +806,11 @@ impl App {
         }
     }
 
-    /// 从随包资源加载贴图（png/jpg/bmp）。
+    /// 从随包资源加载贴图（png/jpg/bmp），返回**由调用方持有**的句柄。
     ///
     /// 读失败时和 [`load_texture`](Self::load_texture) 一样：打 error 日志并
     /// 返回一张 ffcc00/6699ff 棋盘 missing 纹理（不 panic）。
-    pub fn load_texture_asset(&self, name: &str) -> usize {
+    pub fn load_texture_asset(&self, name: &str) -> Arc<Texture> {
         let tex = match self.assets().read(name) {
             Ok(bytes) => Texture::from_bytes(&bytes, &self.gpu),
             Err(e) => {
@@ -816,10 +818,7 @@ impl App {
                 Texture::from_bytes(&[], &self.gpu)
             }
         };
-        let mut guard = self.textures.lock();
-        let idx = guard.len();
-        guard.push(Arc::new(tex));
-        idx
+        Arc::new(tex)
     }
 
     /// 从随包资源加载字体文件。
@@ -973,14 +972,6 @@ impl App {
     /// 迟到的结果到达时按未知 id 丢弃 + `warn`，不会串给后面的请求。
     pub fn saf_cancel_pending(&self) -> bool {
         crate::saf::cancel_pending()
-    }
-
-    /// 获取贴图（`Err` = 索引越界/未加载完成）。
-    pub fn texture(&self, index: usize) -> Result<Arc<Texture>, VireoError> {
-        match self.textures.lock().get(index).cloned() {
-            Some(t) => Ok(t),
-            None => Err(VireoError::TextureNotFound(index)),
-        }
     }
 
     fn wake_event_loop(&self) {
@@ -1217,17 +1208,28 @@ impl App {
         self.gpu.dispatch(pipeline, bind_groups, workgroups);
     }
 
-    /// 创建带自定义 vertex shader 的材质。VS 须匹配所在绘制路径的输入契约：
-    /// `sdf_feather = Some` → SDF 实例契约（`QuadVertex` + `InstanceData` storage）；
-    /// `None` → 几何实例契约（`TemplateVertex` + `GeoInstance`）；直接 push 的 mesh
-    /// 顶点用 `Vertex`（`@0-7`）。创建期按布局逐项验证，不支持的布局跳过形状 + 告警一次。
+    /// 创建带自定义 vertex shader 的材质。
+    ///
+    /// `layout` 是**必填**的：三条绘制路径的顶点输入契约互不兼容，必须显式声明
+    /// 这条 VS 跑在哪条路径上，否则会出现"类型匹配、编译通过、语义全错"的管线。
+    ///
+    /// - [`ShapeVertexLayout::Mesh`](crate::gpu::ShapeVertexLayout::Mesh)：
+    ///   `Vertex`（68B，`@location(0..7)`），用于直接 push 顶点 / Area；
+    /// - [`ShapeVertexLayout::SdfInstance`](crate::gpu::ShapeVertexLayout::SdfInstance)：
+    ///   `QuadVertex`（8B，只有 `@location(0)`）+ group 2 的 `InstanceData` storage
+    ///   （vertex-pulling，按 `instance_index` 读）；
+    /// - [`ShapeVertexLayout::GeoInstance`](crate::gpu::ShapeVertexLayout::GeoInstance)：
+    ///   `GeoVertex`（16B，`@location(0)=position`、`@location(1)=uv`）+ `GeoInstance`。
+    ///
+    /// 声明之外的绘制路径会被跳过并 warn-once（不回落 mesh）。
     pub fn material_with_vertex_shader(
         &self,
         source: &str,
         vertex_source: &str,
+        layout: crate::gpu::ShapeVertexLayout,
     ) -> Result<Arc<crate::material::Material>, String> {
         self.gpu
-            .create_material_with_vertex_shader(source, vertex_source)
+            .create_material_with_vertex_shader(source, vertex_source, layout)
     }
 
     /// 创建材质并手动指定资源（uniform buffer / 贴图 / sampler）。
@@ -1243,10 +1245,15 @@ impl App {
         &self,
         source: &str,
         vertex_source: &str,
+        layout: crate::gpu::ShapeVertexLayout,
         resources: crate::material::MaterialResources<'_>,
     ) -> Result<Arc<crate::material::Material>, String> {
-        self.gpu
-            .create_material_with_resources_and_vertex_shader(source, vertex_source, resources)
+        self.gpu.create_material_with_resources_and_vertex_shader(
+            source,
+            vertex_source,
+            layout,
+            resources,
+        )
     }
 
     /// 创建材质 + 手动指定 bind group layout（完全自管管线布局）。
@@ -1262,10 +1269,11 @@ impl App {
         &self,
         source: &str,
         vertex_source: &str,
+        layout: crate::gpu::ShapeVertexLayout,
         bgl: &wgpu::BindGroupLayout,
     ) -> Result<Arc<crate::material::Material>, String> {
         self.gpu
-            .create_material_manual_with_vertex_shader(source, vertex_source, bgl)
+            .create_material_manual_with_vertex_shader(source, vertex_source, layout, bgl)
     }
 
     /// 创建自管材质：用户提供多个 (group_index, BGL)，引擎不再插入 group 0/1/2。
@@ -1658,9 +1666,8 @@ impl App {
     ///
     /// 回调触发时能做的清理，vireo 侧只有 **glyph atlas**
     /// （`TextContext.text_atlas`，其 `trim()` 已存在但从不自动调用）。
-    /// **显存大头是用户贴图，而 vireo 结构上释放不了** —— `App.textures` 是
-    /// append-only 的 `Vec<Arc<Texture>>`，只有 `load_texture` 没有移除 API。
-    /// 对贴图密集型应用，请在自己的回调里决定丢弃什么。
+    /// 用户贴图归用户管（[`load_texture`](Self::load_texture) 返回 `Arc<Texture>`，
+    /// 引擎不留表），所以在自己的回调里 drop 掉那些 `Arc` 就能真正释放显存。
     ///
     /// 拿不到 Android 的具体 level（`TRIM_MEMORY_*`）：AGSK 的 C glue 只
     /// `LOGV` 打印后写无 payload 的 `APP_CMD_LOW_MEMORY`。但响应动作在所有

@@ -84,12 +84,8 @@ async fn main() {
             Err(_) => return false,
         };
 
-        match tex {
-            Some(i) => {
-                let t = match ctx.app().texture(i) {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
+        match tex.as_deref() {
+            Some(t) => {
                 let label = Color::new(0.5, 0.5, 0.7, 1.0);
 
                 // ---- 上半：几何模式 ----

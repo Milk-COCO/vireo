@@ -13,6 +13,9 @@ use crate::window::{AntiAliasing, OffscreenIndex};
 pub struct OffscreenCanvas {
     pub texture: Mutex<Texture>,
     renderer: Renderer,
+    /// 本画布的抗锯齿配置。采样契约（`TargetAa`）在每次绘制前由它换算，
+    /// 引擎侧不再保存 AA 状态。
+    aa: AntiAliasing,
     /// 该离屏画布初始化耗时（秒）：app.offscreen() 内的 AA 管线预热。
     pub init_duration: f64,
     /// 在 `App.offscreens` 中的索引
@@ -54,15 +57,22 @@ impl OffscreenCanvas {
             width,
             height,
             1.0,
-            aa,
             1.0,
         );
         Self {
             texture: Mutex::new(texture),
             renderer,
+            aa,
             init_duration,
             index: OffscreenIndex(0),
         }
+    }
+
+    /// 本画布纹理的渲染目标（已带上本画布的采样契约）。
+    fn render_target(&self) -> RenderTarget {
+        let mut target = self.texture.lock().target();
+        target.set_aa(self.aa.into());
+        target
     }
 
     /// 本画布在 `App.offscreens` 中的索引。
@@ -80,7 +90,7 @@ impl OffscreenCanvas {
     /// 翻为线性格式），先按当前格式重建目标纹理再画，调用方无感。
     pub fn draw(&self, clear_color: Option<crate::color::Color>, batches: &[&DrawBatch]) {
         self.ensure_target_format();
-        let target = self.texture.lock().target();
+        let target = self.render_target();
         let cmd_buf = target.draw(&self.renderer, &[clear_color], batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }
@@ -99,7 +109,7 @@ impl OffscreenCanvas {
         F: FnMut(&mut wgpu::CommandEncoder, &RenderTarget),
     {
         self.ensure_target_format();
-        let target = self.texture.lock().target();
+        let target = self.render_target();
         let mut encoder =
             self.renderer
                 .gpu()
@@ -126,7 +136,7 @@ impl OffscreenCanvas {
         F: FnOnce(&mut wgpu::RenderPass),
     {
         self.ensure_target_format();
-        let target = self.texture.lock().target();
+        let target = self.render_target();
         let mut encoder =
             self.renderer
                 .gpu()
@@ -160,7 +170,7 @@ impl OffscreenCanvas {
         F: FnOnce(&crate::render::PreparedFrame<'_>, &mut wgpu::CommandEncoder),
     {
         self.ensure_target_format();
-        let target = self.texture.lock().target();
+        let target = self.render_target();
         let mut encoder =
             self.renderer
                 .gpu()
@@ -184,7 +194,7 @@ impl OffscreenCanvas {
         ds: Option<DepthStencilTarget>,
     ) {
         self.ensure_target_format();
-        let mut target = self.texture.lock().target();
+        let mut target = self.render_target();
         target.set_depth_stencil(ds);
         let cmd_buf = target.draw(&self.renderer, &[clear_color], batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
@@ -202,7 +212,7 @@ impl OffscreenCanvas {
         batches: &[&DrawBatch],
     ) {
         self.ensure_target_format();
-        let prim = self.texture.lock().target();
+        let prim = self.render_target();
         let mut atts = prim.color_attachments;
         atts.extend(extra_targets.iter().map(|t| ColorTargetDesc {
             view: t.view.clone(),
@@ -211,7 +221,8 @@ impl OffscreenCanvas {
         }));
         let mut clears = vec![clear_color];
         clears.resize(atts.len(), None);
-        let target = RenderTarget::from_color_attachments(atts);
+        let mut target = RenderTarget::from_color_attachments(atts);
+        target.set_aa(self.aa.into());
         let cmd_buf = target.draw(&self.renderer, &clears, batches);
         self.renderer.gpu().queue.submit(Some(cmd_buf));
     }

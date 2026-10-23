@@ -4,8 +4,8 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let logo_idx = app.load_texture("logo.png");
-    let logo_bg_idx = app.load_texture("logo_bg.png");
+    let logo = app.load_texture("logo.png");
+    let logo_bg = app.load_texture("logo_bg.png");
     let idx = app.window(
         WindowDesc::new("可是我觉得这很神圣啊", 600, 400),
         None::<fn()>,
@@ -14,14 +14,6 @@ async fn main() {
     let mut angle: f32 = 0.0;
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let logo = match ctx.app().texture(logo_idx) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let logo_bg = match ctx.app().texture(logo_bg_idx) {
             Ok(v) => v,
             Err(_) => return false,
         };

@@ -2,7 +2,7 @@
 
 mod pipeline;
 pub(crate) use pipeline::*;
-pub use pipeline::{VIREO_TARGET_SHAPE, VIREO_TARGET_TEXT};
+pub use pipeline::{ShapeVertexLayout, VIREO_TARGET_SHAPE, VIREO_TARGET_TEXT};
 
 use std::sync::{Arc, Mutex};
 
@@ -41,8 +41,6 @@ pub struct GpuContext {
     pub(crate) instance_storage_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     pub surface_format: Mutex<wgpu::TextureFormat>,
     pub text_ctx: Mutex<TextContext>,
-    /// 跨材质 bind group 复用池。
-    pub(crate) bind_group_pool: crate::material::BindGroupPool,
     /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
     pub(crate) adapter: wgpu::Adapter,
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
@@ -862,7 +860,6 @@ impl GpuContext {
             instance_storage_buf: Mutex::new(None),
             surface_format: Mutex::new(surface_format),
             text_ctx,
-            bind_group_pool: crate::material::BindGroupPool::new(),
             adapter,
             supported_sample_counts,
             pipelines: Mutex::new(pipelines),
@@ -1206,22 +1203,25 @@ impl GpuContext {
     ///
     /// For group 3 resources, use [`create_material_with_resources`](Self::create_material_with_resources).
     pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, None, None)
+        self.create_material_inner(source, None, None, None)
     }
 
     /// Creates a material (no group 3) with a custom shape vertex shader.
     ///
-    /// The shader must provide the input contract of the draw path it runs on:
-    /// SDF instance storage contract, geo instance contract, or the mesh
-    /// `Vertex` contract for direct vertex pushes. Creation validates it against
-    /// each shape layout; unsupported layouts skip the shape with a warn-once
-    /// log. Text targets still use the engine vertex shader.
+    /// `layout` **必须**是你实际要跑的绘制路径：三条路径的顶点输入契约互不兼容
+    /// （`Mesh` = 68B `Vertex`；`SdfInstance` = 8B `QuadVertex` + `InstanceData`
+    /// storage；`GeoInstance` = `GeoVertex` + `GeoInstance`）。声明哪个就用哪个，
+    /// 其他路径的形状会在记录期被跳过并 warn-once（不回落 mesh）。
+    ///
+    /// 创建期只验证这一个布局；失败直接返回 `Err`，不再靠"哪个布局编得过"反推
+    /// 支持集（那会放过"类型匹配但语义错"的着色器）。
     pub fn create_material_with_vertex_shader(
         &self,
         source: &str,
         vertex_source: &str,
+        layout: ShapeVertexLayout,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, Some(vertex_source.to_owned()), None)
+        self.create_material_inner(source, Some(vertex_source.to_owned()), Some(layout), None)
     }
 
     /// Creates a material from resource descriptors (engine builds BGL, injects WGSL, AutoDefaults).
@@ -1230,17 +1230,24 @@ impl GpuContext {
         source: &str,
         resources: crate::material::MaterialResources<'_>,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, None, Some(resources))
+        self.create_material_inner(source, None, None, Some(resources))
     }
 
     /// Creates a material from resource descriptors with custom vertex shader.
+    /// `layout` 语义同 [`Self::create_material_with_vertex_shader`]。
     pub fn create_material_with_resources_and_vertex_shader(
         &self,
         source: &str,
         vertex_source: &str,
+        layout: ShapeVertexLayout,
         resources: crate::material::MaterialResources<'_>,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner(source, Some(vertex_source.to_owned()), Some(resources))
+        self.create_material_inner(
+            source,
+            Some(vertex_source.to_owned()),
+            Some(layout),
+            Some(resources),
+        )
     }
 
     /// Creates a material with user-provided BGL (caller must install `set_bind_group_provider` before draw).
@@ -1249,25 +1256,33 @@ impl GpuContext {
         source: &str,
         bgl: &wgpu::BindGroupLayout,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner_manual(source, None, bgl)
+        self.create_material_inner_manual(source, None, None, bgl)
     }
 
     /// Creates a material with user-provided BGL and custom vertex shader.
+    /// `layout` 语义同 [`Self::create_material_with_vertex_shader`]。
     pub fn create_material_manual_with_vertex_shader(
         &self,
         source: &str,
         vertex_source: &str,
+        layout: ShapeVertexLayout,
         bgl: &wgpu::BindGroupLayout,
     ) -> Result<Arc<Material>, String> {
-        self.create_material_inner_manual(source, Some(vertex_source.to_owned()), bgl)
+        self.create_material_inner_manual(source, Some(vertex_source.to_owned()), Some(layout), bgl)
     }
 
     fn create_material_inner(
         &self,
         source: &str,
         shape_vertex_source: Option<String>,
+        shape_layout: Option<ShapeVertexLayout>,
         resources: Option<crate::material::MaterialResources<'_>>,
     ) -> Result<Arc<Material>, String> {
+        debug_assert_eq!(
+            shape_vertex_source.is_some(),
+            shape_layout.is_some(),
+            "custom vertex shader requires an explicit ShapeVertexLayout"
+        );
         let source = crate::material::expand_includes(source)?;
 
         let raw_resources: Vec<crate::material::MaterialResource<'_>> =
@@ -1289,77 +1304,67 @@ impl GpuContext {
             source
         };
 
-        // Validate pipelines compile across shape vertex layouts + text.
-        // custom VS 按绘制路径契约预验证（Mesh/SDF/Geo 各自输入布局）；
-        // 支持集的布局入 pipelines 表，其余创建期 warning，全败报错。
+        // 创建期只探测**一次**：带 custom VS 用声明布局，fragment-only 用 Mesh
+        // （保证 fragment shader 编不过时立刻报错）。其余布局的引擎 VS 由
+        // `ensure_material_pipeline` 惰性建，不再做 3 次"猜哪个布局能编过"。
         let mut pipelines = FxHashMap::default();
-        let mut shape_support = 0u8;
         // State A：material BGL 放在 group 3，引擎组 0/1/2 始终包含。
         let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> = material_bgl
             .as_ref()
             .map(|b| (3u32, b))
             .into_iter()
             .collect();
-        for layout in [
-            ShapeVertexLayout::Mesh,
-            ShapeVertexLayout::SdfInstance,
-            ShapeVertexLayout::GeoInstance,
-        ] {
+        let probe_layout = shape_layout.unwrap_or(ShapeVertexLayout::Mesh);
+        {
             let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
-            let result = self.create_material_pipeline_raw(
-                &final_source,
-                shape_vertex_source.as_deref(),
-                MaterialTarget::Shape,
-                1,
-                false,
-                false,
-                false,
-                false,
-                wgpu::CompareFunction::Always,
-                false,
-                0,
-                &material_bgl_entries,
-                true,
-                layout,
-                &blends,
-            );
-            match (shape_vertex_source.is_some(), result) {
-                (_, Ok(pipeline)) => {
-                    shape_support |= 1 << layout as u8;
-                    pipelines.insert(
-                        (
-                            material_pipeline_key(
-                                MaterialTarget::Shape,
-                                1,
-                                false,
-                                false,
-                                false,
-                                false,
-                                wgpu::CompareFunction::Always,
-                                false,
-                                0,
-                                layout,
-                                self.surface_format(),
-                                1,
-                                blend_states_hash(&blends),
-                            ),
-                            wgpu::BlendState::ALPHA_BLENDING,
-                        ),
-                        Arc::new(pipeline),
-                    );
-                }
-                (true, Err(err)) => {
-                    log::warn!(
-                        "custom material vertex shader failed to compile with {layout:?} layout: {err}"
-                    );
-                }
-                (false, Err(err)) => return Err(err),
-            }
-        }
-        if shape_vertex_source.is_some() && shape_support == 0 {
-            return Err(
-                "custom material vertex shader did not compile with any shape vertex layout"
-                    .to_owned(),
+            let pipeline = self
+                .create_material_pipeline_raw(
+                    &final_source,
+                    shape_vertex_source.as_deref(),
+                    MaterialTarget::Shape,
+                    1,
+                    false,
+                    false,
+                    false,
+                    false,
+                    wgpu::CompareFunction::Always,
+                    false,
+                    0,
+                    &material_bgl_entries,
+                    true,
+                    probe_layout,
+                    &blends,
+                )
+                .map_err(|err| {
+                    if shape_layout.is_some() {
+                        format!(
+                            "custom material vertex shader does not match the declared \
+                             {probe_layout:?} layout: {err}"
+                        )
+                    } else {
+                        err
+                    }
+                })?;
+            pipelines.insert(
+                (
+                    material_pipeline_key(
+                        MaterialTarget::Shape,
+                        1,
+                        false,
+                        false,
+                        false,
+                        false,
+                        wgpu::CompareFunction::Always,
+                        false,
+                        0,
+                        probe_layout,
+                        self.surface_format(),
+                        1,
+                        blend_states_hash(&blends),
+                    ),
+                    wgpu::BlendState::ALPHA_BLENDING,
+                ),
+                Arc::new(pipeline),
             );
         }
         let text_blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
@@ -1416,10 +1421,9 @@ impl GpuContext {
                 bgl,
                 slots,
                 init_bg,
-                crate::material::CachePolicy::Dirty,
                 final_source,
                 shape_vertex_source,
-                shape_support,
+                shape_layout,
                 pipelines,
                 self.device.clone(),
             )))
@@ -1427,7 +1431,7 @@ impl GpuContext {
             Ok(Arc::new(Material::new_zero_resource(
                 final_source,
                 shape_vertex_source,
-                shape_support,
+                shape_layout,
                 pipelines,
             )))
         }
@@ -1437,73 +1441,70 @@ impl GpuContext {
         &self,
         source: &str,
         shape_vertex_source: Option<String>,
+        shape_layout: Option<ShapeVertexLayout>,
         bgl: &wgpu::BindGroupLayout,
     ) -> Result<Arc<Material>, String> {
+        debug_assert_eq!(
+            shape_vertex_source.is_some(),
+            shape_layout.is_some(),
+            "custom vertex shader requires an explicit ShapeVertexLayout"
+        );
         let source = crate::material::expand_includes(source)?;
         let mut pipelines = FxHashMap::default();
-        let mut shape_support = 0u8;
         // material_manual：BGL 放在 group 3，引擎组 0/1/2 始终包含。
         let material_bgl_entries: Vec<(u32, &wgpu::BindGroupLayout)> = vec![(3u32, bgl)];
-        for layout in [
-            ShapeVertexLayout::Mesh,
-            ShapeVertexLayout::SdfInstance,
-            ShapeVertexLayout::GeoInstance,
-        ] {
+        // 同 `create_material_inner`：只探测一次。
+        let probe_layout = shape_layout.unwrap_or(ShapeVertexLayout::Mesh);
+        {
             let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
-            let result = self.create_material_pipeline_raw(
-                &source,
-                shape_vertex_source.as_deref(),
-                MaterialTarget::Shape,
-                1,
-                false,
-                false,
-                false,
-                false,
-                wgpu::CompareFunction::Always,
-                false,
-                0,
-                &material_bgl_entries,
-                true,
-                layout,
-                &blends,
-            );
-            match (shape_vertex_source.is_some(), result) {
-                (_, Ok(pipeline)) => {
-                    shape_support |= 1 << layout as u8;
-                    pipelines.insert(
-                        (
-                            material_pipeline_key(
-                                MaterialTarget::Shape,
-                                1,
-                                false,
-                                false,
-                                false,
-                                false,
-                                wgpu::CompareFunction::Always,
-                                false,
-                                0,
-                                layout,
-                                self.surface_format(),
-                                1,
-                                blend_states_hash(&blends),
-                            ),
-                            wgpu::BlendState::ALPHA_BLENDING,
-                        ),
-                        Arc::new(pipeline),
-                    );
-                }
-                (true, Err(err)) => {
-                    log::warn!(
-                        "custom material vertex shader failed to compile with {layout:?} layout: {err}"
-                    );
-                }
-                (false, Err(err)) => return Err(err),
-            }
-        }
-        if shape_vertex_source.is_some() && shape_support == 0 {
-            return Err(
-                "custom material vertex shader did not compile with any shape vertex layout"
-                    .to_owned(),
+            let pipeline = self
+                .create_material_pipeline_raw(
+                    &source,
+                    shape_vertex_source.as_deref(),
+                    MaterialTarget::Shape,
+                    1,
+                    false,
+                    false,
+                    false,
+                    false,
+                    wgpu::CompareFunction::Always,
+                    false,
+                    0,
+                    &material_bgl_entries,
+                    true,
+                    probe_layout,
+                    &blends,
+                )
+                .map_err(|err| {
+                    if shape_layout.is_some() {
+                        format!(
+                            "custom material vertex shader does not match the declared \
+                             {probe_layout:?} layout: {err}"
+                        )
+                    } else {
+                        err
+                    }
+                })?;
+            pipelines.insert(
+                (
+                    material_pipeline_key(
+                        MaterialTarget::Shape,
+                        1,
+                        false,
+                        false,
+                        false,
+                        false,
+                        wgpu::CompareFunction::Always,
+                        false,
+                        0,
+                        probe_layout,
+                        self.surface_format(),
+                        1,
+                        blend_states_hash(&blends),
+                    ),
+                    wgpu::BlendState::ALPHA_BLENDING,
+                ),
+                Arc::new(pipeline),
             );
         }
         let text_blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
@@ -1552,7 +1553,7 @@ impl GpuContext {
             None,
             source.to_owned(),
             shape_vertex_source,
-            shape_support,
+            shape_layout,
             pipelines,
         )))
     }
@@ -1574,18 +1575,13 @@ impl GpuContext {
         }
         let source = crate::material::expand_includes(source)?;
         let mut pipelines = FxHashMap::default();
-        let mut shape_support = 0u8;
 
-        // 为每个 layout 预验证 custom VS（与 material_manual 一致）。
-        let _entries_refs: Vec<Option<&wgpu::BindGroupLayout>> =
-            entries.iter().map(|(_, bgl)| Some(*bgl)).collect();
-        for layout in [
-            ShapeVertexLayout::Mesh,
-            ShapeVertexLayout::SdfInstance,
-            ShapeVertexLayout::GeoInstance,
-        ] {
-            let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
-            let result = self.create_material_pipeline_raw(
+        // 自管材质没有 custom VS：只探测一次（Mesh），保证 fragment shader 编不过时
+        // 创建期就报错；其余布局/变体由 `ensure_material_pipeline` 惰性建。
+        let probe_layout = ShapeVertexLayout::Mesh;
+        let blends = [Some(wgpu::BlendState::ALPHA_BLENDING)];
+        let pipeline = self
+            .create_material_pipeline_raw(
                 &source,
                 None,
                 MaterialTarget::Shape,
@@ -1599,47 +1595,31 @@ impl GpuContext {
                 0,
                 entries,
                 false, // self-managed：不包含引擎组
-                layout,
+                probe_layout,
                 &blends,
-            );
-            match result {
-                Ok(pipeline) => {
-                    shape_support |= 1 << layout as u8;
-                    pipelines.insert(
-                        (
-                            material_pipeline_key(
-                                MaterialTarget::Shape,
-                                1,
-                                false,
-                                false,
-                                false,
-                                false,
-                                wgpu::CompareFunction::Always,
-                                false,
-                                0,
-                                layout,
-                                self.surface_format(),
-                                1,
-                                blend_states_hash(&blends),
-                            ),
-                            wgpu::BlendState::ALPHA_BLENDING,
-                        ),
-                        Arc::new(pipeline),
-                    );
-                }
-                Err(err) => {
-                    return Err(format!(
-                        "self-managed custom material failed to compile with {layout:?} layout: {err}"
-                    ));
-                }
-            }
-        }
-        if shape_support == 0 {
-            return Err(
-                "self-managed custom material did not compile with any shape vertex layout"
-                    .to_owned(),
-            );
-        }
+            )
+            .map_err(|err| format!("self-managed custom material failed to compile: {err}"))?;
+        pipelines.insert(
+            (
+                material_pipeline_key(
+                    MaterialTarget::Shape,
+                    1,
+                    false,
+                    false,
+                    false,
+                    false,
+                    wgpu::CompareFunction::Always,
+                    false,
+                    0,
+                    probe_layout,
+                    self.surface_format(),
+                    1,
+                    blend_states_hash(&blends),
+                ),
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
+            Arc::new(pipeline),
+        );
 
         let self_managed_entries: Vec<crate::material::SelfManagedEntry> = entries
             .iter()
@@ -1655,7 +1635,7 @@ impl GpuContext {
             init_bind_groups,
             source.to_owned(),
             None,
-            shape_support,
+            None,
             pipelines,
         )))
     }

@@ -1231,7 +1231,11 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
     let material = gpu
-        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .create_material_with_vertex_shader(
+            FRAGMENT_WGSL,
+            VERTEX_WGSL,
+            ShapeVertexLayout::SdfInstance,
+        )
         .expect("material with custom VS");
 
     let mut b = DrawBatch::new();
@@ -1328,7 +1332,11 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let gpu = Arc::new(GpuContext::new(&instance));
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
     let material = gpu
-        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .create_material_with_vertex_shader(
+            FRAGMENT_WGSL,
+            VERTEX_WGSL,
+            ShapeVertexLayout::GeoInstance,
+        )
         .expect("material with custom VS");
 
     let mut b = DrawBatch::new();
@@ -1425,7 +1433,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     let canvas = OffscreenCanvas::new(&gpu, 320, 180);
     // mesh 契约 VS 可编译（Mesh layout 提供 @0-@7），但 SDF/geo 实例布局缺 @1..@7
     let material = gpu
-        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL)
+        .create_material_with_vertex_shader(FRAGMENT_WGSL, VERTEX_WGSL, ShapeVertexLayout::Mesh)
         .expect("mesh-only contract 仍可创建 material");
 
     let mut b = DrawBatch::new();
@@ -3711,4 +3719,67 @@ fn nested_prepare_panics_and_recovers() {
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
     let pixels = canvas.read_pixels();
     assert!(region_is_red(&pixels, 64, 20, 20, 44, 44));
+}
+
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn dynamic_uniform_slot_growth_rebinds_new_buffer() {
+    println!(
+        "\n=== 回归：dynamic uniform 槽扩容后必须绑到新 buffer（旧 BindGroupPool 指纹 bug）==="
+    );
+    // 片元只输出 uniform 本身，便于用像素判断「当前绑的是哪个 buffer」。
+    const WGSL: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return tint * in.color;
+}
+"#;
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+
+    let resources = vireo::material::MaterialResources(&[vireo::material::MaterialResource {
+        name: "tint",
+        kind: vireo::material::MaterialResourceKind::Uniform {
+            min_size: 16,
+            type_name: "vec4<f32>",
+            dynamic: true,
+        },
+    }]);
+    let material = gpu
+        .create_material_with_resources(WGSL, resources)
+        .expect("dynamic uniform material");
+
+    let mut b = DrawBatch::new();
+    b.set_custom_material(Some(material.clone()));
+    b.set_sdf_feather(Some(1.0));
+    // dynamic uniform 槽需要显式偏移（引擎按段校验）
+    b.dynamic_offsets = vec![0];
+    draw_rectangle(&mut b, Pos::new(8.0, 8.0), 48.0, 48.0, Some(WHITE));
+
+    let bytes = |rgba: [f32; 4]| -> Vec<u8> {
+        rgba.iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+
+    // 1) 不扩容：槽内 buffer 原地 write。
+    material.set_uniform_bytes(&gpu.queue, "tint", &bytes([1.0, 0.0, 0.0, 1.0]));
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let px = canvas.read_pixels();
+    assert!(region_is_red(&px, 64, 16, 16, 40, 40), "第一步应画成红色");
+
+    // 2) 扩容：写入超过 min_size → `set_uniform_bytes` 新建 buffer 并原地替换槽内句柄。
+    //    旧实现用「句柄字段地址」做 bind-group 指纹，地址不变 → 命中旧 bind group，
+    //    绘制继续读旧 buffer（红）；修复后必须读到新 buffer（蓝）。
+    let mut grown = bytes([0.0, 0.0, 1.0, 1.0]);
+    grown.extend_from_slice(&[0u8; 16]);
+    material.set_uniform_bytes(&gpu.queue, "tint", &grown);
+    canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&b]);
+    let px = canvas.read_pixels();
+    assert!(
+        region_is_blue(&px, 64, 16, 16, 40, 40),
+        "扩容后必须绑定新 buffer（蓝）；仍是红色说明命中了旧 bind group"
+    );
 }

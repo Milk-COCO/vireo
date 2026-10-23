@@ -85,69 +85,6 @@ pub fn expand_includes(source: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// BindGroupPool
-// ---------------------------------------------------------------------------
-
-/// 跨材质 bind group 复用池。
-/// key = (BGL 指针 as u64, 按 binding 排序的 slot 指纹列表)。
-pub(crate) struct BindGroupPool {
-    inner: std::sync::Mutex<FxHashMap<(u64, Vec<u64>), wgpu::BindGroup>>,
-}
-
-impl BindGroupPool {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(FxHashMap::default()),
-        }
-    }
-
-    pub(crate) fn resolve(
-        &self,
-        bgl: &wgpu::BindGroupLayout,
-        slots: &FxHashMap<String, ResourceSlot>,
-        build: impl FnOnce() -> wgpu::BindGroup,
-    ) -> wgpu::BindGroup {
-        let bgl_id = std::ptr::from_ref(bgl) as u64;
-        let mut fps: Vec<(u32, u64)> = slots
-            .values()
-            .map(|s| (s.binding, slot_fingerprint(&s.kind)))
-            .collect();
-        fps.sort_by_key(|&(b, _)| b);
-        let fps: Vec<u64> = fps.into_iter().map(|(_, f)| f).collect();
-        let key = (bgl_id, fps);
-
-        {
-            let lock = self.inner.lock().unwrap();
-            if let Some(bg) = lock.get(&key) {
-                return bg.clone();
-            }
-        }
-        let bg = build();
-        self.inner.lock().unwrap().insert(key, bg.clone());
-        bg
-    }
-
-    #[allow(dead_code)]
-    pub fn clear(&self) {
-        self.inner.lock().unwrap().clear();
-    }
-}
-
-fn slot_fingerprint(kind: &SlotKind) -> u64 {
-    match kind {
-        SlotKind::Uniform { buffer, .. } | SlotKind::Storage { buffer, .. } => {
-            let p = std::ptr::from_ref(buffer) as u64;
-            p.wrapping_mul(6364136223846793005)
-        }
-        SlotKind::Texture { view, sampler, .. } => {
-            let vp = view.as_ref().map_or(0, |v| std::ptr::from_ref(v) as u64);
-            let sp = std::ptr::from_ref(sampler) as u64;
-            vp.wrapping_mul(6364136223846793005).wrapping_add(sp)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Descriptor types (public)
 // ---------------------------------------------------------------------------
 
@@ -216,19 +153,6 @@ pub enum MaterialResourceKind<'a> {
 pub struct MaterialResources<'a>(pub &'a [MaterialResource<'a>]);
 
 // ---------------------------------------------------------------------------
-// Cache policy (public)
-// ---------------------------------------------------------------------------
-
-/// Bind group 缓存策略。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CachePolicy {
-    /// 每帧重建 bind group。
-    AlwaysRebuild,
-    /// 资源指纹变化时才重建（默认）。
-    Dirty,
-}
-
-// ---------------------------------------------------------------------------
 // Internal resource slot
 // ---------------------------------------------------------------------------
 
@@ -283,10 +207,7 @@ pub(crate) enum MaterialState {
     A {
         bgl: wgpu::BindGroupLayout,
         slots: Mutex<FxHashMap<String, ResourceSlot>>,
-        cache_policy: CachePolicy,
         bind_group: Mutex<Option<wgpu::BindGroup>>,
-        #[allow(dead_code)]
-        fingerprints: Mutex<FxHashMap<String, u64>>,
         dirty: AtomicBool,
         /// 已对「纹理槽未填」打过一次 error 日志（避免每帧刷屏）。
         notified_unset: AtomicBool,
@@ -344,11 +265,12 @@ pub struct Material {
     pub(crate) state: MaterialState,
     pub(crate) source: String,
     pub(crate) shape_vertex_source: Option<String>,
-    /// 创建期预验证通过的 shape 顶点布局位集（bit = `ShapeVertexLayout as u8`）。
+    /// 该材质自定义顶点着色器声明的 shape 顶点布局。
     ///
-    /// 记录期按绘制路径检查：custom VS 只支持部分布局时，不支持的形状跳过
-    /// （不回落 mesh，避免契约不符）。
-    pub(crate) shape_layout_support: u8,
+    /// `None` = 没有自定义 VS（引擎按绘制路径选自己的 VS，任何布局都可用）；
+    /// `Some(layout)` = 只在该布局上生效，其他绘制路径的形状跳过（不回落 mesh，
+    /// 避免契约不符）。由创建期的显式声明决定，**不**从"是否编译通过"反推。
+    pub(crate) shape_layout: Option<ShapeVertexLayout>,
     /// 已 warn 过的不支持布局位集（warn-once）。
     pub(crate) warned_layouts: AtomicU8,
     /// 中性 depth-stencil 时是否写深度（默认 `false`）。
@@ -387,14 +309,14 @@ impl Material {
     pub(crate) fn new_zero_resource(
         source: String,
         shape_vertex_source: Option<String>,
-        shape_layout_support: u8,
+        shape_layout: Option<ShapeVertexLayout>,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
             state: MaterialState::ZeroResource,
             source,
             shape_vertex_source,
-            shape_layout_support,
+            shape_layout,
             warned_layouts: AtomicU8::new(0),
             depth_write: AtomicBool::new(false),
             depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
@@ -406,28 +328,24 @@ impl Material {
         bgl: wgpu::BindGroupLayout,
         slots: FxHashMap<String, ResourceSlot>,
         init_bind_group: Option<wgpu::BindGroup>,
-        cache_policy: CachePolicy,
         source: String,
         shape_vertex_source: Option<String>,
-        shape_layout_support: u8,
+        shape_layout: Option<ShapeVertexLayout>,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
         device: wgpu::Device,
     ) -> Self {
-        let fingerprints = FxHashMap::default();
         Self {
             state: MaterialState::A {
                 bgl,
                 slots: Mutex::new(slots),
-                cache_policy,
                 bind_group: Mutex::new(init_bind_group),
-                fingerprints: Mutex::new(fingerprints),
                 dirty: AtomicBool::new(false),
                 notified_unset: AtomicBool::new(false),
                 device,
             },
             source,
             shape_vertex_source,
-            shape_layout_support,
+            shape_layout,
             warned_layouts: AtomicU8::new(0),
             depth_write: AtomicBool::new(false),
             depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
@@ -441,7 +359,7 @@ impl Material {
         init_bind_group: Option<wgpu::BindGroup>,
         source: String,
         shape_vertex_source: Option<String>,
-        shape_layout_support: u8,
+        shape_layout: Option<ShapeVertexLayout>,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         Self {
@@ -453,7 +371,7 @@ impl Material {
             },
             source,
             shape_vertex_source,
-            shape_layout_support,
+            shape_layout,
             warned_layouts: AtomicU8::new(0),
             depth_write: AtomicBool::new(false),
             depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
@@ -468,7 +386,7 @@ impl Material {
         init_bind_groups: Vec<Option<wgpu::BindGroup>>,
         source: String,
         shape_vertex_source: Option<String>,
-        shape_layout_support: u8,
+        shape_layout: Option<ShapeVertexLayout>,
         pipelines: FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>,
     ) -> Self {
         assert_eq!(entries.len(), init_bind_groups.len());
@@ -494,7 +412,7 @@ impl Material {
             },
             source,
             shape_vertex_source,
-            shape_layout_support,
+            shape_layout,
             warned_layouts: AtomicU8::new(0),
             depth_write: AtomicBool::new(false),
             depth_compare: AtomicU8::new(wgpu::CompareFunction::Always as u8),
@@ -563,9 +481,17 @@ impl Material {
         u8_to_compare(self.depth_compare.load(Ordering::Relaxed))
     }
 
-    /// 该材质的 custom VS 是否支持给定 shape 顶点布局（创建期预验证结果）。
+    /// 该材质能否用于给定 shape 顶点布局。
+    ///
+    /// 没有自定义 VS → 任何布局都可以（引擎按路径选自己的 VS）；
+    /// 有自定义 VS → 只有创建期显式声明的那一个。
     pub(crate) fn supports_shape_layout(&self, layout: ShapeVertexLayout) -> bool {
-        self.shape_layout_support & (1u8 << layout as u8) != 0
+        self.shape_layout.is_none_or(|declared| declared == layout)
+    }
+
+    /// 自定义顶点着色器声明的 shape 顶点布局（`None` = 没有自定义 VS）。
+    pub fn shape_layout(&self) -> Option<ShapeVertexLayout> {
+        self.shape_layout
     }
 
     /// 对不支持的布局只警告一次（记录期跳过该形状，不回落 mesh）。
@@ -574,35 +500,35 @@ impl Material {
         let prev = self.warned_layouts.fetch_or(bit, Ordering::Relaxed);
         if prev & bit == 0 {
             log::warn!(
-                "custom material vertex shader does not support {layout:?} layout; shape skipped (draw path requires it)"
+                "custom material vertex shader was declared for a different layout; {layout:?} shapes are skipped"
             );
         }
     }
 
-    /// 确保 bind group 就绪（Dirty 检测/手动 provider），返回当前 bind group。
+    /// 确保 bind group 就绪（Dirty 检测 / 手动 provider），返回当前 bind group。
     /// 0 资源材质返回 `None`。
+    ///
+    /// 重建条件是「`dirty` 置位」或「尚无缓存」：任一 `set_*` 都会置 `dirty`，
+    /// 所以换绑资源后必然重建。这里**不能**按资源身份去重——`ResourceSlot`
+    /// 内的 buffer/view 句柄是原地替换的，按句柄地址做键会命中旧 bind group
+    /// 而把新资源漏掉（历史 bug）。
     pub(crate) fn ensure_bind_group(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        pool: &BindGroupPool,
     ) -> Option<wgpu::BindGroup> {
         match &self.state {
             MaterialState::ZeroResource => None,
             MaterialState::A {
                 bgl,
                 slots,
-                cache_policy,
                 bind_group,
                 dirty,
                 notified_unset,
                 ..
             } => {
                 let mut bg_guard = bind_group.lock().unwrap();
-                if *cache_policy == CachePolicy::AlwaysRebuild
-                    || dirty.load(Ordering::Acquire)
-                    || bg_guard.is_none()
-                {
+                if dirty.load(Ordering::Acquire) || bg_guard.is_none() {
                     let slots_guard = slots.lock().unwrap();
                     let has_unset = slots_guard
                         .values()
@@ -616,9 +542,8 @@ impl Material {
                         }
                         // 未填槽：不缓存，返回 None；填齐后（dirty=true）会自动重建。
                     } else {
-                        let new_bg = pool.resolve(bgl, &slots_guard, || {
-                            build_bind_group_from_slots(device, bgl, &slots_guard).unwrap()
-                        });
+                        let new_bg = build_bind_group_from_slots(device, bgl, &slots_guard)
+                            .expect("bind group build must not fail after slot validation");
                         drop(slots_guard);
                         *bg_guard = Some(new_bg);
                         dirty.store(false, Ordering::Release);
@@ -655,7 +580,6 @@ impl Material {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        pool: &BindGroupPool,
     ) -> Vec<(u32, wgpu::BindGroup)> {
         match &self.state {
             MaterialState::SelfManaged {
@@ -685,7 +609,7 @@ impl Material {
                 provider: _,
                 bind_group: _,
                 ..
-            } => match self.ensure_bind_group(device, queue, pool) {
+            } => match self.ensure_bind_group(device, queue) {
                 Some(bg) => vec![(*group_index, bg)],
                 None => Vec::new(),
             },

@@ -14,7 +14,7 @@ use super::{
     BatchEncodeCtx, BatchEncodeInfo, BatchShapeCommand, ClipPath, DepthStencilOps,
     DepthStencilTarget, DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment,
     OrderedShapeSegment, ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment,
-    TextRenderSegment,
+    TextRenderSegment, patch_instance_poly_base, patch_vertex_poly_base,
 };
 
 /// 同步 blend 常量：段用 `Constant` 系数时才调（小众路径；无条件设置，正确优先）。
@@ -63,7 +63,6 @@ pub struct PreparedFrame<'a> {
     ds: ResolvedDsOps,
     has_ds: bool,
     uses_stencil: bool,
-    mrt: bool,
     wants_pass: bool,
     clip_paths: Vec<ClipPath>,
     draw_calls: std::cell::Cell<u32>,
@@ -231,9 +230,9 @@ impl Renderer {
             })
             .collect();
 
-        // MRT：>1 个颜色附件的 pass。引擎 MSAA / 文字 / 引擎形状均只支持单目标，
-        // MRT 由 custom material（多个 FS 输出）承担，其余内容跳过并 warn-once。
-        let mrt = target.color_attachments.len() > 1;
+        // 多颜色附件的 pass 由 custom material（多个 FS 输出）承担；引擎 shader 与
+        // 文字管线只有单颜色输出，判断落在各自使用点（`target_blends.len() != 1`），
+        // 不再跨阶段传递一个 `mrt` 布尔。
         let target_blends: Vec<Option<wgpu::BlendState>> =
             target.color_attachments.iter().map(|a| a.blend).collect();
         // 相机为逻辑像素正交；Pop 全屏四边形也用逻辑尺寸
@@ -553,9 +552,7 @@ impl Renderer {
                         let poly_base = batch_poly_base[info_idx] as f32;
                         let patch = |mut instance: InstanceData| -> InstanceData {
                             instance.transform_index += transform_base;
-                            if instance.sdf_type == 6 || instance.sdf_type == 7 {
-                                instance.sdf_params[0] += poly_base;
-                            }
+                            patch_instance_poly_base(&mut instance, poly_base);
                             instance
                         };
                         if batch.merge_instance_states
@@ -888,8 +885,8 @@ impl Renderer {
                                 if transform_base > 0 {
                                     v.transform_index += transform_base;
                                 }
-                                if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
-                                    v.sdf_params[0] += poly_base;
+                                if has_poly {
+                                    patch_vertex_poly_base(&mut v, poly_base);
                                 }
                                 combined_vdata.extend_from_slice(bytemuck::bytes_of(&v));
                             }
@@ -955,11 +952,9 @@ impl Renderer {
                                         instance.transform_index + transform_base,
                                     ),
                                 ];
-                                for vertex in &mut verts {
+                                for vertex in verts.iter_mut() {
                                     vertex.sdf_params = instance.sdf_params;
-                                    if instance.sdf_type == 6 || instance.sdf_type == 7 {
-                                        vertex.sdf_params[0] += poly_base;
-                                    }
+                                    patch_vertex_poly_base(vertex, poly_base);
                                     vertex.sdf_extra = instance.sdf_extra;
                                     vertex.sdf_type = instance.sdf_type;
                                     vertex.sdf_feather = instance.sdf_feather;
@@ -1301,8 +1296,8 @@ impl Renderer {
                                 if transform_base > 0 {
                                     v.transform_index += transform_base;
                                 }
-                                if has_poly && (v.sdf_type == 6 || v.sdf_type == 7) {
-                                    v.sdf_params[0] += poly_base;
+                                if has_poly {
+                                    patch_vertex_poly_base(&mut v, poly_base);
                                 }
                                 combined_vdata.extend_from_slice(bytemuck::bytes_of(&v));
                             }
@@ -1489,7 +1484,7 @@ impl Renderer {
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
         {
             let mut tc = self.gpu.text_ctx.lock().unwrap();
-            tc.ensure_sample_count(&self.gpu.device, self.sample_count);
+            tc.ensure_sample_count(&self.gpu.device, target.aa.samples);
             tc.ensure_text_stencil_mode(
                 &self.gpu.device,
                 if has_ds {
@@ -1650,7 +1645,6 @@ impl Renderer {
             ds: resolved_ds,
             has_ds,
             uses_stencil,
-            mrt,
             wants_pass,
             clip_paths,
             draw_calls: std::cell::Cell::new(0),
@@ -1692,7 +1686,12 @@ impl PreparedFrame<'_> {
 
     /// 引擎 pipeline 的 sample count（`1` = 无 MSAA）。
     pub fn sample_count(&self) -> u32 {
-        self.renderer.sample_count
+        self.target.aa.samples
+    }
+
+    /// 本次绘制的完整采样契约。
+    pub fn target_aa(&self) -> crate::render::TargetAa {
+        self.target.aa
     }
 
     /// `encode` 是否会按“有 depth-stencil”选择管线。
@@ -1731,9 +1730,9 @@ impl PreparedFrame<'_> {
             geo_template_vbuf: geo_template_vbuf.as_ref().map(|b| &b.0),
             geo_template_ibuf: geo_template_ibuf.as_ref().map(|b| &b.0),
             geo_instance_buf: geo_instance_buf.as_ref().map(|b| &b.0),
-            sample_count: r.sample_count,
-            alpha_to_coverage: r.alpha_to_coverage,
-            ssaa: r.ssaa,
+            sample_count: self.target.aa.samples,
+            alpha_to_coverage: self.target.aa.alpha_to_coverage,
+            ssaa: self.target.aa.per_sample,
         };
         let mut scissor_stack = r.scratch_scissor_stack.lock();
         scissor_stack.clear();
@@ -1805,7 +1804,8 @@ impl PreparedFrame<'_> {
                 };
                 shape_draw_calls += DrawBatch::encode_into(&mut *pass, &encode_info, &ctx);
             }
-            if !info.text.is_empty() && self.mrt {
+            // 文字管线只有单颜色输出：附件数不为 1 时无法写进本 pass。
+            if !info.text.is_empty() && self.target.color_attachments.len() != 1 {
                 mrt_warn_once("text");
             } else if !info.text.is_empty() {
                 // 有 DS 时：Push/Test 用 Equal；op=0（UI/unclipped）用 Always，避免误裁
@@ -1833,7 +1833,7 @@ impl PreparedFrame<'_> {
                 // 文字路径：材质取 batch 最终值（text 无 per-shape command）。
                 let material_bg = match info.custom_material.as_ref() {
                     Some(m) if m.bgl().is_some() => {
-                        m.ensure_bind_group(&r.gpu.device, &r.gpu.queue, &r.gpu.bind_group_pool)
+                        m.ensure_bind_group(&r.gpu.device, &r.gpu.queue)
                     }
                     _ => None,
                 };
@@ -1856,8 +1856,8 @@ impl PreparedFrame<'_> {
                             match r.gpu.ensure_material_pipeline(
                                 m,
                                 MaterialTarget::Text,
-                                r.sample_count,
-                                r.alpha_to_coverage,
+                                self.target.aa.samples,
+                                self.target.aa.alpha_to_coverage,
                                 false,
                                 self.has_ds,
                                 self.uses_stencil,
@@ -1920,34 +1920,37 @@ impl PreparedFrame<'_> {
         encoder: &'e mut wgpu::CommandEncoder,
     ) -> wgpu::RenderPass<'e> {
         let r = self.renderer;
-        let msaa_view = r.msaa_view(r.gpu.surface_format());
-        // 目标附件清单：MRT 直接使用用户的多个颜色附件（引擎 MSAA 仅单目标路径）；
-        // 单目标路径保持 MSAA resolve 到 target 0 的既有行为。
+        let aa = self.target.aa;
+        let format = r.gpu.surface_format();
+        // 引擎 MSAA：逐附件判断。附件自身已是多重采样（用户给的）或已带
+        // `resolve_target`（用户自己 resolve）时引擎不介入；否则按 `aa.samples`
+        // 自建一份并 resolve 回该附件。MRT 与 MSAA 因此可以共存。
+        let msaa_views: Vec<Option<wgpu::TextureView>> = self
+            .target
+            .color_attachments
+            .iter()
+            .enumerate()
+            .map(|(i, att)| {
+                let needs_engine_msaa = aa.samples > 1
+                    && att.resolve_target.is_none()
+                    && att.view.texture().sample_count() == 1;
+                if needs_engine_msaa {
+                    r.msaa_view_at(i, format, aa.samples)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
             Vec::with_capacity(self.target.color_attachments.len().max(1));
-        if self.mrt {
-            for (i, att) in self.target.color_attachments.iter().enumerate() {
-                let load = self.loads.get(i).copied().unwrap_or(wgpu::LoadOp::Load);
-                color_attachments.push(Some(wgpu::RenderPassColorAttachment {
-                    view: &att.view,
-                    resolve_target: att.resolve_target.as_ref(),
-                    ops: wgpu::Operations {
-                        load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                }));
-            }
-        } else {
-            let target_view = &self.target.color_attachments[0].view;
-            let load = self.loads.first().copied().unwrap_or(wgpu::LoadOp::Load);
-            let (color_view, resolve): (&wgpu::TextureView, Option<&wgpu::TextureView>) =
-                match &msaa_view {
-                    Some(msaa) => (msaa, Some(target_view)),
-                    None => (target_view, None),
-                };
+        for (i, att) in self.target.color_attachments.iter().enumerate() {
+            let load = self.loads.get(i).copied().unwrap_or(wgpu::LoadOp::Load);
+            let (view, resolve) = match &msaa_views[i] {
+                Some(msaa) => (msaa, Some(&att.view)),
+                None => (&att.view, att.resolve_target.as_ref()),
+            };
             color_attachments.push(Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
+                view,
                 resolve_target: resolve,
                 ops: wgpu::Operations {
                     load,
@@ -1960,7 +1963,7 @@ impl PreparedFrame<'_> {
         let ds_attachment = match &self.ds {
             ResolvedDsOps::None => None,
             ResolvedDsOps::Engine(ops) => {
-                dv = r.ds_view();
+                dv = r.ds_view(aa.samples);
                 // depth 也 Clear：部分后端在 depth_ops=None 时对未定义 depth 行为异常，
                 // 且 glyphon 写 depth=0，需可预测的 depth 缓冲。
                 // 每次 draw 独立建立并清理 stencil；multi-draw 只复用颜色 attachment。

@@ -207,6 +207,32 @@ pub(crate) struct GeoTemplate {
     vertex_count: u32,
 }
 
+/// `sdf_type` 是否为「多边形 / 折线」（`6` / `7`）。
+///
+/// 这两类的 `sdf_params[0]` 是**边索引**，记录期只存 batch 局部值；引擎在把 batch
+/// 合并进全局 buffer 时必须补上该 batch 的全局基址。判定集中在这里，避免
+/// `sdf_type == 6 || sdf_type == 7` 散落在多处（曾经 6 处重复，改一处极易漏）。
+#[inline]
+pub(crate) fn sdf_uses_polygon_edges(sdf_type: u32) -> bool {
+    sdf_type == 6 || sdf_type == 7
+}
+
+/// 给实例补 batch 的边索引基址（只对多边形/折线生效）。
+#[inline]
+pub(crate) fn patch_instance_poly_base(instance: &mut InstanceData, base: f32) {
+    if sdf_uses_polygon_edges(instance.sdf_type) {
+        instance.sdf_params[0] += base;
+    }
+}
+
+/// 给 mesh 顶点补 batch 的边索引基址（只对多边形/折线生效）。
+#[inline]
+pub(crate) fn patch_vertex_poly_base(vertex: &mut Vertex, base: f32) {
+    if sdf_uses_polygon_edges(vertex.sdf_type) {
+        vertex.sdf_params[0] += base;
+    }
+}
+
 /// 粒子段：`combined_particles` 的一段，共享 unit quad（与 `InstanceSegment` 同机理，
 /// 缓冲不同）。`material` 逐段捕获（画笔状态机，不同材质不合并）。
 pub(crate) struct ParticleSegment {
@@ -611,6 +637,110 @@ pub enum DepthStencilTarget {
     Engine(DepthStencilOps),
 }
 
+/// 一次绘制的采样契约（MSAA / SSAA / alpha-to-coverage）。
+///
+/// 它是**目标**的属性，不是 pass 的属性：附件有多少采样点、片元着色器是否按采样点
+/// 求值、是否启用 alpha-to-coverage——这三件事共同决定管线形状与附件组成，所以随
+/// [`RenderTarget`] 一起传入，渲染器不再自己保存一份 AA 状态。
+///
+/// | 取值 | 含义 |
+/// |---|---|
+/// | `samples == 1` | 无多重采样（`per_sample` / `alpha_to_coverage` 必须为 false） |
+/// | `samples > 1, per_sample == false` | MSAA：每像素着色，硬件 resolve |
+/// | `samples > 1, per_sample == true` | SSAA：`@interpolate(linear, sample)`，每采样点着色 |
+///
+/// 引擎自建 MSAA（`samples > 1` 且附件本身是单采样且没有 `resolve_target`）时，
+/// 用的就是这个 `samples`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetAa {
+    /// 本次 pass 的采样点数（1 = 无多重采样）。
+    pub samples: u32,
+    /// 片元着色器是否按采样点求值（SSAA 与 MSAA 的唯一区别）。
+    pub per_sample: bool,
+    /// 是否启用 alpha-to-coverage（与 MSAA/SSAA 正交）。
+    pub alpha_to_coverage: bool,
+}
+
+impl Default for TargetAa {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl TargetAa {
+    /// 单采样、无极性特性。
+    pub const fn none() -> Self {
+        Self {
+            samples: 1,
+            per_sample: false,
+            alpha_to_coverage: false,
+        }
+    }
+
+    /// MSAA：每像素着色 + 硬件 resolve。
+    pub const fn msaa(samples: u32) -> Self {
+        Self {
+            samples,
+            per_sample: false,
+            alpha_to_coverage: false,
+        }
+    }
+
+    /// SSAA：每采样点着色（`@interpolate(linear, sample)`）。
+    pub const fn ssaa(samples: u32) -> Self {
+        Self {
+            samples,
+            per_sample: true,
+            alpha_to_coverage: false,
+        }
+    }
+
+    /// 打开/关闭 alpha-to-coverage（builder）。
+    pub const fn with_alpha_to_coverage(mut self, enabled: bool) -> Self {
+        self.alpha_to_coverage = enabled;
+        self
+    }
+
+    /// 从附件的实际采样点数推导（单采样 → [`TargetAa::none`]）。
+    pub fn from_view(view: &wgpu::TextureView) -> Self {
+        match view.texture().sample_count() {
+            n if n > 1 => Self::msaa(n),
+            _ => Self::none(),
+        }
+    }
+
+    /// `samples == 1` 时不允许 `per_sample` / `alpha_to_coverage`。
+    pub(crate) fn is_consistent(&self) -> bool {
+        self.samples > 0 && (self.samples > 1 || (!self.per_sample && !self.alpha_to_coverage))
+    }
+}
+
+impl From<crate::window::AntiAliasing> for TargetAa {
+    /// 画布级抗锯齿配置 → 一次绘制的采样契约。
+    ///
+    /// `samples == 1` 时丢掉 `per_sample` / `alpha_to_coverage`（单采样下无意义，
+    /// 且 wgpu 会拒绝）。
+    fn from(aa: crate::window::AntiAliasing) -> Self {
+        use crate::window::AntiAliasing;
+        let aa = match aa {
+            AntiAliasing::None => TargetAa::none(),
+            AntiAliasing::Msaa {
+                samples,
+                alpha_to_coverage,
+            } => TargetAa::msaa(samples).with_alpha_to_coverage(alpha_to_coverage),
+            AntiAliasing::Ssaa {
+                samples,
+                alpha_to_coverage,
+            } => TargetAa::ssaa(samples).with_alpha_to_coverage(alpha_to_coverage),
+        };
+        if aa.samples <= 1 {
+            TargetAa::none()
+        } else {
+            aa
+        }
+    }
+}
+
 /// 单个颜色附件描述（MRT 支持多个）。
 pub struct ColorTargetDesc {
     pub view: wgpu::TextureView,
@@ -627,11 +757,17 @@ pub struct RenderTarget {
     pub color_attachments: Vec<ColorTargetDesc>,
     /// 本帧 depth-stencil 附件（`None` = 引擎默认行为，见 [`DepthStencilTarget`]）。
     pub depth_stencil: Option<DepthStencilTarget>,
+    /// 本次绘制的采样契约（采样点数 / SSAA / alpha-to-coverage）。
+    ///
+    /// 构造时从附件推导（单采样 → [`TargetAa::none`]）；引擎自建 MSAA 时由
+    /// 画布（窗口/离屏）显式覆盖，例如 `target.set_aa(TargetAa::msaa(4))`。
+    pub aa: TargetAa,
 }
 
 impl RenderTarget {
     /// 从已有的 TextureView 创建（单目标，兼容旧调用）。
     pub fn from_texture_view(view: wgpu::TextureView) -> Self {
+        let aa = TargetAa::from_view(&view);
         Self {
             color_attachments: vec![ColorTargetDesc {
                 view,
@@ -639,15 +775,21 @@ impl RenderTarget {
                 blend: None,
             }],
             depth_stencil: None,
+            aa,
         }
     }
 
     /// 从多个颜色附件创建（MRT）。
     pub fn from_color_attachments(attachments: Vec<ColorTargetDesc>) -> Self {
         debug_assert!(!attachments.is_empty(), "color_attachments 不能为空");
+        let aa = attachments
+            .first()
+            .map(|a| TargetAa::from_view(&a.view))
+            .unwrap_or_default();
         Self {
             color_attachments: attachments,
             depth_stencil: None,
+            aa,
         }
     }
 
@@ -655,6 +797,25 @@ impl RenderTarget {
     pub fn with_depth_stencil(mut self, depth_stencil: Option<DepthStencilTarget>) -> Self {
         self.depth_stencil = depth_stencil;
         self
+    }
+
+    /// 覆盖本次绘制的采样契约（builder）。引擎自建 MSAA 时用。
+    pub fn with_aa(mut self, aa: TargetAa) -> Self {
+        debug_assert!(
+            aa.is_consistent(),
+            "TargetAa: samples == 1 时不能开 per_sample/atc"
+        );
+        self.aa = aa;
+        self
+    }
+
+    /// 覆盖本次绘制的采样契约。
+    pub fn set_aa(&mut self, aa: TargetAa) {
+        debug_assert!(
+            aa.is_consistent(),
+            "TargetAa: samples == 1 时不能开 per_sample/atc"
+        );
+        self.aa = aa;
     }
 
     /// 设置本帧 depth-stencil 附件（默认 `None`）。
@@ -702,10 +863,8 @@ pub struct Renderer {
     /// （scale/dpi 不变 → 图集 cache key 稳定），仅 shader NDC 映射补偿 DXGI 拉伸。
     /// `None` = 用 `physical_width/height`（旧 surface 尺寸）。
     text_viewport_override: Mutex<Option<(u32, u32)>>,
-    sample_count: u32,
-    alpha_to_coverage: bool,
-    ssaa: bool,
-    msaa_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    /// 引擎自建的 MSAA 附件，按颜色附件下标缓存（MRT 时每个附件各一份）。
+    msaa_texs: Mutex<Vec<Option<(wgpu::Texture, wgpu::TextureView)>>>,
     ds_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     transform_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
@@ -760,7 +919,6 @@ impl Renderer {
         physical_width: u32,
         physical_height: u32,
         scale: f32,
-        aa: crate::window::AntiAliasing,
         dpi_scale: f32,
     ) -> Self {
         let proj = glam::camera::rh::proj::opengl::orthographic(
@@ -806,10 +964,7 @@ impl Renderer {
             physical_height,
             scale,
             text_viewport_override: Mutex::new(None),
-            sample_count: aa.sample_count(),
-            alpha_to_coverage: aa.alpha_to_coverage(),
-            ssaa: aa.is_ssaa(),
-            msaa_tex: Mutex::new(None),
+            msaa_texs: Mutex::new(Vec::new()),
             ds_tex: Mutex::new(None),
             polygon_edge_buf: Mutex::new(None),
             transform_buf: Mutex::new(None),
@@ -858,33 +1013,36 @@ impl Renderer {
         self.last_clip_paths.lock().clone()
     }
 
-    /// 更新抗锯齿设置（样本数 / alpha_to_coverage / SSAA）。
-    /// 会清空现有 MSAA/DS 纹理，下一帧重建。
-    pub fn update_aa(&mut self, aa: crate::window::AntiAliasing) {
-        self.sample_count = aa.sample_count();
-        self.alpha_to_coverage = aa.alpha_to_coverage();
-        self.ssaa = aa.is_ssaa();
-        self.clear_msaa_ds();
-    }
-
-    /// 清空 MSAA/DS 纹理缓存（格式漂移或尺寸变化后下一帧重建）。
+    /// 清空 MSAA/DS 纹理缓存（格式漂移、尺寸或采样点数变化后下一帧重建）。
     pub(crate) fn clear_msaa_ds(&self) {
-        *self.msaa_tex.lock() = None;
+        self.msaa_texs.lock().clear();
         *self.ds_tex.lock() = None;
     }
 
-    /// 获取 multisampled 视图（必要时创建），无 MSAA 返回 None
-    fn msaa_view(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
-        if self.sample_count <= 1 {
+    /// 获取第 `index` 个颜色附件的引擎 MSAA 视图（必要时创建）。
+    ///
+    /// `samples <= 1` 返回 `None`，调用方直接用原附件。
+    fn msaa_view_at(
+        &self,
+        index: usize,
+        format: wgpu::TextureFormat,
+        samples: u32,
+    ) -> Option<wgpu::TextureView> {
+        if samples <= 1 {
             return None;
         }
-        let mut mt = self.msaa_tex.lock();
-        if mt.is_none()
-            || mt.as_ref().unwrap().0.width() != self.physical_width
-            || mt.as_ref().unwrap().0.height() != self.physical_height
-            || mt.as_ref().unwrap().0.sample_count() != self.sample_count
-            || mt.as_ref().unwrap().0.format() != format
-        {
+        let mut views = self.msaa_texs.lock();
+        if views.len() <= index {
+            views.resize_with(index + 1, || None);
+        }
+        let slot = &mut views[index];
+        let stale = slot.as_ref().is_none_or(|(t, _)| {
+            t.width() != self.physical_width
+                || t.height() != self.physical_height
+                || t.sample_count() != samples
+                || t.format() != format
+        });
+        if stale {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("msaa"),
                 size: wgpu::Extent3d {
@@ -893,29 +1051,27 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: self.sample_count,
+                sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            *mt = Some((tex, view));
+            *slot = Some((tex, view));
         }
-        Some(mt.as_ref().unwrap().1.clone())
+        slot.as_ref().map(|(_, v)| v.clone())
     }
 
-    /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。sample_count 与 color 一致。
-    fn ds_view(&self) -> wgpu::TextureView {
+    /// 获取 depth/stencil 视图（Depth24PlusStencil8，必要时创建）。
+    /// 采样点数与颜色附件一致。
+    fn ds_view(&self, samples: u32) -> wgpu::TextureView {
         let mut dt = self.ds_tex.lock();
-        let ok = dt
-            .as_ref()
-            .map(|(t, _)| {
-                t.width() == self.physical_width
-                    && t.height() == self.physical_height
-                    && t.sample_count() == self.sample_count
-            })
-            .unwrap_or(false);
+        let ok = dt.as_ref().is_some_and(|(t, _)| {
+            t.width() == self.physical_width
+                && t.height() == self.physical_height
+                && t.sample_count() == samples
+        });
         if !ok {
             let tex = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("depth_stencil"),
@@ -925,7 +1081,7 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: self.sample_count,
+                sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth24PlusStencil8,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -998,7 +1154,7 @@ impl Renderer {
         self.physical_width = physical_width;
         self.physical_height = physical_height;
         *self.text_viewport_override.lock() = None;
-        *self.msaa_tex.lock() = None;
+        self.msaa_texs.lock().clear();
         *self.ds_tex.lock() = None;
     }
 

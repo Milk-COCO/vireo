@@ -39,70 +39,54 @@ pub(crate) fn strip_noflat_invariant(src: &str) -> String {
     src.replace("@invariant ", "")
 }
 
-pub(crate) fn default_shape_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
-    let source = include_str!("../shader.wgsl");
-    let base = if ssaa {
+/// 默认顶点着色器生成选项——决策默认 VS 源码变体的两个维度，集中在这里。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ShapeShaderFlags {
+    /// SSAA：`local_pos` 用 `@interpolate(linear, sample)`（每采样点着色）。
+    pub ssaa: bool,
+    /// 弱 GLES 后端回退：剥掉 `local_pos` 插值修饰（见 [`strip_noflat_interpolation`]）。
+    pub noflat: bool,
+}
+
+/// SDF 系着色器（`shader` / `shader_instance` / `shader_particle`）的 SSAA 开关：
+/// 源码默认带 `, sample`（SSAA 才是"原样"），MSAA 时把修饰去掉。
+fn per_sample_source(source: &str, ssaa: bool) -> String {
+    if ssaa {
         source.to_owned()
     } else {
         source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
-    };
-    if noflat {
-        strip_noflat_interpolation(&base)
-    } else {
-        base
     }
 }
 
-/// 默认 SDF instance VS（`shader_instance.wgsl`），按 `ssaa` 同步 local_pos 插值。
-/// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致：
-///   - ssaa=true：  VS/FS 双方 `@interpolate(linear, sample)`
-///   - ssaa=false： VS/FS 双方 `@interpolate(linear)`
-/// `noflat=true` 时双方统一退为默认插值（见 `strip_noflat_interpolation`）。
-pub(crate) fn default_sdf_instance_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
-    let source = include_str!("../shader_instance.wgsl");
-    let base = if ssaa {
-        source.to_owned()
-    } else {
-        source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
+/// 按顶点布局取默认顶点着色器源码——**唯一**的变体选择点。
+///
+/// `local_pos` 的插值必须与材质 FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 对齐：
+///   - `ssaa = true`：  VS/FS 双方 `@interpolate(linear, sample)`
+///   - `ssaa = false`： VS/FS 双方 `@interpolate(linear)`
+///   - `noflat = true`：双方统一退为默认插值（弱 GLES 后端）
+pub(crate) fn shape_vertex_wgsl(layout: ShapeVertexLayout, flags: ShapeShaderFlags) -> String {
+    let base = match layout {
+        ShapeVertexLayout::Mesh => per_sample_source(include_str!("../shader.wgsl"), flags.ssaa),
+        ShapeVertexLayout::SdfInstance => {
+            per_sample_source(include_str!("../shader_instance.wgsl"), flags.ssaa)
+        }
+        // geo VS 源码默认是 per-pixel（`@interpolate(linear)`），SSAA 时反向提升。
+        ShapeVertexLayout::GeoInstance => {
+            let source = include_str!("../shader_geo_instance.wgsl");
+            if flags.ssaa {
+                source.replace(
+                    "@interpolate(linear) local_pos",
+                    "@interpolate(linear, sample) local_pos",
+                )
+            } else {
+                source.to_owned()
+            }
+        }
+        ShapeVertexLayout::Particle => {
+            per_sample_source(include_str!("../shader_particle.wgsl"), flags.ssaa)
+        }
     };
-    if noflat {
-        strip_noflat_interpolation(&base)
-    } else {
-        base
-    }
-}
-
-/// 默认 Geo instance VS（`shader_geo_instance.wgsl`），按 `ssaa` 同步 local_pos 插值。
-/// geo shape 本无 SDF 字段，VS 输出 local_pos 仅为 material FS 可读参考。
-pub(crate) fn default_geo_instance_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
-    let source = include_str!("../shader_geo_instance.wgsl");
-    let base = if ssaa {
-        // geo VS 当前用 `@interpolate(linear)`（per-pixel），提升为 per-sample 与 FS 对齐
-        source.replace(
-            "@interpolate(linear) local_pos",
-            "@interpolate(linear, sample) local_pos",
-        )
-    } else {
-        source.to_owned()
-    };
-    if noflat {
-        strip_noflat_interpolation(&base)
-    } else {
-        base
-    }
-}
-
-/// 默认粒子 VS（`shader_particle.wgsl`），按 `ssaa` 同步 local_pos 插值。
-/// 与 material FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 保持一致（SDF 字段恒 0，
-/// `vireo_apply_sdf` 早退；`local_pos` 为 material FS 可读参考）。
-pub(crate) fn default_particle_vertex_wgsl(ssaa: bool, noflat: bool) -> String {
-    let source = include_str!("../shader_particle.wgsl");
-    let base = if ssaa {
-        source.to_owned()
-    } else {
-        source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
-    };
-    if noflat {
+    if flags.noflat {
         strip_noflat_interpolation(&base)
     } else {
         base
@@ -513,6 +497,10 @@ pub(crate) enum MaterialTarget {
 /// Shape Material 的顶点布局。同一 Material FS 可绑定不同顶点布局，
 /// 按 batch 类型自动选最优路径（mesh / SDF instance / Geo instance）。
 ///
+/// 带自定义顶点着色器（custom VS）的材质**必须显式声明**用哪一个布局：
+/// 它们的输入契约互不兼容，靠"能不能编译通过"反推会得到"编过但语义错"的管线。
+/// fragment-only 材质不需要声明（引擎按绘制路径选自己的 VS）。
+///
 /// - `Mesh`：单 buffer `[Vertex]`（68B），用于 `DrawBatch.vertices` / Area 全屏 quad
 ///   / 直接 push 顶点的用户绘制。
 /// - `SdfInstance`：单 buffer `[QuadVertex]`（8B）+ group 2 binding 2 的
@@ -527,10 +515,11 @@ pub(crate) enum MaterialTarget {
 ///   FS 极简（tex×color，无 SDF）。**仅 fragment-only Material 可用**（custom VS 在
 ///   `draw_particles` 记录期烘焙为 mesh）。
 ///
-/// custom VS 的布局支持集由创建期预验证决定，记录期按绘制路径检查。
+/// 声明了某个布局的 custom VS 只在该路径生效；其他路径的形状会被跳过并
+/// warn-once（不回落 mesh，避免"悄悄换一套语义"）。
 /// `material_pipeline_key` 用 bit 8-9 区分 layout。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ShapeVertexLayout {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShapeVertexLayout {
     Mesh = 0,
     SdfInstance = 1,
     GeoInstance = 2,
@@ -1406,16 +1395,13 @@ impl GpuContext {
                 // layout 决定默认 VS：Mesh 用 default_shape，instance path 用各自 VS。
                 // custom VS 按绘制路径契约读取（Mesh/SDF/Geo）；Particle 仅 fragment-only
                 //（粒子 path 记录期已烘焙为 mesh，到此即错误用法）。
-                let default_vs = match shape_layout {
-                    ShapeVertexLayout::Mesh => default_shape_vertex_wgsl(ssaa, self.noflat),
-                    ShapeVertexLayout::SdfInstance => {
-                        default_sdf_instance_vertex_wgsl(ssaa, self.noflat)
-                    }
-                    ShapeVertexLayout::GeoInstance => {
-                        default_geo_instance_vertex_wgsl(ssaa, self.noflat)
-                    }
-                    ShapeVertexLayout::Particle => default_particle_vertex_wgsl(ssaa, self.noflat),
-                };
+                let default_vs = shape_vertex_wgsl(
+                    shape_layout,
+                    ShapeShaderFlags {
+                        ssaa,
+                        noflat: self.noflat,
+                    },
+                );
                 let vs_source = match shape_layout {
                     ShapeVertexLayout::Mesh
                     | ShapeVertexLayout::SdfInstance
@@ -1991,8 +1977,22 @@ mod custom_material_tests {
 
     #[test]
     fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
-        assert!(default_shape_vertex_wgsl(true, false).contains("@interpolate(linear, sample)"));
-        assert!(!default_shape_vertex_wgsl(false, false).contains("@interpolate(linear, sample)"));
+        let ssaa = shape_vertex_wgsl(
+            ShapeVertexLayout::Mesh,
+            ShapeShaderFlags {
+                ssaa: true,
+                noflat: false,
+            },
+        );
+        let msaa = shape_vertex_wgsl(
+            ShapeVertexLayout::Mesh,
+            ShapeShaderFlags {
+                ssaa: false,
+                noflat: false,
+            },
+        );
+        assert!(ssaa.contains("@interpolate(linear, sample)"));
+        assert!(!msaa.contains("@interpolate(linear, sample)"));
     }
 
     #[test]
@@ -2030,19 +2030,46 @@ mod custom_material_tests {
     #[test]
     fn noflat_vertex_sources_have_no_linear_interpolation() {
         // 四条 local_pos 路径在 noflat 下全部退为默认插值，flat 不动。
+        let noflat = ShapeShaderFlags {
+            ssaa: true,
+            noflat: true,
+        };
+        let noflat_msaa = ShapeShaderFlags {
+            ssaa: false,
+            noflat: true,
+        };
         for src in [
-            default_shape_vertex_wgsl(true, true),
-            default_shape_vertex_wgsl(false, true),
-            default_sdf_instance_vertex_wgsl(true, true),
-            default_geo_instance_vertex_wgsl(true, true),
-            default_geo_instance_vertex_wgsl(false, true),
-            default_particle_vertex_wgsl(true, true),
+            shape_vertex_wgsl(ShapeVertexLayout::Mesh, noflat),
+            shape_vertex_wgsl(ShapeVertexLayout::Mesh, noflat_msaa),
+            shape_vertex_wgsl(ShapeVertexLayout::SdfInstance, noflat),
+            shape_vertex_wgsl(ShapeVertexLayout::GeoInstance, noflat),
+            shape_vertex_wgsl(ShapeVertexLayout::GeoInstance, noflat_msaa),
+            shape_vertex_wgsl(ShapeVertexLayout::Particle, noflat),
         ] {
             assert!(!src.contains("@interpolate(linear"), "{}", &src[..80]);
             assert!(src.contains("@interpolate(flat)"));
         }
-        // 非 noflat 路径行为不变。
-        assert!(default_shape_vertex_wgsl(true, false).contains("@interpolate(linear, sample)"));
+        // 非 noflat 路径行为不变：SSAA 才是 per-sample 的那份。
+        assert!(
+            shape_vertex_wgsl(
+                ShapeVertexLayout::Mesh,
+                ShapeShaderFlags {
+                    ssaa: true,
+                    noflat: false
+                }
+            )
+            .contains("@interpolate(linear, sample)")
+        );
+        assert!(
+            !shape_vertex_wgsl(
+                ShapeVertexLayout::Mesh,
+                ShapeShaderFlags {
+                    ssaa: false,
+                    noflat: false
+                }
+            )
+            .contains("@interpolate(linear, sample)")
+        );
     }
 
     #[test]

@@ -143,10 +143,18 @@ async fn main() {
         None::<fn()>,
     );
     let sdf_material = app
-        .material_with_vertex_shader(FRAGMENT_WGSL, SDF_VERTEX_WGSL)
+        .material_with_vertex_shader(
+            FRAGMENT_WGSL,
+            SDF_VERTEX_WGSL,
+            ShapeVertexLayout::SdfInstance,
+        )
         .expect("sdf instance custom vertex WGSL compile");
     let geo_material = app
-        .material_with_vertex_shader(FRAGMENT_WGSL, GEO_VERTEX_WGSL)
+        .material_with_vertex_shader(
+            FRAGMENT_WGSL,
+            GEO_VERTEX_WGSL,
+            ShapeVertexLayout::GeoInstance,
+        )
         .expect("geo template custom vertex WGSL compile");
 
     app.run(move |ctx| {

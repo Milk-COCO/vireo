@@ -18,12 +18,8 @@ async fn main() {
         };
         let mut batch = DrawBatch::new();
 
-        match tex {
-            Some(i) => {
-                let t = match ctx.app().texture(i) {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
+        match tex.as_deref() {
+            Some(t) => {
                 let s = 0.2; // logo 是 1000x1000，缩小到可看
                 batch.set_texture(Some(&*t));
                 draw_rectangle(

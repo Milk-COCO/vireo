@@ -626,24 +626,14 @@ impl DrawBatch {
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = material
                             .as_ref()
-                            .map(|m| {
-                                m.ensure_bind_groups(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            .map(|m| m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue))
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
                         // Regular materials resolve seg_custom_bg for group 3 binding.
                         let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
-                            material.as_ref().and_then(|m| {
-                                m.ensure_bind_group(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            material
+                                .as_ref()
+                                .and_then(|m| m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue))
                         } else {
                             None
                         };
@@ -782,23 +772,13 @@ impl DrawBatch {
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = seg_material
                             .as_ref()
-                            .map(|m| {
-                                m.ensure_bind_groups(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            .map(|m| m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue))
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
                         let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
-                            seg_material.as_ref().and_then(|m| {
-                                m.ensure_bind_group(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            seg_material
+                                .as_ref()
+                                .and_then(|m| m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue))
                         } else {
                             None
                         };
@@ -935,23 +915,13 @@ impl DrawBatch {
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = seg_material
                             .as_ref()
-                            .map(|m| {
-                                m.ensure_bind_groups(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            .map(|m| m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue))
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
                         let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
-                            seg_material.as_ref().and_then(|m| {
-                                m.ensure_bind_group(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            seg_material
+                                .as_ref()
+                                .and_then(|m| m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue))
                         } else {
                             None
                         };
@@ -1099,23 +1069,13 @@ impl DrawBatch {
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = seg_material
                             .as_ref()
-                            .map(|m| {
-                                m.ensure_bind_groups(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            .map(|m| m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue))
                             .unwrap_or_default();
                         let is_self_managed = !user_bind_groups.is_empty();
                         let seg_custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
-                            seg_material.as_ref().and_then(|m| {
-                                m.ensure_bind_group(
-                                    &ctx.gpu.device,
-                                    &ctx.gpu.queue,
-                                    &ctx.gpu.bind_group_pool,
-                                )
-                            })
+                            seg_material
+                                .as_ref()
+                                .and_then(|m| m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue))
                         } else {
                             None
                         };
@@ -1286,15 +1246,13 @@ impl DrawBatch {
             let user_bind_groups = info
                 .custom_material
                 .as_ref()
-                .map(|m| {
-                    m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue, &ctx.gpu.bind_group_pool)
-                })
+                .map(|m| m.ensure_bind_groups(&ctx.gpu.device, &ctx.gpu.queue))
                 .unwrap_or_default();
             let is_self_managed = !user_bind_groups.is_empty();
             let custom_bg: Option<wgpu::BindGroup> = if !is_self_managed {
-                info.custom_material.as_ref().and_then(|m| {
-                    m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue, &ctx.gpu.bind_group_pool)
-                })
+                info.custom_material
+                    .as_ref()
+                    .and_then(|m| m.ensure_bind_group(&ctx.gpu.device, &ctx.gpu.queue))
             } else {
                 None
             };
@@ -3006,7 +2964,7 @@ impl DrawBatch {
                     [*instance_start as usize..(*instance_start + *instance_count) as usize]
                     .iter()
                     .all(|inst| {
-                        if inst.sdf_type == 6 || inst.sdf_type == 7 {
+                        if crate::render::sdf_uses_polygon_edges(inst.sdf_type) {
                             let s = inst.sdf_params[0] as usize;
                             let c = inst.sdf_params[1] as usize;
                             s.saturating_add(c) <= edge_count

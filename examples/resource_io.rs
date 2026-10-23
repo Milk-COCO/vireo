@@ -134,20 +134,18 @@ async fn main() {
         // 下半：随包贴图，证明 assets 里的图真的解码成功
         let logo_h = 132.0;
         let logo_y = h - logo_h - 16.0;
-        if let Some(i) = tex {
-            if let Ok(t) = ctx.app().texture(i) {
-                let s = logo_h / t.height.max(1) as f32;
-                batch.set_texture(Some(&*t));
-                draw_rectangle(
-                    &mut batch,
-                    Pos::new(14.0, logo_y),
-                    t.width as f32 * s,
-                    logo_h,
-                    Some(WHITE),
-                );
-                // 贴图画完要清掉画笔状态，否则后面的矩形/文字会继续采样这张图
-                batch.set_texture(None);
-            }
+        if let Some(t) = tex.as_deref() {
+            let s = logo_h / t.height.max(1) as f32;
+            batch.set_texture(Some(&*t));
+            draw_rectangle(
+                &mut batch,
+                Pos::new(14.0, logo_y),
+                t.width as f32 * s,
+                logo_h,
+                Some(WHITE),
+            );
+            // 贴图画完要清掉画笔状态，否则后面的矩形/文字会继续采样这张图
+            batch.set_texture(None);
         }
 
         draw_text(

@@ -1,6 +1,6 @@
 //! Vireo 自定义错误类型。
 //!
-//! 与索引/句柄相关的查询 API（`App::window_ref` / `App::offscreen_ref` / `App::texture`）
+//! 与索引/句柄相关的查询 API（`App::window_ref` / `App::offscreen_ref`）
 //! 原本返回 `Option`，窗口关闭或索引失效时得到 `None`——调用方若 `.unwrap()` 会炸出难以
 //! 定位的 panic。改为返回 `Result<_, VireoError>`，让「窗口已关闭 / 索引无效」成为有明确
 //! 文案的错误，而不是靠 unwrap 在运行时偶发 panic。
@@ -20,8 +20,6 @@ pub enum VireoError {
     WindowNotFound(u64),
     /// 离屏画布索引无效：从未创建，或已释放（`App::offscreen_ref`）。
     OffscreenNotFound(usize),
-    /// 贴图索引无效：越界，或尚未加载完成（`App::texture`）。
-    TextureNotFound(usize),
     /// 随包资源不存在（`Assets::read` / `Assets::list`）。
     ///
     /// 安卓上还包括「`AndroidApp` 句柄不可用」（未经 `android_main` 入口）——
@@ -55,10 +53,6 @@ impl fmt::Display for VireoError {
             VireoError::OffscreenNotFound(idx) => write!(
                 f,
                 "offscreen canvas not found (index {idx}); it was never created or has been released"
-            ),
-            VireoError::TextureNotFound(idx) => write!(
-                f,
-                "texture not found (index {idx}); out of bounds or not yet loaded"
             ),
             VireoError::AssetNotFound(name) => write!(
                 f,

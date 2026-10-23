@@ -769,7 +769,7 @@ fn stale_commands_fall_back_after_geo_buffer_clear() {
         "fn material_main(in: crate_material_never) -> vec4<f32> { return vec4<f32>(1.0); }"
             .to_string(),
         None,
-        0b111,
+        None,
         rustc_hash::FxHashMap::default(),
     )));
     draw_rectangle(&mut batch3, Pos::ZERO, 8.0, 8.0, Some(RED));

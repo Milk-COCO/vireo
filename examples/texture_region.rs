@@ -6,7 +6,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let tex_id = app.load_texture("logo_bg.png");
+    let tex = app.load_texture("logo_bg.png");
     let idx = app.window(
         WindowDesc::new("Texture Sub-Region", 450, 220),
         None::<fn()>,
@@ -17,11 +17,6 @@ async fn main() {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let tex = match ctx.app().texture(tex_id) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-
         let mut batch = DrawBatch::new();
         batch.set_texture(Some(&*tex));
         let s = 0.1; // logo 1000x1000，缩小到 100x100

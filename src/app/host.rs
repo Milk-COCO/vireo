@@ -244,7 +244,6 @@ impl Runner {
             window.inner_size().width,
             window.inner_size().height,
             scale,
-            desc.anti_aliasing,
             dpi,
         );
 
@@ -301,6 +300,7 @@ impl Runner {
             renderer,
             dpi_scale: dpi,
             dpi_override: desc.dpi_override,
+            aa: desc.anti_aliasing,
             init_duration,
             frame_style: desc.frame_style,
             pending_show: desc.visible && desc.preparable,

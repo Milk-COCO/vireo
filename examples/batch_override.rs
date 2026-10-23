@@ -130,65 +130,63 @@ async fn main() {
             320.0,
         );
 
-        if let Some(i) = logo {
-            if let Ok(tex) = ctx.app().texture(i) {
-                let s = 0.08;
-                let w = tex.width as f32 * s;
-                let h = tex.height as f32 * s;
+        if let Some(tex) = logo.as_deref() {
+            let s = 0.08;
+            let w = tex.width as f32 * s;
+            let h = tex.height as f32 * s;
 
-                // 笔刷贴图：后续白色矩形会采样 logo
-                batch.set_texture(Some(&*tex));
-                draw_rectangle(&mut batch, Pos::new(30.0, 360.0), w, h, Some(WHITE));
-                label(&mut batch, "set_texture(Some)", 30.0, 360.0 + h + 4.0);
+            // 笔刷贴图：后续白色矩形会采样 logo
+            batch.set_texture(Some(&*tex));
+            draw_rectangle(&mut batch, Pos::new(30.0, 360.0), w, h, Some(WHITE));
+            label(&mut batch, "set_texture(Some)", 30.0, 360.0 + h + 4.0);
 
-                // 仅本次 UV 子区域（不改 batch.uv）
-                draw_shape(
-                    &mut batch,
-                    &Shape::Rect {
-                        pos: Pos::new(160.0, 360.0),
-                        w,
-                        h,
-                    },
-                    ShapeOverride::new()
-                        .color(WHITE)
-                        .texture(&tex)
-                        .uv_rect(0.0, 0.0, 0.5, 0.5),
-                );
-                label(&mut batch, "opts.uv 半区", 160.0, 360.0 + h + 4.0);
+            // 仅本次 UV 子区域（不改 batch.uv）
+            draw_shape(
+                &mut batch,
+                &Shape::Rect {
+                    pos: Pos::new(160.0, 360.0),
+                    w,
+                    h,
+                },
+                ShapeOverride::new()
+                    .color(WHITE)
+                    .texture(tex)
+                    .uv_rect(0.0, 0.0, 0.5, 0.5),
+            );
+            label(&mut batch, "opts.uv 半区", 160.0, 360.0 + h + 4.0);
 
-                // 仅本次清贴图（白填充），batch 仍挂着 logo
-                draw_shape(
-                    &mut batch,
-                    &Shape::RoundedRect {
-                        pos: Pos::new(290.0, 360.0),
-                        w: 80.0,
-                        h: 60.0,
-                        radius: 12.0,
-                    },
-                    ShapeOverride::new().color(PINK).clear_texture(),
-                );
-                label(&mut batch, "clear_texture()", 290.0, 430.0);
+            // 仅本次清贴图（白填充），batch 仍挂着 logo
+            draw_shape(
+                &mut batch,
+                &Shape::RoundedRect {
+                    pos: Pos::new(290.0, 360.0),
+                    w: 80.0,
+                    h: 60.0,
+                    radius: 12.0,
+                },
+                ShapeOverride::new().color(PINK).clear_texture(),
+            );
+            label(&mut batch, "clear_texture()", 290.0, 430.0);
 
-                // batch 仍有贴图
-                draw_rectangle(
-                    &mut batch,
-                    Pos::new(400.0, 360.0),
-                    w * 0.7,
-                    h * 0.7,
-                    Some(WHITE),
-                );
-                label(&mut batch, "仍 set_texture", 400.0, 360.0 + h * 0.7 + 4.0);
+            // batch 仍有贴图
+            draw_rectangle(
+                &mut batch,
+                Pos::new(400.0, 360.0),
+                w * 0.7,
+                h * 0.7,
+                Some(WHITE),
+            );
+            label(&mut batch, "仍 set_texture", 400.0, 360.0 + h * 0.7 + 4.0);
 
-                batch.set_texture(None);
-                draw_rectangle(
-                    &mut batch,
-                    Pos::new(520.0, 360.0),
-                    70.0,
-                    50.0,
-                    Some(SKYBLUE),
-                );
-                label(&mut batch, "set_texture(None)", 500.0, 430.0);
-            }
+            batch.set_texture(None);
+            draw_rectangle(
+                &mut batch,
+                Pos::new(520.0, 360.0),
+                70.0,
+                50.0,
+                Some(SKYBLUE),
+            );
+            label(&mut batch, "set_texture(None)", 500.0, 430.0);
         } else {
             label(
                 &mut batch,

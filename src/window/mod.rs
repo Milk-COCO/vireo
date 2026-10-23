@@ -87,6 +87,7 @@ pub(crate) enum WinitEvent {
         renderer: crate::render::Renderer,
         dpi_scale: f32,
         dpi_override: Option<f64>,
+        aa: AntiAliasing,
         init_duration: f64,
         frame_style: FrameStyle,
         /// 首帧渲染后是否自动显示（`desc.visible && desc.preparable`）。
@@ -346,7 +347,9 @@ pub struct VireoWindow {
     /// 跟随执行计数器（`Frames` 单位节流依据），每次 4a 跟随段自增。
     follow_frame: Mutex<u64>,
     /// 待应用的 AA 模式（在 draw 开头应用）
-    pending_aa: Mutex<Option<AntiAliasing>>,
+    /// 本窗口的抗锯齿配置。采样契约（`TargetAa`）在每次绘制前由它换算，
+    /// 引擎侧不再保存 AA 状态。
+    aa: Mutex<AntiAliasing>,
     /// 窗口 handle（在 App.windows 中的索引）
     handle: usize,
     /// 窗口边框样式（供 `frame_style()` 查询；运行时经 `set_frame_style` 切换）。
@@ -399,6 +402,7 @@ impl VireoWindow {
         renderer: crate::render::Renderer,
         dpi_scale: f32,
         dpi_override: Option<f64>,
+        aa: AntiAliasing,
         init_duration: f64,
         frame_style: FrameStyle,
         pending_show: bool,
@@ -457,7 +461,7 @@ impl VireoWindow {
             follow_smoothing: Mutex::new(FollowAmount::default()),
             follow_samples: Mutex::new(std::collections::VecDeque::with_capacity(16)),
             follow_frame: Mutex::new(0),
-            pending_aa: Mutex::new(None),
+            aa: Mutex::new(aa),
             handle,
             frame_style: Mutex::new(frame_style),
             focusable: Mutex::new(true),
@@ -787,7 +791,9 @@ impl VireoWindow {
     ///
     /// 只有 **custom material**（fragment shader 声明多个输出）能写入多个目标；
     /// 引擎形状与文字只有单颜色输出，在 MRT pass 中会被跳过并 warn-once。
-    /// MRT 不使用引擎 MSAA 目标（`extra_targets` 的样本数须与管线 sample_count 一致）。
+    /// 采样点数由窗口的 `AntiAliasing` 决定并逐附件补齐：每个附件只要本身是单采样
+    /// 且没有自带 `resolve_target`，引擎就会按该采样点数自建 MSAA 并 resolve 回去，
+    /// 因此 MRT 与 MSAA/SSAA 可以同时使用。
     pub fn draw_mrt(
         &self,
         clear_color: crate::color::Color,
@@ -885,29 +891,8 @@ impl VireoWindow {
         if let Some(latency) = self.pending_frame_latency.lock().take() {
             self.surface_config.lock().desired_maximum_frame_latency = latency;
         }
-        // 应用 pending AA 变化（不触碰 surface；重建 msaa/ds 纹理）
-        if let Some(aa) = self.pending_aa.lock().take() {
-            let sc = aa.sample_count();
-            let atc = aa.alpha_to_coverage();
-            let ssaa = aa.is_ssaa();
-            let _ = self.gpu.ensure_pipeline(
-                sc,
-                atc,
-                ssaa,
-                false,
-                false,
-                wgpu::BlendState::ALPHA_BLENDING,
-            );
-            let _ = self.gpu.ensure_pipeline(
-                sc,
-                atc,
-                ssaa,
-                false,
-                true,
-                wgpu::BlendState::ALPHA_BLENDING,
-            );
-            self.renderer.lock().update_aa(aa);
-        }
+        // 采样契约在编码前由 `self.aa` 换算进 `RenderTarget`（见下方 target.set_aa），
+        // 渲染器不再持有 AA 状态，因此这里不需要任何 pending 应用逻辑。
 
         // 2) 逐帧轮询实际尺寸 + 缩放（模态循环期间最可靠）。
         //    resize 刷新策略（`ResizeRefreshPolicy`）：任何策略下，尺寸停止变化满
@@ -1281,6 +1266,7 @@ impl VireoWindow {
             )
         };
         target.set_depth_stencil(ds);
+        target.set_aa((*self.aa.lock()).into());
         let batch_refs: Vec<&DrawBatch> = batches.to_vec();
         let t2 = std::time::Instant::now();
         let mut encoder = self
@@ -2855,11 +2841,36 @@ impl VireoWindow {
         self.set_layout_follow_smoothing(FollowAmount::Average(FollowFramesOrTime::Frames(n)));
     }
 
-    /// 运行时切换抗锯齿（运行时重建 msaa 纹理）。
-    /// 下次 `draw` 前应用。
+    /// 运行时切换抗锯齿。下一帧 `draw` 生效。
+    ///
+    /// AA 是窗口自己的配置，`TargetAa` 在每帧绘制前换算——不再需要和渲染器同步，
+    /// 也不重建任何纹理：引擎 MSAA/DS 视图按采样点数惰性创建并自动失效。
     pub fn set_anti_aliasing(&self, aa: AntiAliasing) {
         let aa = crate::window::clamp_aa(aa, self.gpu.supported_sample_counts());
-        *self.pending_aa.lock() = Some(aa);
+        *self.aa.lock() = aa;
+        // 预热新契约的引擎管线，避免切换那一帧现场编译（纯 CPU/GPU 侧，不碰 renderer 锁）。
+        let ta: crate::render::TargetAa = aa.into();
+        let _ = self.gpu.ensure_pipeline(
+            ta.samples,
+            ta.alpha_to_coverage,
+            ta.per_sample,
+            false,
+            false,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+        let _ = self.gpu.ensure_pipeline(
+            ta.samples,
+            ta.alpha_to_coverage,
+            ta.per_sample,
+            false,
+            true,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+    }
+
+    /// 当前抗锯齿配置。
+    pub fn anti_aliasing(&self) -> AntiAliasing {
+        *self.aa.lock()
     }
 
     /// 窗口 handle（在 App.windows 中的索引）
