@@ -47,8 +47,10 @@ pub struct GpuContext {
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
     pipelines: Mutex<FxHashMap<(u32, wgpu::BlendState), wgpu::RenderPipeline>>,
+    /// 内置管线的公共布局（camera / texture / storage 三组），所有内置管线共享一份。
+    pub(crate) engine_pipeline_layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,                // MSAA：per-pixel 着色
-    shader_sdf_per_sample: wgpu::ShaderModule, // SSAA：per-sample 着色
+    shader_sdf_per_sample: wgpu::ShaderModule, // per-sample：逐采样点执行片元着色
     shader_geo: wgpu::ShaderModule,            // 几何光栅化：无 SDF 分支
     shader_geo_instance: wgpu::ShaderModule,   // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
@@ -689,7 +691,7 @@ impl GpuContext {
                 s.to_owned()
             }
         };
-        // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
+        // per-sample：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
         let shader_sdf_per_sample = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vireo shader (per-sample)"),
             source: wgpu::ShaderSource::Wgsl(flat(shader_src).into()),
@@ -823,6 +825,19 @@ impl GpuContext {
             render_pipeline.clone(),
         );
 
+        // 引擎所有内置管线（mesh / SDF 实例 / geo 实例 / 粒子）共用同一份管线布局：
+        // camera / texture / storage 三组。建一次共享，而不是每条管线各建一份。
+        let engine_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vireo engine pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&texture_bind_group_layout),
+                    Some(&engine_storage_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+
         // 查询 adapter 对 surface_format 的 sample_count；若未开
         // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES，pipeline 只接受 WebGPU 保底 [1, 4]。
         let mut supported_sample_counts = adapter
@@ -865,6 +880,7 @@ impl GpuContext {
             adapter,
             supported_sample_counts,
             pipelines: Mutex::new(pipelines),
+            engine_pipeline_layout,
             shader,
             shader_sdf_per_sample,
             shader_geo,

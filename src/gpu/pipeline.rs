@@ -42,14 +42,14 @@ pub(crate) fn strip_noflat_invariant(src: &str) -> String {
 /// 默认顶点着色器生成选项——决策默认 VS 源码变体的两个维度，集中在这里。
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ShapeShaderFlags {
-    /// SSAA：`local_pos` 用 `@interpolate(linear, sample)`（每采样点着色）。
+    /// per-sample：`local_pos` 用 `@interpolate(linear, sample)`（每采样点着色）。
     pub per_sample: bool,
     /// 弱 GLES 后端回退：剥掉 `local_pos` 插值修饰（见 [`strip_noflat_interpolation`]）。
     pub noflat: bool,
 }
 
-/// SDF 系着色器（`shader` / `shader_instance` / `shader_particle`）的 SSAA 开关：
-/// 源码默认带 `, sample`（SSAA 才是"原样"），MSAA 时把修饰去掉。
+/// SDF 系着色器（`shader` / `shader_instance` / `shader_particle`）的 per-sample 开关：
+/// 源码默认带 `, sample`（per-sample 才是"原样"），MSAA 时把修饰去掉。
 fn per_sample_source(source: &str, per_sample: bool) -> String {
     if per_sample {
         source.to_owned()
@@ -72,7 +72,7 @@ pub(crate) fn shape_vertex_wgsl(layout: ShapeVertexLayout, flags: ShapeShaderFla
         ShapeVertexLayout::SdfInstance => {
             per_sample_source(include_str!("../shader_instance.wgsl"), flags.per_sample)
         }
-        // geo VS 源码默认是 per-pixel（`@interpolate(linear)`），SSAA 时反向提升。
+        // geo VS 源码默认是 per-pixel（`@interpolate(linear)`），per-sample 时反向提升。
         ShapeVertexLayout::GeoInstance => {
             let source = include_str!("../shader_geo_instance.wgsl");
             if flags.per_sample {
@@ -540,6 +540,31 @@ pub(crate) fn surface_format_bits(format: wgpu::TextureFormat) -> u32 {
     (h.finish() as u32) & 0x0FFF
 }
 
+/// 实例管线（SDF 实例 / geo 实例 / 粒子）的缓存键。
+///
+/// `kind` 占 bits 23-24：`1` = SDF 实例、`2` = geo 模板实例、`3` = 粒子。
+/// 三条路径除 kind、着色器模块与顶点布局外完全一致，故共用一个生成器
+/// （见 `GpuContext::ensure_instanced_pipeline`）。
+pub(crate) fn instanced_pipeline_key(
+    kind: u32,
+    sample_count: u32,
+    alpha_to_coverage: bool,
+    per_sample: bool,
+    ds: bool,
+    use_stencil: bool,
+    op: u32,
+    format: wgpu::TextureFormat,
+) -> u32 {
+    sample_count
+        | ((alpha_to_coverage as u32) << 16)
+        | ((per_sample as u32) << 17)
+        | ((ds as u32) << 18)
+        | ((use_stencil as u32) << 19)
+        | (op << 20)
+        | (kind << 23)
+        | (surface_format_bits(format) << 4)
+}
+
 /// 把多个颜色附件的混合状态折叠成管线缓存键的高位数值。
 pub(crate) fn blend_states_hash(blends: &[Option<wgpu::BlendState>]) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -636,6 +661,54 @@ pub(crate) fn neutral_depth_stencil_state(
     }
 }
 
+/// 引擎实例路径（SDF 实例 / geo 实例 / 粒子）的 depth-stencil 状态。
+///
+/// `op` 已是调用方 `stencil_op.min(2)` 之后的值：`0` = 不测试、`1` = 写掩码、
+/// `2` = 只测试。`use_stencil == false && ds` 时补中性 DS（pass 挂了 DS，但本管线
+/// 不测/不写），与 `depth_stencil: None` 行为等价。
+pub(crate) fn stencil_ds_state(
+    use_stencil: bool,
+    op: u32,
+    ds: bool,
+) -> Option<wgpu::DepthStencilState> {
+    if use_stencil {
+        let face = match op {
+            1 => wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Equal,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::IncrementClamp,
+            },
+            2 => wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Equal,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+            _ => wgpu::StencilFaceState::IGNORE,
+        };
+        Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState {
+                front: face,
+                back: face,
+                read_mask: if op == 0 { 0 } else { 0xff },
+                write_mask: if op == 1 { 0xff } else { 0 },
+            },
+            bias: Default::default(),
+        })
+    } else if ds {
+        Some(neutral_depth_stencil_state(
+            false,
+            wgpu::CompareFunction::Always,
+        ))
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline cache methods (impl GpuContext)
 // ---------------------------------------------------------------------------
@@ -660,6 +733,10 @@ impl GpuContext {
         // bits4-15 = surface format（macOS Metal 为 Bgra8UnormSrgb），格式不同
         // 的管线键不同，避免复用首窗口同步前的默认 Rgba8 管线。
         // blend 不进 bit（`BlendState` 全 Hash，进元组键后半）。
+        //
+        // 几何路径没有 per-sample 变体（`shader_geo` 单模块），per_sample 对它无效——
+        // 先归一掉，否则同一条管线会按两个键各编译一份。
+        let per_sample = per_sample && !geometry;
         let n_targets = num_targets.max(1);
         let key = (
             sample_count
@@ -682,17 +759,8 @@ impl GpuContext {
         } else {
             &self.shader
         };
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
+        let pipeline_layout = &self.engine_pipeline_layout;
+
         let targets = engine_color_targets(
             Some(wgpu::ColorTargetState {
                 format: self.surface_format(),
@@ -789,17 +857,8 @@ impl GpuContext {
         } else {
             &self.shader
         };
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
+        let pipeline_layout = &self.engine_pipeline_layout;
+
         // op3/4 不写颜色，但仍走 fs_main，以便 SDF discard 裁出正确轮廓
         //（fs_stencil_only 无 SDF，圆/圆角会落成 AABB）。
         let frag_entry = "fs_main";
@@ -899,8 +958,22 @@ impl GpuContext {
         p
     }
 
-    pub(crate) fn ensure_instance_pipeline(
+    /// 引擎三条实例路径（SDF 实例 / geo 实例 / 粒子）唯一的管线生成器。
+    ///
+    /// 三者只差三件事：缓存键里的 kind 位、着色器模块、顶点缓冲布局；其余（管线布局、
+    /// 深度/模板状态、颜色目标、多重采样）逐行相同，此前是三份复制粘贴。
+    ///
+    /// `kind`：`1` = SDF 实例、`2` = geo 模板实例、`3` = 粒子（占键的 bits 23-24）。
+    /// `per_sample_module` 为 `None`（几何着色器没有 per-sample 变体）时忽略
+    /// `per_sample`，统一用 `module`。
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_instanced_pipeline(
         &self,
+        kind: u32,
+        module: &wgpu::ShaderModule,
+        per_sample_module: Option<&wgpu::ShaderModule>,
+        label: &str,
+        buffers: &[wgpu::VertexBufferLayout<'static>],
         sample_count: u32,
         alpha_to_coverage: bool,
         per_sample: bool,
@@ -914,81 +987,37 @@ impl GpuContext {
         let op = stencil_op.min(2);
         // bit18 = 中性 DS（该位在 instance/geo/particle 生成器中空闲）。
         let key = (
-            sample_count
-                | ((alpha_to_coverage as u32) << 16)
-                | ((per_sample as u32) << 17)
-                | ((ds as u32) << 18)
-                | ((use_stencil as u32) << 19)
-                | (op << 20)
-                | (1u32 << 23)
-                | (surface_format_bits(self.surface_format()) << 4),
+            instanced_pipeline_key(
+                kind,
+                sample_count,
+                alpha_to_coverage,
+                per_sample,
+                ds,
+                use_stencil,
+                op,
+                self.surface_format(),
+            ),
             blend,
         );
         let mut pipes = self.pipelines.lock().unwrap();
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
-        let module = if per_sample {
-            &self.shader_instance_per_sample
-        } else {
-            &self.shader_instance
+        let module = match (per_sample, per_sample_module) {
+            (true, Some(m)) => m,
+            _ => module,
         };
-        let layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo instance pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
-        let depth_stencil = if use_stencil {
-            let face = match op {
-                1 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::IncrementClamp,
-                },
-                2 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::Keep,
-                },
-                _ => wgpu::StencilFaceState::IGNORE,
-            };
-            Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState {
-                    front: face,
-                    back: face,
-                    read_mask: if op == 0 { 0 } else { 0xff },
-                    write_mask: if op == 1 { 0xff } else { 0 },
-                },
-                bias: Default::default(),
-            })
-        } else if ds {
-            Some(neutral_depth_stencil_state(
-                false,
-                wgpu::CompareFunction::Always,
-            ))
-        } else {
-            None
-        };
+        let buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> =
+            buffers.iter().cloned().map(Some).collect();
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("vireo instance pipeline"),
-                layout: Some(&layout),
+                label: Some(label),
+                layout: Some(&self.engine_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some("vs_main"),
-                    buffers: &[Some(QuadVertex::desc())],
+                    buffers: &buffers,
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -1008,7 +1037,7 @@ impl GpuContext {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
-                depth_stencil,
+                depth_stencil: stencil_ds_state(use_stencil, op, ds),
                 multisample: wgpu::MultisampleState {
                     count: sample_count,
                     alpha_to_coverage_enabled: alpha_to_coverage,
@@ -1021,8 +1050,37 @@ impl GpuContext {
         pipeline
     }
 
+    /// SDF 实例化管线：unit quad（8B `QuadVertex`）+ storage 里的 `InstanceData`。
+    pub(crate) fn ensure_instance_pipeline(
+        &self,
+        sample_count: u32,
+        alpha_to_coverage: bool,
+        per_sample: bool,
+        ds: bool,
+        use_stencil: bool,
+        stencil_op: u32,
+        blend: wgpu::BlendState,
+        num_targets: u32,
+    ) -> wgpu::RenderPipeline {
+        self.ensure_instanced_pipeline(
+            1,
+            &self.shader_instance,
+            Some(&self.shader_instance_per_sample),
+            "vireo instance pipeline",
+            &[QuadVertex::desc()],
+            sample_count,
+            alpha_to_coverage,
+            per_sample,
+            ds,
+            use_stencil,
+            stencil_op,
+            blend,
+            num_targets,
+        )
+    }
+
     /// 几何模板实例化管线：共享模板顶点/索引 buffer + per-instance color/transform。
-    /// 无 SDF 分支；无 per-sample 插值（单模块，MSAA / per-sample 同源）。
+    /// 无 SDF 分支；无 per-sample 变体（单模块，MSAA / per-sample 同源）。
     pub(crate) fn ensure_geo_instance_pipeline(
         &self,
         sample_count: u32,
@@ -1034,115 +1092,25 @@ impl GpuContext {
         blend: wgpu::BlendState,
         num_targets: u32,
     ) -> wgpu::RenderPipeline {
-        let n_targets = num_targets.max(1);
-        let op = stencil_op.min(2);
-        let key = (
-            sample_count
-                | ((alpha_to_coverage as u32) << 16)
-                | ((per_sample as u32) << 17)
-                | ((ds as u32) << 18)
-                | ((use_stencil as u32) << 19)
-                | (op << 20)
-                | (2u32 << 23)
-                | (surface_format_bits(self.surface_format()) << 4),
+        self.ensure_instanced_pipeline(
+            2,
+            &self.shader_geo_instance,
+            None,
+            "vireo geo instance pipeline",
+            &[GeoVertex::desc(), GeoInstance::desc()],
+            sample_count,
+            alpha_to_coverage,
+            per_sample,
+            ds,
+            use_stencil,
+            stencil_op,
             blend,
-        );
-        let mut pipes = self.pipelines.lock().unwrap();
-        if let Some(p) = pipes.get(&key) {
-            return p.clone();
-        }
-        let module = &self.shader_geo_instance;
-        let layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo geo instance pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
-        let depth_stencil = if use_stencil {
-            let face = match op {
-                1 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::IncrementClamp,
-                },
-                2 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::Keep,
-                },
-                _ => wgpu::StencilFaceState::IGNORE,
-            };
-            Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState {
-                    front: face,
-                    back: face,
-                    read_mask: if op == 0 { 0 } else { 0xff },
-                    write_mask: if op == 1 { 0xff } else { 0 },
-                },
-                bias: Default::default(),
-            })
-        } else if ds {
-            Some(neutral_depth_stencil_state(
-                false,
-                wgpu::CompareFunction::Always,
-            ))
-        } else {
-            None
-        };
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("vireo geo instance pipeline"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(GeoVertex::desc()), Some(GeoInstance::desc())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some("fs_main"),
-                    targets: &engine_color_targets(
-                        Some(wgpu::ColorTargetState {
-                            format: self.surface_format(),
-                            blend: Some(blend),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        n_targets,
-                    ),
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil,
-                multisample: wgpu::MultisampleState {
-                    count: sample_count,
-                    alpha_to_coverage_enabled: alpha_to_coverage,
-                    ..Default::default()
-                },
-                multiview_mask: None,
-                cache: None,
-            });
-        pipes.insert(key, pipeline.clone());
-        pipeline
+            num_targets,
+        )
     }
 
     /// 粒子实例化管线：共享 unit quad + per-instance spawn 参数，VS 按 `camera.time`
     /// 积分。FS 极简（tex×color，无 SDF 分支）；`local_pos` 仅供 material FS 参考。
-    /// 缓存键镜像 instance 管线，标记位 `3 << 23`（instance=1, geo=2）。
     pub(crate) fn ensure_particle_pipeline(
         &self,
         sample_count: u32,
@@ -1154,116 +1122,22 @@ impl GpuContext {
         blend: wgpu::BlendState,
         num_targets: u32,
     ) -> wgpu::RenderPipeline {
-        let n_targets = num_targets.max(1);
-        let op = stencil_op.min(2);
-        let key = (
-            sample_count
-                | ((alpha_to_coverage as u32) << 16)
-                | ((per_sample as u32) << 17)
-                | ((ds as u32) << 18)
-                | ((use_stencil as u32) << 19)
-                | (op << 20)
-                | (3u32 << 23)
-                | (surface_format_bits(self.surface_format()) << 4),
+        self.ensure_instanced_pipeline(
+            3,
+            &self.shader_particle,
+            Some(&self.shader_particle_per_sample),
+            "vireo particle pipeline",
+            &[QuadVertex::desc(), ParticleInstance::desc()],
+            sample_count,
+            alpha_to_coverage,
+            per_sample,
+            ds,
+            use_stencil,
+            stencil_op,
             blend,
-        );
-        let mut pipes = self.pipelines.lock().unwrap();
-        if let Some(p) = pipes.get(&key) {
-            return p.clone();
-        }
-        let module = if per_sample {
-            &self.shader_particle_per_sample
-        } else {
-            &self.shader_particle
-        };
-        let layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vireo particle pipeline layout"),
-                bind_group_layouts: &[
-                    Some(&self.camera_bind_group_layout),
-                    Some(&self.texture_bind_group_layout),
-                    Some(&self.engine_storage_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
-        let depth_stencil = if use_stencil {
-            let face = match op {
-                1 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::IncrementClamp,
-                },
-                2 => wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::Equal,
-                    fail_op: wgpu::StencilOperation::Keep,
-                    depth_fail_op: wgpu::StencilOperation::Keep,
-                    pass_op: wgpu::StencilOperation::Keep,
-                },
-                _ => wgpu::StencilFaceState::IGNORE,
-            };
-            Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState {
-                    front: face,
-                    back: face,
-                    read_mask: if op == 0 { 0 } else { 0xff },
-                    write_mask: if op == 1 { 0xff } else { 0 },
-                },
-                bias: Default::default(),
-            })
-        } else if ds {
-            Some(neutral_depth_stencil_state(
-                false,
-                wgpu::CompareFunction::Always,
-            ))
-        } else {
-            None
-        };
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("vireo particle pipeline"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(QuadVertex::desc()), Some(ParticleInstance::desc())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some("fs_main"),
-                    targets: &engine_color_targets(
-                        Some(wgpu::ColorTargetState {
-                            format: self.surface_format(),
-                            blend: Some(blend),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        n_targets,
-                    ),
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil,
-                multisample: wgpu::MultisampleState {
-                    count: sample_count,
-                    alpha_to_coverage_enabled: alpha_to_coverage,
-                    ..Default::default()
-                },
-                multiview_mask: None,
-                cache: None,
-            });
-        pipes.insert(key, pipeline.clone());
-        pipeline
+            num_targets,
+        )
     }
-
     // -----------------------------------------------------------------------
     // Material pipeline creation
     // -----------------------------------------------------------------------
@@ -1863,6 +1737,67 @@ mod custom_material_tests {
         );
     }
 
+    /// 三条实例路径共用同一个生成器：kind 位必须让缓存键互不相同，否则
+    /// SDF 实例/geo 实例/粒子会拿到彼此的管线（顶点布局不同 → 校验失败）。
+    #[test]
+    fn instanced_pipeline_kind_bits_are_distinct() {
+        let mk = |kind: u32| {
+            instanced_pipeline_key(
+                kind,
+                4,
+                false,
+                true,
+                false,
+                false,
+                0,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            )
+        };
+        assert_ne!(mk(1), mk(2));
+        assert_ne!(mk(2), mk(3));
+        assert_ne!(mk(1), mk(3));
+        // 同 kind 同参数必须相等（缓存命中的前提）
+        assert_eq!(mk(1), mk(1));
+        // per_sample / stencil_op / 中性 DS 也必须改键
+        let base = instanced_pipeline_key(
+            1,
+            4,
+            false,
+            false,
+            false,
+            false,
+            0,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        assert_ne!(base, mk(1));
+        assert_ne!(
+            base,
+            instanced_pipeline_key(
+                1,
+                4,
+                false,
+                false,
+                true,
+                false,
+                0,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
+        );
+        assert_ne!(
+            base,
+            instanced_pipeline_key(
+                1,
+                4,
+                false,
+                false,
+                false,
+                true,
+                2,
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            )
+        );
+    }
+
     #[test]
     fn material_shape_per_sample_pipeline_key_is_distinct() {
         assert_ne!(
@@ -2106,7 +2041,7 @@ mod custom_material_tests {
             assert!(!src.contains("@interpolate(linear"), "{}", &src[..80]);
             assert!(src.contains("@interpolate(flat)"));
         }
-        // 非 noflat 路径行为不变：SSAA 才是 per-sample 的那份。
+        // 非 noflat 路径行为不变：per-sample 才是带 sample 限定符的那份。
         assert!(
             shape_vertex_wgsl(
                 ShapeVertexLayout::Mesh,
