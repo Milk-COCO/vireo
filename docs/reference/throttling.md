@@ -8,6 +8,9 @@ vireo 的哲学是 **"报状态、不做策略"**：它把「该不该画」和�
 
 所以"帧率"这件事，先要弄清它一共有几层。
 
+不过"帧率"只是**已出帧之间的间隔**。如果界面在空闲期压根不需要新帧，省电的正确做法不是把
+帧率压到 30，而是**这一帧不画**——见 §4.4，可运行示例 `examples/on_demand.rs`。
+
 ---
 
 ## 1. 帧率的来源
@@ -170,7 +173,10 @@ if matches!(win.render_advice(), RenderAdvice::Skip) {
 
 ---
 
-## 4. 手动限流的四种配方
+## 4. 手动控帧配方
+
+前三节解决的是"关掉引擎的节流"，这一节是"关了之后怎么自己管"。§4.1–§4.3 是"限制画多快"，
+§4.4 是另一个维度："这一帧根本不画"。
 
 ### 4.1 朴素 sleep（能用，但不推荐）
 
@@ -217,21 +223,62 @@ if !win.is_vsync_throttled() {
 
 配合 §3.2 的 `Skip` 检查，就是"前台满帧 / 后台 60 / 最小化不画"的三档策略。
 
-### 4.4 事件驱动（最省电）
+### 4.4 按需出帧 / 事件驱动（静态 UI 最省）
 
-只有用户操作才需要重画的应用，根本不需要常驻循环：
+这里不再是"把画面限制到多快"，而是"**根本不出这一帧**"。`win.draw` 本来就由应用调用，
+所以"这一帧要不要画"的决定权一直在应用手里：不调 `draw` 就没有 acquire / encode /
+submit / present，屏幕保留上一张已 presented 的图（Windows flip model 下由 DWM 持有），
+不会闪白，也不会残留半帧。
+
+判据全是现成的公开 API，不需要引擎加东西：
+
+| 脏信号 | API | 语义 |
+|---|---|---|
+| 输入到达 | `win.refresh_input() -> bool` | 返回值 = 这一 tick 有没有输入被应用 |
+| 尺寸 / DPI 变化 | `win.resize_pending() -> bool` | 观测到的窗口 metrics 与已配置 surface 不一致 |
+| 最小化 / 0×0 | `win.refresh_metrics() -> bool` | `0×0` 时返回 `false`，顺手当守卫 |
+| 应用自己的状态 | 自己的 `dirty` 标记 | 数据变了 / 动画在跑 / 一次性请求 |
 
 ```rust
 app.run(move |ctx| {
-    if !ctx.dirty() {   // 你自己维护的脏标记
-        return false;   // 结束本 loop → 线程回到 condvar 等待
+    let Ok(win) = ctx.app().window_ref(&idx) else { return false };
+
+    let mut dirty = win.refresh_input();      // 输入
+    dirty |= win.resize_pending();            // 尺寸 / DPI
+    dirty |= state.step();                    // 你自己的状态机：动画期间恒 true
+
+    if dirty && win.refresh_metrics() {       // 0×0 时 refresh_metrics 返回 false
+        let mut batch = DrawBatch::new();
+        // …构图…
+        win.draw(BLACK, &[&batch]);
+    } else {
+        state.skipped += 1;
     }
-    // …画…
-    true
+    true                                      // 返回值只表示"loop 继续"，与画不画无关
 })
 ```
 
-缺点是"常驻动画"场景不适用。
+注意返回值**不是**"要不要画"的开关：`on_tick` 返回 `false` 表示这条 loop 结束（并连带
+停掉整条线程），拿它当"本帧不画"会直接把渲染线程关掉。
+
+两个坑：
+
+1. **跳过出帧时仍要调 `refresh_input()`**。它既是脏判据，也是唯一把 `pending_input`
+   队列结算掉的地方；一直跳过又一直不调，输入就堆在队列里。
+2. **动画收尾要补画一帧**。时间片走完立刻停帧，屏上停住的是"差一点没走完"的中间状态；
+   正确做法是收尾时置一个一次性脏标记，再画最后一帧。
+
+完整可运行示例：`examples/on_demand.rs`（空闲 0 present/s、鼠标移动时跟随、按 `A` 主动
+持续更新、按 `R` 显式请求一帧）。本机实测（Windows / `max_fps` 默认 240 / 720×460 /
+debug 构建）：空闲时 0 present/s、每 tick `skipped += 1`、进程 CPU ≈ 0.5% 单核。
+
+**省不掉的是什么**：按需出帧省的是 GPU 提交、合成、驱动排队与每帧构图，不是 tick 本身
+——循环仍按 `Thread::max_tps` 跑，每 tick 只做一次脏判据（µs 级）。要把 tick 也省下来
+得调低 `max_tps`，但那对"有动画时还想满速"的应用是错误取舍，两件事别混。
+
+**`presented_fps()` 空闲时不会衰减**：它是最近若干次 present 间隔的滑动平均，跳过帧期间
+一直显示历史值。要"现在就是 0 fps"就自己数过去 1s 的出帧数（示例里就是这么做的），
+窗口标题是唯一不需要出帧就能更新的反馈通道。
 
 ---
 
@@ -241,13 +288,15 @@ app.run(move |ctx| {
 
 **② "`WindowDesc::max_fps` 会管所有窗口"** —— 错。它只作用于创建的那个窗口；vireo 没有全局帧率旋钮，运行期也不会互相传播。
 
-**③ "`Thread::with_max_tps(None)` 表示该线程不限速"** —— **0.2.0 起是对的**（`None` = 不限速，默认 `Some(240)`）。0.1.x 里它会被 `App::max_fps` 覆盖，那些全局默认值已移除。
+**③ "`Thread::with_max_tps(None)` 表示该线程不限速"** —— **0.2.0 起是对的**（`None` = 不限速，默认 `Some(240)`）。0.1.x 里它会被 `App::max_fps` 覆盖，那些全局默认值已移除。但"不限速"是字面意思：`None` 时循环不做任何 pacing sleep，会尽量占满一个核——那是留给自建调度器的口子，不是"更省电的全速"。
 
 **④ "`presented_fps()` 就是我的帧率"** —— 半对。它是真正 present 成功的速率；`ctx.fps()` 是 tick 速率，一个 loop 里可能画 0 帧或多帧。
 
 **⑤ "`frame_latency(1)` 能提高帧率"** —— 不能。它只减少在途帧、降低延迟，不提高上限。
 
 **⑥ "`PresentMode::Immediate` 是免费的低延迟"** —— 不免费，它会撕裂。`AutoNoVsync` 通常先在驱动层尝试"无 vsync 但不撕裂"的路径。
+
+**⑦ "跳过 `draw` 会让窗口变白 / 卡住旧内容"** —— 不会。present 出去的图由合成器持有，不调 `draw` 只是不再提交新帧，屏上那张保持不动（遮挡后重新露出、最小化恢复都不闪）。真正会留下视觉残影的是**附加 MRT 目标跨帧累加**，与这里无关。
 
 ---
 
@@ -259,6 +308,8 @@ app.run(move |ctx| {
 | 2 | 取不到显示器刷新率时按 60Hz 估算 | `is_vsync_throttled()` 可能偏保守 |
 | 3 | 空闲降频的触发只认"没上屏" | 可见但被别的窗口部分遮挡时仍按正常帧率跑（那时 vsync 在管） |
 | 4 | `ctx.fps()` 是 tick 速率、跨窗口共享 | 多窗口看 `presented_fps()` |
+| 5 | `presented_fps()` 空闲时不衰减 | 它是提交节拍的滑动平均；"现在 0 fps"要自己按 1s 窗口数出帧 |
+| 6 | 按需出帧不改变 tick 频率 | 省的是 GPU/合成/构图，tick 仍按 `max_tps` 跑（§4.4） |
 
 ---
 
@@ -326,5 +377,7 @@ async fn main() {
 - [ ] `RenderAdvice::Skip` 时跳过构建、**不**返回 `false`
 - [ ] 动画/物理用真实 `dt`，并做上限钳制
 - [ ] 后台/最小化时不烧 CPU（默认 `idle_cap = 30`；要满速就 `idle_cap(None)`）
+- [ ] 静态 / 工具类界面确认没有每 tick 白调 `draw`：按 §4.4 的脏判据出帧（示例 `examples/on_demand.rs`）
+- [ ] 按需出帧时仍每 tick 调 `refresh_input()`，收尾补画最后一帧
 - [ ] 用 `win.applied_cap()` 确认"现在到底被谁压着"（`Some(30)` = 空闲降频，`Some(刷新率)` = 拖动期）
 - [ ] 在笔记本/电池场景实测过帧时间抖动

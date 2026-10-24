@@ -4,6 +4,14 @@
 
 ### Added / 新增
 
+- **按需出帧（脏驱动）示例**：`examples/on_demand.rs` 演示"这一帧不画"这个能力——
+  只在输入到达（`refresh_input`）、尺寸/DPI 变化（`resize_pending`）、自身状态变化
+  （含主动持续动画）时调用 `win.draw`。空闲期间 0 次 present、不 acquire、不 encode、
+  屏上保留上一张已 presented 的图（实测：空闲 0 present/s，CPU ≈ 0.5% 单核，debug 构建）。
+  示例同时展示"主动在一段时间内持续更新"（0.9s 脉冲、`A` 键持续动画）与"按需请求一帧"
+  （`R` 键），并用窗口标题做不需要出帧的实时反馈通道。
+  On-demand (dirty-driven) rendering example: skip `draw` entirely when nothing changed —
+  no acquire/encode/present; plus opt-in continuous animation while the app wants it.
 - **空闲自动降频（默认开启，30fps）**：画面**没上屏**时（DWM 判定遮挡 / 最小化 / 0×0 /
   surface stale / acquire 超时）把帧率压到 `idle_cap`（默认 `Some(DEFAULT_IDLE_FPS)` = 30，
   与用户 `max_fps` 取更严者），避免后台挂着时全速空转。
@@ -187,6 +195,15 @@
   创建期显式声明契约、而不是靠编译结果猜。
 
 ### Changed / 变更
+
+- **文档｜`docs/reference/throttling.md` §4.4 改错并重写为「按需出帧」**：原文拿
+  `on_tick` 返回 `false` 当"本帧不画"，而 `false` 实际表示该 loop 结束（并连带停掉整条
+  渲染线程）。改成真实可行的形态——不调 `win.draw` + 四个脏判据（`refresh_input` /
+  `resize_pending` / `refresh_metrics` / 自己的状态），补"跳过帧时仍要 `refresh_input`"、
+  "动画收尾补画一帧"两个坑，并记入 `presented_fps()` 空闲不衰减（第 5 条）与"按需出帧
+  不改变 tick 频率"（第 6 条）两条已知限制。
+  Fixed a wrong recipe in the throttling guide (`on_tick` returning `false` ends the loop —
+  it does not skip a frame) and rewrote it as the supported dirty-driven pattern.
 
 - **BREAKING｜移除 `App` 的全局帧率旋钮**：`App::set_max_fps` / `max_fps` /
   `set_drag_cap` / `drag_cap` 全部删除。它们从来不是运行期全局控制——只在**建窗/spawn

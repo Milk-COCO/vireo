@@ -221,6 +221,7 @@ cargo run --example window_api
 cargo run --example window_multi
 cargo run --example window_resize
 cargo run --example window_present
+cargo run --example on_demand
 cargo run --example window_aa
 cargo run --example input
 cargo run --example input_touch
@@ -256,7 +257,7 @@ cargo build --examples
 
 - [帧率、垂直同步与限流](docs/reference/throttling.md) — 想关掉节流、或关掉之后想自己限流，看这篇：
   四层节流分别是什么、怎么关、关掉之后必须自己接管什么（含 Windows 的 DWM 遮挡延迟）、
-  四种手动限流配方与常见误解。
+  四种手动限流配方、按需出帧（脏驱动，空闲时 0 present/s）与常见误解。
 
 ## 许可证
 
