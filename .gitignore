@@ -1,8 +1,15 @@
 target/
 .idea/
 .claude/
-.opencode/
-opencode.json
 .vscode/
 Cargo.lock
 flamegraph.svg
+
+# 旧的 opencode CLI 配置
+opencode.json
+
+# 本地 agent 指令与知识（不入库、不外发）：
+# AGENTS.md        DSH 指令文件
+# .dsh/            skills（DSH 发现路径）+ docs（交接/调研/变更记录）+ 运行时状态
+AGENTS.md
+.dsh/
