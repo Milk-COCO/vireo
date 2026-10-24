@@ -192,7 +192,6 @@ pub mod prelude {
     pub use crate::material::TexKind;
     pub use crate::material::TexSample;
     pub use crate::material::expand_includes;
-    pub use crate::material::wgsl_snippets;
     pub use crate::render::BatchOverride;
     pub use crate::render::ClipPath;
     pub use crate::render::ColorTargetDesc;

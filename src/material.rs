@@ -16,6 +16,12 @@ pub const MATERIAL_UNIFORM_SIZE: usize = 1024;
 // ---------------------------------------------------------------------------
 
 /// 可用片段名 → WGSL 源码。
+///
+/// 这是 `// #include "vireo_*.wgsl"` 的展开表（见 [`expand_includes`]）。契约只有
+/// **片段名与函数名**——内容是几十行纯工具函数（颜色转换 / 噪声 / SDF 距离），
+/// 不涉及 buffer 布局或管线状态，不是二进制 ABI；引擎自己的材质编译也走同一张表。
+///
+/// 不在 prelude 里导出（用户几乎不需要直接取表）；需要时 `vireo::material::wgsl_snippets()`。
 pub fn wgsl_snippets() -> FxHashMap<&'static str, &'static str> {
     let mut m = FxHashMap::default();
     m.reserve(3);
@@ -282,7 +288,7 @@ pub struct Material {
     ///
     /// 同 [`Material::depth_write`] 的生效条件。Text 目标忽略该值（恒 `Always`）。
     pub(crate) depth_compare: AtomicU8,
-    /// 统一 pipeline 缓存：key = (Target, sample_count, atc, ssaa, stencil_op?)
+    /// 统一 pipeline 缓存：key = (Target, sample_count, atc, per_sample, stencil_op?)
     pub(crate) pipelines: Mutex<FxHashMap<(u64, wgpu::BlendState), Arc<wgpu::RenderPipeline>>>,
 }
 
