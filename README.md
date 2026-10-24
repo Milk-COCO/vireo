@@ -136,9 +136,10 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 | `vireo_base_sample(uv)` | 采 batch 基础贴图 |
 | `vireo_base_color(in)` | 当前默认基色 |
 | `vireo_has_*()` | 能力探针（base sample / local_pos / sdf） |
+| `camera.time_secs` | **GPU 时间**（秒，`@group(0)` 的相机 uniform 末尾）：引擎每帧写默认钟时间，CPU 不用改任何 uniform；`batch.set_clock(c)` 换成另一条时间线（可暂停/倍速/定值）。`struct Camera { projection: mat4x4<f32>, dpi_scale: f32, time_secs: f32 }` |
 
 引擎内部 4-group：`0` 视口、`1` 引擎纹理、`2` transform/polygon、`3` 用户 Material（1024B storage + 4 组 tex/sampler）。
-Shape / text 共用 ABI；默认 shape VS 按 MSAA/SSAA 选 per-pixel / per-sample；自定义 shape VS 全 AA 模式保持 per-pixel。
+Shape / text 共用 ABI；默认 shape VS 按 MSAA / per-sample 选 per-pixel / per-sample；自定义 shape VS 全 AA 模式保持 per-pixel（引擎统一 `(linear)`，不会因 AA 档编译失败）。per-sample 只超采样 SDF 几何覆盖度，纹理与屏空间后处理不受益。
 
 **MRT**：改写成 `fn material_main(...) -> MaterialOutput`（第 0 个字段必须名为 `color`，
 引擎在其上应用 alpha / SDF；其余 location 原样输出），配 `draw_mrt(clear, &extra_targets, batches)`

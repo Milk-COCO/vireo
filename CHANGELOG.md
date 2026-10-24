@@ -4,6 +4,19 @@
 
 ### Added / 新增
 
+- **GPU 时间对所有绘制可见（不再只是粒子）**：相机 uniform 是 80B
+  （projection 64 / dpi 4 / `time_secs` 4 / pad），引擎每帧把默认钟时间写进 offset 68，
+  所以形状、文字、粒子、custom VS 与 custom material 都能读同一份 GPU 时间：
+  WGSL 里声明 `struct Camera { projection: mat4x4<f32>, dpi_scale: f32, time_secs: f32 }`
+  即可（`@group(0) @binding(0)`），CPU 每帧不用改任何 uniform。
+  `DrawBatch::clock`（默认 `ClockIndex::ZERO`）可把某个 batch 换到另一条时间线：
+  非默认钟会在 draw 时绑定该时钟自己的 80B camera buffer（投影/dpi 相同、时间不同），
+  默认钟仍走共享组、零额外绑定。配合 `set_clock_scale(0.0)`（暂停）与
+  `set_clock_time(t)`（定值/确定性回放）使用。
+  GPU time is now visible to every draw path, not just particles: the camera uniform
+  carries `time_secs`, refreshed per frame for the default clock; `DrawBatch::clock`
+  switches a batch to another timeline (paused/scaled/set-value supported).
+
 - **按需出帧（脏驱动）示例**：`examples/on_demand.rs` 演示"这一帧不画"这个能力——
   只在输入到达（`refresh_input`）、尺寸/DPI 变化（`resize_pending`）、自身状态变化
   （含主动持续动画）时调用 `win.draw`。空闲期间 0 次 present、不 acquire、不 encode、
@@ -187,7 +200,7 @@
   `PreparedFrame` + `draw_with_inline` / `draw_with_frame`: prepare/encode split with
   an engine-pass hook and a user-created pass.
 - **采样契约类型**：`TargetAa { samples, per_sample, alpha_to_coverage }`（`none` /
-  `msaa` / `ssaa` / `with_alpha_to_coverage` 构造 + `From<AntiAliasing>`）；
+  `msaa` / `per_sample` / `with_alpha_to_coverage` 构造 + `From<AntiAliasing>`）；
   `RenderTarget::aa`（公开字段）/ `with_aa` / `set_aa`；`PreparedFrame::target_aa()`；
   `VireoWindow::anti_aliasing()`。自建 pass 时可据此逐项对齐附件。
 - **顶点布局 ABI 公开**：`ShapeVertexLayout`（`Mesh` / `SdfInstance` / `GeoInstance` /
@@ -195,6 +208,30 @@
   创建期显式声明契约、而不是靠编译结果猜。
 
 ### Changed / 变更
+
+- **BREAKING｜`AntiAliasing::Ssaa` 改名为 `PerSample`（原名误导）**：这一档实际做的是
+  **逐采样点着色**（`@interpolate(linear, sample)`，每个采样点独立求值后 resolve 平均），
+  规范术语是 sample shading（Vulkan `sampleShadingEnable`）。叫 SSAA / SGSSAA 会让人以为
+  它像 2× 渲染再缩采样那样**全要素**超采样——实际只超采样 **SDF 几何覆盖度**：
+  纹理采样用的 `uv` 仍是逐像素插值（N 个采样点同值），屏空间后处理（blur/bloom）也不受益。
+  迁移：`AntiAliasing::Ssaa { .. }` → `AntiAliasing::PerSample { .. }`、
+  `AntiAliasing::is_ssaa()` → `is_per_sample()`、`TargetAa::ssaa(n)` → `TargetAa::per_sample(n)`。
+  `PerSample` 仍是 SDF 形状唯一有效的硬件 AA 档（形状画成整像素四边形，MSAA 的采样点
+  覆盖率对它无效）；自定义 shape VS 在该档仍按像素求值。该档**保留**解析软边（不把
+  `feather` 归零交给 resolve）：45° 边实测「软边 + 逐采样」过渡像素 204 / 覆盖率级数 50 /
+  单像素最大阶跃 209，「硬边 + resolve」只有 92 / 3 / 255 —— 4 个采样点下软边更平滑。
+  `AntiAliasing::Ssaa` is renamed to `PerSample`: it is per-sample shading (the standard term),
+  not supersampling of the whole frame — only SDF coverage is supersampled, `uv` stays
+  per-pixel and screen-space effects are untouched.
+
+- **BREAKING｜`DrawBatch::particle_clock` 改名为 `clock`**：时间线现在对**所有绘制**
+  生效（形状/文字/粒子/custom VS 与 custom material 都从 group 0 的
+  `camera.time_secs` 读），不再是粒子专属属性。新增 `set_clock` / `clock()`；
+  `set_particle_clock` 保留为 `#[deprecated]` 转发。
+  Migration: `batch.particle_clock = c` → `batch.set_clock(c)`; field is now `clock`.
+- **`wgsl_snippets()` 从 prelude 移除**：`// #include "vireo_*.wgsl"` 机制不变
+  （`material::expand_includes` 仍在 prelude 外可用），只是不再把 3 段工具函数的映射表
+  挂在 prelude 上；需要时 `vireo::material::wgsl_snippets()`。
 
 - **文档｜`docs/reference/throttling.md` §4.4 改错并重写为「按需出帧」**：原文拿
   `on_tick` 返回 `false` 当"本帧不画"，而 `false` 实际表示该 loop 结束（并连带停掉整条
@@ -234,7 +271,7 @@
   窗口/离屏自己的配置（`VireoWindow::anti_aliasing()` 可读）。AA 的 5 处同步点
   （update_aa / resize 清理 / msaa_view 比对 / ds_view 比对 / pending_aa）随之消失：
   引擎 MSAA/DS 视图按 `samples` 逐附件惰性创建，运行期 `set_anti_aliasing` 不再抢
-  渲染器锁。附带能力：**MRT 与 MSAA/SSAA 可同时使用**（此前引擎 MSAA 只服务单目标）。
+  渲染器锁。附带能力：**MRT 与 MSAA / per-sample 可同时使用**（此前引擎 MSAA 只服务单目标）。
   Sampling is now a property of the render target (`TargetAa`) instead of renderer
   state; MSAA/depth views are allocated per attachment, so MRT + MSAA works.
 - **BREAKING｜custom VS 必须显式声明顶点布局**：`ShapeVertexLayout` 公开并进入 prelude
