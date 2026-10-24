@@ -223,6 +223,11 @@ pub struct WindowDesc {
     /// [`crate::window::VireoWindow::set_max_fps`] 调整。拖动 resize 期间若
     /// [`Self::drag_cap`] 开启，上限会被临时压到显示器刷新率（防空转）。
     pub max_fps: Option<u32>,
+    /// 空闲自动降频：画面没上屏时的帧率上限（默认 `Some(DEFAULT_IDLE_FPS)` = 30）。
+    ///
+    /// 仅在 [`Self::max_fps`] 为 `None` 且本窗口"没上屏"时生效；`None` 关闭该行为
+    /// （回到"不限制就全速空转"）。运行期见 [`crate::window::VireoWindow::set_idle_cap`]。
+    pub idle_cap: Option<u32>,
     /// 拖动 resize 期间是否把帧率压到显示器刷新率（默认 `true`）。
     ///
     /// Windows 上拖动窗口时 `acquire` 会失去 vsync 节流，不压就会全速空转
@@ -239,6 +244,12 @@ pub struct WindowDesc {
 ///
 /// 取 240 而不是 `None`：不限制会让空闲/后台场景全速空转（笔记本上直接烫手）。
 pub const DEFAULT_MAX_FPS: u32 = 240;
+
+/// 空闲自动降频的默认值（`None` = 不降频）。
+///
+/// 只在**画面没上屏**时生效（`Occluded` / 最小化 / 0×0 / surface stale / acquire 超时），
+/// **不**看是否聚焦、也不看 vsync 是否在钳制——用户主动关掉 vsync 的前台场景不该被降频。
+pub const DEFAULT_IDLE_FPS: u32 = 30;
 impl WindowDesc {
     /// 创建窗口描述。裸宽高按 **vireo 逻辑像素** 处理（vireo 用户坐标系）——
     /// `Some(dpi_override)` 下物理 = 逻辑 × dpi，`None` 下物理 = 逻辑 × OS 系统 DPI。
@@ -271,6 +282,7 @@ impl WindowDesc {
             present_mode: wgpu::PresentMode::AutoVsync,
             anti_aliasing: AntiAliasing::None,
             max_fps: Some(DEFAULT_MAX_FPS),
+            idle_cap: Some(DEFAULT_IDLE_FPS),
             drag_cap: true,
             frame_latency: 2,
         }
@@ -536,6 +548,12 @@ impl WindowDesc {
         self
     }
 
+    /// 空闲自动降频上限（默认 [`DEFAULT_IDLE_FPS`]；`None` = 关闭）。
+    pub fn idle_cap(mut self, fps: impl Into<Option<u32>>) -> Self {
+        self.idle_cap = fps.into();
+        self
+    }
+
     /// 拖动 resize 期间是否压到显示器刷新率（默认 `true`；见 [`Self::drag_cap`]）。
     pub fn drag_cap(mut self, enabled: bool) -> Self {
         self.drag_cap = enabled;
@@ -572,6 +590,19 @@ mod cap_tests {
         assert_eq!(d.max_fps, Some(DEFAULT_MAX_FPS));
         assert_eq!(DEFAULT_MAX_FPS, 240);
         assert!(d.drag_cap, "拖动期默认压到刷新率");
+    }
+
+    /// 空闲降频默认 30，且可关。
+    #[test]
+    fn idle_cap_defaults_and_override() {
+        let d = WindowDesc::new("t", 400, 300);
+        assert_eq!(d.idle_cap, Some(super::DEFAULT_IDLE_FPS));
+        assert_eq!(super::DEFAULT_IDLE_FPS, 30);
+        assert_eq!(WindowDesc::new("t", 400, 300).idle_cap(None).idle_cap, None);
+        assert_eq!(
+            WindowDesc::new("t", 400, 300).idle_cap(Some(10)).idle_cap,
+            Some(10)
+        );
     }
 
     /// builder 可显式关掉上限 / 拖动 cap。

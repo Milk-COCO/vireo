@@ -216,6 +216,30 @@ pub enum RenderAdvice {
     Skip,
 }
 
+/// 空闲降频是否应该生效（纯函数，便于单测）。
+///
+/// `off_screen`：上次 draw 的结局是否为"没上屏"（遮挡 / 0×0 / surface stale / 超时）；
+/// `minimized`：平台上报的窗口最小化状态。
+///
+/// 刻意**不**接受"是否聚焦"或"vsync 是否在钳制"：用户主动关掉 vsync 的前台窗口
+/// 不该被降频。
+pub(crate) fn idle_cap_active(off_screen: bool, minimized: bool) -> bool {
+    off_screen || minimized
+}
+
+/// 空闲降频与用户上限的合并规则（纯函数）：取**更严**的那个。
+///
+/// - 空闲降频关闭（`idle == None`）→ 按用户值（含 `None` = 不限制）；
+/// - 用户不限制（`user == None`）→ 用空闲上限；
+/// - 两者都有 → 取 `min`（用户设 10 就保持 10，设 240 则降到 30）。
+pub(crate) fn combine_idle_cap(user: Option<u32>, idle: Option<u32>) -> Option<u32> {
+    match (user, idle) {
+        (_, None) => user,
+        (None, Some(i)) => Some(i),
+        (Some(u), Some(i)) => Some(u.min(i)),
+    }
+}
+
 /// 判定「present 是否被 vsync 钳制」需要连续多少帧同向证据才切换状态。
 pub(crate) const THROTTLE_HYSTERESIS: i32 = 8;
 
@@ -369,6 +393,47 @@ pub(crate) fn drag_cap_effective(
 /// 单位不匹配会导致 `min(240, 120_000) = 240`，cap 永远压不下去。
 pub(crate) fn mhz_to_hz(millihertz: u32) -> u32 {
     (millihertz + 500) / 1000
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::idle_cap_active;
+
+    #[test]
+    fn off_screen_or_minimized_triggers() {
+        assert!(idle_cap_active(true, false), "遮挡/0×0/stale 应触发");
+        assert!(idle_cap_active(false, true), "最小化应触发");
+        assert!(idle_cap_active(true, true));
+    }
+
+    use super::combine_idle_cap;
+
+    #[test]
+    fn idle_never_raises_user_cap() {
+        assert_eq!(combine_idle_cap(Some(240), Some(30)), Some(30), "按更严");
+        assert_eq!(
+            combine_idle_cap(Some(10), Some(30)),
+            Some(10),
+            "用户更严则保持"
+        );
+        assert_eq!(
+            combine_idle_cap(None, Some(30)),
+            Some(30),
+            "用户不限→空闲兜底"
+        );
+        assert_eq!(
+            combine_idle_cap(Some(240), None),
+            Some(240),
+            "空闲关闭→原样"
+        );
+        assert_eq!(combine_idle_cap(None, None), None, "都关→不限制");
+    }
+
+    /// 可见且正常上屏时**不**触发——即便用户关了 vsync 在跑满速。
+    #[test]
+    fn visible_window_never_throttled() {
+        assert!(!idle_cap_active(false, false));
+    }
 }
 
 #[cfg(test)]

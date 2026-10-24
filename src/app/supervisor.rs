@@ -78,6 +78,7 @@ pub(crate) fn apply_winit_event_one(
             pending_show,
             max_fps,
             drag_cap,
+            idle_cap,
         } => {
             let vw = VireoWindow::new(
                 window,
@@ -108,6 +109,7 @@ pub(crate) fn apply_winit_event_one(
             );
             vw.set_max_fps(max_fps);
             vw.set_drag_cap(drag_cap);
+            vw.set_idle_cap(idle_cap);
             while app.windows.lock().len() <= handle {
                 app.windows.lock().push(None);
             }

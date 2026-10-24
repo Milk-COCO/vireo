@@ -17,7 +17,8 @@ vireo 的哲学是 **"报状态、不做策略"**：它把「该不该画」和�
 | 1 | **present vsync** | `PresentMode::AutoVsync` | `Present` 阻塞等 vblank → 卡在刷新率（60/120/144…） | `WindowDesc::present_mode(PresentMode::AutoNoVsync)` |
 | 2 | **窗口帧率上限** | `DEFAULT_MAX_FPS` = **240** | 每次 draw 后按 `1/fps` 睡 | `WindowDesc::max_fps(None)`（或运行期 `win.set_max_fps(None)`） |
 | 3 | **拖动 resize 上限** | `drag_cap = true` | 拖动期间即使 `max_fps=None` 也压到刷新率 | `WindowDesc::drag_cap(false)`（或 `win.set_drag_cap(false)`） |
-| 4 | **Thread tick 上限**（仅自建 `Thread` 时） | `Some(240)` | 整个线程循环一轮按 `1/tps` 睡 | `Thread::with_max_tps(None)` |
+| 4 | **空闲自动降频** | `idle_cap = Some(30)` | 画面没上屏时压到 30（与你的 `max_fps` 取更严者） | `WindowDesc::idle_cap(None)`（或 `win.set_idle_cap(None)`） |
+| 5 | **Thread tick 上限**（仅自建 `Thread` 时） | `Some(240)` | 整个线程循环一轮按 `1/tps` 睡 | `Thread::with_max_tps(None)` |
 
 ### 每层为什么存在
 
@@ -26,7 +27,10 @@ vireo 的哲学是 **"报状态、不做策略"**：它把「该不该画」和�
    vireo 没有全局帧率旋钮，多窗口想统一就逐个设（或建窗时用 `WindowDesc`）。
 3. **拖动上限**：Windows 上拖动窗口时 `acquire` 会失去 vsync 节流，循环瞬间全速 → 拖动更卡、
    更烫。这层是故意在拖动期抢回控制权的。
-4. **Thread tick 上限**：只有你用 `Thread` 自己 spawn 渲染线程时才相关。普通 `app.run` 用户
+4. **空闲自动降频**：只在**画面没上屏**时生效（`Occluded` / 最小化 / 0×0 / surface stale /
+   acquire 超时），所以不会干扰"我在前台跑满速"的用法。它看的是**可见性事实**，不看是否
+   聚焦、也不看 vsync 是否在钳制——用户主动关掉 vsync 的前台窗口不该被降频。
+5. **Thread tick 上限**：只有你用 `Thread` 自己 spawn 渲染线程时才相关。普通 `app.run` 用户
    不用管它；纯逻辑线程（不画窗口）可以显式 `None` 全速，也可以限到 30 tps 省 CPU。
 
 > 注意 ④ 的 `None` 是**真的不限速**（0.2.0 起）。0.1.x 里它会被 `App::max_fps` 覆盖，
@@ -253,7 +257,7 @@ app.run(move |ctx| {
 |---|---|---|
 | 1 | `drag_cap` 在 `max_fps=None` 时仍压到刷新率 | 拖动期防空转的保险，可关 |
 | 2 | 取不到显示器刷新率时按 60Hz 估算 | `is_vsync_throttled()` 可能偏保守 |
-| 3 | 没有"空闲自动降频" | 引擎不做策略，用 `is_vsync_throttled()` 自己接（§4.3） |
+| 3 | 空闲降频的触发只认"没上屏" | 可见但被别的窗口部分遮挡时仍按正常帧率跑（那时 vsync 在管） |
 | 4 | `ctx.fps()` 是 tick 速率、跨窗口共享 | 多窗口看 `presented_fps()` |
 
 ---
@@ -321,4 +325,6 @@ async fn main() {
 - [ ] 有"没被 vsync 钳住"时的兜底限流（`is_vsync_throttled()`）
 - [ ] `RenderAdvice::Skip` 时跳过构建、**不**返回 `false`
 - [ ] 动画/物理用真实 `dt`，并做上限钳制
+- [ ] 后台/最小化时不烧 CPU（默认 `idle_cap = 30`；要满速就 `idle_cap(None)`）
+- [ ] 用 `win.applied_cap()` 确认"现在到底被谁压着"（`Some(30)` = 空闲降频，`Some(刷新率)` = 拖动期）
 - [ ] 在笔记本/电池场景实测过帧时间抖动

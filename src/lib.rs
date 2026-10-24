@@ -258,6 +258,7 @@ pub mod prelude {
     pub use crate::app::App;
     pub use crate::window::AntiAliasing;
     pub use crate::window::CursorGrabMode;
+    pub use crate::window::DEFAULT_IDLE_FPS;
     pub use crate::window::DEFAULT_MAX_FPS;
     pub use crate::window::DrawOutcome;
     pub use crate::window::DrawReport;

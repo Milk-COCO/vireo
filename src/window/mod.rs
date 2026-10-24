@@ -37,7 +37,9 @@ mod desc;
 mod metrics;
 mod on;
 pub(crate) use desc::clamp_aa;
-pub use desc::{AntiAliasing, DEFAULT_MAX_FPS, FrameStyle, SendRawWindowHandle, WindowDesc};
+pub use desc::{
+    AntiAliasing, DEFAULT_IDLE_FPS, DEFAULT_MAX_FPS, FrameStyle, SendRawWindowHandle, WindowDesc,
+};
 #[allow(unused_imports)]
 pub(crate) use metrics::{
     DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON, ResizeRefresh,
@@ -96,6 +98,8 @@ pub(crate) enum WinitEvent {
         max_fps: Option<u32>,
         /// 建窗时声明的"拖动期压刷新率"开关（`desc.drag_cap`）。
         drag_cap: bool,
+        /// 建窗时声明的空闲降频上限（`desc.idle_cap`，`None` = 关闭）。
+        idle_cap: Option<u32>,
     },
     Resized {
         handle: usize,
@@ -332,6 +336,8 @@ pub struct VireoWindow {
     monitor_refresh_mhz: Mutex<Option<u32>>,
     /// 拖动期帧率上限开关（`VireoWindow::set_drag_cap`），与 `max_fps` 解耦。
     drag_cap: Mutex<bool>,
+    /// 空闲自动降频上限（`set_idle_cap`）：画面没上屏时的帧率上限，`None` = 关闭。
+    idle_cap: Mutex<Option<u32>>,
     /// 本窗口节流相位锁 deadline（`pac_advance` 维护）。
     /// 帧率上限相位锁的下一个 deadline（`pac_advance` 维护）。`AtomicI64` 存纳秒
     /// （`None` 哨兵 = `i64::MIN`，值 = 相对 `PACE_START` 的纳秒）。用原子量是为了同窗口被
@@ -470,6 +476,7 @@ impl VireoWindow {
             dpi_scale: Mutex::new(dpi_scale),
             max_fps: Mutex::new(Some(DEFAULT_MAX_FPS)),
             drag_cap: Mutex::new(true),
+            idle_cap: Mutex::new(Some(DEFAULT_IDLE_FPS)),
             pacing_deadline: std::sync::atomic::AtomicI64::new(i64::MIN),
             configured_layout: Mutex::new((initial_phys.0, initial_phys.1, scale, dpi_scale)),
             input: InputState::default(),
@@ -2842,17 +2849,67 @@ impl VireoWindow {
         *self.drag_cap.lock()
     }
 
+    /// 本窗口空闲自动降频上限（`None` = 关闭）。默认取 `WindowDesc::idle_cap`
+    /// （即 `Some(DEFAULT_IDLE_FPS)` = 30）。
+    ///
+    /// 只在 `max_fps == None` 且本窗口**没上屏**时生效（见 [`Self::applied_cap`]）。
+    pub fn set_idle_cap(&self, fps: Option<u32>) {
+        *self.idle_cap.lock() = fps;
+    }
+
+    /// 当前空闲自动降频配置（见 [`Self::set_idle_cap`]）。
+    pub fn idle_cap(&self) -> Option<u32> {
+        *self.idle_cap.lock()
+    }
+
+    /// **当前真正生效**的帧率上限（逐帧可查）。
+    ///
+    /// 优先级：拖动期 `drag_cap` → 空闲降频（与用户上限取更严）→ 用户 `max_fps` → `None`。
+    /// 返回值用于回答"为什么我的帧率是这个数"：`Some(30)` 说明是空闲降频在压，
+    /// `Some(刷新率)` 说明是拖动期在压。
+    pub fn applied_cap(&self) -> Option<u32> {
+        self.effective_max_fps()
+    }
+
+    /// 空闲降频是否应该生效：本窗口**没上屏**（遮挡 / 最小化 / 0×0 / surface stale /
+    /// acquire 超时）。
+    ///
+    /// 刻意**不**看是否聚焦、也不看 vsync 是否在钳制：用户主动关掉 vsync 的前台窗口
+    /// 不该被降频（那正是游戏/压测想要的满速）。
+    fn idle_cap_active(&self) -> bool {
+        let last = *self.last_draw_outcome.lock();
+        let off_screen = matches!(
+            last,
+            Some(DrawOutcome::Skipped(
+                DrawSkipReason::Occluded
+                    | DrawSkipReason::ZeroSized
+                    | DrawSkipReason::SurfaceStale
+                    | DrawSkipReason::Timeout
+            ))
+        );
+        crate::window::metrics::idle_cap_active(
+            off_screen,
+            self.inner.is_minimized().unwrap_or(false),
+        )
+    }
+
     /// 实际生效的帧率上限（窗口级）。`set_max_fps` 用户值基础上，若本窗口正在 resize
     /// 拖动（acquire 失去 vsync 节流）且 `drag_cap` 开启，则压到本窗口显示器刷新率，
     /// 避免渲染循环全速空转；松手 snap 后自动恢复。纯决策，供 `draw_frame` 帧节流调用。
     fn effective_max_fps(&self) -> Option<u32> {
         let user = *self.max_fps.lock();
+        // ① 拖动期：即使 `user == None` 也压到刷新率（防空转），优先级最高。
         if *self.drag_cap.lock()
             && self.pending_resize_at.lock().is_some()
             && let Some(mhz) = *self.drag_refresh_mhz.lock()
         {
             return drag_cap_effective(user, true, mhz);
         }
+        // ② 画面没上屏 → 空闲降频与用户上限取更严者（遮挡时 240fps 也是白烧 CPU）。
+        if self.idle_cap_active() {
+            return crate::window::metrics::combine_idle_cap(user, *self.idle_cap.lock());
+        }
+        // ③ 其它情况按用户值（`None` = 不限制）。
         user
     }
 

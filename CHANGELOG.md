@@ -4,6 +4,16 @@
 
 ### Added / 新增
 
+- **空闲自动降频（默认开启，30fps）**：画面**没上屏**时（DWM 判定遮挡 / 最小化 / 0×0 /
+  surface stale / acquire 超时）把帧率压到 `idle_cap`（默认 `Some(DEFAULT_IDLE_FPS)` = 30，
+  与用户 `max_fps` 取更严者），避免后台挂着时全速空转。
+  触发依据是**可见性事实**，不看焦点、也不看 vsync 是否在钳制——所以主动关掉 vsync 的前台
+  窗口不会被误降频。关闭：`WindowDesc::idle_cap(None)` 或 `win.set_idle_cap(None)`。
+  新增 `DEFAULT_IDLE_FPS` 常量、`WindowDesc::idle_cap` / `VireoWindow::set_idle_cap` /
+  `idle_cap()` / **`applied_cap()`**（当前真正生效的上限，用来区分"被谁压着"）。
+  Idle auto-throttle to 30fps when the window is not on screen (occluded/minimized/etc.),
+  independent of focus and of vsync throttling; opt out with `idle_cap(None)`.
+  `applied_cap()` reports which cap is actually in effect.
 - **`VireoWindow::is_vsync_throttled()`：实测「present 有没有被 vblank 钳制」**。
   比较 `DrawTimings.acquire_secs + present_secs` 与显示器刷新率（`1/hz`，取不到回退
   60Hz 假设），连续 8 帧同向证据才切换（滞回，避免抖动）；建窗与 `Resized` 时刷新
