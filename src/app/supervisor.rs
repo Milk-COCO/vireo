@@ -76,6 +76,8 @@ pub(crate) fn apply_winit_event_one(
             init_duration,
             frame_style,
             pending_show,
+            max_fps,
+            drag_cap,
         } => {
             let vw = VireoWindow::new(
                 window,
@@ -104,8 +106,8 @@ pub(crate) fn apply_winit_event_one(
                 #[cfg(target_os = "android")]
                 crate::app::android_app().cloned(),
             );
-            vw.set_max_fps(app.max_fps());
-            vw.set_drag_cap(app.drag_cap());
+            vw.set_max_fps(max_fps);
+            vw.set_drag_cap(drag_cap);
             while app.windows.lock().len() <= handle {
                 app.windows.lock().push(None);
             }

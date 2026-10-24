@@ -178,6 +178,21 @@
 
 ### Changed / 变更
 
+- **BREAKING｜移除 `App` 的全局帧率旋钮**：`App::set_max_fps` / `max_fps` /
+  `set_drag_cap` / `drag_cap` 全部删除。它们从来不是运行期全局控制——只在**建窗/spawn
+  那一刻**给窗口和线程种默认值，名字却读成"立刻改全局帧率"。
+  改为**声明式 + 组件自带默认**：`WindowDesc::max_fps(impl Into<Option<u32>>)`（默认
+  `Some(DEFAULT_MAX_FPS)` = 240）、`WindowDesc::drag_cap(bool)`（默认 `true`）；
+  新增公开常量 `DEFAULT_MAX_FPS`。运行期仍用 `VireoWindow::set_max_fps` /
+  `set_drag_cap`（窗口各自持有，无全局值）。
+  迁移：`app.set_max_fps(Some(60))` → `WindowDesc::… .max_fps(Some(60))`。
+  Removed the illusion of an app-wide frame cap; per-window defaults are now declared
+  on `WindowDesc` and live on the window.
+- **BREAKING｜`Thread::max_tps = None` 现在真的表示「不限速」**：此前 `App::spawn` 里
+  `thread.max_tps.or(app.max_fps())` 会把 `None` 替换成 App 的值（而 `None` 又是字段
+  默认值，于是"没设过"和"想不限制"无法区分）。现默认值改为
+  `Some(DEFAULT_MAX_FPS)`，不再回落到 App。
+  `Thread::max_tps` is now `Some(240)` by default and `None` truly means uncapped.
 - **BREAKING｜`RenderAdvice` 只回答「该不该画」，`Unthrottled` 变体移除**：
   `RenderAdvice` 现在只有 `Render` / `Skip`，`render_advice()` 不再用「是否聚焦」猜测
   节流状态（失焦但可见的窗口仍受 vsync 约束，旧判定会误报）。原来 `Unthrottled` 想表达

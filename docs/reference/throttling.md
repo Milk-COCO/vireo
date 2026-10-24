@@ -4,27 +4,33 @@
 > 适用版本：0.2.0。
 
 vireo 的哲学是 **"报状态、不做策略"**：它把「该不该画」和「有没有被 vsync 钳住」都告诉你，
-但**不会**替你 sleep —— 除了你自己显式配置的 3 个上限。
+但**不会**替你 sleep —— 除了你自己显式配置的上限。
 
-所以"帧率"这件事，你得先知道它一共有几层。
+所以"帧率"这件事，先要弄清它一共有几层。
 
 ---
 
-## 1. 帧率的四个来源
+## 1. 帧率的来源
 
 | # | 层 | 默认值 | 它怎么限制你 | 关掉它 |
 |---|---|---|---|---|
-| 1 | **present vsync** | `PresentMode::AutoVsync` | `Present` 阻塞等 vblank → 卡在刷新率（60/120/144…） | `win.set_present_mode(PresentMode::AutoNoVsync)` |
-| 2 | **窗口帧率上限** | `App` 默认 `Some(240)`，建窗时种给窗口 | 每次 draw 后按 `1/fps` 睡 | `win.set_max_fps(None)` |
-| 3 | **Thread tick 上限** | `spawn` 时用 `App::max_fps` 做种子 | 整个 loop 一轮（tick）按 `1/tps` 睡 | `app.set_max_fps(None)`（**必须在 spawn/建窗之前**） |
-| 4 | **拖动 resize 上限** | `drag_cap = true` | 拖动期间即使 `max_fps=None` 也压到刷新率 | `win.set_drag_cap(false)` / `app.set_drag_cap(false)` |
+| 1 | **present vsync** | `PresentMode::AutoVsync` | `Present` 阻塞等 vblank → 卡在刷新率（60/120/144…） | `WindowDesc::present_mode(PresentMode::AutoNoVsync)` |
+| 2 | **窗口帧率上限** | `DEFAULT_MAX_FPS` = **240** | 每次 draw 后按 `1/fps` 睡 | `WindowDesc::max_fps(None)`（或运行期 `win.set_max_fps(None)`） |
+| 3 | **拖动 resize 上限** | `drag_cap = true` | 拖动期间即使 `max_fps=None` 也压到刷新率 | `WindowDesc::drag_cap(false)`（或 `win.set_drag_cap(false)`） |
+| 4 | **Thread tick 上限**（仅自建 `Thread` 时） | `Some(240)` | 整个线程循环一轮按 `1/tps` 睡 | `Thread::with_max_tps(None)` |
 
 ### 每层为什么存在
 
 1. **vsync**：不撕裂。关掉后画面可能在扫描途中切换，出现水平撕裂线。
-2. **窗口上限**：默认 240 是"防止无限空转"的保险丝，也是常见诉求。
-3. **Thread tick 上限**：一个 Thread 可能驱动多个窗口/多个 `Loop`；它限制的是**循环次数**，不是单窗口帧数。
-4. **拖动上限**：Windows 上拖动窗口时 `acquire` 会失去 vsync 节流，循环瞬间全速 → 拖动更卡、更烫。这层是故意在拖动期抢回控制权的。
+2. **窗口上限**：240 是"防止无限空转"的保险丝，也是常见诉求。上限**归窗口自己所有**：
+   vireo 没有全局帧率旋钮，多窗口想统一就逐个设（或建窗时用 `WindowDesc`）。
+3. **拖动上限**：Windows 上拖动窗口时 `acquire` 会失去 vsync 节流，循环瞬间全速 → 拖动更卡、
+   更烫。这层是故意在拖动期抢回控制权的。
+4. **Thread tick 上限**：只有你用 `Thread` 自己 spawn 渲染线程时才相关。普通 `app.run` 用户
+   不用管它；纯逻辑线程（不画窗口）可以显式 `None` 全速，也可以限到 30 tps 省 CPU。
+
+> 注意 ④ 的 `None` 是**真的不限速**（0.2.0 起）。0.1.x 里它会被 `App::max_fps` 覆盖，
+> 那套全局默认值在 0.2.0 已移除。
 
 ---
 
@@ -34,9 +40,9 @@ vireo 的哲学是 **"报状态、不做策略"**：它把「该不该画」和�
 
 | 场景 | 建议 |
 |---|---|
-| 只想**测吞吐**（benchmark / 压测） | 4 层全关，允许风扇起飞 |
+| 只想**测吞吐**（benchmark / 压测） | 3 层全关，允许风扇起飞 |
 | 想要**低延迟**（游戏、实时交互） | 关 vsync + `frame_latency(1)`，但保留一个较宽的 `max_fps`（如 500）兜底 |
-| 想要**省电 60 帧** | 别关，直接 `set_max_fps(Some(60))` |
+| 想要**省电 60 帧** | 别关，`.max_fps(Some(60))` |
 | 想要**自适应**（前台全速、后台省电） | 见 §4.3 |
 
 ### 2.2 代码
@@ -46,16 +52,14 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    // 3) Thread tick 上限：必须在 spawn 之前把 App 的种子清掉
-    //    （Thread::max_tps = None 会回落到 App 的值，见 §5 误解 ③）
-    app.set_max_fps(None);
-    // 4) 拖动期不要压回刷新率
-    app.set_drag_cap(false);
-
     let win_idx = app.window(
         WindowDesc::new("uncapped", 1280, 720)
             // 1) 关 vsync（AutoNoVsync 优先；Immediate 延迟最低但会撕裂）
             .present_mode(wgpu::PresentMode::AutoNoVsync)
+            // 2) 关窗口帧率上限
+            .max_fps(None)
+            // 3) 拖动 resize 期也不压回刷新率
+            .drag_cap(false)
             // 可选：减少在途帧，降低延迟（不是节流）
             .frame_latency(1),
         None::<fn()>,
@@ -66,9 +70,6 @@ async fn main() {
             Ok(w) => w,
             Err(_) => return false, // 窗口还没建好 / 已关闭
         };
-        // 2) 窗口级上限：建窗时已从 App 种下，但运行期改 App 不会传播给已存在的窗口，
-        //    这里显式再清一次最保险。
-        win.set_max_fps(None);
 
         let mut batch = DrawBatch::new();
         // … 你的绘制 …
@@ -80,13 +81,15 @@ async fn main() {
 }
 ```
 
+> 自建线程时再加一句：`Thread::new().with_max_tps(None)`（默认 `Some(240)`）。
+
 ### 2.3 如何验证真的关掉了
 
 三个读数**分开看**：
 
 | 读数 | 含义 | 若它不符合预期 |
 |---|---|---|
-| `ctx.fps()` | **tick** 速率（每轮 loop 一次，跨窗口共享） | 不高 → 第 3 层（Thread tick 上限）没关 |
+| `ctx.fps()` | **tick** 速率（每轮 loop 一次，跨窗口共享） | 不高 → 第 4 层（Thread tick 上限）没关 |
 | `win.presented_fps()` | **真正 present 成功**的速率 | 卡在 60/120/144 → 第 1 层（vsync）或第 2 层（窗口上限）还在 |
 | `win.is_vsync_throttled()` | present 有没有被 vblank 钳住（**实测**） | `true` = 仍被钳；`false` = vsync 已不兜底 |
 
@@ -115,7 +118,6 @@ async fn main() {
 微软未公开具体超时，实测数百毫秒到一两秒；最小化通常最快，"被别的窗口盖住"最慢。
 
 **注意：失焦本身不会解除 vsync**。可见但无焦点的窗口照样被 vblank 钳住。
-（0.1.x 的 `render_advice()` 曾用"是否聚焦"猜这件事，会误报；0.2.0 起改为实测。）
 
 对策：
 
@@ -139,8 +141,8 @@ if matches!(win.render_advice(), RenderAdvice::Skip) {
 
 ### 3.3 拖窗口时会被压回刷新率
 
-`drag_cap` 默认开启：即使你 `set_max_fps(None)`，**拖动 resize 期间**上限仍被压到显示器刷新率。
-想连拖动也全速：`win.set_drag_cap(false)`。
+`drag_cap` 默认开启：即使 `max_fps(None)`，**拖动 resize 期间**上限仍被压到显示器刷新率。
+想连拖动也全速：`WindowDesc::drag_cap(false)` 或运行期 `win.set_drag_cap(false)`。
 
 ### 3.4 高帧率会改变你的时间步进
 
@@ -233,9 +235,9 @@ app.run(move |ctx| {
 
 **① "失焦就会解除 vsync"** —— 错。可见但无焦点**仍被钳**。真正解除的是 Windows 判定窗口被遮挡（§3.1），且有延迟。
 
-**② "`app.set_max_fps(None)` 会立刻让已存在的窗口不限制"** —— 错。App 的值只在**建窗那一刻**种给窗口，运行期改 App 不传播，需逐窗 `win.set_max_fps(None)`。
+**② "`WindowDesc::max_fps` 会管所有窗口"** —— 错。它只作用于创建的那个窗口；vireo 没有全局帧率旋钮，运行期也不会互相传播。
 
-**③ "`Thread::with_max_tps(None)` 表示该线程不限速"** —— 错。实现是 `thread.max_tps.or(app.max_fps())`，`None` 会回落到 App 的值。想不限速请先 `app.set_max_fps(None)`。
+**③ "`Thread::with_max_tps(None)` 表示该线程不限速"** —— **0.2.0 起是对的**（`None` = 不限速，默认 `Some(240)`）。0.1.x 里它会被 `App::max_fps` 覆盖，那些全局默认值已移除。
 
 **④ "`presented_fps()` 就是我的帧率"** —— 半对。它是真正 present 成功的速率；`ctx.fps()` 是 tick 速率，一个 loop 里可能画 0 帧或多帧。
 
@@ -249,12 +251,10 @@ app.run(move |ctx| {
 
 | # | 限制 | 说明 |
 |---|---|---|
-| 1 | `Thread::max_tps = None` 回落到 `App::max_fps` | 想真正不限速请先设 `app.set_max_fps(None)` |
-| 2 | `App::set_max_fps` 不传播给已存在窗口 | 逐窗 `win.set_max_fps` |
-| 3 | `drag_cap` 在 `max_fps=None` 时仍压到刷新率 | 拖动期防空调转的保险，可关 |
-| 4 | 取不到显示器刷新率时按 60Hz 估算 | `is_vsync_throttled()` 可能偏保守 |
-| 5 | 没有"空闲自动降频" | 引擎不做策略，用 `is_vsync_throttled()` 自己接（§4.3） |
-| 6 | `ctx.fps()` 是 tick 速率、跨窗口共享 | 多窗口看 `presented_fps()` |
+| 1 | `drag_cap` 在 `max_fps=None` 时仍压到刷新率 | 拖动期防空转的保险，可关 |
+| 2 | 取不到显示器刷新率时按 60Hz 估算 | `is_vsync_throttled()` 可能偏保守 |
+| 3 | 没有"空闲自动降频" | 引擎不做策略，用 `is_vsync_throttled()` 自己接（§4.3） |
+| 4 | `ctx.fps()` 是 tick 速率、跨窗口共享 | 多窗口看 `presented_fps()` |
 
 ---
 
@@ -265,12 +265,11 @@ use std::time::{Duration, Instant};
 
 #[vireo::main]
 async fn main() {
-    app.set_max_fps(None);      // 不让 Thread 层限速
-    app.set_drag_cap(false);    // 拖动也不压回刷新率
-
     let win_idx = app.window(
         WindowDesc::new("uncapped + idle throttle", 1280, 720)
             .present_mode(wgpu::PresentMode::AutoNoVsync)
+            .max_fps(None)
+            .drag_cap(false)
             .frame_latency(1),
         None::<fn()>,
     );
@@ -285,7 +284,6 @@ async fn main() {
         if matches!(win.render_advice(), RenderAdvice::Skip) {
             return true; // 被遮挡/最小化：不构建，但别退出 loop
         }
-        win.set_max_fps(None);
 
         // 只有"没被 vblank 钳住"时才自己踩刹车
         if win.is_vsync_throttled() {
@@ -317,9 +315,9 @@ async fn main() {
 ## 8. 检查清单
 
 - [ ] 清楚自己关的是哪几层、为什么
-- [ ] `app.set_max_fps(None)` 在 spawn / 建窗**之前**
-- [ ] 每个窗口显式 `set_max_fps(None)`（不依赖 App 传播）
-- [ ] 想连拖动也全速 → `set_drag_cap(false)`
+- [ ] 建窗时用 `WindowDesc::max_fps` / `drag_cap` 声明（不要指望全局默认值）
+- [ ] 想连拖动也全速 → `.drag_cap(false)`
+- [ ] 自建线程且要全速 → `Thread::with_max_tps(None)`
 - [ ] 有"没被 vsync 钳住"时的兜底限流（`is_vsync_throttled()`）
 - [ ] `RenderAdvice::Skip` 时跳过构建、**不**返回 `false`
 - [ ] 动画/物理用真实 `dt`，并做上限钳制

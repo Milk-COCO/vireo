@@ -83,8 +83,6 @@ pub struct AppInner {
     storage_name: Mutex<String>,
     offscreens: Mutex<Vec<Arc<OffscreenCanvas>>>,
     pub init_duration: f64,
-    max_fps: Mutex<Option<u32>>,
-    drag_cap: Mutex<bool>,
     create_tx: Mutex<Option<mpsc::Sender<CreateWindowRequest>>>,
     cb_tx: Mutex<Option<mpsc::Sender<(usize, crate::input::InputCallbacks)>>>,
     pub(crate) loop_states: Mutex<Vec<Arc<crate::thread::LoopHandleState>>>,
@@ -668,8 +666,6 @@ impl App {
                 default_icon: Mutex::new(default_icon),
                 offscreens: Mutex::new(Vec::new()),
                 init_duration,
-                max_fps: Mutex::new(Some(240)),
-                drag_cap: Mutex::new(true),
                 create_tx: Mutex::new(None),
                 cb_tx: Mutex::new(None),
                 loop_states: Mutex::new(Vec::new()),
@@ -1154,7 +1150,7 @@ impl App {
         let shared_for_thread = shared.clone();
         let fps_for_thread = fps_stats.clone();
         let device_lost_for_thread = device_lost.clone();
-        let thread_tps = thread.max_tps.or(app.max_fps());
+        let thread_tps = thread.max_tps;
         let thread_name = thread.name.clone().unwrap_or_else(|| {
             let n = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
             format!("vireo-thread-{n}")
@@ -1688,22 +1684,6 @@ impl App {
     /// level 上是同一个，缺失不构成阻塞。
     pub fn on_memory_warning(&self, cb: impl Fn() + Send + Sync + 'static) {
         self.inner.memory_warning_cbs.lock().push(Arc::new(cb));
-    }
-
-    pub fn set_max_fps(&self, fps: Option<u32>) {
-        *self.max_fps.lock() = fps;
-    }
-
-    pub fn max_fps(&self) -> Option<u32> {
-        *self.max_fps.lock()
-    }
-
-    pub fn set_drag_cap(&self, enabled: bool) {
-        *self.drag_cap.lock() = enabled;
-    }
-
-    pub fn drag_cap(&self) -> bool {
-        *self.drag_cap.lock()
     }
 
     pub fn windows(&self) -> Vec<Arc<VireoWindow>> {

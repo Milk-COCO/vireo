@@ -217,6 +217,17 @@ pub struct WindowDesc {
     pub blur: bool,
     pub present_mode: wgpu::PresentMode,
     pub anti_aliasing: AntiAliasing,
+    /// 本窗口帧率上限（`None` = 不限制）。
+    ///
+    /// 默认 [`DEFAULT_MAX_FPS`]；运行期仍可用
+    /// [`crate::window::VireoWindow::set_max_fps`] 调整。拖动 resize 期间若
+    /// [`Self::drag_cap`] 开启，上限会被临时压到显示器刷新率（防空转）。
+    pub max_fps: Option<u32>,
+    /// 拖动 resize 期间是否把帧率压到显示器刷新率（默认 `true`）。
+    ///
+    /// Windows 上拖动窗口时 `acquire` 会失去 vsync 节流，不压就会全速空转
+    /// （拖动更卡、更烫）。关掉即"拖动期也按 [`Self::max_fps`] 跑"。
+    pub drag_cap: bool,
     /// 期望最大在途帧（`SurfaceConfiguration::desired_maximum_frame_latency`）。
     /// DX12 下 swapchain buffer 数 = latency + 1：默认 2 → 3 buffer（CPU 可超前
     /// 2 帧，无 vsync 时峰值更高）；设 1 → 2 buffer（在途封顶 1，vsync 拖动时
@@ -224,6 +235,10 @@ pub struct WindowDesc {
     pub frame_latency: u32,
 }
 
+/// 未显式配置时的默认帧率上限（窗口绘制 + 线程 tick 共用）。
+///
+/// 取 240 而不是 `None`：不限制会让空闲/后台场景全速空转（笔记本上直接烫手）。
+pub const DEFAULT_MAX_FPS: u32 = 240;
 impl WindowDesc {
     /// 创建窗口描述。裸宽高按 **vireo 逻辑像素** 处理（vireo 用户坐标系）——
     /// `Some(dpi_override)` 下物理 = 逻辑 × dpi，`None` 下物理 = 逻辑 × OS 系统 DPI。
@@ -255,6 +270,8 @@ impl WindowDesc {
             blur: false,
             present_mode: wgpu::PresentMode::AutoVsync,
             anti_aliasing: AntiAliasing::None,
+            max_fps: Some(DEFAULT_MAX_FPS),
+            drag_cap: true,
             frame_latency: 2,
         }
     }
@@ -513,6 +530,18 @@ impl WindowDesc {
         self
     }
 
+    /// 本窗口帧率上限（`None` = 不限制）。默认 [`DEFAULT_MAX_FPS`]。
+    pub fn max_fps(mut self, fps: impl Into<Option<u32>>) -> Self {
+        self.max_fps = fps.into();
+        self
+    }
+
+    /// 拖动 resize 期间是否压到显示器刷新率（默认 `true`；见 [`Self::drag_cap`]）。
+    pub fn drag_cap(mut self, enabled: bool) -> Self {
+        self.drag_cap = enabled;
+        self
+    }
+
     pub fn present_mode(mut self, mode: wgpu::PresentMode) -> Self {
         self.present_mode = mode;
         self
@@ -529,5 +558,30 @@ impl WindowDesc {
     pub fn anti_aliasing(mut self, aa: AntiAliasing) -> Self {
         self.anti_aliasing = aa;
         self
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::{DEFAULT_MAX_FPS, WindowDesc};
+
+    /// 默认：有上限（240）且拖动期压刷新率。
+    #[test]
+    fn desc_defaults_are_capped() {
+        let d = WindowDesc::new("t", 800, 600);
+        assert_eq!(d.max_fps, Some(DEFAULT_MAX_FPS));
+        assert_eq!(DEFAULT_MAX_FPS, 240);
+        assert!(d.drag_cap, "拖动期默认压到刷新率");
+    }
+
+    /// builder 可显式关掉上限 / 拖动 cap。
+    #[test]
+    fn desc_builders_override_defaults() {
+        let d = WindowDesc::new("t", 800, 600).max_fps(None).drag_cap(false);
+        assert_eq!(d.max_fps, None);
+        assert!(!d.drag_cap);
+
+        let d2 = WindowDesc::new("t", 800, 600).max_fps(Some(60));
+        assert_eq!(d2.max_fps, Some(60));
     }
 }

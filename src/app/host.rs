@@ -304,6 +304,8 @@ impl Runner {
             init_duration,
             frame_style: desc.frame_style,
             pending_show: desc.visible && desc.preparable,
+            max_fps: desc.max_fps,
+            drag_cap: desc.drag_cap,
         });
     }
 }

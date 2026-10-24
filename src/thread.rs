@@ -246,11 +246,12 @@ pub struct Thread {
     pub(crate) name: Option<String>,
     /// 本 Thread 的 tick 速率上限（ticks per second）。
     ///
-    /// 一整个 Thread 循环一次称为一个 **tick**（每个 `Loop` 各执行一次，称为该 Loop 的一个 tick，
-    /// 而非 frame）。`None` = 不限速；`Some(n)` = 用相位锁 `crate::window::metrics::pac_advance` 把 tick 间隔钳到
-    /// `1/n` 秒。该上限在 [`App::spawn`] 时由 `App::max_fps` **作为默认值**种子
-    /// （未显式设置时取 `app.max_fps()`，运行期改 `App::max_fps` 不影响已 spawn 的 Thread），
-    /// 之后由本字段独立决定，App 不再直接控制。
+    /// 一整个 Thread 循环一次称为一个 **tick**（每个 `Loop` 各执行一次，称为该 Loop 的
+    /// 一个 tick，而非 frame）。`Some(n)` = 用相位锁 `crate::window::metrics::pac_advance`
+    /// 把 tick 间隔钳到 `1/n` 秒；**`None` = 不限速**（纯逻辑线程可据此全速跑）。
+    ///
+    /// 默认 `Some(DEFAULT_MAX_FPS)`（240）。`App` 不再持有全局帧率默认值——需要按线程
+    /// 调整时用 [`Self::with_max_tps`]，需要不限速则显式传 `None`。
     pub max_tps: Option<u32>,
 }
 
@@ -266,7 +267,7 @@ impl Thread {
         Self {
             loops: Vec::new(),
             name: None,
-            max_tps: None,
+            max_tps: Some(crate::window::DEFAULT_MAX_FPS),
         }
     }
     /// 向本 `Thread` 添加单个循环（链式调用）。
@@ -279,7 +280,7 @@ impl Thread {
         self.loops.extend(loops);
         self
     }
-    /// 设置本 Thread 的 tick 速率上限（覆盖 `App::max_fps` 默认值）。
+    /// 设置本 Thread 的 tick 速率上限（覆盖默认的 `Some(DEFAULT_MAX_FPS)`；`None` = 不限速）。
     pub fn with_max_tps(mut self, tps: impl Into<Option<u32>>) -> Self {
         self.max_tps = tps.into();
         self
@@ -523,7 +524,7 @@ pub(crate) fn run_thread_loop(
                 break;
             }
             // 整轮 Thread tick 的速率上限（tps）。一整个 Thread 循环一次 = 一个 tick；
-            // `max_tps` 由 `App::spawn` 时以 `App::max_fps` 作为默认值种子，运行期独立生效。
+            // `max_tps` 默认为 `Some(DEFAULT_MAX_FPS)`；`None` 表示本线程完全不限速。
             // 相位锁 `pac_advance` 无条件应用：正常 tick（有窗口绘制）与空闲 tick（均 Skipped）
             // 都受同一上限约束，无魔法数字、不硬编码速率；各窗口自身的 `max_fps` 作为更细的
             // 逐窗口覆盖仍生效。用户亦可在 `on_frame` 内据 `render_advice()`（该不该画）与
@@ -585,4 +586,29 @@ pub(crate) fn run_thread_loop(
         "render thread exit: force draw_idle on {} windows",
         forced
     ));
+}
+
+#[cfg(test)]
+mod tps_tests {
+    use super::Thread;
+    use crate::window::DEFAULT_MAX_FPS;
+
+    /// 默认有 tick 上限（不再是"None + 回落到 App"）。
+    #[test]
+    fn default_tps_is_capped() {
+        assert_eq!(Thread::new().max_tps, Some(DEFAULT_MAX_FPS));
+    }
+
+    /// `None` 现在**真的**表示不限速（0.2.0 之前会被 `or(app.max_fps())` 覆盖）。
+    #[test]
+    fn none_means_uncapped() {
+        let t = Thread::new().with_max_tps(None);
+        assert_eq!(t.max_tps, None);
+    }
+
+    /// 显式值原样保留。
+    #[test]
+    fn explicit_tps_kept() {
+        assert_eq!(Thread::new().with_max_tps(30).max_tps, Some(30));
+    }
 }

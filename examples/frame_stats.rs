@@ -107,7 +107,7 @@ async fn main() {
     let mut current_aa = AntiAliasing::None;
     let mut show_text = true;
     let mut present_immediate = false;
-    let mut current_cap: Option<u32> = app.max_fps();
+    let mut current_cap: Option<u32> = Some(DEFAULT_MAX_FPS);
     let mut current_latency: u32 = 2;
     let mut was_focused = true;
     let pending_aa: Arc<Mutex<Option<AntiAliasing>>> = Arc::new(Mutex::new(None));

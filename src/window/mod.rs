@@ -37,7 +37,7 @@ mod desc;
 mod metrics;
 mod on;
 pub(crate) use desc::clamp_aa;
-pub use desc::{AntiAliasing, FrameStyle, SendRawWindowHandle, WindowDesc};
+pub use desc::{AntiAliasing, DEFAULT_MAX_FPS, FrameStyle, SendRawWindowHandle, WindowDesc};
 #[allow(unused_imports)]
 pub(crate) use metrics::{
     DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON, ResizeRefresh,
@@ -92,6 +92,10 @@ pub(crate) enum WinitEvent {
         frame_style: FrameStyle,
         /// 首帧渲染后是否自动显示（`desc.visible && desc.preparable`）。
         pending_show: bool,
+        /// 建窗时声明的帧率上限（`desc.max_fps`，`None` = 不限制）。
+        max_fps: Option<u32>,
+        /// 建窗时声明的"拖动期压刷新率"开关（`desc.drag_cap`）。
+        drag_cap: bool,
     },
     Resized {
         handle: usize,
@@ -464,7 +468,7 @@ impl VireoWindow {
             pending_override_target: Mutex::new(None),
             pending_override_since: Mutex::new(None),
             dpi_scale: Mutex::new(dpi_scale),
-            max_fps: Mutex::new(None),
+            max_fps: Mutex::new(Some(DEFAULT_MAX_FPS)),
             drag_cap: Mutex::new(true),
             pacing_deadline: std::sync::atomic::AtomicI64::new(i64::MIN),
             configured_layout: Mutex::new((initial_phys.0, initial_phys.1, scale, dpi_scale)),
@@ -2806,22 +2810,29 @@ impl VireoWindow {
     /// - `1` → 2 buffer：在途封顶 1，vsync 拖动时 camera 时差更小。
     ///
     /// 值域为 wgpu 能力范围（通常 1..=16），超出会被 wgpu 夹紧。`0` 非法。
-    /// 本窗口帧率上限（`None` = 不限制）。默认取 `App::set_max_fps` 创建时的值；
-    /// `set_max_fps` 可在运行期按窗口独立调整（不与 `App` 全局值联动，除非再次经
-    /// `App::set_max_fps` 传播）。与渲染循环解耦：`draw` 是窗口唯一帧入口，节流在
-    /// `draw_frame` 内按本窗口 cap 执行。
+    pub fn set_frame_latency(&self, latency: u32) {
+        *self.pending_frame_latency.lock() = Some(latency);
+    }
+
+    /// 本窗口帧率上限（`None` = 不限制）。默认取 `WindowDesc::max_fps`
+    /// （即 `Some(DEFAULT_MAX_FPS)` = 240）。
+    ///
+    /// 窗口各自持有，**没有全局值**：想改所有窗口请逐个调用，或建窗时用
+    /// `WindowDesc::max_fps`。拖动 resize 期间若 `drag_cap` 开启，上限会被临时压到
+    /// 显示器刷新率（见 [`Self::set_drag_cap`]）。节流在 `draw_frame` 内按本窗口 cap 执行。
     pub fn set_max_fps(&self, fps: Option<u32>) {
         *self.max_fps.lock() = fps;
     }
 
-    /// 当前本窗口帧率上限（见 `set_max_fps`）。
+    /// 当前本窗口帧率上限（见 [`Self::set_max_fps`]）。
     pub fn max_fps(&self) -> Option<u32> {
         *self.max_fps.lock()
     }
 
-    /// 本窗口「拖动期帧率上限」开关，与 `set_max_fps` 解耦。详见 `App::set_drag_cap` 的语义
-    /// 说明：开启（默认）时 resize 拖动期即使 `set_max_fps(None)` 也压到刷新率防空转；
-    /// 关闭则拖动期全速产帧、画面内容变化更平滑。
+    /// 本窗口「拖动期帧率上限」开关，默认取 `WindowDesc::drag_cap`（`true`）。
+    ///
+    /// 开启时：resize 拖动期间即使 `set_max_fps(None)` 也会压到显示器刷新率（防拖动
+    /// 空转）；关闭则拖动期按本窗口 cap 全速产帧，画面内容变化更平滑。
     pub fn set_drag_cap(&self, enabled: bool) {
         *self.drag_cap.lock() = enabled;
     }
@@ -2843,10 +2854,6 @@ impl VireoWindow {
             return drag_cap_effective(user, true, mhz);
         }
         user
-    }
-
-    pub fn set_frame_latency(&self, latency: u32) {
-        *self.pending_frame_latency.lock() = Some(latency);
     }
 
     /// 当前真正生效（configure 到 surface）的在途帧。pending 未应用时返回旧值。
