@@ -358,13 +358,16 @@ pub struct DrawBatch {
     /// flatten/draw 时整批一次消费，零 record 副作用。`Transform::IDENTITY` 是自然缺省
     /// （非 `Option`：`None` 与 `Some(IDENTITY)` 等价）。
     pub view: Transform,
-    /// 本批粒子用的时钟（**属性，非画笔状态**，batch-local **不继承**子树）。
+    /// 本批次使用的 GPU 时间线（**属性，非画笔状态**，batch-local **不继承**子树）。
     ///
     /// - draw 阶段按此 index 读注册表时间＋绑对应 camera 组（见 `Renderer::clock_camera_group`）；
-    ///   `draw_particles` 本身不读时间（D 已否决），spawn/sweep 取钟由用户经 `clock_time` 自理。
+    ///   对**所有绘制生效**（形状/文字/粒子/custom VS 与 custom material），不再只影响粒子：
+    ///   group 0 的相机 uniform 末尾有 `time_secs`，着色器声明
+    ///   `struct Camera { projection, dpi_scale, time_secs }` 即可读。
+    /// - 默认 `ClockIndex::ZERO`：用共享的默认相机组（每帧写默认钟时间，零额外绑定）。
     /// - 时钟是选择无法叠加（不像 transform 可乘），故无 `view` 式的祖先累计；
-    ///   子 batch 各用各的字段，整棵子树同钟请逐个设。默认 0 号钟。
-    pub particle_clock: ClockIndex,
+    ///   子 batch 各用各的字段，整棵子树同钟请逐个设。
+    pub clock: ClockIndex,
     /// SDF 柔边宽度（逻辑像素，`None` = 几何光栅化模式，不走 SDF）。
     /// 默认值为 `Some(1.0)`；需要几何路径时显式设为 `None`。
     ///
@@ -547,7 +550,7 @@ impl DrawBatch {
             shape_mesh_end: 0,
             transform: None,
             view: Transform::IDENTITY,
-            particle_clock: ClockIndex::ZERO,
+            clock: ClockIndex::ZERO,
             sdf_feather: Some(1.0),
             color: crate::color::colors::WHITE,
             uv: UvRect::default(),
@@ -599,7 +602,11 @@ impl DrawBatch {
         let mut last_dynamic_offsets: Vec<u32> = Vec::new();
 
         let engine_bg = ctx.engine_bg;
-        let camera_bg = ctx.camera_bind_group;
+        // group 0 的相机组：默认钟用共享组（`time_secs` 每帧写默认时间），
+        // 非默认钟才现取该时钟自己的 80B camera buffer（每个 batch 最多一次）。
+        let clock_bg = (info.clock != crate::gpu::ClockIndex::ZERO)
+            .then(|| ctx.renderer.clock_camera_group(info.clock));
+        let camera_bg = clock_bg.as_ref().unwrap_or(ctx.camera_bind_group);
         let mut material_blends: Vec<Option<wgpu::BlendState>> = Vec::new();
 
         if !info.ordered.is_empty() {
@@ -889,7 +896,6 @@ impl DrawBatch {
                         last_geometry = None;
                     }
                     OrderedShapeSegment::Particles(segment) => {
-                        let clock_bg = ctx.renderer.clock_camera_group(info.particle_clock);
                         let seg_material = &segment.material;
                         // P3: resolve user bind groups for self-managed materials.
                         let user_bind_groups = seg_material
@@ -957,7 +963,7 @@ impl DrawBatch {
                         if let Some(custom_pipe) = custom_pipe.as_ref() {
                             pass.set_pipeline(custom_pipe);
                             if !is_self_managed {
-                                pass.set_bind_group(0, &clock_bg, &[]);
+                                pass.set_bind_group(0, camera_bg, &[]);
                                 pass.set_bind_group(1, &segment.bind_group, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                             }
@@ -1004,7 +1010,7 @@ impl DrawBatch {
                             );
                             pass.set_pipeline(&particle_pipeline);
                             if !is_self_managed {
-                                pass.set_bind_group(0, &clock_bg, &[]);
+                                pass.set_bind_group(0, camera_bg, &[]);
                                 pass.set_bind_group(1, &segment.bind_group, &[]);
                                 pass.set_bind_group(2, engine_bg, &[]);
                             }
@@ -1495,7 +1501,6 @@ impl DrawBatch {
                     last_geometry = None;
                 }
                 if !info.particles.is_empty() {
-                    let clock_bg = ctx.renderer.clock_camera_group(info.particle_clock);
                     let custom_pipe: Option<Arc<wgpu::RenderPipeline>> = if use_custom_particles {
                         let mat = info.custom_material.as_ref().unwrap();
                         match ctx.gpu.ensure_material_pipeline(
@@ -1531,7 +1536,7 @@ impl DrawBatch {
                     };
                     if let Some(custom_pipe) = custom_pipe.as_ref() {
                         pass.set_pipeline(custom_pipe);
-                        pass.set_bind_group(0, &clock_bg, &[]);
+                        pass.set_bind_group(0, camera_bg, &[]);
                     } else {
                         let particle_pipeline = ctx.gpu.ensure_particle_pipeline(
                             ctx.sample_count,
@@ -1544,7 +1549,7 @@ impl DrawBatch {
                             info.target_blends.len().max(1) as u32,
                         );
                         pass.set_pipeline(&particle_pipeline);
-                        pass.set_bind_group(0, &clock_bg, &[]);
+                        pass.set_bind_group(0, camera_bg, &[]);
                     }
                     for seg in info.particles {
                         pass.set_bind_group(1, &seg.bind_group, &[]);
@@ -1629,7 +1634,7 @@ impl DrawBatch {
         self.shape_mesh_end = 0;
         self.transform = None;
         self.view = Transform::IDENTITY;
-        self.particle_clock = ClockIndex::ZERO;
+        self.clock = ClockIndex::ZERO;
         self.sdf_feather = Some(1.0); // 与 new() 一致：SDF 路径
         self.color = crate::color::colors::WHITE;
         self.uv = UvRect::default();
@@ -2417,6 +2422,30 @@ impl DrawBatch {
     #[inline]
     pub fn set_sdf_feather(&mut self, value: Option<f32>) {
         self.sdf_feather = value;
+    }
+
+    /// 当前批次使用的 GPU 时间线。
+    #[inline]
+    pub fn clock(&self) -> ClockIndex {
+        self.clock
+    }
+
+    /// 设置本批次的 GPU 时间线（`ClockIndex::ZERO` = 默认钟）。
+    ///
+    /// 只改这一个 batch：`draw` 时按它把 group 0 绑到该时钟自己的相机 uniform
+    /// （投影/dpi 相同、`time_secs` 不同）。默认钟不额外绑定、不额外写 buffer。
+    #[inline]
+    pub fn set_clock(&mut self, clock: ClockIndex) {
+        self.clock = clock;
+    }
+
+    /// 旧名，等价于 [`Self::set_clock`]。
+    ///
+    /// 字段已改名为 `clock`：时间线现在**对所有绘制生效**，不再只是粒子的属性。
+    #[deprecated(note = "改用 set_clock：时间线对所有绘制生效，不再只影响粒子")]
+    #[inline]
+    pub fn set_particle_clock(&mut self, clock: ClockIndex) {
+        self.clock = clock;
     }
 
     /// 清除 SDF 柔边（设为 `None`），走几何路径。
@@ -3371,7 +3400,7 @@ impl DrawBatch {
             texts: TextEntryList::new_from_entries(&self.texts),
             transform: self.transform,
             view: self.view,
-            particle_clock: self.particle_clock,
+            clock: self.clock,
             sdf_feather: self.sdf_feather,
             color: self.color,
             uv: self.uv,

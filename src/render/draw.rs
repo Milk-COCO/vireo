@@ -189,6 +189,13 @@ impl Renderer {
         batches: &'a [&'a DrawBatch],
     ) -> PreparedFrame<'a> {
         let active = FrameActiveGuard::acquire(&self.frame_active);
+        // 默认钟的时间位每帧刷新（4 字节，offset 68）。默认相机组是常驻绑定的，所以
+        // 引擎形状/文字/粒子与自定义 VS 都能从 `camera.time_secs` 读到当前时间——
+        // GPU 时间不再只有粒子拿得到；非默认钟由 batch 级 `clock` 另绑 per-clock 组。
+        let now_secs = self.gpu.clock_time(crate::gpu::ClockIndex::ZERO);
+        self.gpu
+            .queue
+            .write_buffer(&self.camera_buf, 68, &now_secs.to_le_bytes());
         // ---- 前序展开子树（含 Pop 事件 + Area 事件）----
         // 可见 = 祖先 stencil ∧ batch 自身有效 Area。
         // Area 编译为掩码 op（无色）：AreaSetup 在 batch 前盖、AreaCleanup 在子树后擦。
@@ -1009,7 +1016,7 @@ impl Renderer {
                             instances: instance_segments,
                             geo_instances: geo_segments,
                             particles: particle_segments,
-                            particle_clock: batch.particle_clock,
+                            clock: batch.clock,
                             blend: batch.blend_state,
                             ordered: if batch.shape_commands.is_empty()
                                 || !batch.shape_commands_valid()
@@ -1204,7 +1211,7 @@ impl Renderer {
                             instances: instance_segments,
                             geo_instances: geo_segments,
                             particles: particle_segments,
-                            particle_clock: batch.particle_clock,
+                            clock: batch.clock,
                             blend: batch.blend_state,
                             ordered: Vec::new(),
                         })
@@ -1264,7 +1271,7 @@ impl Renderer {
                         instances: Vec::new(),
                         geo_instances: Vec::new(),
                         particles: Vec::new(),
-                        particle_clock: ClockIndex::ZERO,
+                        clock: ClockIndex::ZERO,
                         blend: wgpu::BlendState::ALPHA_BLENDING,
                         ordered: Vec::new(),
                     };
@@ -1312,7 +1319,7 @@ impl Renderer {
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
-                            particle_clock: ClockIndex::ZERO,
+                            clock: ClockIndex::ZERO,
                             blend: wgpu::BlendState::ALPHA_BLENDING,
                             ordered: Vec::new(),
                         };
@@ -1375,7 +1382,7 @@ impl Renderer {
                             instances: Vec::new(),
                             geo_instances: Vec::new(),
                             particles: Vec::new(),
-                            particle_clock: ClockIndex::ZERO,
+                            clock: ClockIndex::ZERO,
                             blend: wgpu::BlendState::ALPHA_BLENDING,
                             ordered: Vec::new(),
                         };
@@ -1785,7 +1792,7 @@ impl PreparedFrame<'_> {
                     geo_instances: &shape.geo_instances,
                     particles: &shape.particles,
                     ordered: &shape.ordered,
-                    particle_clock: shape.particle_clock,
+                    clock: shape.clock,
                     stencil_ref: info.stencil_ref,
                     dynamic_offsets: &info.dynamic_offsets,
                     pipe_op,

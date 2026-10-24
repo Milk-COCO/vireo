@@ -525,9 +525,10 @@ struct ShapeInfo {
     particles: Vec<ParticleSegment>,
     /// legacy 路径的统一 blend（段构建时即 batch 级一致；ordered 路径用段自带值，此处忽略）。
     blend: wgpu::BlendState,
-    /// 本批粒子的时钟（`batch.particle_clock`，batch-local）。
-    /// 粒子段 group 0 绑此钟的 camera 组；非粒子绘制不用。
-    particle_clock: ClockIndex,
+    /// 本批次的 GPU 时间线（`batch.clock`，batch-local）。
+    /// 非 `ClockIndex::ZERO` 时，本批**所有**段的 group 0 绑该钟的 camera 组；
+    /// 默认钟走共享组（时间由引擎每帧写）。
+    clock: ClockIndex,
     ordered: Vec<OrderedShapeSegment>,
 }
 
@@ -591,7 +592,7 @@ pub(crate) struct BatchEncodeInfo<'a> {
     pub geo_instances: &'a [GeoInstanceSegment],
     pub particles: &'a [ParticleSegment],
     pub ordered: &'a [OrderedShapeSegment],
-    pub particle_clock: ClockIndex,
+    pub clock: ClockIndex,
     pub stencil_ref: u32,
     pub dynamic_offsets: &'a [u32],
     pub pipe_op: u32,
@@ -637,7 +638,7 @@ pub enum DepthStencilTarget {
     Engine(DepthStencilOps),
 }
 
-/// 一次绘制的采样契约（MSAA / SSAA / alpha-to-coverage）。
+/// 一次绘制的采样契约（MSAA / per-sample / alpha-to-coverage）。
 ///
 /// 它是**目标**的属性，不是 pass 的属性：附件有多少采样点、片元着色器是否按采样点
 /// 求值、是否启用 alpha-to-coverage——这三件事共同决定管线形状与附件组成，所以随
@@ -647,7 +648,11 @@ pub enum DepthStencilTarget {
 /// |---|---|
 /// | `samples == 1` | 无多重采样（`per_sample` / `alpha_to_coverage` 必须为 false） |
 /// | `samples > 1, per_sample == false` | MSAA：每像素着色，硬件 resolve |
-/// | `samples > 1, per_sample == true` | SSAA：`@interpolate(linear, sample)`，每采样点着色 |
+/// | `samples > 1, per_sample == true` | per-sample：`@interpolate(linear, sample)`，每采样点着色 |
+///
+/// `per_sample` 只让**几何位置的插值**按采样点求值（引擎里是 `local_pos`，驱动 SDF
+/// 覆盖度）；`uv` 仍是逐像素插值，所以纹理内容不被超采样，屏空间后处理也不受益。
+/// 规范术语 sample shading；业界常称 SSAA / SGSSAA。
 ///
 /// 引擎自建 MSAA（`samples > 1` 且附件本身是单采样且没有 `resolve_target`）时，
 /// 用的就是这个 `samples`。
@@ -655,7 +660,7 @@ pub enum DepthStencilTarget {
 pub struct TargetAa {
     /// 本次 pass 的采样点数（1 = 无多重采样）。
     pub samples: u32,
-    /// 片元着色器是否按采样点求值（SSAA 与 MSAA 的唯一区别）。
+    /// 片元着色器是否按采样点求值（per-sample 与 MSAA 的唯一区别）。
     pub per_sample: bool,
     /// 是否启用 alpha-to-coverage（与 MSAA / per-sample 正交）。
     pub alpha_to_coverage: bool,
@@ -686,7 +691,10 @@ impl TargetAa {
         }
     }
 
-    /// SSAA：每采样点着色（`@interpolate(linear, sample)`）。
+    /// per-sample：每采样点着色（`@interpolate(linear, sample)`）。
+    ///
+    /// 只超采样 **SDF 几何覆盖度**；纹理采样（`uv` 逐像素）与屏空间后处理不受益。
+    /// 术语见 [`crate::window::AntiAliasing::PerSample`]。
     pub const fn per_sample(samples: u32) -> Self {
         Self {
             samples,
@@ -757,7 +765,7 @@ pub struct RenderTarget {
     pub color_attachments: Vec<ColorTargetDesc>,
     /// 本帧 depth-stencil 附件（`None` = 引擎默认行为，见 [`DepthStencilTarget`]）。
     pub depth_stencil: Option<DepthStencilTarget>,
-    /// 本次绘制的采样契约（采样点数 / SSAA / alpha-to-coverage）。
+    /// 本次绘制的采样契约（采样点数 / per-sample / alpha-to-coverage）。
     ///
     /// 构造时从附件推导（单采样 → [`TargetAa::none`]）；引擎自建 MSAA 时由
     /// 画布（窗口/离屏）显式覆盖，例如 `target.set_aa(TargetAa::msaa(4))`。

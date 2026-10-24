@@ -598,7 +598,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
     );
     draw_text(
         &mut batch.texts,
-        "shape + text + SSAA",
+        "shape + text + per-sample",
         Pos::new(60.0, 75.0),
         TextDef::default().font_size(20.0),
         TextOverride::from_color(WHITE),
@@ -2378,10 +2378,10 @@ fn particle_dual_clock_independent_timelines() {
     });
 
     let mut batch_a = DrawBatch::new();
-    batch_a.particle_clock = clock_a;
+    batch_a.clock = clock_a;
     draw_particles(&mut batch_a, &pool_a);
     let mut batch_b = DrawBatch::new();
-    batch_b.particle_clock = clock_b;
+    batch_b.clock = clock_b;
     draw_particles(&mut batch_b, &pool_b);
 
     canvas.draw(Some(Color::new(0.0, 0.0, 0.0, 1.0)), &[&batch_a, &batch_b]);
@@ -3813,7 +3813,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     println!("  manual RenderTarget + DS: target0=red target1=blue ok");
 }
 
-/// MRT：**SSAA（per-sample 着色）** 与逐附件 MSAA/resolve 的组合也要成立。
+/// MRT：**per-sample 着色** 与逐附件 MSAA/resolve 的组合也要成立。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn mrt_with_per_sample_shading() {
@@ -3858,13 +3858,13 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     assert!(
         region_is_red(&base.read_pixels(), 128, 32, 32, 96, 96),
-        "target 0 应为红（SSAA 下也应 resolve 出内容）"
+        "target 0 应为红（per-sample 下也应 resolve 出内容）"
     );
     assert!(
         region_is_blue(&aux.read_pixels(), 128, 32, 32, 96, 96),
-        "target 1 应为蓝（附加目标逐附件 SSAA resolve）"
+        "target 1 应为蓝（附加目标逐附件 per-sample resolve）"
     );
-    println!("  MRT + SSAA(4): target0=red target1=blue ok");
+    println!("  MRT + per-sample(4): target0=red target1=blue ok");
 }
 
 /// per-sample 档的边缘梯度实测：软边（`feather = 1px`，现状）vs 硬边（`feather = 0`，AA 全交 resolve）。
@@ -3963,6 +3963,133 @@ fn per_sample_feather_off_vs_on_rotated_edge() {
             );
         }
     }
+}
+
+/// GPU 时间对**所有绘制**可见（不再只属于粒子）：
+/// 默认钟每帧被写进相机 uniform 的 `time_secs`，`batch.set_clock(other)` 则把 group 0
+/// 换成那条时间线。这里用 custom VS 读 `camera.time_secs` 直接位移几何，用像素位置验证。
+///
+/// 注：fragment-only 材质会在创建期同时对 Shape/Text 两个 target 校验，而 Text 的
+/// 材质支持片段没有 `camera` 绑定（文字走自己的 group 0），所以这里走 custom VS
+/// ——VS 是独立模块，只有声明过的 shape layout 会被校验。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn shape_batch_clock_drives_camera_time() {
+    const FRAG: &str = r#"
+fn material_main(in: MaterialInput) -> vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+"#;
+    const VERT: &str = r#"
+struct QuadVertex {
+    @location(0) corner: vec2<f32>,
+};
+struct InstanceData {
+    bounds: vec4<f32>,
+    uv_bounds: vec4<f32>,
+    uv_rect: vec4<f32>,
+    color: vec4<f32>,
+    sdf_params: vec4<f32>,
+    sdf_extra: vec2<f32>,
+    sdf_type: u32,
+    sdf_feather: f32,
+    transform_index: u32,
+    _pad: u32,
+    _pad2: vec2<u32>,
+};
+struct Camera {
+    projection: mat4x4<f32>,
+    dpi_scale: f32,
+    time_secs: f32,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
+@group(2) @binding(2) var<storage> instances: array<InstanceData>;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) sdf_params: vec4<f32>,
+    @location(3) @interpolate(linear) local_pos: vec2<f32>,
+    @location(4) @interpolate(flat) sdf_type: u32,
+    @location(5) sdf_feather: f32,
+    @location(6) sdf_extra: vec2<f32>,
+};
+
+@vertex
+fn vs_main(vertex: QuadVertex, @builtin(instance_index) inst_idx: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let inst = instances[inst_idx];
+    let t = vertex.corner * 0.5 + vec2<f32>(0.5);
+    var local_pos = mix(inst.bounds.xy, inst.bounds.zw, t);
+    // GPU 时间位移**几何**（world），不动 local_pos：SDF 掩码跟着 quad 一起移动。
+    // 0.2s → +8px，0.8s → +32px。
+    let shift = fract(camera.time_secs) * 40.0;
+    let world_pos =
+        transforms[inst.transform_index] * vec3<f32>(local_pos + vec2<f32>(shift, 0.0), 1.0);
+    out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
+    let span = max(inst.uv_bounds.zw - inst.uv_bounds.xy, vec2<f32>(1e-6));
+    out.uv = mix(inst.uv_rect.xy, inst.uv_rect.zw, (local_pos - inst.uv_bounds.xy) / span);
+    out.color = inst.color;
+    out.sdf_params = inst.sdf_params;
+    out.local_pos = local_pos;
+    out.sdf_type = inst.sdf_type;
+    out.sdf_feather = inst.sdf_feather;
+    out.sdf_extra = inst.sdf_extra;
+    return out;
+}
+"#;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+    let mat = gpu
+        .create_material_with_vertex_shader(FRAG, VERT, ShapeVertexLayout::SdfInstance)
+        .expect("material");
+
+    // 12×12 的方块画在左上角，时间把它沿 x 推开：0.2s → x∈[8,20)，0.8s → x∈[32,44)。
+    let draw = |clock: Option<ClockIndex>| -> Vec<u8> {
+        let mut b = DrawBatch::new();
+        b.set_custom_material(Some(mat.clone()));
+        if let Some(c) = clock {
+            b.set_clock(c);
+        }
+        draw_rectangle(&mut b, Pos::new(0.0, 0.0), 12.0, 12.0, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b]);
+        canvas.read_pixels()
+    };
+    let lit = |px: &[u8], x: u32, y: u32| -> bool { px[((y * 64 + x) * 4) as usize] > 128 };
+
+    // 默认钟：定值 0.2s 并冻结，保证确定性（0 号槽可设值）。
+    assert!(
+        gpu.set_clock_time(ClockIndex::ZERO, 0.2),
+        "默认钟应可设时间"
+    );
+    assert!(gpu.set_clock_scale(ClockIndex::ZERO, 0.0), "默认钟应可暂停");
+    let a = draw(None);
+
+    // 另一条时间线：0.8s，同样冻结。
+    let other = gpu.create_clock();
+    assert!(gpu.set_clock_time(other, 0.8), "新钟应可设时间");
+    assert!(gpu.set_clock_scale(other, 0.0), "新钟应可暂停");
+    let b = draw(Some(other));
+
+    println!(
+        "  camera.time_secs → 覆盖区域: 默认钟(0.2s) x14={} x38={} | 另一钟(0.8s) x14={} x38={}",
+        lit(&a, 14, 6),
+        lit(&a, 38, 6),
+        lit(&b, 14, 6),
+        lit(&b, 38, 6)
+    );
+    assert!(
+        lit(&a, 14, 6) && !lit(&a, 38, 6),
+        "默认钟应读到 0.2s（方块落在 x≈8..20）"
+    );
+    assert!(
+        !lit(&b, 14, 6) && lit(&b, 38, 6),
+        "非默认 batch clock 必须换到另一条时间线（方块落在 x≈32..44）"
+    );
 }
 
 /// MRT：附加目标在**下一次 draw 里保持内容**（`LoadOp::Load`）——引擎形状/文字画在上面

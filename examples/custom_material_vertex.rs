@@ -9,6 +9,11 @@
 //! 两套契约均需输出同一 `VertexOutput`（@0-@6）供 `material_main` 使用；
 //! custom VS 插值限定必须用普通 `@interpolate(linear)`（`linear, sample` 在
 //! sample_count=1 验证会失败 → 布局支持丢失）。布局不匹配时形状被跳过 + 警告日志（不回落 mesh）。
+//!
+//! **GPU 时间**：group 0 的相机 uniform 是 80B（投影 64 + dpi 4 + `time_secs` 4 + pad），
+//! 默认钟的时间每帧由引擎写入，所以 custom VS 只要在 `struct Camera` 末尾加
+//! `time_secs: f32` 就能直接做时间驱动动画（本示例的抖动相位就是它）。
+//! `batch.set_clock(other)` 会把 group 0 换成另一条时间线（支持暂停/倍速/定值）。
 
 use vireo::prelude::*;
 
@@ -35,6 +40,9 @@ struct InstanceData {
 struct Camera {
     projection: mat4x4<f32>,
     dpi_scale: f32,
+    // 默认钟的当前时间（秒）：引擎每帧写 camera uniform 的 offset 68，
+    // 与粒子共用同一条时间线；`batch.set_clock(other)` 会换成那条时间线的值。
+    time_secs: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -60,7 +68,8 @@ fn vs_main(vertex: QuadVertex, @builtin(instance_index) inst_idx: u32) -> Vertex
     let t = vertex.corner * 0.5 + vec2<f32>(0.5);
     var local_pos = mix(inst.bounds.xy, inst.bounds.zw, t);
     // 顶点抖动：沿 y 正弦偏移 x（local_pos 同时进入片元 SDF 求值）
-    local_pos.x += 6.0 * sin(local_pos.y * 0.05);
+    // x 相位来自 camera.time_secs —— GPU 时间，CPU 每帧不用改任何 uniform。
+    local_pos.x += 6.0 * sin(local_pos.y * 0.05 + camera.time_secs * 2.0);
     let world_pos = transforms[inst.transform_index] * vec3<f32>(local_pos, 1.0);
     out.position = camera.projection * vec4<f32>(world_pos.xy, 0.0, 1.0);
     let span = max(inst.uv_bounds.zw - inst.uv_bounds.xy, vec2<f32>(1e-6));
@@ -91,6 +100,9 @@ struct GeoInstanceInput {
 struct Camera {
     projection: mat4x4<f32>,
     dpi_scale: f32,
+    // 默认钟的当前时间（秒）：引擎每帧写 camera uniform 的 offset 68，
+    // 与粒子共用同一条时间线；`batch.set_clock(other)` 会换成那条时间线的值。
+    time_secs: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

@@ -346,6 +346,8 @@ pub(crate) const SHAPE_FRAGMENT_SUPPORT_WGSL: &str = r#"
 struct Camera {
     projection: mat4x4<f32>,
     dpi_scale: f32,
+    // 当前时间线的秒数（引擎每帧写 offset 68；batch 可用 `set_clock` 换时间线）。
+    time_secs: f32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var vireo_base_texture: texture_2d<f32>;
