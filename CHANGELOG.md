@@ -4,6 +4,15 @@
 
 ### Added / 新增
 
+- **`VireoWindow::is_vsync_throttled()`：实测「present 有没有被 vblank 钳制」**。
+  比较 `DrawTimings.acquire_secs + present_secs` 与显示器刷新率（`1/hz`，取不到回退
+  60Hz 假设），连续 8 帧同向证据才切换（滞回，避免抖动）；建窗与 `Resized` 时刷新
+  刷新率缓存。配合 `DrawReport::vsync_throttled`（同一份实测值）使用。
+  典型用途：`max_fps = None` 时判断「vsync 是否已经不兜底了」——Windows 上 DWM 判定
+  窗口被遮挡后 DXGI 会提前返回，此时循环会全速空转（有数百毫秒到一两秒的延迟）。
+  Measured vsync throttling state on `VireoWindow` (acquire+present block time vs
+  refresh period, 8-frame hysteresis), replacing the old focus-based guess.
+
 - **文件读写 API**：安卓的「文件」有三个互不相通的世界，此前 vireo 一条都没覆盖
   ——随包资源在 APK 内部（`std::fs` 读不到），且没有任何可写目录概念。
   - **读（随包资源，只读）**：`App::assets() -> Assets`，含
@@ -168,6 +177,14 @@
   创建期显式声明契约、而不是靠编译结果猜。
 
 ### Changed / 变更
+
+- **BREAKING｜`RenderAdvice` 只回答「该不该画」，`Unthrottled` 变体移除**：
+  `RenderAdvice` 现在只有 `Render` / `Skip`，`render_advice()` 不再用「是否聚焦」猜测
+  节流状态（失焦但可见的窗口仍受 vsync 约束，旧判定会误报）。原来 `Unthrottled` 想表达
+  的「没被 vblank 钳制」改为实测事实，见新增的 `VireoWindow::is_vsync_throttled()`；
+  `DrawReport::vsync_throttled` 也从「有焦点」改为实测值。
+  `RenderAdvice` now only answers "should this frame be built" (`Render`/`Skip`); the
+  throttling question moved to the measured `is_vsync_throttled()`.
 
 - **BREAKING｜采样契约随目标传入**：新增 `TargetAa { samples, per_sample,
   alpha_to_coverage }` 与 `RenderTarget::aa`（`with_aa` / `set_aa`，构造期从附件推导）。

@@ -42,7 +42,7 @@ pub use desc::{AntiAliasing, FrameStyle, SendRawWindowHandle, WindowDesc};
 pub(crate) use metrics::{
     DEFAULT_RESIZE_DEBOUNCE, PRESENT_SAMPLE_CAP, RESIZE_DRIFT_EPSILON, ResizeRefresh,
     drag_cap_effective, drag_effective_cap, mhz_to_hz, observed_moved, pac_advance,
-    phys_to_logical, resize_refresh, size_drifted_beyond, skip_report, sliding_rate,
+    phys_to_logical, resize_refresh, size_drifted_beyond, skip_report, sliding_rate, throttle_step,
     validate_aspect_ratio,
 };
 pub use metrics::{
@@ -321,6 +321,11 @@ pub struct VireoWindow {
     /// 本窗口帧率上限（`VireoWindow::set_max_fps`）。默认取 `App` 创建时的值；拖动期
     /// 按 `drag_cap` 压到刷新率防空转。cap 归属窗口级（与渲染循环解耦）。
     max_fps: Mutex<Option<u32>>,
+    /// **实测**节流状态：`acquire + present` 阻塞时长与刷新率比较后的滞回判定。
+    /// 供 [`Self::is_vsync_throttled`] 与 `DrawReport::vsync_throttled` 使用。
+    throttle: Mutex<ThrottleTracker>,
+    /// 当前显示器刷新率（milli-Hz）。建窗时取一次，`Resized` 时刷新（可能跨屏）。
+    monitor_refresh_mhz: Mutex<Option<u32>>,
     /// 拖动期帧率上限开关（`VireoWindow::set_drag_cap`），与 `max_fps` 解耦。
     drag_cap: Mutex<bool>,
     /// 本窗口节流相位锁 deadline（`pac_advance` 维护）。
@@ -392,6 +397,26 @@ pub struct VireoWindow {
     occupancy: std::sync::Mutex<()>,
 }
 
+/// 实测节流状态的滞回跟踪器（窗口级）。
+///
+/// 初值 `throttled: true`：还没测到任何成功 present 之前，保守地认为「仍被 vsync 钳制」，
+/// 避免应用一启动就误以为可以放开跑而不限流。
+#[derive(Debug)]
+struct ThrottleTracker {
+    /// 当前是否被钳制。
+    throttled: bool,
+    /// 与当前状态相反证据的连续帧数（正=在数「被钳制」，负=在数「没被钳制」）。
+    streak: i32,
+}
+
+impl Default for ThrottleTracker {
+    fn default() -> Self {
+        Self {
+            throttled: true,
+            streak: 0,
+        }
+    }
+}
 impl VireoWindow {
     pub(crate) fn new(
         inner: Arc<winit::window::Window>,
@@ -414,6 +439,10 @@ impl VireoWindow {
         handle: usize,
         #[cfg(target_os = "android")] android_app: Option<crate::android::AndroidApp>,
     ) -> Self {
+        // 刷新率要在 `inner` 被移进结构体之前取（`Arc` 不可 Copy）。
+        let monitor_refresh_mhz = inner
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz());
         let initial_present_mode = surface_config.present_mode;
         let initial_frame_latency = surface_config.desired_maximum_frame_latency;
         let initial_phys = (surface_config.width, surface_config.height);
@@ -481,6 +510,10 @@ impl VireoWindow {
             present_intervals: Mutex::new(Vec::with_capacity(PRESENT_SAMPLE_CAP)),
             last_present: Mutex::new(None),
             occupancy: std::sync::Mutex::new(()),
+            throttle: Mutex::new(ThrottleTracker::default()),
+            // 建窗即缓存刷新率（滞回判定需要 `1/hz`）；拿不到就留空，`throttle_period_secs`
+            // 会回退 60Hz 假设，`Resized` 时也会重新取。
+            monitor_refresh_mhz: Mutex::new(monitor_refresh_mhz),
         }
     }
 
@@ -718,13 +751,13 @@ impl VireoWindow {
 
     /// 引擎对「本帧是否应该渲染」的建议（见 [`RenderAdvice`]）。
     ///
-    /// 只读引擎已知缓存状态（焦点 / 尺寸 / 上次 draw 结局），不调 OS、不阻塞、macOS 安全；
-    /// 状态由 `refresh_input` / `draw` 推进，用户负责刷新时机，故读到的是上次刷新后的值
-    /// （最多滞后约 1 帧）。用于在构建渲染内容**之前**判断本帧是否值得画，避免失焦时
-    /// 仍全速构建内容后被 vsync 丢弃。
+    /// 只读引擎已知缓存状态（尺寸 / 上次 draw 结局），不调 OS、不阻塞、macOS 安全；
+    /// 状态由 `draw` 推进，故读到的是上次 draw 之后的状态（最多滞后约 1 帧）。
+    /// 用于在构建渲染内容**之前**判断本帧是否值得画（窗口 0×0、被遮挡、正在关闭时
+    /// 构建出来的内容会被丢弃）。
     ///
-    /// 引擎只报状态、不做策略：返回 `Unthrottled` 时**不会**自动限速，用户需自行
-    /// 限流（降 `max_fps` 或在 `on_frame` 内返回 `false`）。
+    /// 注意分工：本函数**不回答**「有没有被 vsync 钳制」——那是实测事实，见
+    /// [`Self::is_vsync_throttled`]（早先版本用"是否聚焦"猜这件事，已废弃）。
     pub fn render_advice(&self) -> RenderAdvice {
         if *self.closing.lock() {
             return RenderAdvice::Skip;
@@ -738,11 +771,46 @@ impl VireoWindow {
         {
             return RenderAdvice::Skip;
         }
-        // 失焦：present 不被 vsync 节流 → 渲染循环全速空转。报 Unthrottled 让用户自行限流。
-        if !self.focused() {
-            return RenderAdvice::Unthrottled;
-        }
         RenderAdvice::Render
+    }
+
+    /// **实测**：本窗口最近的 present 是否被 vsync 钳制。
+    ///
+    /// 依据 `acquire_secs + present_secs` 与显示器刷新率的比值（连续
+    /// [`crate::window::metrics::THROTTLE_HYSTERESIS`] 帧同向才切换，避免抖动）。
+    /// 与 `render_advice()` 的分工：
+    /// - `render_advice()` 回答「该不该画」（策略，缓存状态）；
+    /// - 本函数回答「画面有没有被 vblank 卡住」（事实，实测）。
+    ///
+    /// 典型用途：`max_fps = None`（不限制）时，若返回 `false` 说明 vsync 已不再钳制
+    /// （例如 Windows 判定窗口被遮挡后 DXGI 提前返回），此时渲染循环会全速空转，
+    /// 想省资源的应用应自行限流。
+    ///
+    /// 尚未拿到任何成功 present 样本时返回 `true`（保守：假装仍被钳制，避免误导用户限流）。
+    pub fn is_vsync_throttled(&self) -> bool {
+        self.throttle.lock().throttled
+    }
+
+    /// 一帧刷新周期（秒）。已知刷新率时用 `1/hz`，未知时回退 60Hz 假设
+    /// （Windows 上 `current_monitor()` 拿不到刷新率的情况极少，见 `ThrottleTracker` 注释）。
+    fn throttle_period_secs(&self) -> f64 {
+        let hz = self
+            .monitor_refresh_mhz
+            .lock()
+            .map(mhz_to_hz)
+            .filter(|hz| *hz > 0)
+            .unwrap_or(60);
+        1.0 / hz as f64
+    }
+
+    /// 用本帧 `acquire + present` 的阻塞时长更新实测节流状态，返回**更新后**的判定。
+    fn observe_throttle(&self, block_secs: f64) -> bool {
+        let period = self.throttle_period_secs();
+        let mut tr = self.throttle.lock();
+        let (streak, throttled) = throttle_step(block_secs, period, tr.streak, tr.throttled);
+        tr.streak = streak;
+        tr.throttled = throttled;
+        throttled
     }
 
     /// 记录一次成功 present 的间隔（供 `presented_fps` 滑动窗口）。
@@ -1003,6 +1071,13 @@ impl VireoWindow {
                 *self.last_observed.lock() = (size.width, size.height, new_scale);
                 let drag_starting = self.pending_resize_at.lock().is_none();
                 *self.pending_resize_at.lock() = Some(now);
+                // 跨屏/改刷新率时更新实测节流用的周期（与拖动期的 drag 缓存无关）。
+                if let Some(mhz) = self
+                    .current_monitor()
+                    .and_then(|m| m.refresh_rate_millihertz())
+                {
+                    *self.monitor_refresh_mhz.lock() = Some(mhz);
+                }
                 if drag_starting {
                     // 拖动开始：缓存显示器刷新率（acquire 失去 vsync 节流时用它
                     // 临时压 cap 防空转）。只查一次；monitor 不跨屏时刷新率稳定。
@@ -1346,7 +1421,7 @@ impl VireoWindow {
 
         DrawReport {
             outcome: DrawOutcome::Presented { suboptimal },
-            vsync_throttled: self.focused(),
+            vsync_throttled: self.observe_throttle(acquire_secs + present_secs),
             timings: DrawTimings {
                 configure_secs,
                 acquire_secs,

@@ -189,28 +189,67 @@ pub struct DrawReport {
     pub outcome: DrawOutcome,
     /// 分段耗时
     pub timings: DrawTimings,
-    /// 本帧 present 是否被 vsync 节流（前台有焦点时通常为 `true`；失焦/被遮挡时
-    /// present 不被 vsync 钳制、渲染循环会全速空转）。`false` 表示「没被阻塞」——
-    /// 用户若在意 CPU 占用应自行限流（降 `max_fps` 或在 `on_frame` 内返回 `false`）。
+    /// 本帧 present 是否被 vsync 钳制（**实测**）：比较 `acquire_secs + present_secs`
+    /// 与 `1/刷新率`，连续 [`THROTTLE_HYSTERESIS`] 帧同向才切换（见 [`throttle_step`]）。
+    ///
+    /// `false` 表示这帧 present 几乎没阻塞 —— 例如 Windows 上 DWM 判定窗口被遮挡后
+    /// DXGI 提前返回（有数百毫秒到一两秒延迟，**与焦点无关**）。此时渲染循环会全速
+    /// 空转，在意 CPU 占用的应用应自行限流（`max_fps` 或 `on_frame` 返回 `false`）。
     /// 跳过/失败帧无 present 发生，恒为 `false`。
     pub vsync_throttled: bool,
 }
 
 /// 引擎对「本帧是否应该渲染」的建议。引擎只报**已知缓存状态**，不做策略、不 sleep。
-/// 用户在 `on_frame` 开头查询，据此决定是否构建渲染内容（以及是否自行限流/暂停）。
+/// 用户在 `on_frame` 开头查询，据此决定是否构建渲染内容。
 ///
-/// 状态来自缓存（焦点/尺寸/上次 draw 结果），由 `refresh_input` / `draw` 推进；用户负责
-/// 决定刷新时机，因此读到的是「上次刷新后的状态」（最多滞后约 1 帧，焦点等低频变化无感）。
+/// 状态来自缓存（尺寸 / 上次 draw 结果），由 `refresh_input` / `draw` 推进；用户负责
+/// 决定刷新时机，因此读到的是「上次刷新后的状态」（最多滞后约 1 帧）。
+///
+/// **「有没有被 vsync 钳制」不在这个枚举里**：那是可实测的事实，见
+/// [`crate::window::VireoWindow::is_vsync_throttled`]（以及 `DrawReport::vsync_throttled`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderAdvice {
-    /// 正常渲染（可见、有焦点、尺寸有效）。
+    /// 正常渲染：窗口可见、尺寸有效、未在关闭。
     Render,
     /// 不该渲染：窗口正在关闭 / 0×0 / 被遮挡（`Occluded`）——构建内容会被丢弃。
     /// 用户应跳过构建（返回 `false` 或重建空 batch）。
     Skip,
-    /// 可以渲染，但本帧不被 vsync 节流（窗口失焦等）：渲染循环会全速空转。
-    /// 引擎不替用户限速；用户若想省资源应自行限流（降 `max_fps` 或返回 `false`）。
-    Unthrottled,
+}
+
+/// 判定「present 是否被 vsync 钳制」需要连续多少帧同向证据才切换状态。
+pub(crate) const THROTTLE_HYSTERESIS: i32 = 8;
+
+/// 单帧「是否被 vsync 钳制」的滞回步进（纯函数，便于单测）。
+///
+/// `block` = `acquire_secs + present_secs`（等 swapchain 空位 + present 阻塞的总时长）；
+/// `period` = 1 / 显示器刷新率。
+///
+/// - 被钳制时两者之和应接近 `period`（一直在等 vblank），取 `0.5 × period` 作证据阈值，
+///   容忍调度抖动；
+/// - 只有连续 [`THROTTLE_HYSTERESIS`] 帧同向证据才切换，避免偶发长/短帧导致抖动；
+/// - `period` 非法或 `block` 非有限值时不改变状态。
+pub(crate) fn throttle_step(block: f64, period: f64, streak: i32, throttled: bool) -> (i32, bool) {
+    if !(period > 0.0) || !block.is_finite() {
+        return (streak, throttled);
+    }
+    let evidence = block >= 0.5 * period;
+    if evidence == throttled {
+        // 与现状同向：不需要切换，计数清零（抖动不累积）。
+        return (0, throttled);
+    }
+    // 计数「连续反向证据」：>0 表示在朝「被钳制」积累，<0 表示在朝「未钳制」积累。
+    // 方向一变就重新计数——否则正负相互抵消，滞回形同虚设。
+    let dir: i32 = if evidence { 1 } else { -1 };
+    let streak = if streak.signum() == dir {
+        streak + dir
+    } else {
+        dir
+    };
+    if streak.abs() >= THROTTLE_HYSTERESIS {
+        (0, evidence)
+    } else {
+        (streak, throttled)
+    }
 }
 
 /// 一次 [`crate::window::VireoWindow::draw`] 的结局。
@@ -330,4 +369,97 @@ pub(crate) fn drag_cap_effective(
 /// 单位不匹配会导致 `min(240, 120_000) = 240`，cap 永远压不下去。
 pub(crate) fn mhz_to_hz(millihertz: u32) -> u32 {
     (millihertz + 500) / 1000
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::{THROTTLE_HYSTERESIS, throttle_step};
+
+    const PERIOD_60: f64 = 1.0 / 60.0; // ≈16.67ms
+
+    /// 未达到滞回帧数前不切换状态。
+    #[test]
+    fn no_switch_before_hysteresis() {
+        let (streak, throttled) = (0, true);
+        // 连续 7 帧"没被钳制"的证据，仍应保持 throttled
+        let (s, th) = (0..THROTTLE_HYSTERESIS - 1).fold((streak, throttled), |(s, th), _| {
+            throttle_step(0.001, PERIOD_60, s, th)
+        });
+        assert!(th, "未达滞回阈值不应切换");
+        assert_eq!(s, -(THROTTLE_HYSTERESIS - 1));
+    }
+
+    /// 达到滞回帧数后切换到"未被钳制"。
+    #[test]
+    fn switches_to_unthrottled_after_hysteresis() {
+        let mut s = 0;
+        let mut th = true;
+        for _ in 0..THROTTLE_HYSTERESIS {
+            let (ns, nth) = throttle_step(0.001, PERIOD_60, s, th);
+            s = ns;
+            th = nth;
+        }
+        assert!(
+            !th,
+            "连续 {} 帧无阻塞后应判定为未被钳制",
+            THROTTLE_HYSTERESIS
+        );
+        assert_eq!(s, 0, "切换后 streak 归零");
+    }
+
+    /// 被钳制方向的证据同样需要滞回。
+    #[test]
+    fn switches_back_to_throttled() {
+        let mut s = 0;
+        let mut th = false;
+        for _ in 0..THROTTLE_HYSTERESIS {
+            let (ns, nth) = throttle_step(PERIOD_60 * 0.9, PERIOD_60, s, th);
+            s = ns;
+            th = nth;
+        }
+        assert!(th, "present 阻塞接近 1/刷新率 时应判定为被钳制");
+    }
+
+    /// 反向证据会清零 streak（抖动不累积）。
+    #[test]
+    fn conflicting_evidence_resets_streak() {
+        let (s, th) = throttle_step(0.001, PERIOD_60, 3, true);
+        assert!(th, "两帧证据不足以切换");
+        assert_eq!(s, -1, "反向证据从 +3 直接变为 -1（上一帧归零后重新计数）");
+    }
+
+    /// 阈值取 0.5×period：正好一半以下算"没被钳制"。
+    #[test]
+    fn threshold_is_half_period() {
+        let half = PERIOD_60 * 0.5;
+        // 恰好等于阈值 → 算被钳制（evidence = block >= 0.5*period）
+        let mut s = 0;
+        let mut th = false;
+        for _ in 0..THROTTLE_HYSTERESIS {
+            let (ns, nth) = throttle_step(half, PERIOD_60, s, th);
+            s = ns;
+            th = nth;
+        }
+        assert!(th);
+        // 略低于阈值 → 不算
+        let mut s = 0;
+        let mut th = true;
+        for _ in 0..THROTTLE_HYSTERESIS {
+            let (ns, nth) = throttle_step(half * 0.99, PERIOD_60, s, th);
+            s = ns;
+            th = nth;
+        }
+        assert!(!th);
+    }
+
+    /// 非法 period / 非有限 block 不改变状态。
+    #[test]
+    fn degenerate_inputs_keep_state() {
+        assert_eq!(throttle_step(0.001, 0.0, 2, true), (2, true));
+        assert_eq!(throttle_step(f64::NAN, PERIOD_60, 4, false), (4, false));
+        assert_eq!(
+            throttle_step(f64::INFINITY, PERIOD_60, -3, true),
+            (-3, true)
+        );
+    }
 }

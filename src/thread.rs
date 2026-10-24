@@ -526,7 +526,8 @@ pub(crate) fn run_thread_loop(
             // `max_tps` 由 `App::spawn` 时以 `App::max_fps` 作为默认值种子，运行期独立生效。
             // 相位锁 `pac_advance` 无条件应用：正常 tick（有窗口绘制）与空闲 tick（均 Skipped）
             // 都受同一上限约束，无魔法数字、不硬编码速率；各窗口自身的 `max_fps` 作为更细的
-            // 逐窗口覆盖仍生效。用户亦可在 `on_frame` 内据 `render_advice()` 自行暂停（返回 `false`）。
+            // 逐窗口覆盖仍生效。用户亦可在 `on_frame` 内据 `render_advice()`（该不该画）与
+            // `is_vsync_throttled()`（有没有被 vblank 钳制）自行决定暂停/限流（返回 `false`）。
             {
                 let now = std::time::Instant::now();
                 let (next, sleep_dur) = crate::window::pac_advance(now, tick_deadline, max_tps);
