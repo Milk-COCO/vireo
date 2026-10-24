@@ -11,8 +11,20 @@ pub enum AntiAliasing {
         samples: u32,
         alpha_to_coverage: bool,
     },
-    /// 超采样：per-sample 着色（`@interpolate(linear, sample)`），每个采样点独立计算 SDF。
-    Ssaa {
+    /// 逐采样点着色：目标按 `samples` 个采样点分配，片元着色器**每个采样点各跑一遍**
+    /// （`local_pos` 用 `@interpolate(linear, sample)`），最后由硬件 resolve 求平均。
+    ///
+    /// 超采样的是 **SDF 几何覆盖度**（每个采样点算一次距离场）。**不超采样**的是：
+    /// 纹理采样（`uv` 仍逐像素插值，N 个采样点拿到同一个值）与屏空间后处理
+    /// （blur / bloom 等仍按像素分辨率）。要全要素超采样只能离屏 2× 渲染再缩采样。
+    ///
+    /// 命名：规范术语是 sample shading（Vulkan `sampleShadingEnable`）；业界常称
+    /// SSAA / SGSSAA，但 SGSSAA 还包含「对纹理做稀疏网格超采样」，本档不具备。
+    ///
+    /// 对 SDF 形状这是唯一有效的硬件 AA 档——形状画成整像素四边形，MSAA 的采样点
+    /// 覆盖率对它不起作用；只有几何光栅化（`clear_sdf_feather()`）路径上 MSAA 才有
+    /// 覆盖率收益。自定义 shape VS 在本档仍按像素求值（引擎统一用 `(linear)`）。
+    PerSample {
         samples: u32,
         alpha_to_coverage: bool,
     },
@@ -22,7 +34,9 @@ impl AntiAliasing {
     pub fn sample_count(&self) -> u32 {
         match self {
             AntiAliasing::None => 1,
-            AntiAliasing::Msaa { samples, .. } | AntiAliasing::Ssaa { samples, .. } => *samples,
+            AntiAliasing::Msaa { samples, .. } | AntiAliasing::PerSample { samples, .. } => {
+                *samples
+            }
         }
     }
 
@@ -32,14 +46,14 @@ impl AntiAliasing {
             AntiAliasing::Msaa {
                 alpha_to_coverage, ..
             }
-            | AntiAliasing::Ssaa {
+            | AntiAliasing::PerSample {
                 alpha_to_coverage, ..
             } => *alpha_to_coverage,
         }
     }
 
-    pub fn is_ssaa(&self) -> bool {
-        matches!(self, AntiAliasing::Ssaa { .. })
+    pub fn is_per_sample(&self) -> bool {
+        matches!(self, AntiAliasing::PerSample { .. })
     }
 }
 
@@ -127,10 +141,10 @@ pub(crate) fn clamp_aa(aa: AntiAliasing, supported: &[u32]) -> AntiAliasing {
             samples: snap(samples),
             alpha_to_coverage,
         },
-        AntiAliasing::Ssaa {
+        AntiAliasing::PerSample {
             samples,
             alpha_to_coverage,
-        } => AntiAliasing::Ssaa {
+        } => AntiAliasing::PerSample {
             samples: snap(samples),
             alpha_to_coverage,
         },

@@ -43,15 +43,15 @@ pub(crate) fn strip_noflat_invariant(src: &str) -> String {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ShapeShaderFlags {
     /// SSAA：`local_pos` 用 `@interpolate(linear, sample)`（每采样点着色）。
-    pub ssaa: bool,
+    pub per_sample: bool,
     /// 弱 GLES 后端回退：剥掉 `local_pos` 插值修饰（见 [`strip_noflat_interpolation`]）。
     pub noflat: bool,
 }
 
 /// SDF 系着色器（`shader` / `shader_instance` / `shader_particle`）的 SSAA 开关：
 /// 源码默认带 `, sample`（SSAA 才是"原样"），MSAA 时把修饰去掉。
-fn per_sample_source(source: &str, ssaa: bool) -> String {
-    if ssaa {
+fn per_sample_source(source: &str, per_sample: bool) -> String {
+    if per_sample {
         source.to_owned()
     } else {
         source.replace("@interpolate(linear, sample)", "@interpolate(linear)")
@@ -61,19 +61,21 @@ fn per_sample_source(source: &str, ssaa: bool) -> String {
 /// 按顶点布局取默认顶点着色器源码——**唯一**的变体选择点。
 ///
 /// `local_pos` 的插值必须与材质 FS 的 `SHAPE_VERTEX_OUTPUT_WGSL` 对齐：
-///   - `ssaa = true`：  VS/FS 双方 `@interpolate(linear, sample)`
-///   - `ssaa = false`： VS/FS 双方 `@interpolate(linear)`
+///   - `per_sample = true`：  VS/FS 双方 `@interpolate(linear, sample)`
+///   - `per_sample = false`： VS/FS 双方 `@interpolate(linear)`
 ///   - `noflat = true`：双方统一退为默认插值（弱 GLES 后端）
 pub(crate) fn shape_vertex_wgsl(layout: ShapeVertexLayout, flags: ShapeShaderFlags) -> String {
     let base = match layout {
-        ShapeVertexLayout::Mesh => per_sample_source(include_str!("../shader.wgsl"), flags.ssaa),
+        ShapeVertexLayout::Mesh => {
+            per_sample_source(include_str!("../shader.wgsl"), flags.per_sample)
+        }
         ShapeVertexLayout::SdfInstance => {
-            per_sample_source(include_str!("../shader_instance.wgsl"), flags.ssaa)
+            per_sample_source(include_str!("../shader_instance.wgsl"), flags.per_sample)
         }
         // geo VS 源码默认是 per-pixel（`@interpolate(linear)`），SSAA 时反向提升。
         ShapeVertexLayout::GeoInstance => {
             let source = include_str!("../shader_geo_instance.wgsl");
-            if flags.ssaa {
+            if flags.per_sample {
                 source.replace(
                     "@interpolate(linear) local_pos",
                     "@interpolate(linear, sample) local_pos",
@@ -83,7 +85,7 @@ pub(crate) fn shape_vertex_wgsl(layout: ShapeVertexLayout, flags: ShapeShaderFla
             }
         }
         ShapeVertexLayout::Particle => {
-            per_sample_source(include_str!("../shader_particle.wgsl"), flags.ssaa)
+            per_sample_source(include_str!("../shader_particle.wgsl"), flags.per_sample)
         }
     };
     if flags.noflat {
@@ -97,13 +99,13 @@ pub(crate) fn shape_vertex_wgsl(layout: ShapeVertexLayout, flags: ShapeShaderFla
 pub(crate) fn material_fragment_source(
     source: &str,
     target: MaterialTarget,
-    ssaa: bool,
+    per_sample: bool,
     noflat: bool,
 ) -> (String, u32) {
     let line_count = |s: &str| s.split('\n').count() as u32;
     match target {
         MaterialTarget::Shape => {
-            let vertex_out = if ssaa {
+            let vertex_out = if per_sample {
                 SHAPE_VERTEX_OUTPUT_WGSL.replace(
                     "@interpolate(linear) local_pos",
                     "@interpolate(linear, sample) local_pos",
@@ -553,7 +555,7 @@ pub(crate) fn material_pipeline_key(
     target: MaterialTarget,
     sample_count: u32,
     alpha_to_coverage: bool,
-    ssaa: bool,
+    per_sample: bool,
     ds: bool,
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
@@ -564,7 +566,7 @@ pub(crate) fn material_pipeline_key(
     num_targets: u32,
     blend_hash: u64,
 ) -> u64 {
-    let ssaa = ssaa && target == MaterialTarget::Shape;
+    let per_sample = per_sample && target == MaterialTarget::Shape;
     let layout_bits = if target == MaterialTarget::Shape {
         shape_layout as u64
     } else {
@@ -577,7 +579,7 @@ pub(crate) fn material_pipeline_key(
         | ((layout_bits) << 8)
         | ((alpha_to_coverage as u64) << 12)
         | ((stencil_mode as u64) << 13)
-        | ((ssaa as u64) << 14)
+        | ((per_sample as u64) << 14)
         | ((ds as u64) << 15)
         | ((stencil_op.min(4) as u64) << 16)
         | ((surface_format_bits(format) as u64) << 20)
@@ -640,13 +642,13 @@ pub(crate) fn neutral_depth_stencil_state(
 
 impl GpuContext {
     /// 无 DS attachment 的热路径管线（无 `clips_children` 时使用）。
-    /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 ssaa 参数。
+    /// `geometry`: true 时使用无 SDF 分支的几何着色器，忽略 per_sample 参数。
     /// `ds`: pass 挂载了 DS（中性路径，无 stencil 测试）时置 true，管线补中性 DS 状态。
     pub fn ensure_pipeline(
         &self,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         geometry: bool,
         blend: wgpu::BlendState,
@@ -662,7 +664,7 @@ impl GpuContext {
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
-                | ((ssaa as u32) << 17)
+                | ((per_sample as u32) << 17)
                 | ((geometry as u32) << 18)
                 | ((n_targets.min(15)) << 20)
                 | ((ds as u32) << 25)
@@ -675,8 +677,8 @@ impl GpuContext {
         }
         let module = if geometry {
             &self.shader_geo
-        } else if ssaa {
-            &self.shader_ssaa
+        } else if per_sample {
+            &self.shader_sdf_per_sample
         } else {
             &self.shader
         };
@@ -748,7 +750,7 @@ impl GpuContext {
         &self,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         geometry: bool,
         stencil_op: u32,
         blend: wgpu::BlendState,
@@ -768,7 +770,7 @@ impl GpuContext {
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
-                | ((ssaa as u32) << 17)
+                | ((per_sample as u32) << 17)
                 | ((geometry as u32) << 18)
                 | (1u32 << 19)
                 | (op << 20)
@@ -782,8 +784,8 @@ impl GpuContext {
         }
         let module = if geometry {
             &self.shader_geo
-        } else if ssaa {
-            &self.shader_ssaa
+        } else if per_sample {
+            &self.shader_sdf_per_sample
         } else {
             &self.shader
         };
@@ -901,7 +903,7 @@ impl GpuContext {
         &self,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         use_stencil: bool,
         stencil_op: u32,
@@ -914,7 +916,7 @@ impl GpuContext {
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
-                | ((ssaa as u32) << 17)
+                | ((per_sample as u32) << 17)
                 | ((ds as u32) << 18)
                 | ((use_stencil as u32) << 19)
                 | (op << 20)
@@ -926,8 +928,8 @@ impl GpuContext {
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
-        let module = if ssaa {
-            &self.shader_instance_ssaa
+        let module = if per_sample {
+            &self.shader_instance_per_sample
         } else {
             &self.shader_instance
         };
@@ -1020,12 +1022,12 @@ impl GpuContext {
     }
 
     /// 几何模板实例化管线：共享模板顶点/索引 buffer + per-instance color/transform。
-    /// 无 SDF 分支；无 per-sample 插值（单模块，MSAA/SSAA 同源）。
+    /// 无 SDF 分支；无 per-sample 插值（单模块，MSAA / per-sample 同源）。
     pub(crate) fn ensure_geo_instance_pipeline(
         &self,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         use_stencil: bool,
         stencil_op: u32,
@@ -1037,7 +1039,7 @@ impl GpuContext {
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
-                | ((ssaa as u32) << 17)
+                | ((per_sample as u32) << 17)
                 | ((ds as u32) << 18)
                 | ((use_stencil as u32) << 19)
                 | (op << 20)
@@ -1145,7 +1147,7 @@ impl GpuContext {
         &self,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         use_stencil: bool,
         stencil_op: u32,
@@ -1157,7 +1159,7 @@ impl GpuContext {
         let key = (
             sample_count
                 | ((alpha_to_coverage as u32) << 16)
-                | ((ssaa as u32) << 17)
+                | ((per_sample as u32) << 17)
                 | ((ds as u32) << 18)
                 | ((use_stencil as u32) << 19)
                 | (op << 20)
@@ -1169,8 +1171,8 @@ impl GpuContext {
         if let Some(p) = pipes.get(&key) {
             return p.clone();
         }
-        let module = if ssaa {
-            &self.shader_particle_ssaa
+        let module = if per_sample {
+            &self.shader_particle_per_sample
         } else {
             &self.shader_particle
         };
@@ -1272,7 +1274,7 @@ impl GpuContext {
         target: MaterialTarget,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         stencil_mode: bool,
         stencil_op: u32,
@@ -1280,8 +1282,8 @@ impl GpuContext {
         // MRT：每个颜色附件的混合状态；第 0 个对应 batch.blend，其余取自 RenderTarget。
         blends: &[Option<wgpu::BlendState>],
     ) -> Result<Arc<wgpu::RenderPipeline>, String> {
-        let ssaa =
-            ssaa && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
+        let per_sample =
+            per_sample && target == MaterialTarget::Shape && material.shape_vertex_source.is_none();
         // 深度写/比较仅在中性 DS（无 stencil 测试）且 shape 目标时取材质声明；
         // 其余恒 (false, Always)，与 `depth_stencil: None` 行为等价。
         let (depth_write, depth_compare) = if ds && !stencil_mode && target == MaterialTarget::Shape
@@ -1301,7 +1303,7 @@ impl GpuContext {
                 target,
                 sample_count,
                 alpha_to_coverage,
-                ssaa,
+                per_sample,
                 ds,
                 depth_write,
                 depth_compare,
@@ -1339,7 +1341,7 @@ impl GpuContext {
             target,
             sample_count,
             alpha_to_coverage,
-            ssaa,
+            per_sample,
             ds,
             depth_write,
             depth_compare,
@@ -1361,7 +1363,7 @@ impl GpuContext {
         target: MaterialTarget,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         ds: bool,
         depth_write: bool,
         depth_compare: wgpu::CompareFunction,
@@ -1373,10 +1375,11 @@ impl GpuContext {
         // MRT：每个颜色附件的混合状态；第 0 个对应 batch.blend，其余取自 RenderTarget。
         blends: &[Option<wgpu::BlendState>],
     ) -> Result<wgpu::RenderPipeline, String> {
-        let ssaa = ssaa && target == MaterialTarget::Shape && shape_vertex_source.is_none();
+        let per_sample =
+            per_sample && target == MaterialTarget::Shape && shape_vertex_source.is_none();
         let _scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let (fragment_source_str, user_offset) =
-            material_fragment_source(source, target, ssaa, self.noflat);
+            material_fragment_source(source, target, per_sample, self.noflat);
         let user_line_count = source.split('\n').count() as u32;
         let depth_stencil = if !ds {
             None
@@ -1451,7 +1454,7 @@ impl GpuContext {
                 let default_vs = shape_vertex_wgsl(
                     shape_layout,
                     ShapeShaderFlags {
-                        ssaa,
+                        per_sample,
                         noflat: self.noflat,
                     },
                 );
@@ -1634,7 +1637,7 @@ mod custom_material_tests {
         target: MaterialTarget,
         sample_count: u32,
         alpha_to_coverage: bool,
-        ssaa: bool,
+        per_sample: bool,
         stencil_mode: bool,
         stencil_op: u32,
         shape_layout: ShapeVertexLayout,
@@ -1644,7 +1647,7 @@ mod custom_material_tests {
             target,
             sample_count,
             alpha_to_coverage,
-            ssaa,
+            per_sample,
             false,
             false,
             wgpu::CompareFunction::Always,
@@ -1861,7 +1864,7 @@ mod custom_material_tests {
     }
 
     #[test]
-    fn material_shape_ssaa_pipeline_key_is_distinct() {
+    fn material_shape_per_sample_pipeline_key_is_distinct() {
         assert_ne!(
             mk_key(
                 MaterialTarget::Shape,
@@ -2030,22 +2033,22 @@ mod custom_material_tests {
     }
 
     #[test]
-    fn default_material_shape_vertex_preserves_sample_interpolation_for_ssaa() {
-        let ssaa = shape_vertex_wgsl(
+    fn default_material_shape_vertex_preserves_sample_interpolation_for_per_sample() {
+        let per_sample = shape_vertex_wgsl(
             ShapeVertexLayout::Mesh,
             ShapeShaderFlags {
-                ssaa: true,
+                per_sample: true,
                 noflat: false,
             },
         );
         let msaa = shape_vertex_wgsl(
             ShapeVertexLayout::Mesh,
             ShapeShaderFlags {
-                ssaa: false,
+                per_sample: false,
                 noflat: false,
             },
         );
-        assert!(ssaa.contains("@interpolate(linear, sample)"));
+        assert!(per_sample.contains("@interpolate(linear, sample)"));
         assert!(!msaa.contains("@interpolate(linear, sample)"));
     }
 
@@ -2085,11 +2088,11 @@ mod custom_material_tests {
     fn noflat_vertex_sources_have_no_linear_interpolation() {
         // 四条 local_pos 路径在 noflat 下全部退为默认插值，flat 不动。
         let noflat = ShapeShaderFlags {
-            ssaa: true,
+            per_sample: true,
             noflat: true,
         };
         let noflat_msaa = ShapeShaderFlags {
-            ssaa: false,
+            per_sample: false,
             noflat: true,
         };
         for src in [
@@ -2108,7 +2111,7 @@ mod custom_material_tests {
             shape_vertex_wgsl(
                 ShapeVertexLayout::Mesh,
                 ShapeShaderFlags {
-                    ssaa: true,
+                    per_sample: true,
                     noflat: false
                 }
             )
@@ -2118,7 +2121,7 @@ mod custom_material_tests {
             !shape_vertex_wgsl(
                 ShapeVertexLayout::Mesh,
                 ShapeShaderFlags {
-                    ssaa: false,
+                    per_sample: false,
                     noflat: false
                 }
             )
@@ -2155,7 +2158,7 @@ mod custom_material_tests {
     }
 
     #[test]
-    fn material_shape_fragment_matches_ssaa_interpolation() {
+    fn material_shape_fragment_matches_per_sample_interpolation() {
         let shader = "fn material_main(in: MaterialInput) -> vec4<f32> { return in.color; }";
         assert!(
             material_fragment_source(shader, MaterialTarget::Shape, true, false)
@@ -2167,7 +2170,7 @@ mod custom_material_tests {
                 .0
                 .contains("@interpolate(linear, sample) local_pos")
         );
-        // noflat 下 ssaa 也不保留 linear/sample，flat 保留。
+        // noflat 下 per_sample 也不保留 linear/sample，flat 保留。
         let noflat = material_fragment_source(shader, MaterialTarget::Shape, true, true).0;
         assert!(!noflat.contains("@interpolate(linear"));
         assert!(noflat.contains("@interpolate(flat) sdf_type: u32"));

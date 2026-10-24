@@ -693,11 +693,11 @@ impl App {
         let aa = crate::window::clamp_aa(aa, self.gpu.supported_sample_counts());
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
-        let ssaa = aa.is_ssaa();
+        let per_sample = aa.is_per_sample();
         let _ = self.gpu.ensure_pipeline(
             sc,
             atc,
-            ssaa,
+            per_sample,
             false,
             false,
             wgpu::BlendState::ALPHA_BLENDING,
@@ -706,7 +706,7 @@ impl App {
         let _ = self.gpu.ensure_pipeline(
             sc,
             atc,
-            ssaa,
+            per_sample,
             false,
             true,
             wgpu::BlendState::ALPHA_BLENDING,
@@ -1031,11 +1031,11 @@ impl App {
         desc.anti_aliasing = aa;
         let sc = aa.sample_count();
         let atc = aa.alpha_to_coverage();
-        let ssaa = aa.is_ssaa();
+        let per_sample = aa.is_per_sample();
         let _ = self.gpu.ensure_pipeline(
             sc,
             atc,
-            ssaa,
+            per_sample,
             false,
             false,
             wgpu::BlendState::ALPHA_BLENDING,
@@ -1044,7 +1044,7 @@ impl App {
         let _ = self.gpu.ensure_pipeline(
             sc,
             atc,
-            ssaa,
+            per_sample,
             false,
             true,
             wgpu::BlendState::ALPHA_BLENDING,

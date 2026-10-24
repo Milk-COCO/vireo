@@ -1,6 +1,6 @@
-//! 抗锯齿对比：SSAA / MSAA / SDF / None
+//! 抗锯齿对比：per-sample / MSAA / SDF / None
 //!
-//! - SSAA x4：per-sample 着色（几何光栅化，每个采样点独立执行片段着色器）
+//! - per-sample x4：每个采样点独立执行片段着色器（只超采 SDF 覆盖度，纹理不过采）
 //! - MSAA x4：几何光栅化 + 硬件多重采样
 //! - SDF 1px：纯 SDF feather 分析性抗锯齿
 //! - No AA：几何光栅化，无抗锯齿
@@ -69,8 +69,8 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
 
 #[vireo::main]
 async fn main() {
-    let ssaa = app.window(
-        WindowDesc::new("SSAA x4", 320, 240).anti_aliasing(AntiAliasing::Ssaa {
+    let per_sample = app.window(
+        WindowDesc::new("per-sample x4", 320, 240).anti_aliasing(AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: true,
         }),
@@ -90,9 +90,9 @@ async fn main() {
     let raw = app.window(WindowDesc::new("No AA", 320, 240), None::<fn()>);
 
     app.run(move |ctx| {
-        if let Ok(w) = ctx.app().window_ref(&ssaa) {
+        if let Ok(w) = ctx.app().window_ref(&per_sample) {
             let mut b = DrawBatch::new();
-            draw_shapes(&mut b, 0.0, "SSAA x4");
+            draw_shapes(&mut b, 0.0, "per-sample x4");
             w.draw(Color::new(0.05, 0.05, 0.08, 1.0), &[&b]);
         }
         if let Ok(w) = ctx.app().window_ref(&msaa) {

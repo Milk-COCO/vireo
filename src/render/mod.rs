@@ -572,7 +572,7 @@ pub(crate) struct BatchEncodeCtx<'a> {
     pub geo_instance_buf: Option<&'a wgpu::Buffer>,
     pub sample_count: u32,
     pub alpha_to_coverage: bool,
-    pub ssaa: bool,
+    pub per_sample: bool,
 }
 
 /// 单批次在本次合并后的绘制状态。
@@ -604,7 +604,7 @@ pub(crate) struct BatchEncodeInfo<'a> {
 /// 约束：
 /// - 纹理格式必须为 `Depth24PlusStencil8`（vireo 全部内置管线固定该格式）；
 /// - `sample_count` 必须与本次绘制的 sample count 一致（`AntiAliasing::Msaa { samples }`
-///   时用多重采样纹理；`None`/`Ssaa` 时用 1）——否则 wgpu 校验失败。
+///   时用多重采样纹理；`None`/`PerSample` 时用 1）——否则 wgpu 校验失败。
 ///
 /// `depth_ops` / `stencil_ops` 为 `None` 表示该 aspect 只读（不 load/clear/store）；
 /// 两者都为 `None` 时本次绘制视为**没有** depth-stencil（告警一次）。
@@ -657,7 +657,7 @@ pub struct TargetAa {
     pub samples: u32,
     /// 片元着色器是否按采样点求值（SSAA 与 MSAA 的唯一区别）。
     pub per_sample: bool,
-    /// 是否启用 alpha-to-coverage（与 MSAA/SSAA 正交）。
+    /// 是否启用 alpha-to-coverage（与 MSAA / per-sample 正交）。
     pub alpha_to_coverage: bool,
 }
 
@@ -687,7 +687,7 @@ impl TargetAa {
     }
 
     /// SSAA：每采样点着色（`@interpolate(linear, sample)`）。
-    pub const fn ssaa(samples: u32) -> Self {
+    pub const fn per_sample(samples: u32) -> Self {
         Self {
             samples,
             per_sample: true,
@@ -728,10 +728,10 @@ impl From<crate::window::AntiAliasing> for TargetAa {
                 samples,
                 alpha_to_coverage,
             } => TargetAa::msaa(samples).with_alpha_to_coverage(alpha_to_coverage),
-            AntiAliasing::Ssaa {
+            AntiAliasing::PerSample {
                 samples,
                 alpha_to_coverage,
-            } => TargetAa::ssaa(samples).with_alpha_to_coverage(alpha_to_coverage),
+            } => TargetAa::per_sample(samples).with_alpha_to_coverage(alpha_to_coverage),
         };
         if aa.samples <= 1 {
             TargetAa::none()

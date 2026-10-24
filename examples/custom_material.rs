@@ -3,7 +3,7 @@
 //! ```bash
 //! cargo run --example custom_material
 //! set VIREO_AA=msaa4; cargo run --example custom_material
-//! set VIREO_AA=ssaa4; cargo run --example custom_material
+//! set VIREO_AA=persample4; cargo run --example custom_material   # 旧值 ssaa4 仍接受
 //! ```
 
 use vireo::prelude::*;
@@ -52,7 +52,8 @@ async fn main() {
             samples: 4,
             alpha_to_coverage: false,
         },
-        Ok("ssaa4") => AntiAliasing::Ssaa {
+        // `ssaa4` 是 0.2.0 之前的旧名，保留以兼容既有演示脚本。
+        Ok("persample4") | Ok("per_sample4") | Ok("ssaa4") => AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: false,
         },
@@ -61,7 +62,7 @@ async fn main() {
     let title = match aa {
         AntiAliasing::None => "Custom Material (no AA)",
         AntiAliasing::Msaa { .. } => "Custom Material (MSAA x4)",
-        AntiAliasing::Ssaa { .. } => "Custom Material (SSAA x4)",
+        AntiAliasing::PerSample { .. } => "Custom Material (per-sample x4)",
     };
     let idx = app.window(
         WindowDesc::new(title, 500, 400).anti_aliasing(aa),

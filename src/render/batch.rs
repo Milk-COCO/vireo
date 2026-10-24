@@ -654,7 +654,7 @@ impl DrawBatch {
                                     MaterialTarget::Shape,
                                     ctx.sample_count,
                                     ctx.alpha_to_coverage,
-                                    ctx.ssaa,
+                                    ctx.per_sample,
                                     info.has_ds,
                                     info.uses_stencil,
                                     if info.uses_stencil {
@@ -689,7 +689,7 @@ impl DrawBatch {
                                 tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
                                     ctx.sample_count,
                                     ctx.alpha_to_coverage,
-                                    ctx.ssaa,
+                                    ctx.per_sample,
                                     *geometry,
                                     info.pipe_op.min(4),
                                     *blend,
@@ -700,7 +700,7 @@ impl DrawBatch {
                                 tmp_pipe = ctx.gpu.ensure_pipeline(
                                     ctx.sample_count,
                                     ctx.alpha_to_coverage,
-                                    ctx.ssaa,
+                                    ctx.per_sample,
                                     info.has_ds,
                                     *geometry,
                                     *blend,
@@ -782,7 +782,7 @@ impl DrawBatch {
                                 MaterialTarget::Shape,
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 if info.uses_stencil {
@@ -848,7 +848,7 @@ impl DrawBatch {
                             let instance_pipeline = ctx.gpu.ensure_instance_pipeline(
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 info.pipe_op,
@@ -927,7 +927,7 @@ impl DrawBatch {
                                 MaterialTarget::Shape,
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 if info.uses_stencil {
@@ -995,7 +995,7 @@ impl DrawBatch {
                             let particle_pipeline = ctx.gpu.ensure_particle_pipeline(
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 info.pipe_op,
@@ -1071,7 +1071,7 @@ impl DrawBatch {
                                 MaterialTarget::Shape,
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 if info.uses_stencil {
@@ -1147,7 +1147,7 @@ impl DrawBatch {
                             let geo_pipeline = ctx.gpu.ensure_geo_instance_pipeline(
                                 ctx.sample_count,
                                 ctx.alpha_to_coverage,
-                                ctx.ssaa,
+                                ctx.per_sample,
                                 info.has_ds,
                                 info.uses_stencil,
                                 info.pipe_op,
@@ -1252,7 +1252,7 @@ impl DrawBatch {
                             MaterialTarget::Shape,
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             if info.uses_stencil {
@@ -1285,7 +1285,7 @@ impl DrawBatch {
                         tmp_pipe = ctx.gpu.ensure_stencil_pipeline(
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.geometry,
                             info.pipe_op.min(4),
                             info.blend,
@@ -1296,7 +1296,7 @@ impl DrawBatch {
                         tmp_pipe = ctx.gpu.ensure_pipeline(
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.geometry,
                             info.blend,
@@ -1345,7 +1345,7 @@ impl DrawBatch {
                             MaterialTarget::Shape,
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             if info.uses_stencil {
@@ -1378,7 +1378,7 @@ impl DrawBatch {
                         let instance_pipeline = ctx.gpu.ensure_instance_pipeline(
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             info.pipe_op,
@@ -1418,7 +1418,7 @@ impl DrawBatch {
                             MaterialTarget::Shape,
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             if info.uses_stencil {
@@ -1451,7 +1451,7 @@ impl DrawBatch {
                         let geo_pipeline = ctx.gpu.ensure_geo_instance_pipeline(
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             info.pipe_op,
@@ -1503,7 +1503,7 @@ impl DrawBatch {
                             MaterialTarget::Shape,
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             if info.uses_stencil {
@@ -1536,7 +1536,7 @@ impl DrawBatch {
                         let particle_pipeline = ctx.gpu.ensure_particle_pipeline(
                             ctx.sample_count,
                             ctx.alpha_to_coverage,
-                            ctx.ssaa,
+                            ctx.per_sample,
                             info.has_ds,
                             info.uses_stencil,
                             info.pipe_op,

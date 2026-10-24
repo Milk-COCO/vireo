@@ -872,7 +872,7 @@ impl VireoWindow {
     /// `LoadOp::Load` 载入内容；要写多路数据用 **custom material**。
     /// 采样点数由窗口的 `AntiAliasing` 决定并逐附件补齐：每个附件只要本身是单采样
     /// 且没有自带 `resolve_target`，引擎就会按该采样点数自建 MSAA 并 resolve 回去，
-    /// 因此 MRT 与 MSAA/SSAA 可以同时使用。
+    /// 因此 MRT 与 MSAA / per-sample 可以同时使用。
     pub fn draw_mrt(
         &self,
         clear_color: crate::color::Color,

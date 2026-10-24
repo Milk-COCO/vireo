@@ -1,6 +1,6 @@
-//! 离屏抗锯齿对比：SSAA / MSAA / SDF
+//! 离屏抗锯齿对比：per-sample / MSAA / SDF
 //!
-//! - SSAA：per-sample SDF 着色
+//! - per-sample：SDF 逐采样点着色
 //! - MSAA：几何光栅化 + 硬件多重采样
 //! - SDF：SDF feather 分析性抗锯齿
 
@@ -33,10 +33,10 @@ fn draw_off(batch: &mut DrawBatch, sdf: f32) {
 
 #[vireo::main]
 async fn main() {
-    let off_ssaa = app.offscreen(
+    let off_per_sample = app.offscreen(
         300,
         300,
-        AntiAliasing::Ssaa {
+        AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: true,
         },
@@ -51,12 +51,13 @@ async fn main() {
     );
     let off_sdf = app.offscreen(300, 300, AntiAliasing::None);
     let win = app.window(
-        WindowDesc::new("Offscreen AA: SSAA vs MSAA vs SDF", 1000, 380).dpi_override(Some(1.0)),
+        WindowDesc::new("Offscreen AA: per-sample vs MSAA vs SDF", 1000, 380)
+            .dpi_override(Some(1.0)),
         None::<fn()>,
     );
 
     app.run(move |ctx| {
-        if let Ok(c) = ctx.app().offscreen_ref(&off_ssaa) {
+        if let Ok(c) = ctx.app().offscreen_ref(&off_per_sample) {
             let mut b = DrawBatch::new();
             draw_off(&mut b, 1.0);
             c.draw(Some(Color::new(0.05, 0.05, 0.08, 1.0)), &[&b]);
@@ -73,7 +74,7 @@ async fn main() {
         }
         if let (Ok(w), Ok(c1), Ok(c2), Ok(c3)) = (
             ctx.app().window_ref(&win),
-            ctx.app().offscreen_ref(&off_ssaa),
+            ctx.app().offscreen_ref(&off_per_sample),
             ctx.app().offscreen_ref(&off_msaa),
             ctx.app().offscreen_ref(&off_sdf),
         ) {
@@ -91,7 +92,7 @@ async fn main() {
             draw_rectangle(&mut b, Pos::new(685.0, 30.0), 300.0, 300.0, Some(WHITE));
             draw_text(
                 &mut b.texts,
-                "SSAA x4 + SDF 1px",
+                "per-sample x4 + SDF 1px",
                 Pos::new(75.0, 345.0),
                 TextDef::default().font_size(14.0),
                 TextOverride::from_color(WHITE),

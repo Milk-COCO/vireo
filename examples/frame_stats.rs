@@ -1,7 +1,7 @@
 //! 帧统计 + spike 诊断
 //!
 //! 交互：
-//! - 1/2/3/4: AA = None / MSAA4 / MSAA8 / SSAA4
+//! - 1/2/3/4: AA = None / MSAA4 / MSAA8 / per-sample4
 //! - T: 开关文字（A/B：有字 vs 无字）
 //! - V: 切换 PresentMode AutoVsync ↔ Immediate
 //! - C: 循环帧率上限 cap = 240 / 120 / 60 / 30 / 10 / off（无 vsync 空转时生效）
@@ -37,14 +37,14 @@ fn aa_label(aa: AntiAliasing) -> String {
                 format!("MSAA {}x", samples)
             }
         }
-        AntiAliasing::Ssaa {
+        AntiAliasing::PerSample {
             samples,
             alpha_to_coverage,
         } => {
             if alpha_to_coverage {
-                format!("SSAA {}x (ATC)", samples)
+                format!("per-sample {}x (ATC)", samples)
             } else {
-                format!("SSAA {}x", samples)
+                format!("per-sample {}x", samples)
             }
         }
     }
@@ -154,7 +154,7 @@ async fn main() {
                 });
             }
             KeyCode::Digit4 => {
-                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::Ssaa {
+                *pending_aa_keys.lock().unwrap() = Some(AntiAliasing::PerSample {
                     samples: 4,
                     alpha_to_coverage: false,
                 });
@@ -294,7 +294,7 @@ async fn main() {
 
         let k_msaa8 = if max_sc >= 8 { " 3=MSAA8" } else { "" };
         let keys = format!(
-            "1=None 2=MSAA4{} 4=SSAA4  |  T=text  V=vsync/imm  C=cap  L=latency(2/1)  |  hw max {}x",
+            "1=None 2=MSAA4{} 4=PerSample4  |  T=text  V=vsync/imm  C=cap  L=latency(2/1)  |  hw max {}x",
             k_msaa8, max_sc,
         );
         if show_text {

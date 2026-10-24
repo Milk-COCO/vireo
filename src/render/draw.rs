@@ -1722,7 +1722,7 @@ impl PreparedFrame<'_> {
             geo_instance_buf: geo_instance_buf.as_ref().map(|b| &b.0),
             sample_count: self.target.aa.samples,
             alpha_to_coverage: self.target.aa.alpha_to_coverage,
-            ssaa: self.target.aa.per_sample,
+            per_sample: self.target.aa.per_sample,
         };
         let mut scissor_stack = r.scratch_scissor_stack.lock();
         scissor_stack.clear();

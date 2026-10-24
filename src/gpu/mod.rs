@@ -47,14 +47,14 @@ pub struct GpuContext {
     /// 在 GpuContext::new 末尾由 device.get_texture_format_features 查询得到。
     supported_sample_counts: Vec<u32>,
     pipelines: Mutex<FxHashMap<(u32, wgpu::BlendState), wgpu::RenderPipeline>>,
-    shader: wgpu::ShaderModule,              // MSAA：per-pixel 着色
-    shader_ssaa: wgpu::ShaderModule,         // SSAA：per-sample 着色
-    shader_geo: wgpu::ShaderModule,          // 几何光栅化：无 SDF 分支
-    shader_geo_instance: wgpu::ShaderModule, // 几何模板实例化：无 SDF 分支
+    shader: wgpu::ShaderModule,                // MSAA：per-pixel 着色
+    shader_sdf_per_sample: wgpu::ShaderModule, // SSAA：per-sample 着色
+    shader_geo: wgpu::ShaderModule,            // 几何光栅化：无 SDF 分支
+    shader_geo_instance: wgpu::ShaderModule,   // 几何模板实例化：无 SDF 分支
     shader_instance: wgpu::ShaderModule,
-    shader_instance_ssaa: wgpu::ShaderModule,
+    shader_instance_per_sample: wgpu::ShaderModule,
     shader_particle: wgpu::ShaderModule,
-    shader_particle_ssaa: wgpu::ShaderModule,
+    shader_particle_per_sample: wgpu::ShaderModule,
     /// 弱 GLES 后端回退：`true` 时所有管线模块剥掉 `local_pos` 的 `linear`/`sample`
     /// 插值（naga-GLSL 把它们映射到 ES 不一定有的特性；正交投影下默认插值等价）。
     /// 由 adapter 后端决定（`Backend::Gl`），创建后不变，管线键无需另加位。
@@ -690,15 +690,15 @@ impl GpuContext {
             }
         };
         // SSAA：保留 `@interpolate(linear, sample)` — 每个采样点独立执行片段着色器
-        let shader_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo shader (SSAA)"),
+        let shader_sdf_per_sample = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vireo shader (per-sample)"),
             source: wgpu::ShaderSource::Wgsl(flat(shader_src).into()),
         });
         // MSAA：去掉 `, sample` — 每像素执行一次片段着色器
         let msaa_src: String =
             shader_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo shader (MSAA)"),
+            label: Some("vireo shader (per-pixel)"),
             source: wgpu::ShaderSource::Wgsl(flat(&msaa_src).into()),
         });
 
@@ -716,26 +716,28 @@ impl GpuContext {
             ),
         });
         let shader_instance_src = include_str!("../shader_instance.wgsl");
-        let shader_instance_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo instance shader (SSAA)"),
-            source: wgpu::ShaderSource::Wgsl(flat(shader_instance_src).into()),
-        });
+        let shader_instance_per_sample =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vireo instance shader (per-sample)"),
+                source: wgpu::ShaderSource::Wgsl(flat(shader_instance_src).into()),
+            });
         let shader_instance_src =
             shader_instance_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader_instance = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo instance shader (MSAA)"),
+            label: Some("vireo instance shader (per-pixel)"),
             source: wgpu::ShaderSource::Wgsl(flat(&shader_instance_src).into()),
         });
         // 粒子 VS：与 instance 同源结构（`local_pos` 插值变体），FS 极简（tex×color，无 SDF）。
         let shader_particle_src = include_str!("../shader_particle.wgsl");
-        let shader_particle_ssaa = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo particle shader (SSAA)"),
-            source: wgpu::ShaderSource::Wgsl(flat(shader_particle_src).into()),
-        });
+        let shader_particle_per_sample =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vireo particle shader (per-sample)"),
+                source: wgpu::ShaderSource::Wgsl(flat(shader_particle_src).into()),
+            });
         let shader_particle_src =
             shader_particle_src.replace("@interpolate(linear, sample)", "@interpolate(linear)");
         let shader_particle = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vireo particle shader (MSAA)"),
+            label: Some("vireo particle shader (per-pixel)"),
             source: wgpu::ShaderSource::Wgsl(flat(&shader_particle_src).into()),
         });
         let instance_quad_vertex_buf =
@@ -864,13 +866,13 @@ impl GpuContext {
             supported_sample_counts,
             pipelines: Mutex::new(pipelines),
             shader,
-            shader_ssaa,
+            shader_sdf_per_sample,
             shader_geo,
             shader_geo_instance,
             shader_instance,
-            shader_instance_ssaa,
+            shader_instance_per_sample,
             shader_particle,
-            shader_particle_ssaa,
+            shader_particle_per_sample,
             noflat,
             device_lost,
             clocks: Mutex::new(ClockTable::new()),

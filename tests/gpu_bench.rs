@@ -560,7 +560,7 @@ fn preserve_order_reduces_draw_calls() {
 
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
-fn material_shape_text_ssaa_paths() {
+fn material_shape_text_per_sample_paths() {
     const MATERIAL_WGSL: &str = r#"
 fn material_main(in: MaterialInput) -> vec4<f32> {
     return vec4<f32>(in.color.rgb * vec3<f32>(0.8, 1.0, 0.9), in.color.a);
@@ -575,7 +575,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         &gpu,
         320,
         180,
-        AntiAliasing::Ssaa {
+        AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: false,
         },
@@ -3816,7 +3816,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 /// MRT：**SSAA（per-sample 着色）** 与逐附件 MSAA/resolve 的组合也要成立。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
-fn mrt_with_ssaa_per_sample_shading() {
+fn mrt_with_per_sample_shading() {
     const WGSL: &str = r#"
 struct MaterialOutput {
     @location(0) color: vec4<f32>,
@@ -3836,7 +3836,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         &gpu,
         128,
         128,
-        AntiAliasing::Ssaa {
+        AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: false,
         },
@@ -3865,6 +3865,104 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         "target 1 应为蓝（附加目标逐附件 SSAA resolve）"
     );
     println!("  MRT + SSAA(4): target0=red target1=blue ok");
+}
+
+/// per-sample 档的边缘梯度实测：软边（`feather = 1px`，现状）vs 硬边（`feather = 0`，AA 全交 resolve）。
+///
+/// 目的只是量化「解析软边 + 逐采样求值 = 两层 AA 叠加」，**不改变任何行为**；数字用于
+/// `TargetAa::per_sample` / `AntiAliasing::PerSample` 文档：4 个采样点且每采样点二值
+/// （硬边）时，覆盖率只有 5 级；软边则是连续梯度。两者都应有过渡像素。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn per_sample_feather_off_vs_on_rotated_edge() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    const SIZE: u32 = 64;
+    const EDGE_DEG: f32 = 22.5;
+    const HALF: f32 = 20.0;
+
+    let cases: [(&str, AntiAliasing, Option<f32>); 3] = [
+        (
+            "MSAA4 + feather 1px（每像素求值基线）",
+            AntiAliasing::Msaa {
+                samples: 4,
+                alpha_to_coverage: false,
+            },
+            Some(1.0),
+        ),
+        (
+            "PerSample4 + feather 1px（现状）",
+            AntiAliasing::PerSample {
+                samples: 4,
+                alpha_to_coverage: false,
+            },
+            Some(1.0),
+        ),
+        (
+            "PerSample4 + feather 0（硬边，AA 交 resolve）",
+            AntiAliasing::PerSample {
+                samples: 4,
+                alpha_to_coverage: false,
+            },
+            Some(0.0),
+        ),
+    ];
+
+    for (label, aa, feather) in cases {
+        let canvas = OffscreenCanvas::with_aa(&gpu, SIZE, SIZE, aa, 0.0);
+        let mut b = DrawBatch::new();
+        b.set_sdf_feather(feather);
+        // 先平移到画布中心、再绕局部原点旋转 → 方块绕自身中心转 22.5°（保证斜边）。
+        b.translate(SIZE as f32 * 0.5, SIZE as f32 * 0.5);
+        b.rotate_deg(EDGE_DEG);
+        draw_rectangle(
+            &mut b,
+            Pos::new(-HALF, -HALF),
+            HALF * 2.0,
+            HALF * 2.0,
+            Some(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+        let px = canvas.read_pixels();
+
+        // 白形状 + 黑背景：任取一个颜色通道当覆盖率（0 = 背景，255 = 完全覆盖）。
+        let at = |x: u32, y: u32| -> i32 { px[((y * SIZE + x) * 4) as usize] as i32 };
+        let mut transition = 0u32;
+        let mut levels = std::collections::BTreeSet::new();
+        let mut max_step = 0i32;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let l = at(x, y);
+                if l > 8 && l < 247 {
+                    transition += 1;
+                    levels.insert(l);
+                }
+                if x > 0 {
+                    max_step = max_step.max((l - at(x - 1, y)).abs());
+                }
+            }
+        }
+        println!(
+            "  {label}: 过渡像素 {transition}、覆盖率级数 {}、单像素最大阶跃 {max_step}/255",
+            levels.len()
+        );
+        assert!(transition > 0, "{label}: 应有过渡像素（AA 生效）");
+        if feather == Some(0.0) {
+            assert!(
+                levels.len() <= 5,
+                "{label}: 4 采样点 + 二值覆盖最多 5 级，实测 {}",
+                levels.len()
+            );
+        } else {
+            assert!(
+                levels.len() > 5,
+                "{label}: 解析软边应给出连续梯度（> 5 级），实测 {}",
+                levels.len()
+            );
+        }
+    }
 }
 
 /// MRT：附加目标在**下一次 draw 里保持内容**（`LoadOp::Load`）——引擎形状/文字画在上面
