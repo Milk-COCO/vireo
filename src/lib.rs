@@ -48,10 +48,7 @@
 //! fn main() {
 //!     init_logger();
 //!     let app = App::new();
-//!     let win = app.window(
-//!         WindowDesc::new("Hello Vireo", 800, 600),
-//!         None,
-//!     );
+//!     let win = app.window(WindowDesc::new("Hello Vireo", 800, 600));
 //!     app.run(move |cx: &mut LoopContext| {
 //!         let mut batch = DrawBatch::new();
 //!         draw_rectangle(&mut batch, Pos::new(100.0, 100.0), 200.0, 120.0, RED);
@@ -257,6 +254,8 @@ pub mod prelude {
     pub use crate::app::App;
     pub use crate::app::ExitReason;
     pub use crate::window::AntiAliasing;
+    pub use crate::window::CloseAction;
+    pub use crate::window::CloseSource;
     pub use crate::window::CursorGrabMode;
     pub use crate::window::DEFAULT_IDLE_FPS;
     pub use crate::window::DEFAULT_MAX_FPS;

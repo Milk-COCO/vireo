@@ -25,10 +25,7 @@ struct TouchLog {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Input Touch", 800, 560).present_mode(Immediate));
 
     let log = Arc::new(Mutex::new(TouchLog {
         last: None,

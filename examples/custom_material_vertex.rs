@@ -150,10 +150,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Custom Vertex Shader", 640, 420),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Custom Vertex Shader", 640, 420));
     let sdf_material = app
         .material_with_vertex_shader(
             FRAGMENT_WGSL,

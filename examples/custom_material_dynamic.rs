@@ -29,10 +29,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Custom Material Dynamic Offset", 600, 400),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Custom Material Dynamic Offset", 600, 400));
 
     let stride = std::mem::size_of::<RectParams>() as u64;
     let mat = app

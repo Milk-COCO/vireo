@@ -108,7 +108,6 @@ async fn main() {
             .resize_increments(8, 8)
             .position(120, 80)
             .present_mode(PresentMode::AutoVsync),
-        None::<fn()>,
     );
 
     // 去抖时长候选（毫秒）；0 = 变化即 snap（等价每帧实时 configure）

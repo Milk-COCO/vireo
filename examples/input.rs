@@ -10,7 +10,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Vireo Input Demo", 800, 600), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Vireo Input Demo", 800, 600));
 
     // 方块状态
     let mut x: f32 = 350.0;

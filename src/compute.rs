@@ -10,7 +10,7 @@
 //! ```no_run
 //! # use vireo::prelude::*;
 //! # fn demo(app: &App) {
-//! # let gpu = app.window_ref(&app.window(WindowDesc::new("c", 64, 64), None::<fn()>)).unwrap().gpu();
+//! # let gpu = app.window_ref(&app.window(WindowDesc::new("c", 64, 64))).unwrap().gpu();
 //! // 1) 用户自建 BGL（任意 group 编号，如 @group(0) @binding(0)）
 //! // 2) 创建 compute 管线
 //! // let kernel = app.compute_pipeline(WGSL, "cs_main", &[(0, &bgl)])?;

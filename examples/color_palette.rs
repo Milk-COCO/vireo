@@ -4,7 +4,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Color Palette", 720, 400), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Color Palette", 720, 400));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

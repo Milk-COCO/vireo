@@ -18,10 +18,7 @@ const SCENES: &[SceneEntry] = &[
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Vireo Performance Benchmark", 900, 700),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Vireo Performance Benchmark", 900, 700));
 
     let mut scene: usize = 0;
     let mut frame_times: Vec<f64> = Vec::new();

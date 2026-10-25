@@ -53,7 +53,6 @@ async fn main() {
     let win = app.window(
         WindowDesc::new("Offscreen AA: per-sample vs MSAA vs SDF", 1000, 380)
             .dpi_override(Some(1.0)),
-        None::<fn()>,
     );
 
     app.run(move |ctx| {

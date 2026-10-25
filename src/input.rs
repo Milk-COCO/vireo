@@ -223,16 +223,24 @@ pub struct InputCallbacks {
     /// 任务栏缩略图按钮点击（参数 = 按钮 `id`）。仅 Windows 上报；依赖
     /// `set_thumbar_buttons` 安装的 `WM_COMMAND`/`THBN_CLICKED` 子类。运行在 winit 线程。
     pub on_thumb_button: Vec<Box<dyn FnMut(u32)>>,
-    /// **关窗许可（否决钩子）**：返回 `false` 即取消本次关闭，窗口原样存活。
+    /// **关窗许可（否决钩子）**：返回
+    /// [`CloseAction::Cancel`](crate::window::CloseAction::Cancel) 即取消本次关闭，
+    /// 窗口原样存活。
     ///
     /// 运行在 winit 线程（与上面所有回调一致），**同步**执行 —— 返回之前 winit 不会
     /// 继续处理事件，所以不许阻塞、不许画帧（这里也拿不到 `DrawBatch`）。
-    /// 可多次注册：按注册顺序全部返回 `true` 才关，遇 `false` 短路。
+    /// 可多次注册：按注册顺序全部返回 `Allow` 才关，遇 `Cancel` 短路。
     ///
     /// 单条 panic 按「放行」处理（fail-open）+ `log::error!` —— 与仓库里其它回调
     /// 「panic 只打日志」一致；反过来 fail-closed 会让一个 bug 变成「窗口永远关不掉、
     /// 只能 taskkill」，那是更坏的结果。
-    pub on_close_requested: Vec<Box<dyn FnMut() -> bool>>,
+    pub on_close_requested:
+        Vec<Box<dyn FnMut(crate::window::CloseSource) -> crate::window::CloseAction>>,
+    /// **关窗已获准**：否决通过之后、真正拆除之前触发一次（`FnOnce`）。
+    ///
+    /// 运行在 winit 线程。不覆盖 `main` 返回后的批量收尾与设备丢失（那两条根本
+    /// 不走 winit 的关窗路径）—— 统一收尾请用 [`App::on_exit`](crate::app::App::on_exit)。
+    pub on_closing: Vec<Box<dyn FnOnce()>>,
 }
 
 // SAFETY: InputCallbacks 仅在 winit 线程使用。App 移入渲染线程前 self.callbacks 已被抽空。

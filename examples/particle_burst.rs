@@ -241,7 +241,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main(app: App) {
-    let idx = app.window(WindowDesc::new("Particle Burst", 900, 700), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Particle Burst", 900, 700));
     let atlas = Texture::from_rgba(64, 64, &sprite_atlas(), &app.gpu);
     let tint = app
         .gpu

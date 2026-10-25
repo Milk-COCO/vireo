@@ -64,10 +64,7 @@ async fn main() {
         AntiAliasing::Msaa { .. } => "Custom Material (MSAA x4)",
         AntiAliasing::PerSample { .. } => "Custom Material (per-sample x4)",
     };
-    let idx = app.window(
-        WindowDesc::new(title, 500, 400).anti_aliasing(aa),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new(title, 500, 400).anti_aliasing(aa));
 
     let mat = app
         .material_with_resources(

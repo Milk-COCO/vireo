@@ -86,10 +86,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(
-        WindowDesc::new("MRT glow: mask-driven halo", W, H),
-        None::<fn()>,
-    );
+    let window = app.window(WindowDesc::new("MRT glow: mask-driven halo", W, H));
     let scene = app.offscreen(W, H, AntiAliasing::None);
     let mask = app.offscreen(W, H, AntiAliasing::None);
 

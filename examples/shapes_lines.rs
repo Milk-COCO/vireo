@@ -7,7 +7,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Shapes — Lines", 900, 480), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Shapes — Lines", 900, 480));
 
     let mut t: f32 = 0.0;
     let mut use_sdf = true;

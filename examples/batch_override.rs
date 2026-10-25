@@ -25,10 +25,7 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
 #[vireo::main]
 async fn main() {
     let logo = Some(app.load_texture("logo_quad.png"));
-    let idx = app.window(
-        WindowDesc::new("ShapeOverride", 900, 520).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("ShapeOverride", 900, 520).dpi_override(Some(1.0)));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

@@ -20,10 +20,7 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Texture Repeat vs Clamp", 900, 420),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Texture Repeat vs Clamp", 900, 420));
 
     // 同一张 64×64 棋盘：出厂 Clamp；repeat 版共享 image（零重传）。
     let mut tex = Texture::from_rgba(

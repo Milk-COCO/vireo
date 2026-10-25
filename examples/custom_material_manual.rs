@@ -56,10 +56,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Custom Material (manual BGL)", 500, 400),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Custom Material (manual BGL)", 500, 400));
 
     // ── 自建 BGL、buffer、bind group ──
 

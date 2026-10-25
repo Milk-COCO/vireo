@@ -105,10 +105,7 @@ async fn main() {
         log::info!("{l}");
     }
 
-    let idx = app.window(
-        WindowDesc::new("文件读写：assets + 可写目录", 780, 520),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("文件读写：assets + 可写目录", 780, 520));
     let hud = lines.join("\n");
     let tex = Some(tex);
 

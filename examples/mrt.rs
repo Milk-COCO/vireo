@@ -55,10 +55,7 @@ fn panel(batch: &mut DrawBatch, canvas: &OffscreenCanvas, x: f32) {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(
-        WindowDesc::new("MRT: albedo + mask", PANEL_W * 2, H),
-        None::<fn()>,
-    );
+    let window = app.window(WindowDesc::new("MRT: albedo + mask", PANEL_W * 2, H));
     let scene = app.offscreen(PANEL_W, H, AntiAliasing::None);
     let mask = app.offscreen(PANEL_W, H, AntiAliasing::None);
     let mat = app.material(FRAG).expect("material");

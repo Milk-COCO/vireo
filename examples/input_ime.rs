@@ -27,10 +27,7 @@ struct ImeState {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("IME Input + Drag Drop", 800, 560),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("IME Input + Drag Drop", 800, 560));
 
     let st = Arc::new(Mutex::new(ImeState {
         committed: String::new(),

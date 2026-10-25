@@ -5,7 +5,7 @@ use vireo::prelude::*;
 #[vireo::main]
 async fn main() {
     let off_idx = app.offscreen(256, 256, AntiAliasing::None);
-    let idx = app.window(WindowDesc::new("Offscreen Render", 800, 600), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Offscreen Render", 800, 600));
 
     app.run(move |ctx| {
         let canvas = match ctx.app().offscreen_ref(&off_idx) {

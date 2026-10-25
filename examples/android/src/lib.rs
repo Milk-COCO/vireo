@@ -114,7 +114,7 @@ async fn main(app: App) {
     // 不调这个的话 vireo 的 `log::warn!`（字体加载、IME、生命周期）全被丢弃。
     vireo::init_logger();
 
-    let idx = app.window(WindowDesc::new("Vireo Android", 1280, 720), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Vireo Android", 1280, 720));
 
     // ---- 生命周期：on_paused vs on_stopped ---------------------------------
     // 两者都在**渲染线程**上触发，但时机不同：

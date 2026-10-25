@@ -2,7 +2,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main(app: App) {
-    let idx = app.window(WindowDesc::new("EZ Vireo", 800, 600), None::<fn()>);
+    let idx = app.window(WindowDesc::new("EZ Vireo", 800, 600));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

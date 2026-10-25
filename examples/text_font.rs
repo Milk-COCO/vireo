@@ -29,10 +29,8 @@ async fn main() {
         eprintln!("loaded font bytes: arial.ttf ({} bytes)", bytes.len());
     }
 
-    let idx = app.window(
-        WindowDesc::new("Text Font — load_font", 720, 360).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx =
+        app.window(WindowDesc::new("Text Font — load_font", 720, 360).dpi_override(Some(1.0)));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

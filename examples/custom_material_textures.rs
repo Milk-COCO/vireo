@@ -47,10 +47,7 @@ fn checker_rgba(w: u32, h: u32, c0: [u8; 3], c1: [u8; 3], cell: u32) -> Vec<u8> 
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Custom Material Multi-Texture", 560, 360),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Custom Material Multi-Texture", 560, 360));
 
     let mat = app
         .material_with_resources(

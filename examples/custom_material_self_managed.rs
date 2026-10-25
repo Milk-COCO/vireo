@@ -58,10 +58,11 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Custom Material (self-managed BGL)", 500, 400),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new(
+        "Custom Material (self-managed BGL)",
+        500,
+        400,
+    ));
 
     // ── 自建 BGL、buffer、bind group（group 0，非引擎 group 3） ──
     let buf = app.gpu.device.create_buffer(&wgpu::BufferDescriptor {

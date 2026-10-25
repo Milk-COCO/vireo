@@ -71,7 +71,6 @@ async fn main() {
     let window = app.window(
         WindowDesc::new("compute particles", SIZE as u32, SIZE as u32)
             .anti_aliasing(AntiAliasing::None),
-        None::<fn()>,
     );
 
     // ---- 自建 GPU 资源（compute 需要 device/queue 的直接访问）----

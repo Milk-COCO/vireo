@@ -20,7 +20,6 @@ pub(crate) struct CreateWindowRequest {
     pub handle: u64,
     pub desc: WindowDesc,
     pub init_duration: f64,
-    pub on_close: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// 入口期一次性创建的通道集合。
@@ -1081,11 +1080,17 @@ impl App {
     ///
     /// 多窗口 UI 在 Android 上折进单窗口（自绘标签页 / 状态机切换内容），或用
     /// [`App::offscreen`] + [`OffscreenCanvas`](crate::OffscreenCanvas) 自己合成。
-    pub fn window(
-        &self,
-        mut desc: WindowDesc,
-        on_close: Option<impl FnOnce() + Send + 'static>,
-    ) -> WindowIndex {
+    ///
+    /// # 关窗 / 退出相关的回调不在参数里
+    ///
+    /// 建窗只描述窗口本身。三种关窗/退出回调都走统一注册：
+    /// [`on_close_requested`](Self::on_close_requested)（否决）、
+    /// [`on_closing`](Self::on_closing)（已获准、即将拆除）、
+    /// [`on_exit`](Self::on_exit)（进程收尾）。
+    ///
+    /// 0.2.0 之前这里有个 `on_close: Option<impl FnOnce()>` 第二参数：它只能在建窗时
+    /// 挂、且职责与 `on_closing` 完全重合，已删除（调用点删掉 `None::<fn()>` 即可）。
+    pub fn window(&self, mut desc: WindowDesc) -> WindowIndex {
         let start = std::time::Instant::now();
         let aa = crate::window::clamp_aa(desc.anti_aliasing, self.gpu.supported_sample_counts());
         desc.anti_aliasing = aa;
@@ -1113,7 +1118,6 @@ impl App {
         let init_duration = start.elapsed().as_secs_f64();
         let handle = *self.next_handle.lock();
         *self.next_handle.lock() = handle + 1;
-        let on_close = on_close.map(|f| Box::new(f) as Box<dyn FnOnce() + Send>);
         // Android 单窗口限制 —— 见 [`android_rejects_extra_window`] 的完整说明
         // （winit Android 的 `WindowId` 是单元结构体 + `Window::new` 忽略全部
         // 属性，第二个窗口必然事件串台 + 两个 Renderer 抢同一 surface）。
@@ -1152,7 +1156,6 @@ impl App {
                     handle,
                     desc,
                     init_duration,
-                    on_close,
                 });
                 self.pending_window_creates.fetch_add(1, Ordering::AcqRel);
                 self.wake_event_loop();
@@ -1184,21 +1187,41 @@ impl App {
         on_moved: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static => on_moved,
         on_theme_changed: impl FnMut(winit::window::Theme) + 'static => on_theme_changed,
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
-        /// **关窗许可（否决钩子）**：返回 `false` 即取消本次关闭，窗口原样存活。
+        /// **关窗许可（否决钩子）**：返回 [`CloseAction::Cancel`](crate::window::CloseAction::Cancel)
+        /// 即取消本次关闭，窗口原样存活。
         ///
-        /// 与 `App::window(.., on_close)` 的区别：那个是 `FnOnce` 的**事后通知**
-        /// （关窗已不可撤销），这个是**事前许可**，签名带返回值。
+        /// 参数是 [`CloseSource`](crate::window::CloseSource)（用户点 X / 程序调
+        /// `VireoWindow::close()`）—— 于是「点 X 要先问，菜单里的退出直接走」这类
+        /// 诉求可以直接表达，不必在外面另立 flag。
         ///
-        /// - 可多次注册：按注册顺序全部返回 `true` 才关，遇 `false` 短路；
+        /// - 可多次注册：按注册顺序全部返回 `Allow` 才关，遇 `Cancel` 短路；
         /// - **同步跑在 winit 线程**（与其它 `on_*` 一致）⇒ 不许阻塞、不许画帧
         ///   （也拿不到 `DrawBatch`）。要弹确认框就：置一个 `Arc<AtomicBool>`、
-        ///   返回 `false`，让正在绘制的 loop 下一帧画出来；用户点「确认」后
-        ///   再置「允许」旗并调 `VireoWindow::close()`；
+        ///   返回 `Cancel`，让正在绘制的 loop 下一帧画出来；用户点「确认」后
+        ///   再调 `VireoWindow::close()`（此时钩子应返回 `Allow`）；
         /// - 单条 panic 按「放行」处理（fail-open）+ `log::error!`；
         /// - **不会**在 `main` 返回后的批量收尾（`SupervisorAction::CloseAll`）、
         ///   设备丢失、Android Destroy、OS 强行销毁时被问到 —— 那些路径下没人能再
         ///   驱动 UI，问也只会把进程锁死。统一收尾用 [`App::on_exit`]。
-        on_close_requested: impl FnMut() -> bool + 'static => on_close_requested,
+        on_close_requested:
+            impl FnMut(crate::window::CloseSource) -> crate::window::CloseAction + 'static
+            => on_close_requested,
+        /// **这个窗口的关闭已获准**：否决通过之后、真正拆除之前触发一次（`FnOnce`）。
+        ///
+        /// 与 [`App::on_close_requested`] 的分工：那个是**事前许可**（可以否决、可能被问
+        /// 很多次），这个是**已确认、即将拆除**的通知（每个注册只触发一次）。跑在
+        /// winit 线程，此时窗口对象还在 `App.windows` 里、surface 还在。
+        ///
+        /// # 覆盖范围（唯一的坑）
+        ///
+        /// 只覆盖**主动关窗**路径：用户点 X / Alt+F4 / 自绘标题栏关闭按钮，以及
+        /// `VireoWindow::close()`。**不覆盖** `main` 返回后的批量收尾与设备丢失
+        /// —— 那两条不走 winit 的关窗路径，窗口直接随进程消失。要「无论如何都收尾」
+        /// 就用 [`App::on_exit`]。
+        ///
+        /// 多窗口程序里想按窗口做清理（存盘、关设备…）时，这是唯一能区分
+        /// 「关的是哪一个」的地方。
+        on_closing: impl FnOnce() + 'static => on_closing,
         #[cfg(target_os = "windows")]
         on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
@@ -1821,8 +1844,12 @@ impl App {
     ///
     /// 时机上它排在 `ThreadHandle` 的完成通知与 supervisor 的 `all_loops_done` 之前
     /// （`state.done` 在钩子之后才置位），所以 main 返回型退出里「渲染侧收尾先于
-    /// [`on_exit`](Self::on_exit)」是有保证的；末窗关闭 / 设备丢失那两条路径
-    /// **没有顺序保证**（它们不依赖 loop 结束就能判定退出）。
+    /// [`on_exit`](Self::on_exit)」是有保证的。
+    ///
+    /// 末窗关闭 / 设备丢失这两条不依赖 loop 结束就能判定退出，顺序不保证；但进程在
+    /// `run_entry` 返回前会**有界地等** loop 线程收尾（2s，与关窗握手同一数量级），
+    /// 正常情况几毫秒就等到。只有循环卡在用户代码里才会超时 —— 那次收尾丢失，
+    /// `VIREO_EXIT_TRACE=1` 下能见到 `loop threads still running after 2s`。
     pub fn on_exit_render(&self, cb: impl Fn() + Send + Sync + 'static) {
         self.inner.render_exit_cbs.lock().push(Arc::new(cb));
     }

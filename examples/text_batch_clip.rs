@@ -11,10 +11,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Text + Batch Clip", 920, 480).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Text + Batch Clip", 920, 480).dpi_override(Some(1.0)));
 
     let mut t: f32 = 0.0;
     let long = "Text clipped by parent circle.";

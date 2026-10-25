@@ -95,7 +95,7 @@ fn hint(b: &mut DrawBatch, x: f32, y: f32, text: &str) {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Window Control", 960, 600), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Window Control", 960, 600));
 
     let st = Arc::new(Mutex::new(WinState {
         moved: None,

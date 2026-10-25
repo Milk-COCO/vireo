@@ -14,10 +14,8 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Area — include/exclude/∪/∩", 920, 500).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx =
+        app.window(WindowDesc::new("Area — include/exclude/∪/∩", 920, 500).dpi_override(Some(1.0)));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

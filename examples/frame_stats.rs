@@ -97,10 +97,8 @@ fn compute_stats(history: &[f64]) -> (f64, f64, f64, f64, f64, f64, f64) {
 async fn main() {
     let quiet = std::env::var("VIREO_QUIET").is_ok();
 
-    let idx = app.window(
-        WindowDesc::new("Vireo Frame Stats", 720, 440).anti_aliasing(AntiAliasing::None),
-        None::<fn()>,
-    );
+    let idx = app
+        .window(WindowDesc::new("Vireo Frame Stats", 720, 440).anti_aliasing(AntiAliasing::None));
 
     let app_init_ms = app.init_duration() * 1000.0;
     let mut history: Vec<f64> = Vec::with_capacity(HISTORY_CAP);

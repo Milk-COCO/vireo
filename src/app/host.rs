@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 
 use winit::{
@@ -14,7 +15,7 @@ use crate::dpi::{dim_to_winit_position, dim_to_winit_size, to_pixel_size};
 use crate::gpu::GpuContext;
 use crate::platform::windows::win_hwnd;
 use crate::render::Renderer;
-use crate::window::{FrameStyle, WindowDesc, WinitEvent};
+use crate::window::{CloseSource, FrameStyle, WindowDesc, WinitEvent};
 
 /// `window_callbacks` 槽位上限 —— 只防「无效 WindowIndex 撑爆内存」这一种情况。
 ///
@@ -44,21 +45,24 @@ pub(crate) fn ensure_callback_slot(
     true
 }
 
-/// 问一遍这个窗口注册的**关窗许可**钩子：全部返回 `true` 才允许关闭。
+/// 问一遍这个窗口注册的**关窗许可**钩子：全部返回 `CloseAction::Allow` 才允许关闭。
 ///
 /// - 空表（绝大多数窗口）直接放行，一次 Vec `is_empty` 判定，无分配；
-/// - 按注册顺序跑，**遇 `false` 立即返回**（短路：后面的钩子不再执行）；
+/// - 按注册顺序跑，**遇 `Cancel` 立即返回**（短路：后面的钩子不再执行）；
 /// - 单条 panic → 按「放行」处理（fail-open）+ `log::error!`。
 ///   fail-closed 会让一个 bug 变成「窗口永远关不掉、只能 taskkill」，
 ///   那是比「少拦一次」更坏的结果。
 ///
 /// 抽成 free function 是为了能脱离 winit 事件循环做单测（`Runner` 没法在
 /// `cargo test --lib` 里构造）。
-pub(crate) fn close_veto_allows(cbs: &mut crate::input::InputCallbacks) -> bool {
+pub(crate) fn close_veto_allows(
+    cbs: &mut crate::input::InputCallbacks,
+    source: crate::window::CloseSource,
+) -> bool {
     for cb in &mut cbs.on_close_requested {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())) {
-            Ok(true) => {}
-            Ok(false) => return false,
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(source))) {
+            Ok(crate::window::CloseAction::Allow) => {}
+            Ok(crate::window::CloseAction::Cancel) => return false,
             Err(payload) => log::error!(
                 "vireo: on_close_requested callback panicked (treated as ALLOW): {}",
                 crate::app::supervisor::panic_payload_to_string(payload)
@@ -90,6 +94,64 @@ pub(crate) fn fire_exit_hooks(
     }
 }
 
+/// 把一轮注册（`src`）里的回调并入该窗口的槽（`dst`）。
+///
+/// 用**穷举解构**而不是逐字段 `append`：`InputCallbacks` 加字段而这里忘了处理时，
+/// 编译直接失败。这个类目已经踩过两次（建窗前注册被静默丢弃 → `ensure_callback_slot`；
+/// 加 `on_closing` 时没进 drain 列表 → 注册静默消失），所以用编译器兜底，
+/// 不再靠"记得同步这里"的注释。
+///
+/// `on_thumb_button` 不在这里处理：它要绑到 hwnd 上（`set_thumbar_callback`），
+/// 由调用方在拿到 hwnd 后单独 take。
+pub(crate) fn absorb_callbacks(
+    dst: &mut crate::input::InputCallbacks,
+    src: &mut crate::input::InputCallbacks,
+) {
+    let crate::input::InputCallbacks {
+        on_key_down,
+        on_key_up,
+        on_mouse_down,
+        on_mouse_up,
+        on_scroll,
+        on_cursor_entered,
+        on_cursor_left,
+        on_touch,
+        on_focus_gained,
+        on_focus_lost,
+        on_modifiers_changed,
+        on_ime,
+        on_file_dropped,
+        on_file_hovered,
+        on_file_hover_cancelled,
+        on_moved,
+        on_theme_changed,
+        on_resized,
+        on_close_requested,
+        on_closing,
+        on_thumb_button: _, // 调用方处理（需要 hwnd）
+    } = src;
+    dst.on_key_down.append(on_key_down);
+    dst.on_key_up.append(on_key_up);
+    dst.on_mouse_down.append(on_mouse_down);
+    dst.on_mouse_up.append(on_mouse_up);
+    dst.on_scroll.append(on_scroll);
+    dst.on_cursor_entered.append(on_cursor_entered);
+    dst.on_cursor_left.append(on_cursor_left);
+    dst.on_touch.append(on_touch);
+    dst.on_focus_gained.append(on_focus_gained);
+    dst.on_focus_lost.append(on_focus_lost);
+    dst.on_modifiers_changed.append(on_modifiers_changed);
+    dst.on_ime.append(on_ime);
+    dst.on_file_dropped.append(on_file_dropped);
+    dst.on_file_hovered.append(on_file_hovered);
+    dst.on_file_hover_cancelled.append(on_file_hover_cancelled);
+    dst.on_moved.append(on_moved);
+    dst.on_theme_changed.append(on_theme_changed);
+    dst.on_resized.append(on_resized);
+    dst.on_close_requested.append(on_close_requested);
+    dst.on_closing.append(on_closing);
+}
+
 /// winit 事件循环宿主（Runner）：运行在 OS 主线程上，负责创建窗口和转发事件。
 pub struct Runner {
     event_tx: mpsc::Sender<WinitEvent>,
@@ -118,7 +180,6 @@ pub struct Runner {
     ///
     /// `InputState::touches` 轮询路径由渲染线程自己算，不依赖这份缓存。
     window_scale: FxHashMap<usize, (f64, Option<f64>)>,
-    close_hooks: FxHashMap<u64, Option<Box<dyn FnOnce() + Send>>>,
     window_callbacks: Vec<crate::input::InputCallbacks>,
     default_icon: Option<Icon>,
     instance: wgpu::Instance,
@@ -149,29 +210,30 @@ impl Runner {
         let _ = self.event_tx.send(event);
     }
 
-    /// 完整关窗路径：**关窗许可** / close_hooks / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
+    /// 完整关窗路径：**关窗许可** / on_closing / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
     ///
-    /// 这是唯一的关窗咽喉：`WindowEvent::CloseRequested`（点 X / Alt+F4 / 自绘标题栏按钮）
-    /// 与 `VireoWindow::close()`（经 `close_rx`）都汇到这里。否决在**第一行**判定 ——
-    /// 一旦被拒，`close_hooks` 不会被消耗、NC 状态不动、事件不发，窗口完全无感。
+    /// 这是唯一的关窗咽喉：`WindowEvent::CloseRequested`（点 X / Alt+F4 / 自绘标题栏按钮，
+    /// 来源记作 `CloseSource::User`）与 `VireoWindow::close()`（经 `close_rx`，
+    /// 来源记作 `CloseSource::Programmatic`）都汇到这里。否决在**第一行**判定 ——
+    /// 一旦被拒，`on_closing` 不会被消耗、NC 状态不动、事件不发，窗口完全无感。
     ///
-    /// 注意 `SupervisorAction::CloseAll`（main 返回后的批量收尾）**不经过**这里，
-    /// 它直接在 supervisor 侧应用 `CloseRequested` —— 那里不能问许可，否则 main 已死、
-    /// 没人能驱动 UI，进程就被锁死了。统一收尾走 `App::on_exit`。
-    fn request_close(&mut self, handle: usize) {
+    /// 注意 `SupervisorAction::CloseAll`（main 返回后的批量收尾与设备丢失）**不经过**
+    /// 这里，它直接在 supervisor 侧应用 `CloseRequested` —— 那里不能问许可（main 已死、
+    /// 没人能驱动 UI，问也只会把进程锁死），也跑不了 `on_closing`（用户回调只允许在
+    /// winit / 渲染线程上跑）。统一收尾走 `App::on_exit`。
+    fn request_close(&mut self, handle: usize, source: CloseSource) {
         if let Some(cbs) = self.window_callbacks.get_mut(handle)
-            && !close_veto_allows(cbs)
+            && !close_veto_allows(cbs, source)
         {
             crate::app::exit_log(&format!(
-                "request_close: vetoed by on_close_requested (handle={})",
-                handle
+                "request_close: vetoed by on_close_requested (handle={handle}, source={source:?})"
             ));
             return;
         }
-        if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64))
-            && let Some(h) = hook_opt.take()
-        {
-            h();
+        if let Some(cbs) = self.window_callbacks.get_mut(handle) {
+            for hook in cbs.on_closing.drain(..) {
+                hook();
+            }
         }
         if let Some(&hwnd) = self.hwnds.get(handle)
             && hwnd != 0
@@ -261,7 +323,6 @@ impl Runner {
         handle: usize,
         desc: &WindowDesc,
         init_duration: f64,
-        on_close: Option<Box<dyn FnOnce() + Send>>,
     ) {
         if self.window_callbacks.len() <= handle {
             self.window_callbacks
@@ -287,9 +348,6 @@ impl Runner {
                 self.hwnds.resize(handle + 1, 0);
             }
             self.hwnds[handle] = hwnd;
-        }
-        if let Some(h) = on_close {
-            self.close_hooks.insert(handle as u64, Some(h));
         }
         let surface = self.instance.create_surface(window.clone()).unwrap();
         let window_id = window.id();
@@ -417,7 +475,6 @@ impl ApplicationHandler for Runner {
                 req.handle as usize,
                 &req.desc,
                 req.init_duration,
-                req.on_close,
             );
         }
     }
@@ -449,7 +506,6 @@ impl ApplicationHandler for Runner {
                     req.handle as usize,
                     &req.desc,
                     req.init_duration,
-                    req.on_close,
                 );
             }
             if n > 0 {
@@ -482,27 +538,7 @@ impl ApplicationHandler for Runner {
                 continue;
             }
             if let Some(cbs) = self.window_callbacks.get_mut(handle) {
-                cbs.on_key_down.append(&mut reg.on_key_down);
-                cbs.on_key_up.append(&mut reg.on_key_up);
-                cbs.on_mouse_down.append(&mut reg.on_mouse_down);
-                cbs.on_mouse_up.append(&mut reg.on_mouse_up);
-                cbs.on_scroll.append(&mut reg.on_scroll);
-                cbs.on_cursor_entered.append(&mut reg.on_cursor_entered);
-                cbs.on_cursor_left.append(&mut reg.on_cursor_left);
-                cbs.on_touch.append(&mut reg.on_touch);
-                cbs.on_focus_gained.append(&mut reg.on_focus_gained);
-                cbs.on_focus_lost.append(&mut reg.on_focus_lost);
-                cbs.on_modifiers_changed
-                    .append(&mut reg.on_modifiers_changed);
-                cbs.on_ime.append(&mut reg.on_ime);
-                cbs.on_file_dropped.append(&mut reg.on_file_dropped);
-                cbs.on_file_hovered.append(&mut reg.on_file_hovered);
-                cbs.on_file_hover_cancelled
-                    .append(&mut reg.on_file_hover_cancelled);
-                cbs.on_moved.append(&mut reg.on_moved);
-                cbs.on_theme_changed.append(&mut reg.on_theme_changed);
-                cbs.on_resized.append(&mut reg.on_resized);
-                cbs.on_close_requested.append(&mut reg.on_close_requested);
+                absorb_callbacks(cbs, &mut reg);
                 if handle < self.hwnds.len() && self.hwnds[handle] != 0 {
                     for cb in std::mem::take(&mut reg.on_thumb_button) {
                         crate::platform::windows::set_thumbar_callback(self.hwnds[handle], cb);
@@ -525,7 +561,7 @@ impl ApplicationHandler for Runner {
         }
         while let Ok(handle) = self.close_rx.try_recv() {
             crate::app::exit_log(&format!("about_to_wait: close handle={}", handle));
-            self.request_close(handle);
+            self.request_close(handle, crate::window::CloseSource::Programmatic);
         }
         // 安卓主题变化（渲染线程 poll 到 config 变化，见 poll_android_theme）：
         // 复用 ThemeChanged 的回调循环派发。桌面走 WindowEvent 那条，这里只在
@@ -583,7 +619,7 @@ impl ApplicationHandler for Runner {
         };
         match event {
             WindowEvent::CloseRequested => {
-                self.request_close(handle);
+                self.request_close(handle, crate::window::CloseSource::User);
             }
             WindowEvent::Resized(size) => {
                 if let Some(cbs) = self.window_callbacks.get_mut(handle) {
@@ -802,6 +838,8 @@ pub(crate) fn run_blocking(
     let gpu_for_runner = app.gpu.clone();
     // runner 需要 App 句柄来在退出时取 `App::on_exit` 的钩子表（见 `Runner::app`）。
     let app_for_runner = app.clone();
+    // 事件循环退出后用它等 loop 线程收尾（`wait_loop_threads_settle`）。
+    let app_for_tail = app.clone();
     let wake_proxy = app.event_loop_proxy.get().cloned();
     let device_lost = app.device_lost.clone();
     let device_lost_super = device_lost.clone();
@@ -840,7 +878,6 @@ pub(crate) fn run_blocking(
             hwnds: Vec::new(),
             id_to_handle: FxHashMap::default(),
             window_scale: FxHashMap::default(),
-            close_hooks: FxHashMap::default(),
             window_callbacks: Vec::new(),
             default_icon,
             instance,
@@ -851,9 +888,45 @@ pub(crate) fn run_blocking(
         })
         .unwrap();
 
+    // event loop 已经退了，但 loop 线程可能还在跑它们自己的收尾（`App::on_exit_render`）。
+    //
+    // 为什么必须等：末窗关闭 / 设备丢失这两条路径下 supervisor 一看到 `all_closed` /
+    // `device_lost` 就发退出信号，**不等 loop 结束**（否则一个卡在用户代码里的循环
+    // 能把进程永远挂住）。而 `run_entry` 一返回、用户 `main` 一返回，进程退出会把
+    // 还在收尾的 loop 线程连同钩子一起杀掉 —— 实测同一份代码两次跑，钩子一次跑到、
+    // 一次被吞掉。这里补一个**有界**等待（2s，与关窗握手同一数量级）：正常情况几毫秒
+    // 就等到，异常情况超时放行，绝不把退出拖成永久挂起。
+    wait_loop_threads_settle(&app_for_tail, std::time::Duration::from_secs(2));
+
     match supervisor.join() {
         Ok(()) => Ok(()),
         Err(payload) => Err(panic_payload_to_string(payload).into()),
+    }
+}
+
+/// 等所有 loop 线程把 `state.done` 置位（= `App::on_exit_render` 已跑完），有界超时。
+///
+/// 没有可用的 condvar（`LoopHandleState` 的 waker 只服务 `ThreadHandle::await` 的
+/// future），所以用 1ms 轮询；这条路径每进程只走一次、且通常在几毫秒内结束。
+fn wait_loop_threads_settle(app: &App, timeout: std::time::Duration) {
+    let states: Vec<Arc<crate::thread::LoopHandleState>> = app.loop_states.lock().clone();
+    if states.is_empty() {
+        return;
+    }
+    let start = std::time::Instant::now();
+    loop {
+        if states.iter().all(|s| s.done.load(Ordering::Acquire)) {
+            crate::app::exit_log("loop threads settled before process exit");
+            return;
+        }
+        if start.elapsed() >= timeout {
+            crate::app::exit_log(&format!(
+                "loop threads still running after {:?}; exiting anyway (on_exit_render may be skipped)",
+                timeout
+            ));
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -921,11 +994,65 @@ mod callback_slot_tests {
 }
 
 #[cfg(test)]
+mod absorb_callbacks_tests {
+    use super::absorb_callbacks;
+    use crate::input::InputCallbacks;
+
+    /// 核心回归：`on_closing` 必须真的被搬进槽里。
+    ///
+    /// 这条曾经在加字段时漏掉过 —— drain 列表是手写的逐字段 `append`，漏一行等于
+    /// 该回调**静默丢失**（`reg` 随本轮循环 drop，零日志）。现在 `absorb_callbacks`
+    /// 用穷举解构拿到编译期兜底，这个测试盯住"至少有一项真的搬过去了"。
+    #[test]
+    fn on_closing_is_moved_into_the_slot() {
+        let mut reg = InputCallbacks::default();
+        reg.on_closing.push(Box::new(|| {}));
+
+        let mut slot = InputCallbacks::default();
+        absorb_callbacks(&mut slot, &mut reg);
+
+        assert_eq!(slot.on_closing.len(), 1, "on_closing 必须进槽");
+        assert!(reg.on_closing.is_empty(), "搬完源必须被清空（防重复触发）");
+    }
+
+    /// 否决钩子同理（它是 `FnMut`，泄漏更隐蔽：注册成功但永远不触发）。
+    #[test]
+    fn close_veto_is_moved_into_the_slot() {
+        let mut reg = InputCallbacks::default();
+        reg.on_close_requested
+            .push(Box::new(|_| crate::window::CloseAction::Allow));
+
+        let mut slot = InputCallbacks::default();
+        absorb_callbacks(&mut slot, &mut reg);
+
+        assert_eq!(slot.on_close_requested.len(), 1);
+        assert!(reg.on_close_requested.is_empty());
+    }
+
+    /// 输入类回调也要一起搬（回归：别把老字段漏在解构里）。
+    #[test]
+    fn input_callbacks_are_moved_too() {
+        let mut reg = InputCallbacks::default();
+        reg.on_key_down.push(Box::new(|_| {}));
+        reg.on_resized.push(Box::new(|_| {}));
+
+        let mut slot = InputCallbacks::default();
+        absorb_callbacks(&mut slot, &mut reg);
+
+        assert_eq!(slot.on_key_down.len(), 1);
+        assert_eq!(slot.on_resized.len(), 1);
+        assert!(reg.on_key_down.is_empty());
+        assert!(reg.on_resized.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod close_veto_tests {
     use super::close_veto_allows;
     use crate::input::InputCallbacks;
+    use crate::window::{CloseAction, CloseSource};
 
-    fn with_vetos(vetos: Vec<Box<dyn FnMut() -> bool>>) -> InputCallbacks {
+    fn with_vetos(vetos: Vec<Box<dyn FnMut(CloseSource) -> CloseAction>>) -> InputCallbacks {
         let mut cbs = InputCallbacks::default();
         cbs.on_close_requested = vetos;
         cbs
@@ -934,15 +1061,36 @@ mod close_veto_tests {
     /// 绝大多数窗口没注册任何许可钩子 —— 必须无脑放行（X 的默认行为不能变）。
     #[test]
     fn empty_veto_table_allows() {
-        assert!(close_veto_allows(&mut InputCallbacks::default()));
+        assert!(close_veto_allows(
+            &mut InputCallbacks::default(),
+            CloseSource::User
+        ));
     }
 
-    /// 返回 false = 否决；这是本 feature 的全部意义所在。
+    /// 关窗来源必须原样送达钩子 —— 「点 X 要问、程序化退出不问」全靠它区分。
     #[test]
-    fn single_false_denies() {
-        assert!(!close_veto_allows(&mut with_vetos(vec![Box::new(|| {
-            false
-        })])));
+    fn source_is_forwarded() {
+        for src in [CloseSource::User, CloseSource::Programmatic] {
+            let seen = std::sync::Arc::new(parking_lot::Mutex::new(None));
+            let s = seen.clone();
+            assert!(close_veto_allows(
+                &mut with_vetos(vec![Box::new(move |src| {
+                    *s.lock() = Some(src);
+                    CloseAction::Allow
+                })]),
+                src
+            ));
+            assert_eq!(*seen.lock(), Some(src));
+        }
+    }
+
+    /// 返回 Cancel = 否决；这是本 feature 的全部意义所在。
+    #[test]
+    fn single_cancel_denies() {
+        assert!(!close_veto_allows(
+            &mut with_vetos(vec![Box::new(|_src| CloseAction::Cancel)]),
+            CloseSource::User
+        ));
     }
 
     /// 多个钩子全部同意才关 —— 少一个同意就不关（防「后注册的覆盖前者」）。
@@ -951,21 +1099,24 @@ mod close_veto_tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let c1 = calls.clone();
         let c2 = calls.clone();
-        assert!(!close_veto_allows(&mut with_vetos(vec![
-            Box::new(|| true),
-            Box::new(move || {
-                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                false
-            }),
-            Box::new(move || {
-                c2.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
-                true
-            }),
-        ])));
+        assert!(!close_veto_allows(
+            &mut with_vetos(vec![
+                Box::new(|_src| CloseAction::Allow),
+                Box::new(move |_src| {
+                    c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    CloseAction::Cancel
+                }),
+                Box::new(move |_src| {
+                    c2.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                    CloseAction::Allow
+                }),
+            ]),
+            CloseSource::User
+        ));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "遇 false 必须短路：第三个钩子不得被调用（否则它可能弹第二次确认框）"
+            "遇 Cancel 必须短路：第三个钩子不得被调用（否则它可能弹第二次确认框）"
         );
     }
 
@@ -974,12 +1125,13 @@ mod close_veto_tests {
     fn veto_called_once_per_request() {
         let n = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let c = n.clone();
-        assert!(close_veto_allows(&mut with_vetos(vec![Box::new(
-            move || {
+        assert!(close_veto_allows(
+            &mut with_vetos(vec![Box::new(move |_src| {
                 c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                true
-            }
-        )])));
+                CloseAction::Allow
+            })]),
+            CloseSource::Programmatic
+        ));
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -987,7 +1139,10 @@ mod close_veto_tests {
     #[test]
     fn panicking_veto_allows() {
         assert!(
-            close_veto_allows(&mut with_vetos(vec![Box::new(|| panic!("boom"))])),
+            close_veto_allows(
+                &mut with_vetos(vec![Box::new(|_src| panic!("boom"))]),
+                CloseSource::User
+            ),
             "panic 必须 fail-open —— fail-closed 会让窗口永久无法关闭"
         );
     }
@@ -997,13 +1152,16 @@ mod close_veto_tests {
     fn panicking_veto_does_not_stop_later_vetos() {
         let n = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let c = n.clone();
-        assert!(!close_veto_allows(&mut with_vetos(vec![
-            Box::new(|| panic!("boom")),
-            Box::new(move || {
-                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                false
-            }),
-        ])));
+        assert!(!close_veto_allows(
+            &mut with_vetos(vec![
+                Box::new(|_src| panic!("boom")),
+                Box::new(move |_src| {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    CloseAction::Cancel
+                }),
+            ]),
+            CloseSource::User
+        ));
         assert_eq!(
             n.load(std::sync::atomic::Ordering::SeqCst),
             1,

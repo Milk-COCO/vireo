@@ -28,7 +28,7 @@ fn prune(log: &mut Vec<(u64, String)>) {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Deferred Tasks", 640, 420), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Deferred Tasks", 640, 420));
 
     let demo: Arc<Mutex<Demo>> = Arc::new(Mutex::new(Demo {
         color: WHITE,

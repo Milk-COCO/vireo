@@ -33,13 +33,12 @@ async fn main() {
 
     // 路径 1：建窗时直接要 8x（window() 内应 snap，不应 panic）
     eprintln!("[1] App::window(Msaa 8x) ...");
-    let idx = app.window(
-        WindowDesc::new("msaa_clamp", 480, 320).anti_aliasing(AntiAliasing::Msaa {
+    let idx = app.window(WindowDesc::new("msaa_clamp", 480, 320).anti_aliasing(
+        AntiAliasing::Msaa {
             samples: 8,
             alpha_to_coverage: false,
-        }),
-        None::<fn()>,
-    );
+        },
+    ));
     eprintln!("[1] window() returned (pipeline preheat OK if we got here)");
 
     let mut tried_runtime = false;

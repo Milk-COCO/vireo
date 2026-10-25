@@ -49,7 +49,7 @@ fn ease_out_cubic(u: f32) -> f32 {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Vireo 按需出帧", 720, 460), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Vireo 按需出帧", 720, 460));
 
     // ---- 动画状态 ----
     let mut spin = false; // A：持续动画开关

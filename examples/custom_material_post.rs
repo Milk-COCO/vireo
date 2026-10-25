@@ -16,10 +16,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(
-        WindowDesc::new("Material on Offscreen Texture", 640, 400),
-        None::<fn()>,
-    );
+    let window = app.window(WindowDesc::new("Material on Offscreen Texture", 640, 400));
     let scene = app.offscreen(640, 400, AntiAliasing::None);
     let material = app.material(WGSL).expect("material WGSL");
 

@@ -73,10 +73,7 @@ fn draw_shapes(batch: &mut DrawBatch) {
 async fn main() {
     let tex = Some(app.load_texture("logo_quad.png"));
 
-    let idx = app.window(
-        WindowDesc::new("Texture: Geometry vs SDF", 760, 380),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Texture: Geometry vs SDF", 760, 380));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

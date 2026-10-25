@@ -1,16 +1,21 @@
-//! 退出 / 关窗拦截：`on_close_requested`（否决）+ `on_exit` + `on_exit_render`。
+//! 退出 / 关窗拦截：四个钩子全在这一份里。
+//!
+//! - `on_close_requested`（**否决**，winit 线程同步，参数 `CloseSource`、返回 `CloseAction`）
+//! - `on_closing`（已获准、即将拆除，winit 线程，`FnOnce`，每窗口一次）
+//! - `on_exit`（进程收尾，winit 线程，每进程恰好一次）
+//! - `on_exit_render`（渲染线程收尾，每 loop 线程一次，能碰 GPU）
 //!
 //! 跑法：`cargo run --example exit_guard`（需显示器）。
 //!
 //! 三档验收：
 //!
-//! 1. **干净状态**（标题栏的「脏」= no）→ 点 X：直接关，进程退出。
+//! 1. **干净状态**（画面上的「脏」= no）→ 点 X：直接关，进程退出。
 //! 2. 按 `D` 标脏，再点 X：**窗口关不掉**，画面弹出确认框
-//!    （`on_close_requested` 返回 `false` 把这次关闭否决了；X 按钮已经处理完，
-//!    窗口原样存活）。同理 `Q` / `ESC` 走 `win.close()` 也会被同一票否决 ——
-//!    程序化关窗和 X 共用一条许可路径。
-//! 3. 确认框里按 `Y`：置「允许」旗后重新 `close()`，这次放行；退出时两条钩子
-//!    各打一行日志（`on_exit_render` 在渲染线程、`on_exit` 在 winit 线程）。
+//!    （`on_close_requested` 返回 `CloseAction::Cancel` 把这次关闭否决了；X 按钮已经
+//!    处理完，窗口原样存活）。同理 `Q` / `ESC` 走 `win.close()` 也会被同一票否决 ——
+//!    程序化关窗和 X 共用一条许可路径，日志里 `[veto]` 后面会打出是哪一种来源。
+//! 3. 确认框里按 `Y`：置「允许」旗后重新 `close()`，这次放行。随后依次看到
+//!    `[on_closing]`（winit 线程）→ `[on_exit_render]`（渲染线程）→ `[on_exit]`（winit 线程）。
 //!    `N` / `ESC` 取消，回到第 2 档。
 //!
 //! 关键点：否决回调**跑在 winit 线程**（与 `on_key_down` 等一致），同步执行，
@@ -21,7 +26,7 @@
 //!
 //! `VIREO_EXIT_GUARD_AUTO=1 cargo run --release --example exit_guard`：
 //! 第 20 tick 标脏并 `close()`（应被否决、窗口存活），第 40 tick 断言「确认旗已置位
-//! 且窗口仍在」后放行 `close()`，随后进程以退出码 0 结束并打出两条收尾日志。
+//! 且窗口仍在」后放行 `close()`，随后进程以退出码 0 结束并打出三条收尾日志。
 //! 断言失败会 `process::exit(2)` 并打 `[auto] FAIL`。
 
 use std::sync::Arc;
@@ -31,7 +36,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("vireo exit guard", 640, 420), None::<fn()>);
+    let idx = app.window(WindowDesc::new("vireo exit guard", 640, 420));
     let auto = std::env::var_os("VIREO_EXIT_GUARD_AUTO").is_some_and(|v| v != "0");
 
     // 共享状态（winit 线程的否决回调 ⇄ 渲染线程的绘制/交互）
@@ -48,23 +53,32 @@ async fn main() {
             confirm_open.clone(),
             denied.clone(),
         );
-        app.on_close_requested(idx, move || {
+        app.on_close_requested(idx, move |source| {
             if allow_close.load(Ordering::SeqCst) || !dirty.load(Ordering::SeqCst) {
-                return true; // 放行
+                return CloseAction::Allow; // 放行
             }
             // 有未保存改动 → 否决本次关闭，让 loop 下一帧弹确认框。
             confirm_open.store(true, Ordering::SeqCst);
             denied.fetch_add(1, Ordering::SeqCst);
-            false
+            println!("[veto] {source:?} 请求关闭 → 已否决（有未保存改动）");
+            CloseAction::Cancel
         });
     }
 
-    // ---- 2. 退出收尾：winit 线程，每进程恰好一次 ----
+    // ---- 2. 已获准、即将拆除（winit 线程，FnOnce）：此时窗口对象和 surface 都还在 ----
+    //
+    // 只覆盖「主动关窗」（X / `close()`）。main 返回后的批量收尾与设备丢失不走这条，
+    // 那种场景的收尾属于下面的 `on_exit`。
+    app.on_closing(idx, || {
+        println!("[on_closing] 窗口即将拆除（winit 线程，FnOnce，每窗口一次）")
+    });
+
+    // ---- 3. 退出收尾：winit 线程，每进程恰好一次 ----
     app.on_exit(|reason| {
         println!("[on_exit] 进程即将退出，原因 = {reason:?}（winit 线程，纯 CPU 收尾）");
     });
 
-    // ---- 3. 渲染线程收尾：每个 loop 线程一次，能碰 App / GPU ----
+    // ---- 4. 渲染线程收尾：每个 loop 线程一次，能碰 App / GPU ----
     {
         let app_for_hook = app.clone();
         app.on_exit_render(move || {

@@ -69,25 +69,20 @@ fn draw_shapes(batch: &mut DrawBatch, sdf: f32, label: &str) {
 
 #[vireo::main]
 async fn main() {
-    let per_sample = app.window(
-        WindowDesc::new("per-sample x4", 320, 240).anti_aliasing(AntiAliasing::PerSample {
+    let per_sample = app.window(WindowDesc::new("per-sample x4", 320, 240).anti_aliasing(
+        AntiAliasing::PerSample {
             samples: 4,
             alpha_to_coverage: true,
-        }),
-        None::<fn()>,
-    );
+        },
+    ));
     let msaa = app.window(
         WindowDesc::new("MSAA x4", 320, 240).anti_aliasing(AntiAliasing::Msaa {
             samples: 4,
             alpha_to_coverage: true,
         }),
-        None::<fn()>,
     );
-    let sdf = app.window(
-        WindowDesc::new("SDF 1px", 320, 240).anti_aliasing(AntiAliasing::None),
-        None::<fn()>,
-    );
-    let raw = app.window(WindowDesc::new("No AA", 320, 240), None::<fn()>);
+    let sdf = app.window(WindowDesc::new("SDF 1px", 320, 240).anti_aliasing(AntiAliasing::None));
+    let raw = app.window(WindowDesc::new("No AA", 320, 240));
 
     app.run(move |ctx| {
         if let Ok(w) = ctx.app().window_ref(&per_sample) {

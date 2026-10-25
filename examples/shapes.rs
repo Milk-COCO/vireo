@@ -8,10 +8,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Vireo Shapes Demo", 1000, 450),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Vireo Shapes Demo", 1000, 450));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

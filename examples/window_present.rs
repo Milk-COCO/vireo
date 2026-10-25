@@ -17,10 +17,8 @@ fn mode_name(m: PresentMode) -> &'static str {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Present Mode", 640, 360).present_mode(PresentMode::AutoVsync),
-        None::<fn()>,
-    );
+    let idx =
+        app.window(WindowDesc::new("Present Mode", 640, 360).present_mode(PresentMode::AutoVsync));
 
     let modes = [
         PresentMode::AutoVsync,

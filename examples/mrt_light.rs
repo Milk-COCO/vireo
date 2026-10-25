@@ -141,10 +141,7 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(
-        WindowDesc::new("MRT: normal-driven sheen", W, H),
-        None::<fn()>,
-    );
+    let window = app.window(WindowDesc::new("MRT: normal-driven sheen", W, H));
     let scene = app.offscreen(W, H, AntiAliasing::None);
     let normals = app.offscreen(W, H, AntiAliasing::None);
 

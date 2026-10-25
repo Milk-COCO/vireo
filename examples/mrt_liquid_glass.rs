@@ -173,7 +173,7 @@ fn tex_slot(name: &'static str) -> MaterialResource<'static> {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(WindowDesc::new("MRT: liquid glass", W, H), None::<fn()>);
+    let window = app.window(WindowDesc::new("MRT: liquid glass", W, H));
     let scene = app.offscreen(W, H, AntiAliasing::None);
     let mask = app.offscreen(W, H, AntiAliasing::None);
     let q0 = app.offscreen(QW, QH, AntiAliasing::None);

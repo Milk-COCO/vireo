@@ -49,10 +49,7 @@ async fn main() {
         Err(_) => None,
     };
 
-    let idx = app.window(
-        WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

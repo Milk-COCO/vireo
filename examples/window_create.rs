@@ -1,6 +1,6 @@
 //! 窗口创建示例：`WindowDesc` 全部 builder + 多窗口 + 创建后查询
 //!
-//! 创建窗口只需两步：`App::window(desc, on_close)` 返回 [`WindowIndex`]，
+//! 建窗只要一行：`App::window(desc)` 返回 [`WindowIndex`]，
 //! 之后在 `app.run` 回调里用 `app.window_ref(&idx)` 拿到 `&VireoWindow` 绘制。
 //! 三个窗口用不同的 `WindowDesc` 配置演示创建期选项：
 //!
@@ -30,7 +30,7 @@
 //!
 //! 说明：
 //! - `icon_from_path("logo.png")` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
-//! - 关闭窗口时触发 `on_close` 回调；三个窗口全部关闭后进程退出。
+//! - 逐窗口的关窗通知用 `app.on_closing(idx, ..)`（运行期也能挂）；三个窗口全部关闭后进程退出。
 //! - 键盘 `B`：在 W1 检测。在鼠标位置弹出一个无边框小窗（`FrameStyle::Frameless`），
 //!   在发送创建窗口的 1 秒后自动关闭。创建窗口到渲染实际内容有不定长的耗时，期间可能会闪白窗口。
 //!   Vireo 提供在 [`WindowDesc`] 中提供了选项 [`WindowDesc::preparable`] (默认开)
@@ -60,8 +60,8 @@ async fn main() {
             .max_size(1600, 1200)
             .resize_increments(4, 4)
             .icon_from_path("logo.png"),
-        Some(|| println!("W1 已关闭")),
     );
+    app.on_closing(w1, || println!("W1 已关闭"));
 
     // ---- W2：物理像素 + 定位 + 自管标题栏（HiddenTitlebar + §7.6 NC API）----
     // `px(...)` 是物理像素意图：物理尺寸固定，逻辑 = 物理 ÷ OS DPI。
@@ -78,8 +78,8 @@ async fn main() {
             .position(px(80.0), px(60.0))
             .resizable(true)
             .frame_style(FrameStyle::HiddenTitlebar),
-        Some(|| println!("W2 已关闭")),
     );
+    app.on_closing(w2, || println!("W2 已关闭"));
 
     // ---- W3：GPU/外观选项 + 最大化 ----
     let w3 = app.window(
@@ -92,8 +92,8 @@ async fn main() {
             })
             .theme(Theme::Dark)
             .maximized(true),
-        Some(|| println!("W3 已关闭")),
     );
+    app.on_closing(w3, || println!("W3 已关闭"));
 
     let mut popup: Option<(WindowIndex, std::time::Instant)> = None;
     let mut b_was_down = false;
@@ -164,8 +164,9 @@ async fn main() {
                 WindowDesc::new("popup (1s)", 220, 120)
                     .frame_style(FrameStyle::Frameless)
                     .position(px(ox + mx as f64 * sf), px(oy + my as f64 * sf)),
-                Some(|| println!("popup 已关闭")),
             );
+            // 运行期建窗也能挂关窗通知（0.2.0 之前这里的 `on_close` 只能建窗时传）。
+            ctx.app().on_closing(idx, || println!("popup 已关闭"));
             popup = Some((idx, std::time::Instant::now()));
         }
         b_was_down = b_down;

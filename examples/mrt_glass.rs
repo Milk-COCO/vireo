@@ -165,7 +165,7 @@ fn tex_slot(name: &'static str) -> MaterialResource<'static> {
 
 #[vireo::main]
 async fn main() {
-    let window = app.window(WindowDesc::new("MRT: frosted glass", W, H), None::<fn()>);
+    let window = app.window(WindowDesc::new("MRT: frosted glass", W, H));
     let scene = app.offscreen(W, H, AntiAliasing::None);
     let mask = app.offscreen(W, H, AntiAliasing::None);
     // 1/4 分辨率的两张缓冲：横竖两遍交替读写，避免读自己

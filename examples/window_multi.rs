@@ -21,14 +21,14 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx_a = app.window(
-        WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)),
-        Some(|| println!("窗口 A 已关闭")),
-    );
-    let idx_b = app.window(
-        WindowDesc::new("B - mouse capture + text", 400, 400),
-        Some(|| println!("窗口 B 已关闭")),
-    );
+    let idx_a = app
+        .window(WindowDesc::new("A - high_dpi mouse follower", 800, 600).dpi_override(Some(1.0)));
+    let idx_b = app.window(WindowDesc::new("B - mouse capture + text", 400, 400));
+
+    // 逐窗口的关窗通知：多窗口下这是唯一能区分「关的是哪一个」的地方。
+    // 注意它只覆盖主动关窗（X / close()）；进程级收尾用 `app.on_exit`。
+    app.on_closing(idx_a, || println!("窗口 A 已关闭"));
+    app.on_closing(idx_b, || println!("窗口 B 已关闭"));
 
     app.run(move |ctx| {
         let win_a = match ctx.app().window_ref(&idx_a) {

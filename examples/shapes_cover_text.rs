@@ -8,7 +8,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("图形覆盖文本", 520, 180), None::<fn()>);
+    let idx = app.window(WindowDesc::new("图形覆盖文本", 520, 180));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

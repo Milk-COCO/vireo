@@ -527,8 +527,8 @@ pub(crate) fn supervisor_loop(
                 // 1. 不经过 winit 的 `Runner::request_close`，所以**不问
                 //    `on_close_requested` 许可** —— main 已返回、没人能再驱动 UI，
                 //    问下去只会把进程锁死；
-                // 2. 也因此不跑 `close_hooks`（`App::window` 那个 `FnOnce`）与 NC 状态
-                //    清理（窗口马上随进程消失，泄漏的是收尾期的几条表项）。
+                // 2. 也因此不触发 `on_closing`（`InputCallbacks` 里那个 `FnOnce`）与 NC
+                //    状态清理（窗口马上随进程消失，泄漏的是收尾期的几条表项）。
                 //    统一收尾请用 `App::on_exit`。
                 //
                 // `continue` 而非阻塞等事件——关窗已同步完成，退出条件本轮即可满足。

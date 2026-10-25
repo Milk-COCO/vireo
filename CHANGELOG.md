@@ -4,17 +4,24 @@
 
 ### Added / 新增
 
-- **关窗拦截 + 退出收尾钩子（三个，全部新增）**：此前只有 `App::window(desc, on_close)`
-  那个 `FnOnce` 事后通知 —— 没有返回值、拦不住关闭；而 main 返回 / 设备丢失 / main panic
-  这些收尾路径上没有任何用户回调。现在：
-  - **`on_close_requested(handle, FnMut() -> bool)`**（`App` 与 `VireoWindow` 都有）：
-    返回 `false` 即**取消**本次关闭，窗口原样存活（不隐藏、不销毁、`on_close` 不消耗）。
-    可多次注册（全部 `true` 才关，遇 `false` 短路）。覆盖 X / Alt+F4 / 自绘标题栏关闭
-    按钮 / `win.close()`；跑在 **winit 线程且同步**（与所有 `on_*` 一致）⇒ 不许阻塞、
-    不许画帧，确认框要「置旗 + 返回 `false`，让 loop 下一帧画」。**刻意不问**的路径：
+- **关窗拦截 + 关窗/退出收尾钩子（四个，全部新增）**：此前只有
+  `App::window(desc, on_close)` 那个建窗时传入的 `FnOnce` 事后通知 —— 没有返回值、
+  拦不住关闭、不能运行期注册；而 main 返回 / 设备丢失 / main panic 这些收尾路径上
+  没有任何用户回调。现在：
+  - **`on_close_requested(handle, FnMut(CloseSource) -> CloseAction)`**（`App` 与
+    `VireoWindow` 都有）：返回 `CloseAction::Cancel` 即**取消**本次关闭，窗口原样存活
+    （不隐藏、不销毁、`on_closing` 不消耗）。参数 `CloseSource::{User, Programmatic}`
+    区分「点 X」与「`win.close()`」，于是「X 要问、程序化退出直接走」可以直接表达。
+    用枚举而非 `bool`：极性写反的代价是两极的（永远关不掉 / 静默丢数据）。
+    可多次注册（全部 `Allow` 才关，遇 `Cancel` 短路）。覆盖 X / Alt+F4 / 自绘标题栏
+    关闭按钮 / `win.close()`；跑在 **winit 线程且同步**（与所有 `on_*` 一致）⇒ 不许阻塞、
+    不许画帧，确认框要「置旗 + 返回 `Cancel`，让 loop 下一帧画」。**刻意不问**的路径：
     main 返回后的批量收尾、设备丢失、Android Destroy、OS 强行销毁 —— 那些路径上没人能
-    驱动 UI，问了只会把进程锁死。单条 panic 按「放行」处理（fail-open）+ `log::error!`，
-    理由同上：fail-closed 会变成「窗口永远关不掉」。
+    驱动 UI，问了只会把进程锁死。单条 panic 按「放行」处理（fail-open）+ `log::error!`。
+  - **`on_closing(handle, FnOnce())`**：这个窗口**已获准关闭**、即将拆除时触发一次，
+    跑在 winit 线程。多窗口程序里唯一能区分「关的是哪一个」的地方。只覆盖**主动关窗**
+    （X / `close()`）—— main 返回后的批量收尾与设备丢失不走 winit 关窗路径，专用
+    `on_exit` 收尾。
   - **`on_exit(FnOnce(ExitReason))`**：进程退出前**恰好一次**，跑在 winit 线程，
     顺序是「钩子全部跑完 → 回 ack → `event_loop.exit()`」。新增
     `ExitReason { MainReturned, MainPanicked, AllWindowsClosed, DeviceLost }`
@@ -24,13 +31,17 @@
     `App` / `VireoWindow` / GPU（提交 compute、读回 buffer、drop 纹理）。
     时机在 `state.done` 之前，所以 main 返回型退出里「渲染侧收尾先于 `on_exit`」有保证；
     末窗关闭 / 设备丢失两条无顺序保证。**不保证还能 present**（surface 多半已被 drop）。
-  未注册时三条都是空表早退，退出行为与 0.1.x 逐位一致。新增
-  `docs/reference/lifecycle.md` 与 `examples/exit_guard.rs`（三档手工验收 +
-  `VIREO_EXIT_GUARD_AUTO=1` 自检模式，实测「否决后窗口存活 → 放行后正常退出」）。
-  Close-request veto + exit hooks: `on_close_requested` can cancel a close (X and
-  `close()` share one path, winit-thread sync, fail-open on panic); `on_exit` runs once
-  per process (winit thread) with an `ExitReason`; `on_exit_render` runs once per loop
-  thread on the render thread with GPU access.
+  四个钩子全部走统一注册表（`App::on_*(handle, cb)` / `VireoWindow::on_*(cb)`），
+  未注册时都是空表早退，退出行为与 0.1.x 逐位一致。新增
+  `docs/reference/lifecycle.md`（含四条路径的覆盖表）与 `examples/exit_guard.rs`
+  （四档手工验收 + `VIREO_EXIT_GUARD_AUTO=1` 自检模式，实测「否决后窗口存活 → 放行后
+  正常退出」）。
+  Close-request veto + close/exit hooks: `on_close_requested` can cancel a close
+  (`CloseSource` in, `CloseAction` out; X and `close()` share one path; winit-thread sync;
+  fail-open on panic), `on_closing` fires per window once the close is approved,
+  `on_exit` runs once per process (winit thread) with an `ExitReason`, and
+  `on_exit_render` runs once per loop thread on the render thread with GPU access.
+  All four are registered the same way and can be added at runtime.
 
 - **GPU 时间对所有绘制可见（不再只是粒子）**：相机 uniform 是 80B
   （projection 64 / dpi 4 / `time_secs` 4 / pad），引擎每帧把默认钟时间写进 offset 68，
@@ -236,6 +247,12 @@
   创建期显式声明契约、而不是靠编译结果猜。
 
 ### Changed / 变更
+
+- **BREAKING：`App::window` 去掉 `on_close` 第二参数**（`app.window(desc)`）。
+  那个参数只能在建窗时传、且职责与新增的 `on_closing` 完全重合，已删除；
+  等价迁移是建窗后 `app.on_closing(idx, || ...)`（运行期建窗也能挂）。
+  调用点删掉 `, None::<fn()>` 即可 —— 示例里那个处处可见的 turbofish 一起消失。
+  `App::window` no longer takes an `on_close` callback; use `app.on_closing(idx, ..)`.
 
 - **BREAKING｜`AntiAliasing::Ssaa` 改名为 `PerSample`（原名误导）**：这一档实际做的是
   **逐采样点着色**（`@interpolate(linear, sample)`，每个采样点独立求值后 resolve 平均），

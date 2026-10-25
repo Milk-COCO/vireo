@@ -19,10 +19,8 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("DrawBatch.view — pan/zoom", 960, 540).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx =
+        app.window(WindowDesc::new("DrawBatch.view — pan/zoom", 960, 540).dpi_override(Some(1.0)));
 
     // 平移与缩放状态（逻辑坐标）
     let mut pan = Pos::new(240.0, 270.0);

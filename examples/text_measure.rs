@@ -7,10 +7,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Vireo Measure - Bounding Box", 800, 600),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Vireo Measure - Bounding Box", 800, 600));
 
     let text = "Measure Me!";
     let font_size = 48.0;

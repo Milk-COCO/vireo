@@ -9,7 +9,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Transform Stack", 900, 420), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Transform Stack", 900, 420));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

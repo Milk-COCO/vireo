@@ -13,14 +13,8 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let w1 = app.window(
-        WindowDesc::new("loop A", 360, 240).position(120, 120),
-        None::<fn()>,
-    );
-    let w2 = app.window(
-        WindowDesc::new("loop B", 360, 240).position(500, 120),
-        None::<fn()>,
-    );
+    let w1 = app.window(WindowDesc::new("loop A", 360, 240).position(120, 120));
+    let w2 = app.window(WindowDesc::new("loop B", 360, 240).position(500, 120));
 
     // 演示 Thread 显式容器 + push/extend：单 Thread 包含两循环，顺序执行（同线程无竞争，占用锁保证同窗口不并发）
     let mut t = Thread::new().with_name("loop-demo");

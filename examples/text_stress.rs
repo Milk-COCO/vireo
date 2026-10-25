@@ -3,7 +3,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Text Stress Test", 800, 600), None::<fn()>);
+    let idx = app.window(WindowDesc::new("Text Stress Test", 800, 600));
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {

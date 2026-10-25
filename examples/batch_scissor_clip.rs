@@ -24,10 +24,7 @@ fn label(batch: &mut DrawBatch, text: &str, x: f32, y: f32) {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("scissor Scissor Demo", 900, 540).dpi_override(Some(1.0)),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("scissor Scissor Demo", 900, 540).dpi_override(Some(1.0)));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

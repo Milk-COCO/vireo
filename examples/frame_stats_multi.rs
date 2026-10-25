@@ -47,10 +47,9 @@ async fn main() {
 
     let mut idxs = Vec::new();
     for cfg in &CONFIGS {
-        idxs.push(app.window(
-            WindowDesc::new(cfg.name, 420, 300).anti_aliasing(AntiAliasing::None),
-            None::<fn()>,
-        ));
+        idxs.push(
+            app.window(WindowDesc::new(cfg.name, 420, 300).anti_aliasing(AntiAliasing::None)),
+        );
     }
 
     let ctrl = Arc::new(Mutex::new(Ctrl::default()));

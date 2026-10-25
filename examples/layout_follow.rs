@@ -29,7 +29,6 @@ use vireo::prelude::*;
 async fn main() {
     let idx = app.window(
         WindowDesc::new("Layout Follow Smoothing", 720, 480).present_mode(PresentMode::AutoVsync),
-        None::<fn()>,
     );
 
     // (模式, 描述)；`[` `]` 循环这组预设

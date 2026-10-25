@@ -26,7 +26,7 @@ async fn main() {
     if immediate {
         desc = desc.present_mode(PresentMode::Immediate);
     }
-    let idx = app.window(desc, None::<fn()>);
+    let idx = app.window(desc);
     eprintln!(
         "  App::init_duration={:.1}ms  setup={:.1}ms",
         app.init_duration() * 1000.0,

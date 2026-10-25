@@ -225,6 +225,34 @@ pub(crate) enum WinitEvent {
     MemoryWarning,
 }
 
+/// 这次关窗请求是**谁**发起的（交给 [`on_close_requested`](crate::app::App::on_close_requested) 的否决钩子）。
+///
+/// 有它才能表达「点 X 要先问，菜单里的退出直接走」这类最常见的诉求 ——
+/// 两者在钩子眼里本来就该有区别，而不是让用户在外面另立一个 flag。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseSource {
+    /// 系统/用户：标题栏 X、Alt+F4、自绘标题栏关闭按钮（走 `WM_SYSCOMMAND(SC_CLOSE)`）。
+    User,
+    /// 程序主动：[`VireoWindow::close`]。
+    Programmatic,
+}
+
+/// 关窗许可的答案：否决钩子的返回类型。
+///
+/// 用枚举而不是 `bool`：极性写反的代价是两极的 —— 想「保护数据」变成「窗口永远关不掉」，
+/// 或反过来「静默丢数据」，而 `CloseAction::Cancel` 在调用点不可能读错。
+///
+/// 钩子 panic 时按 [`CloseAction::Allow`] 处理（fail-open），见
+/// [`App::on_close_requested`](crate::app::App::on_close_requested) 的文档。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseAction {
+    /// 允许关闭（默认行为）。
+    Allow,
+    /// 取消本次关闭：窗口不隐藏、不销毁、[`App::on_closing`](crate::app::App::on_closing)
+    /// 注册的回调也不会触发。
+    Cancel,
+}
+
 /// 窗口实例 —— 渲染线程独占，持有 surface/renderer/input 与完整帧循环。
 ///
 /// **关键架构（第五十一轮）**：`SurfaceTexture` 从 acquire 到 present 全程是
@@ -2222,11 +2250,17 @@ impl VireoWindow {
         /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
         /// 运行在 winit 线程。
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
-        /// **关窗许可（否决钩子）**：返回 `false` 即取消本次关闭，窗口原样存活。
+        /// **关窗许可（否决钩子）**：返回 `CloseAction::Cancel` 即取消本次关闭，窗口原样存活。
         ///
         /// 语义、线程与失败模式见 [`App::on_close_requested`](crate::app::App::on_close_requested)
         /// （本方法只是绑定到当前窗口 handle）。X 按钮与 [`Self::close`] 都会先问它。
-        on_close_requested: impl FnMut() -> bool + 'static => on_close_requested,
+        on_close_requested:
+            impl FnMut(crate::window::CloseSource) -> crate::window::CloseAction + 'static
+            => on_close_requested,
+        /// **这个窗口的关闭已获准**（`FnOnce`）：否决通过之后、真正拆除之前触发一次。
+        ///
+        /// 覆盖范围见 [`App::on_closing`](crate::app::App::on_closing)。
+        on_closing: impl FnOnce() + 'static => on_closing,
     }
 
     /// 设置窗口是否接收 IME 事件（默认关闭）。
@@ -3068,10 +3102,11 @@ impl VireoWindow {
     /// 请求关闭窗口（走与用户点关闭按钮相同的完整关窗路径）。
     ///
     /// 内部经 `close_tx` 通道转发到 winit 线程，在 winit 线程依次执行
-    /// close_hooks / Windows NC 状态清理，并发送 `WinitEvent::CloseRequested` 给渲染线程
-    /// ——渲染线程随后置 `closing`、从 `App.windows` 移除本窗口，最后一个窗口关闭时请求退出
-    /// event loop。关窗幂等（重复调用不影响）。返回前不阻塞；实际关窗在下一次 winit 事件循环
-    /// 迭代生效。
+    /// **`on_close_requested` 否决**（来源记作 [`CloseSource::Programmatic`]）→
+    /// `on_closing` 回调 → Windows NC 状态清理，并发送 `WinitEvent::CloseRequested` 给
+    /// supervisor —— supervisor 随后置 `closing`、从 `App.windows` 移除本窗口，最后一个
+    /// 窗口关闭时请求退出 event loop。关窗幂等（重复调用不影响）。返回前不阻塞；
+    /// 实际关窗在下一次 winit 事件循环迭代生效。被否决时**什么都不发生**（窗口原样存活）。
     pub fn close(&self) {
         let _ = self.close_tx.send(self.handle);
         self.wake_event_loop();

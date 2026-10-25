@@ -18,10 +18,11 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("text/hud — Normal · Dynamic · Glyphs", 720, 360),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new(
+        "text/hud — Normal · Dynamic · Glyphs",
+        720,
+        360,
+    ));
 
     // 跨帧 HUD 行（Bevy span 思路）：标签 Normal，分数 Glyphs
     let mut score_line = HudLine::new().text("分数: ").glyphs("0");

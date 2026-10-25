@@ -59,10 +59,7 @@ const FONT_SIZES: &[f32] = &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0];
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(
-        WindowDesc::new("Text Shape Cache Stress", 960, 640),
-        None::<fn()>,
-    );
+    let idx = app.window(WindowDesc::new("Text Shape Cache Stress", 960, 640));
 
     app.gpu.set_shape_cache_ttl(Some(Duration::from_secs(2)));
     app.gpu.set_shape_cache_max_entries(Some(4096));
