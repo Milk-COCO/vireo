@@ -2222,6 +2222,11 @@ impl VireoWindow {
         /// 窗口尺寸（物理像素）变化时回调（模态循环期间可能滞后，渲染线程逐帧轮询兜底）。
         /// 运行在 winit 线程。
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
+        /// **关窗许可（否决钩子）**：返回 `false` 即取消本次关闭，窗口原样存活。
+        ///
+        /// 语义、线程与失败模式见 [`App::on_close_requested`](crate::app::App::on_close_requested)
+        /// （本方法只是绑定到当前窗口 handle）。X 按钮与 [`Self::close`] 都会先问它。
+        on_close_requested: impl FnMut() -> bool + 'static => on_close_requested,
     }
 
     /// 设置窗口是否接收 IME 事件（默认关闭）。

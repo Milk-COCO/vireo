@@ -224,6 +224,7 @@ cargo run --example window_resize
 cargo run --example window_present
 cargo run --example on_demand
 cargo run --example window_aa
+cargo run --example exit_guard
 cargo run --example input
 cargo run --example input_touch
 cargo run --example input_ime
@@ -259,6 +260,10 @@ cargo build --examples
 - [帧率、垂直同步与限流](docs/reference/throttling.md) — 想关掉节流、或关掉之后想自己限流，看这篇：
   四层节流分别是什么、怎么关、关掉之后必须自己接管什么（含 Windows 的 DWM 遮挡延迟）、
   四种手动限流配方、按需出帧（脏驱动，空闲时 0 present/s）与常见误解。
+- [关窗拦截与退出收尾](docs/reference/lifecycle.md) — 「有未保存改动就别关窗」用
+  `on_close_requested`（返回 `false` 否决，X 与 `close()` 共用一条路）；退出前收尾用
+  `on_exit`（winit 线程、每进程一次）与 `on_exit_render`（渲染线程、能碰 GPU）。
+  含四条退出路径的覆盖范围、线程约束与反例。
 
 ## 许可证
 

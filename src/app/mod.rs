@@ -28,8 +28,9 @@ pub(crate) struct RunChannels {
     pub event_tx: mpsc::Sender<WinitEvent>,
     pub event_rx: mpsc::Receiver<WinitEvent>,
     pub cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
-    pub exit_rx: mpsc::Receiver<()>,
-    pub exit_tx: mpsc::Sender<()>,
+    /// 退出信号：载荷 = 退出原因，winit 线程拿它去喂 `App::on_exit` 的钩子。
+    pub exit_rx: mpsc::Receiver<ExitReason>,
+    pub exit_tx: mpsc::Sender<ExitReason>,
     pub exit_ack_rx: mpsc::Receiver<()>,
     pub exit_ack_tx: mpsc::Sender<()>,
     pub frame_style_rx: mpsc::Receiver<(isize, FrameStyle)>,
@@ -55,6 +56,30 @@ pub(crate) fn exit_log(msg: &str) {
     if exit_trace() {
         eprintln!("[vireo-exit] {}", msg);
     }
+}
+
+/// 进程为什么退出（交给 [`App::on_exit`] 的钩子）。
+///
+/// 只在**真正决定退出**的那一刻判定，优先级从高到低：
+/// `DeviceLost` > `MainPanicked` > `MainReturned` > `AllWindowsClosed`。
+///
+/// 注意 `MainReturned` 覆盖「先在 supervisor 侧批量关掉还开着的窗口（CloseAll）、
+/// 再由 `windows_settled` 收尾」这条最常见的路径 —— 那种情况下窗口确实是 main
+/// 返回之后才没的，报 `AllWindowsClosed` 会误导。
+///
+/// Android 的 Activity Destroy **不走**这里（它有自己的 `App::on_destroyed`，
+/// 在渲染线程上发）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    /// `#[vireo::main]` 的 main 体正常返回（退出码 0）。
+    MainReturned,
+    /// main 体 panic（`run_entry` 随后 `process::exit(1)`；Android 上不 exit）。
+    MainPanicked,
+    /// 最后一个窗口被关闭，而 main 还在跑（典型：用户点了 X，main 里的循环被
+    /// `window_count() == 0` 打断后返回）。
+    AllWindowsClosed,
+    /// GPU 设备丢失（`wgpu` 的 device-lost 回调置位）。此时 GPU 已不可用。
+    DeviceLost,
 }
 
 pub struct AppInner {
@@ -119,6 +144,16 @@ pub struct AppInner {
     /// `fetch_add`（见 `note_memory_warning`），渲染线程比对后补发回调 ——
     /// 与 `android_lifecycle::GEN` 同一套「跨线程代号 + 渲染线程补发」模式。
     memory_warn_gen: std::sync::atomic::AtomicU64,
+    /// [`App::on_exit`] 注册表：**进程级、只跑一次**，由 winit 线程在
+    /// `event_loop.exit()` 之前 `mem::take` 出来逐条调用（`FnOnce`）。
+    ///
+    /// 放 AppInner 而不是走 channel：注册可能发生在任意线程、任意时刻，
+    /// 直接 push 进 Mutex 最简单；消费点只有一处。
+    pub(crate) exit_hooks: Mutex<Vec<Box<dyn FnOnce(ExitReason) + Send>>>,
+    /// [`App::on_exit_render`] 注册表：**每个 loop 线程各跑一次**，在该线程上调用。
+    /// 与 [`Self::memory_warning_cbs`] 同构（`Arc` + clone 后调用 + panic 隔离），
+    /// 因为「多线程各跑一次」需要可重复调用的回调。
+    pub(crate) render_exit_cbs: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl AppInner {
@@ -151,6 +186,29 @@ impl AppInner {
             if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())) {
                 log::error!(
                     "vireo: memory warning callback panicked: {}",
+                    crate::app::supervisor::panic_payload_to_string(payload)
+                );
+            }
+        }
+    }
+
+    /// 由**每条 loop 线程**在自己的线程上、退出前调用一次（[`App::on_exit_render`]）。
+    ///
+    /// 单回调 panic 不打断收尾：后面还有别的钩子和 `state.done` 要处理。
+    /// 无注册时是一次 `is_empty` 早退，热路径外（线程退出）→ 零成本。
+    pub(crate) fn fire_render_exit_hooks(&self) {
+        let cbs = {
+            let cbs = self.render_exit_cbs.lock();
+            if cbs.is_empty() {
+                return;
+            }
+            // clone Arc 而不是持锁调用：回调完全可能注册新回调。
+            cbs.clone()
+        };
+        for cb in &cbs {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())) {
+                log::error!(
+                    "vireo: on_exit_render callback panicked: {}",
                     crate::app::supervisor::panic_payload_to_string(payload)
                 );
             }
@@ -682,6 +740,8 @@ impl App {
                 shutdown: std::sync::atomic::AtomicBool::new(false),
                 memory_warning_cbs: Mutex::new(Vec::new()),
                 memory_warn_gen: std::sync::atomic::AtomicU64::new(0),
+                exit_hooks: Mutex::new(Vec::new()),
+                render_exit_cbs: Mutex::new(Vec::new()),
                 storage_name: Mutex::new(crate::storage::default_storage_name()),
             }),
         }
@@ -1124,6 +1184,21 @@ impl App {
         on_moved: impl FnMut(winit::dpi::PhysicalPosition<i32>) + 'static => on_moved,
         on_theme_changed: impl FnMut(winit::window::Theme) + 'static => on_theme_changed,
         on_resized: impl FnMut(winit::dpi::PhysicalSize<u32>) + 'static => on_resized,
+        /// **关窗许可（否决钩子）**：返回 `false` 即取消本次关闭，窗口原样存活。
+        ///
+        /// 与 `App::window(.., on_close)` 的区别：那个是 `FnOnce` 的**事后通知**
+        /// （关窗已不可撤销），这个是**事前许可**，签名带返回值。
+        ///
+        /// - 可多次注册：按注册顺序全部返回 `true` 才关，遇 `false` 短路；
+        /// - **同步跑在 winit 线程**（与其它 `on_*` 一致）⇒ 不许阻塞、不许画帧
+        ///   （也拿不到 `DrawBatch`）。要弹确认框就：置一个 `Arc<AtomicBool>`、
+        ///   返回 `false`，让正在绘制的 loop 下一帧画出来；用户点「确认」后
+        ///   再置「允许」旗并调 `VireoWindow::close()`；
+        /// - 单条 panic 按「放行」处理（fail-open）+ `log::error!`；
+        /// - **不会**在 `main` 返回后的批量收尾（`SupervisorAction::CloseAll`）、
+        ///   设备丢失、Android Destroy、OS 强行销毁时被问到 —— 那些路径下没人能再
+        ///   驱动 UI，问也只会把进程锁死。统一收尾用 [`App::on_exit`]。
+        on_close_requested: impl FnMut() -> bool + 'static => on_close_requested,
         #[cfg(target_os = "windows")]
         on_thumb_button: impl FnMut(u32) + 'static => on_thumb_button,
     }
@@ -1684,6 +1759,72 @@ impl App {
     /// level 上是同一个，缺失不构成阻塞。
     pub fn on_memory_warning(&self, cb: impl Fn() + Send + Sync + 'static) {
         self.inner.memory_warning_cbs.lock().push(Arc::new(cb));
+    }
+
+    /// 注册**退出收尾**钩子：进程退出前**恰好跑一次**，参数是退出原因。
+    ///
+    /// # 在哪个线程 / 什么时候
+    ///
+    /// 跑在 **winit 线程**（与所有 `on_*` 回调一致），时机是 supervisor 判定退出、
+    /// winit 侧收到退出信号之后、`event_loop.exit()` **之前**；winit 侧会等所有
+    /// 钩子跑完再回 ack，所以钩子不完成就不会退出。
+    ///
+    /// 因此：**只做纯 CPU 收尾**（落盘、flush 日志、发信号、drop `Arc<Texture>`
+    /// 释放显存）。**不要**在这里画帧 / 建窗口 / 调 `win.draw` —— event loop 马上
+    /// 就退，没有下一帧，而且 `DrawBatch` 本来也不在这条线程上。
+    ///
+    /// # 覆盖哪些退出路径
+    ///
+    /// 四条都覆盖（[`ExitReason`] 区分它们）：main 正常返回、main panic、最后一个
+    /// 窗口关闭、设备丢失。三个例外：进程被信号杀掉、`panic = "abort"`、
+    /// `run_blocking` 自身返回 `Err`（winit 建不出 event loop）—— 这些路径没有
+    /// 任何 Rust 代码有机会跑。
+    ///
+    /// Android 的 Activity Destroy 走的是它自己的
+    /// [`on_destroyed`](Self::on_destroyed)（渲染线程、可画帧），不是这里。
+    ///
+    /// # 可注册多个
+    ///
+    /// 按注册顺序依次调用；单条 panic 被捕获 + `log::error!`，不影响后面几条，
+    /// 也不影响退出流程本身。
+    ///
+    /// # 示例
+    ///
+    /// ```no_run
+    /// # use vireo::prelude::*;
+    /// fn register(app: &App) {
+    ///     app.on_exit(|reason| {
+    ///         log::info!("exiting: {reason:?}");
+    ///         // 落盘 / flush / 释放显存……
+    ///     });
+    /// }
+    /// ```
+    pub fn on_exit(&self, cb: impl FnOnce(ExitReason) + Send + 'static) {
+        self.inner.exit_hooks.lock().push(Box::new(cb));
+    }
+
+    /// 注册**渲染线程收尾**钩子：**每个 loop 线程各跑一次**，就在该线程上、退出前。
+    ///
+    /// # 和 [`on_exit`](Self::on_exit) 的分工
+    ///
+    /// - 这个：跑在渲染线程，**能碰 `App` / `VireoWindow` / GPU**
+    ///   （`app.gpu()`、提交一次 compute、读回 buffer、drop 纹理）。
+    ///   单循环程序 = 一次；`app.run(..)` + `app.spawn(..)` = 每线程各一次。
+    /// - [`on_exit`](Self::on_exit)：跑在 winit 线程，**每进程一次**，纯 CPU。
+    ///
+    /// ⚠️ **不保证还能画帧**：走到这里时窗口 surface 多半已经被 supervisor drop 了
+    /// （关窗握手完成得比线程退出的那段收尾早）。要「最后一帧」就在自己的 `on_tick`
+    /// 返回 `false` 之前画。
+    ///
+    /// ⚠️ 多循环程序里它会被调用多次 —— 需要「只做一次」就用自己一个
+    /// `AtomicBool` 闸住。多个钩子按注册顺序跑，单条 panic 被捕获 + `log::error!`。
+    ///
+    /// 时机上它排在 `ThreadHandle` 的完成通知与 supervisor 的 `all_loops_done` 之前
+    /// （`state.done` 在钩子之后才置位），所以 main 返回型退出里「渲染侧收尾先于
+    /// [`on_exit`](Self::on_exit)」是有保证的；末窗关闭 / 设备丢失那两条路径
+    /// **没有顺序保证**（它们不依赖 loop 结束就能判定退出）。
+    pub fn on_exit_render(&self, cb: impl Fn() + Send + Sync + 'static) {
+        self.inner.render_exit_cbs.lock().push(Arc::new(cb));
     }
 
     pub fn windows(&self) -> Vec<Arc<VireoWindow>> {

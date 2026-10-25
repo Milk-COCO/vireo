@@ -549,6 +549,17 @@ pub(crate) fn run_thread_loop(
         }
     }));
 
+    // 渲染侧收尾钩子（`App::on_exit_render`）：本线程退出前、`state.done` **之前**跑。
+    //
+    // 放在 done 之前是刻意的：`all_loops_done` 与 `ThreadHandle` 的完成通知都以
+    // `state.done` 为准，于是「main 返回型退出」里保证收尾先于 `App::on_exit`
+    // （后者在 winit 线程上、由 supervisor 判定退出后触发）。反过来把钩子放在 done
+    // 之后，supervisor 可能在钩子还没跑完时就发退出信号。
+    // 末窗关闭 / 设备丢失两条退出路径不依赖 loop 结束，所以那两条没有顺序保证。
+    //
+    // panic 路径同样会跑到（本行在 catch_unwind 之外）—— 崩溃后还想 flush 日志是合理需求。
+    app.inner.fire_render_exit_hooks();
+
     match result {
         Ok(()) => {
             state.done.store(true, Ordering::Release);

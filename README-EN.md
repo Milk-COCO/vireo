@@ -224,6 +224,7 @@ cargo run --example window_multi
 cargo run --example window_resize
 cargo run --example window_present
 cargo run --example window_aa
+cargo run --example exit_guard
 cargo run --example input
 cargo run --example input_touch
 cargo run --example input_ime

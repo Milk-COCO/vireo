@@ -4,6 +4,34 @@
 
 ### Added / 新增
 
+- **关窗拦截 + 退出收尾钩子（三个，全部新增）**：此前只有 `App::window(desc, on_close)`
+  那个 `FnOnce` 事后通知 —— 没有返回值、拦不住关闭；而 main 返回 / 设备丢失 / main panic
+  这些收尾路径上没有任何用户回调。现在：
+  - **`on_close_requested(handle, FnMut() -> bool)`**（`App` 与 `VireoWindow` 都有）：
+    返回 `false` 即**取消**本次关闭，窗口原样存活（不隐藏、不销毁、`on_close` 不消耗）。
+    可多次注册（全部 `true` 才关，遇 `false` 短路）。覆盖 X / Alt+F4 / 自绘标题栏关闭
+    按钮 / `win.close()`；跑在 **winit 线程且同步**（与所有 `on_*` 一致）⇒ 不许阻塞、
+    不许画帧，确认框要「置旗 + 返回 `false`，让 loop 下一帧画」。**刻意不问**的路径：
+    main 返回后的批量收尾、设备丢失、Android Destroy、OS 强行销毁 —— 那些路径上没人能
+    驱动 UI，问了只会把进程锁死。单条 panic 按「放行」处理（fail-open）+ `log::error!`，
+    理由同上：fail-closed 会变成「窗口永远关不掉」。
+  - **`on_exit(FnOnce(ExitReason))`**：进程退出前**恰好一次**，跑在 winit 线程，
+    顺序是「钩子全部跑完 → 回 ack → `event_loop.exit()`」。新增
+    `ExitReason { MainReturned, MainPanicked, AllWindowsClosed, DeviceLost }`
+    （优先级 `DeviceLost > MainPanicked > MainReturned > AllWindowsClosed`）。
+    单条 panic 被隔离，不影响后续钩子与退出流程。
+  - **`on_exit_render(Fn())`**：**每个 loop 线程各一次**，在该线程上跑，能碰
+    `App` / `VireoWindow` / GPU（提交 compute、读回 buffer、drop 纹理）。
+    时机在 `state.done` 之前，所以 main 返回型退出里「渲染侧收尾先于 `on_exit`」有保证；
+    末窗关闭 / 设备丢失两条无顺序保证。**不保证还能 present**（surface 多半已被 drop）。
+  未注册时三条都是空表早退，退出行为与 0.1.x 逐位一致。新增
+  `docs/reference/lifecycle.md` 与 `examples/exit_guard.rs`（三档手工验收 +
+  `VIREO_EXIT_GUARD_AUTO=1` 自检模式，实测「否决后窗口存活 → 放行后正常退出」）。
+  Close-request veto + exit hooks: `on_close_requested` can cancel a close (X and
+  `close()` share one path, winit-thread sync, fail-open on panic); `on_exit` runs once
+  per process (winit thread) with an `ExitReason`; `on_exit_render` runs once per loop
+  thread on the render thread with GPU access.
+
 - **GPU 时间对所有绘制可见（不再只是粒子）**：相机 uniform 是 80B
   （projection 64 / dpi 4 / `time_secs` 4 / pad），引擎每帧把默认钟时间写进 offset 68，
   所以形状、文字、粒子、custom VS 与 custom material 都能读同一份 GPU 时间：

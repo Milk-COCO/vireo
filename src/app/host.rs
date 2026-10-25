@@ -44,11 +44,57 @@ pub(crate) fn ensure_callback_slot(
     true
 }
 
+/// 问一遍这个窗口注册的**关窗许可**钩子：全部返回 `true` 才允许关闭。
+///
+/// - 空表（绝大多数窗口）直接放行，一次 Vec `is_empty` 判定，无分配；
+/// - 按注册顺序跑，**遇 `false` 立即返回**（短路：后面的钩子不再执行）；
+/// - 单条 panic → 按「放行」处理（fail-open）+ `log::error!`。
+///   fail-closed 会让一个 bug 变成「窗口永远关不掉、只能 taskkill」，
+///   那是比「少拦一次」更坏的结果。
+///
+/// 抽成 free function 是为了能脱离 winit 事件循环做单测（`Runner` 没法在
+/// `cargo test --lib` 里构造）。
+pub(crate) fn close_veto_allows(cbs: &mut crate::input::InputCallbacks) -> bool {
+    for cb in &mut cbs.on_close_requested {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb())) {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(payload) => log::error!(
+                "vireo: on_close_requested callback panicked (treated as ALLOW): {}",
+                crate::app::supervisor::panic_payload_to_string(payload)
+            ),
+        }
+    }
+    true
+}
+
+/// 依次执行 [`App::on_exit`](crate::app::App::on_exit) 注册的收尾钩子（`FnOnce`，只跑一次）。
+///
+/// 单条 panic 被捕获 + `log::error!`：**绝不允许**一个用户 bug 把退出流程卡住
+/// （那会复现仓库最痛的历史 bug —— 窗口没了、进程不退、exe 被锁）。
+///
+/// 抽成 free function 是为了能单测（`Runner` 无法在 `cargo test --lib` 里构造）。
+pub(crate) fn fire_exit_hooks(
+    hooks: Vec<Box<dyn FnOnce(crate::app::ExitReason) + Send>>,
+    reason: crate::app::ExitReason,
+) {
+    for hook in hooks {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(reason)))
+        {
+            log::error!(
+                "vireo: on_exit callback panicked: {}",
+                crate::app::supervisor::panic_payload_to_string(payload)
+            );
+        }
+    }
+}
+
 /// winit 事件循环宿主（Runner）：运行在 OS 主线程上，负责创建窗口和转发事件。
 pub struct Runner {
     event_tx: mpsc::Sender<WinitEvent>,
     cb_rx: mpsc::Receiver<(usize, crate::input::InputCallbacks)>,
-    exit_rx: mpsc::Receiver<()>,
+    exit_rx: mpsc::Receiver<crate::app::ExitReason>,
     exit_ack_tx: mpsc::Sender<()>,
     /// 自唤醒代理（`about_to_wait` 调 `exit()` 后再发一次 wake；见该处注释）。
     wake_proxy: Option<EventLoopProxy<()>>,
@@ -77,6 +123,10 @@ pub struct Runner {
     default_icon: Option<Icon>,
     instance: wgpu::Instance,
     gpu: Arc<GpuContext>,
+    /// App 的共享句柄。**唯一用途**：退出时 `mem::take` 出 `App::on_exit` 的钩子表
+    /// （`AppInner::exit_hooks`）—— 钩子必须在 winit 线程跑（与所有 `on_*` 一致），
+    /// 而这台线程原本拿不到 `App`。
+    app: App,
     created: bool,
     resumed_fired: bool,
 }
@@ -99,8 +149,25 @@ impl Runner {
         let _ = self.event_tx.send(event);
     }
 
-    /// 完整关窗路径：close_hooks / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
+    /// 完整关窗路径：**关窗许可** / close_hooks / NC 状态清理 / 发 `WinitEvent::CloseRequested`。
+    ///
+    /// 这是唯一的关窗咽喉：`WindowEvent::CloseRequested`（点 X / Alt+F4 / 自绘标题栏按钮）
+    /// 与 `VireoWindow::close()`（经 `close_rx`）都汇到这里。否决在**第一行**判定 ——
+    /// 一旦被拒，`close_hooks` 不会被消耗、NC 状态不动、事件不发，窗口完全无感。
+    ///
+    /// 注意 `SupervisorAction::CloseAll`（main 返回后的批量收尾）**不经过**这里，
+    /// 它直接在 supervisor 侧应用 `CloseRequested` —— 那里不能问许可，否则 main 已死、
+    /// 没人能驱动 UI，进程就被锁死了。统一收尾走 `App::on_exit`。
     fn request_close(&mut self, handle: usize) {
+        if let Some(cbs) = self.window_callbacks.get_mut(handle)
+            && !close_veto_allows(cbs)
+        {
+            crate::app::exit_log(&format!(
+                "request_close: vetoed by on_close_requested (handle={})",
+                handle
+            ));
+            return;
+        }
         if let Some(hook_opt) = self.close_hooks.get_mut(&(handle as u64))
             && let Some(h) = hook_opt.take()
         {
@@ -367,10 +434,10 @@ impl ApplicationHandler for Runner {
             event_loop.exit();
             return;
         }
-        let mut exit_requested = false;
+        let mut exit_reason: Option<crate::app::ExitReason> = None;
         let mut exit_hits = 0u32;
-        while self.exit_rx.try_recv().is_ok() {
-            exit_requested = true;
+        while let Ok(reason) = self.exit_rx.try_recv() {
+            exit_reason = Some(reason);
             exit_hits += 1;
         }
         if self.resumed_fired {
@@ -435,6 +502,7 @@ impl ApplicationHandler for Runner {
                 cbs.on_moved.append(&mut reg.on_moved);
                 cbs.on_theme_changed.append(&mut reg.on_theme_changed);
                 cbs.on_resized.append(&mut reg.on_resized);
+                cbs.on_close_requested.append(&mut reg.on_close_requested);
                 if handle < self.hwnds.len() && self.hwnds[handle] != 0 {
                     for cb in std::mem::take(&mut reg.on_thumb_button) {
                         crate::platform::windows::set_thumbar_callback(self.hwnds[handle], cb);
@@ -475,10 +543,16 @@ impl ApplicationHandler for Runner {
                 }
             }
         }
-        if exit_requested {
+        if let Some(reason) = exit_reason {
+            // 用户退出收尾钩子：**必须早于 ack**。ack 一发出 supervisor 就返回、
+            // `run_blocking` 就会去 join，钩子还没跑完等于收尾被跳过。
+            // 钩子慢只会拖慢退出（supervisor 5s 兜底后照常返回，而 `run_app` 还卡在
+            // 这里 —— 进程仍会等它跑完，这正是「收尾没做完不算完」的语义）。
+            let hooks = std::mem::take(&mut *self.app.inner.exit_hooks.lock());
+            fire_exit_hooks(hooks, reason);
             crate::app::exit_log(&format!(
-                "about_to_wait: exit_rx hits={} → ack + event_loop.exit() + self-wake",
-                exit_hits
+                "about_to_wait: exit_rx hits={} reason={:?} → ack + event_loop.exit() + self-wake",
+                exit_hits, reason
             ));
             let _ = self.exit_ack_tx.send(());
             event_loop.exit();
@@ -726,6 +800,8 @@ pub(crate) fn run_blocking(
     app.windows.lock().clear();
 
     let gpu_for_runner = app.gpu.clone();
+    // runner 需要 App 句柄来在退出时取 `App::on_exit` 的钩子表（见 `Runner::app`）。
+    let app_for_runner = app.clone();
     let wake_proxy = app.event_loop_proxy.get().cloned();
     let device_lost = app.device_lost.clone();
     let device_lost_super = device_lost.clone();
@@ -769,6 +845,7 @@ pub(crate) fn run_blocking(
             default_icon,
             instance,
             gpu: gpu_for_runner,
+            app: app_for_runner,
             created: false,
             resumed_fired: false,
         })
@@ -840,5 +917,153 @@ mod callback_slot_tests {
         let mut slots: Vec<crate::input::InputCallbacks> = Vec::new();
         assert!(ensure_callback_slot(&mut slots, MAX_CALLBACK_SLOTS - 1));
         assert!(!ensure_callback_slot(&mut slots, MAX_CALLBACK_SLOTS));
+    }
+}
+
+#[cfg(test)]
+mod close_veto_tests {
+    use super::close_veto_allows;
+    use crate::input::InputCallbacks;
+
+    fn with_vetos(vetos: Vec<Box<dyn FnMut() -> bool>>) -> InputCallbacks {
+        let mut cbs = InputCallbacks::default();
+        cbs.on_close_requested = vetos;
+        cbs
+    }
+
+    /// 绝大多数窗口没注册任何许可钩子 —— 必须无脑放行（X 的默认行为不能变）。
+    #[test]
+    fn empty_veto_table_allows() {
+        assert!(close_veto_allows(&mut InputCallbacks::default()));
+    }
+
+    /// 返回 false = 否决；这是本 feature 的全部意义所在。
+    #[test]
+    fn single_false_denies() {
+        assert!(!close_veto_allows(&mut with_vetos(vec![Box::new(|| {
+            false
+        })])));
+    }
+
+    /// 多个钩子全部同意才关 —— 少一个同意就不关（防「后注册的覆盖前者」）。
+    #[test]
+    fn all_must_agree() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c1 = calls.clone();
+        let c2 = calls.clone();
+        assert!(!close_veto_allows(&mut with_vetos(vec![
+            Box::new(|| true),
+            Box::new(move || {
+                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            }),
+            Box::new(move || {
+                c2.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                true
+            }),
+        ])));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "遇 false 必须短路：第三个钩子不得被调用（否则它可能弹第二次确认框）"
+        );
+    }
+
+    /// 单个钩子被调用**恰好一次**（否决不是事件订阅，不能重复触发）。
+    #[test]
+    fn veto_called_once_per_request() {
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = n.clone();
+        assert!(close_veto_allows(&mut with_vetos(vec![Box::new(
+            move || {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            }
+        )])));
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// 钩子 panic 按「放行」处理（fail-open）：不能让 bug 变成「窗口关不掉」。
+    #[test]
+    fn panicking_veto_allows() {
+        assert!(
+            close_veto_allows(&mut with_vetos(vec![Box::new(|| panic!("boom"))])),
+            "panic 必须 fail-open —— fail-closed 会让窗口永久无法关闭"
+        );
+    }
+
+    /// panic 之后仍要继续跑后面的钩子（panic 不是否决票）。
+    #[test]
+    fn panicking_veto_does_not_stop_later_vetos() {
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = n.clone();
+        assert!(!close_veto_allows(&mut with_vetos(vec![
+            Box::new(|| panic!("boom")),
+            Box::new(move || {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            }),
+        ])));
+        assert_eq!(
+            n.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "panic 的那条被跳过，后面那条仍要执行"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exit_hook_tests {
+    use super::fire_exit_hooks;
+    use crate::app::ExitReason;
+
+    fn recorder() -> (
+        std::sync::Arc<parking_lot::Mutex<Vec<&'static str>>>,
+        impl Fn(&'static str) -> Box<dyn FnOnce(ExitReason) + Send>,
+    ) {
+        let log = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let l = log.clone();
+        (log, move |tag: &'static str| {
+            let l = l.clone();
+            Box::new(move |_r: ExitReason| l.lock().push(tag)) as Box<dyn FnOnce(ExitReason) + Send>
+        })
+    }
+
+    /// 全部钩子都要跑，且**按注册顺序**（落盘顺序对收尾有语义）。
+    #[test]
+    fn hooks_run_in_registration_order() {
+        let (log, mk) = recorder();
+        fire_exit_hooks(vec![mk("a"), mk("b"), mk("c")], ExitReason::MainReturned);
+        assert_eq!(*log.lock(), vec!["a", "b", "c"]);
+    }
+
+    /// 退出原因必须原样送到每个钩子手里。
+    #[test]
+    fn reason_is_forwarded() {
+        let got = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let g = got.clone();
+        fire_exit_hooks(
+            vec![Box::new(move |r| *g.lock() = Some(r))],
+            ExitReason::DeviceLost,
+        );
+        assert_eq!(*got.lock(), Some(ExitReason::DeviceLost));
+    }
+
+    /// 单条 panic 不能掀掉整条退出流程（后面的钩子照跑）——
+    /// 否则一个用户 bug 就会复现「窗口没了、进程不退、exe 被锁」。
+    #[test]
+    fn panicking_hook_does_not_stop_the_rest() {
+        let (log, mk) = recorder();
+        fire_exit_hooks(
+            vec![Box::new(|_r| panic!("boom")), mk("after")],
+            ExitReason::MainPanicked,
+        );
+        assert_eq!(*log.lock(), vec!["after"]);
+    }
+
+    /// 空表 = 没注册，纯 no-op（绝大多数程序的路径）。
+    #[test]
+    fn empty_table_is_noop() {
+        fire_exit_hooks(Vec::new(), ExitReason::AllWindowsClosed);
     }
 }

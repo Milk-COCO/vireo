@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 use crate::app::App;
+use crate::app::ExitReason;
 use crate::platform::windows;
 use crate::window::FrameStyle;
 use crate::window::WinitEvent;
@@ -48,6 +49,31 @@ pub(crate) fn decide_supervisor_action(
         SupervisorAction::CloseAll
     } else {
         SupervisorAction::Wait
+    }
+}
+
+/// 判定退出原因（纯函数，可单测）。只在已确定要退出时调用。
+///
+/// 优先级：`DeviceLost` > `MainPanicked` > `MainReturned` > `AllWindowsClosed`。
+/// - 设备丢失最重要：GPU 已经不可用，报别的会让人去找错方向；
+/// - main panic 次之：这是「为什么进程要退」的真正原因，即使窗口也恰好在关；
+/// - `MainReturned` 覆盖 CloseAll 之后那一步（那时 `all_closed` 也成立，
+///   但因果是 main 返回）；
+/// - 剩下的退出只可能是「末窗关闭」。
+pub(crate) fn decide_exit_reason(
+    device_lost: bool,
+    main_panicked: bool,
+    main_done: bool,
+    all_loops_done: bool,
+) -> ExitReason {
+    if device_lost {
+        ExitReason::DeviceLost
+    } else if main_panicked {
+        ExitReason::MainPanicked
+    } else if main_done && all_loops_done {
+        ExitReason::MainReturned
+    } else {
+        ExitReason::AllWindowsClosed
     }
 }
 
@@ -347,7 +373,7 @@ pub(crate) fn supervisor_loop(
     aspect_ratio_tx: mpsc::Sender<(isize, Option<f64>)>,
     nc_tx: mpsc::Sender<(isize, crate::platform::windows::NcUpdate)>,
     close_tx: mpsc::Sender<usize>,
-    exit_tx: mpsc::Sender<()>,
+    exit_tx: mpsc::Sender<ExitReason>,
     exit_ack_rx: mpsc::Receiver<()>,
     expected_windows: usize,
     device_lost: Arc<AtomicBool>,
@@ -433,17 +459,26 @@ pub(crate) fn supervisor_loop(
             app.pending_window_creates.load(Ordering::Acquire),
         ) {
             SupervisorAction::Exit => {
+                // 退出原因要跟着信号一起送 —— winit 侧拿它喂 `App::on_exit` 的钩子。
+                // 必须在 `mark_shutdown` / `send` 之前算好（此时判定所依据的旗子还没被动过）。
+                let reason = decide_exit_reason(
+                    device_lost.load(Ordering::Acquire),
+                    app.inner.main_panicked.load(Ordering::Acquire),
+                    app.inner.main_done.load(Ordering::Acquire),
+                    all_loops_done,
+                );
                 // 置「正在退出」并唤醒所有 `App::wait_until` / `wait_while_paused`
                 // 等待者 —— 否则用户代码里挂着的等待会让下面的 join 永久阻塞。
                 // 必须在 `exit_tx.send` **之前**：先让等待者醒，再让线程退出。
                 app.mark_shutdown();
                 super::exit_log(&format!(
-                    "supervisor: Exit (open={} pending={} created={}) -> exit_tx + wake, waiting for ack",
+                    "supervisor: Exit ({:?}, open={} pending={} created={}) -> exit_tx + wake, waiting for ack",
+                    reason,
                     app.window_count(),
                     app.pending_window_creates.load(Ordering::Acquire),
                     created_windows
                 ));
-                let _ = exit_tx.send(());
+                let _ = exit_tx.send(reason);
                 app.wake_event_loop();
                 // 确认循环：winit 侧 about_to_wait 回 ack。无焦点 parked 时若某次 wake
                 // 丢了，这里 500ms 一次 re-wake＋打日志，最多等 5s（不再永久卡死）。
@@ -456,7 +491,7 @@ pub(crate) fn supervisor_loop(
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             super::exit_log("supervisor: exit ack timed out -> re-wake");
-                            let _ = exit_tx.send(());
+                            let _ = exit_tx.send(reason);
                             app.wake_event_loop();
                             if start.elapsed() >= std::time::Duration::from_secs(5) {
                                 super::exit_log(
@@ -484,10 +519,19 @@ pub(crate) fn supervisor_loop(
                     "supervisor: CloseAll (open={}), closing each window via its close path",
                     app.window_count()
                 ));
-                // vireo-main 已死、无存活 loop：快照 open 句柄后逐个走关窗路径
-                //（close hooks / draw_idle / alive 计数与 X 关闭逐位一致），
-                // 下一轮由 all_closed 退出。`continue` 而非阻塞等事件——
-                // 关窗已同步完成，退出条件本轮即可满足。
+                // vireo-main 已死、无存活 loop：快照 open 句柄后逐个走**引擎侧**的
+                // 关窗状态机（`closing` / draw_idle 握手 / alive 计数 —— 这几步与 X
+                // 关闭逐位一致；下一轮由 all_closed 退出）。
+                //
+                // 与 X 关闭**不同**的两点，都是刻意的：
+                // 1. 不经过 winit 的 `Runner::request_close`，所以**不问
+                //    `on_close_requested` 许可** —— main 已返回、没人能再驱动 UI，
+                //    问下去只会把进程锁死；
+                // 2. 也因此不跑 `close_hooks`（`App::window` 那个 `FnOnce`）与 NC 状态
+                //    清理（窗口马上随进程消失，泄漏的是收尾期的几条表项）。
+                //    统一收尾请用 `App::on_exit`。
+                //
+                // `continue` 而非阻塞等事件——关窗已同步完成，退出条件本轮即可满足。
                 // 与并发 X 关闭撞车时上方的 take-guard 保证计数只减一次。
                 let handles: Vec<usize> = {
                     app.windows
@@ -609,5 +653,48 @@ mod tests {
         assert!(is_wait(decide_supervisor_action(
             true, true, false, false, false, 0, 0
         )));
+    }
+
+    // ---- 退出原因判定 ----
+
+    /// 设备丢失盖过一切：GPU 已经不可用，报别的都会让人找错方向。
+    #[test]
+    fn reason_device_lost_beats_everything() {
+        assert_eq!(
+            decide_exit_reason(true, true, true, true),
+            ExitReason::DeviceLost
+        );
+    }
+
+    /// main panic 是「为什么退」的真正原因，即使窗口恰好也在关。
+    #[test]
+    fn reason_main_panicked_beats_window_close() {
+        assert_eq!(
+            decide_exit_reason(false, true, true, false),
+            ExitReason::MainPanicked
+        );
+    }
+
+    /// CloseAll 收完尾之后 all_closed 也成立，但因果是 main 返回 —— 不能报成末窗关闭。
+    #[test]
+    fn reason_main_returned_beats_window_close() {
+        assert_eq!(
+            decide_exit_reason(false, false, true, true),
+            ExitReason::MainReturned
+        );
+    }
+
+    /// main 还在跑（或还有 loop 没结束）却已经要退 → 只可能是末窗关闭/全关。
+    #[test]
+    fn reason_leftover_is_all_windows_closed() {
+        assert_eq!(
+            decide_exit_reason(false, false, false, false),
+            ExitReason::AllWindowsClosed
+        );
+        // main 已结束但 loop 还在跑：仍是「窗口全关」（loop 侧退出条件由窗口数驱动）。
+        assert_eq!(
+            decide_exit_reason(false, false, true, false),
+            ExitReason::AllWindowsClosed
+        );
     }
 }
