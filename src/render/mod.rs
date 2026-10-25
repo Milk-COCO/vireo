@@ -233,6 +233,17 @@ pub(crate) fn patch_vertex_poly_base(vertex: &mut Vertex, base: f32) {
     }
 }
 
+/// 给实例补 batch 的**色带基址**（只有折线渐变会用到 `sdf_params.w`）。
+///
+/// 编码约定：`0.0` = 单色（旧行为），否则 `w = 色带基址 + 1`。所以这里直接 `+= base`
+/// 之后仍是"1 起"，片元里 `u32(w) - 1` 还原成基址。
+#[inline]
+pub(crate) fn patch_instance_ramp_base(instance: &mut InstanceData, base: u32) {
+    if instance.sdf_type == 7 && instance.sdf_params[3] > 0.0 {
+        instance.sdf_params[3] += base as f32;
+    }
+}
+
 /// 粒子段：`combined_particles` 的一段，共享 unit quad（与 `InstanceSegment` 同机理，
 /// 缓冲不同）。`material` 逐段捕获（画笔状态机，不同材质不合并）。
 pub(crate) struct ParticleSegment {
@@ -875,6 +886,8 @@ pub struct Renderer {
     msaa_texs: Mutex<Vec<Option<(wgpu::Texture, wgpu::TextureView)>>>,
     ds_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    /// 折线渐变的弧长色带表（rray<vec4<f32>>；无渐变帧不创建）。
+    line_ramp_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     transform_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     engine_storage_bind_group_cache: Mutex<Option<wgpu::BindGroup>>,
     /// 逻辑视口尺寸（逻辑像素，浮点用户坐标系）
@@ -885,6 +898,7 @@ pub struct Renderer {
     scratch_idata: Mutex<Vec<u8>>,
     scratch_transforms: Mutex<Vec<f32>>,
     scratch_poly_edges: Mutex<Vec<f32>>,
+    scratch_line_ramps: Mutex<Vec<f32>>,
     scratch_event_infos: Mutex<Vec<EventInfo>>,
     scratch_aabb_map: Mutex<AabbMap>,
     scratch_view_map: Mutex<ViewMap>,
@@ -892,6 +906,7 @@ pub struct Renderer {
     scratch_ref_stack: Mutex<Vec<u32>>,
     scratch_batch_transform_bases: Mutex<Vec<u32>>,
     scratch_batch_poly_base: Mutex<Vec<u32>>,
+    scratch_batch_ramp_base: Mutex<Vec<u32>>,
     scratch_batch_geo_vertex_base: Mutex<Vec<u32>>,
     scratch_batch_geo_index_base: Mutex<Vec<u32>>,
 
@@ -975,12 +990,14 @@ impl Renderer {
             msaa_texs: Mutex::new(Vec::new()),
             ds_tex: Mutex::new(None),
             polygon_edge_buf: Mutex::new(None),
+            line_ramp_buf: Mutex::new(None),
             transform_buf: Mutex::new(None),
             engine_storage_bind_group_cache: Mutex::new(None),
             scratch_vdata: Mutex::new(Vec::new()),
             scratch_idata: Mutex::new(Vec::new()),
             scratch_transforms: Mutex::new(Vec::new()),
             scratch_poly_edges: Mutex::new(Vec::new()),
+            scratch_line_ramps: Mutex::new(Vec::new()),
             scratch_event_infos: Mutex::new(Vec::new()),
             scratch_aabb_map: Mutex::new(FxHashMap::default()),
             scratch_view_map: Mutex::new(FxHashMap::default()),
@@ -988,6 +1005,7 @@ impl Renderer {
             scratch_ref_stack: Mutex::new(Vec::new()),
             scratch_batch_transform_bases: Mutex::new(Vec::new()),
             scratch_batch_poly_base: Mutex::new(Vec::new()),
+            scratch_batch_ramp_base: Mutex::new(Vec::new()),
             scratch_batch_geo_vertex_base: Mutex::new(Vec::new()),
             scratch_batch_geo_index_base: Mutex::new(Vec::new()),
             scratch_scissor_stack: Mutex::new(Vec::new()),
@@ -1420,6 +1438,31 @@ impl Renderer {
         };
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("polygon edge buffer"),
+            size: new_cap,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *slot = Some((buf, new_cap));
+        *self.engine_storage_bind_group_cache.lock() = None;
+    }
+
+    /// 折线渐变的色带表 buffer（与 `ensure_polygon_edge_buffer` 同构）。
+    fn ensure_line_ramp_buffer(&self, size: u64) {
+        if size == 0 {
+            return;
+        }
+        let mut slot = self.line_ramp_buf.lock();
+        let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
+        if cur >= size {
+            return;
+        }
+        let new_cap = if cur == 0 {
+            size.next_power_of_two().max(64)
+        } else {
+            (cur * 2).max(size)
+        };
+        let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line ramp buffer"),
             size: new_cap,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,

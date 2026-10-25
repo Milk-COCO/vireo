@@ -225,6 +225,7 @@ cargo run --example window_present
 cargo run --example on_demand
 cargo run --example window_aa
 cargo run --example exit_guard
+cargo run --example line_gradient
 cargo run --example input
 cargo run --example input_touch
 cargo run --example input_ime
@@ -264,6 +265,9 @@ cargo build --examples
   `on_close_requested`（返回 `false` 否决，X 与 `close()` 共用一条路）；退出前收尾用
   `on_exit`（winit 线程、每进程一次）与 `on_exit_render`（渲染线程、能碰 GPU）。
   含四条退出路径的覆盖范围、线程约束与反例。
+- [折线沿线渐变](docs/reference/line-gradient.md) — 一条线自己从头到尾变色/变透明：
+  `draw_line_chain_colors` 逐点色、按弧长连续过渡，仍是 1 个实例 1 次 draw
+  （不是切段单色，接头不会双 blend）。含降级语义、性能与实测数据。
 
 ## 许可证
 

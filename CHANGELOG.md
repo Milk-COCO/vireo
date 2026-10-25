@@ -4,6 +4,33 @@
 
 ### Added / 新增
 
+- **折线沿线渐变（逐点色）**：新增 `draw_line_chain_colors(batch, points, thickness, colors)`
+  与 `DrawBatch::line_chain_colors(..)` —— 第 i 个点取 `colors[i]`，两点之间**沿弧长**
+  平滑过渡，颜色在片元里逐像素求值。整条链仍然是 **1 个 SDF 实例 / 1 次 draw**
+  （不是切成 N 段单色：那样每段的圆头会在接头处重叠并被 blend 两次，半透明时接头出亮点）。
+  - 覆盖「框内保持、框外淡出」这类需求：alpha 按每个点的距离算进 `colors` 即可，
+    不再需要「切成 4 档单色」那种肉眼可见台阶的做法。
+  - 内部编码是**按实例寻址的弧长色带表**（新 storage binding `group(2)@binding(3)`，
+    `array<vec4<f32>>`），因此**不与 `polygon_edges` 平行**：同一份几何（模板缓存命中）
+    可以随时换色带，不存在"边对色错"；几何模板缓存与哈希完全不用动。
+  - 逐点色先转成 `(弧长, 预乘色)` 折线，再经 **Douglas–Peucker 简化**（误差 ≤ 1/255）：
+    200 点线性渐变只占 2 个 stop，"常量 + 淡出 + 常量"典型 4~6 个；超过 64 个 stop
+    的极端输入会被均匀降采样。
+  - 混合在**预乘空间**做（红 a=0.9 → 蓝 a=0 的中点必须是无偏的红，而不是偏紫），
+    再反预乘输出给 straight-alpha 的 blend state。
+  - **旧路径零影响**：单色链的 `sdf_params.w == 0`，片元走逐字保留的原分支；
+    实测「全同色逐点色」与 `draw_line_chain` **逐像素一致**。
+  - 降级（不 panic）：色数 ≠ 点数 → 按 `colors[0]` 单色 + warn once；
+    几何路径（`sdf_feather = None`）→ 单色 + warn once；全透明 → 跳过；重合点 → 跳过该段；
+    自定义材质不生效（色带由引擎片元读取）。
+  - 实测（`tests/gpu_bench.rs`）：200 点 alpha 0.8→0.12 与线性 ramp 最大偏差
+    **0.62/255**、无台阶；同点集不同色带互不串色；PerSample(4) 档正常。
+  新增 `docs/reference/line-gradient.md` 与 `examples/line_gradient.rs`。
+  Per-point colored polyline: `draw_line_chain_colors` interpolates color along arc length
+  within a single SDF instance (no per-segment splitting, no double-blend at joints), via a
+  per-instance arc-length ramp table decoded in the fragment shader. Old single-color chains
+  are pixel-identical (the new branch only runs when `sdf_params.w != 0`).
+
 - **关窗拦截 + 关窗/退出收尾钩子（四个，全部新增）**：此前只有
   `App::window(desc, on_close)` 那个建窗时传入的 `FnOnce` 事后通知 —— 没有返回值、
   拦不住关闭、不能运行期注册；而 main 返回 / 设备丢失 / main panic 这些收尾路径上

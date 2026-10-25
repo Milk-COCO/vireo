@@ -1,7 +1,9 @@
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::area::{Area, AreaGeom, effective_area};
+use crate::color::Color;
 use crate::gpu::{
     ClockIndex, GeoInstance, GeoVertex, InstanceData, MaterialTarget, ParticleInstance,
     ShapeVertexLayout, Vertex,
@@ -325,6 +327,202 @@ pub(crate) struct EdgeTemplate {
     pub(crate) start: u32,
 }
 
+// ------ 折线渐变：逐点色 → 弧长色带 ------
+//
+// 数据流：`colors: &[Color]`（公开 API，逐点） → 绝对弧长的 `(at, Color)` 列
+// → Douglas–Peucker 简化（误差 ≤ `RAMP_EPS`） → 扁平 `vec4` 序列（预乘色）。
+//
+// 为什么内部是"弧长"而不是"逐边两端色"：色带按**实例**寻址，不需要与
+// `polygon_edges` 平行的数组（退化段跳过 / 闭合 wrap 都不会错位），也不进几何模板
+// 缓存（同一份几何可以换色带）。片元里由 `sdf_params.w` 取到基址。
+
+/// 色带简化的颜色容差（8bit 输出的半个最低位）。
+pub(crate) const RAMP_EPS: f32 = 1.0 / 512.0;
+
+/// 单个色带的 stop 上限（防"4000 点 + 4000 种色"把片元里的采样循环拖成 4000 次）。
+pub(crate) const RAMP_MAX_STOPS: usize = 64;
+
+/// 折线逐点色 → 绝对弧长 stop 列 `(at, color)`。
+///
+/// - `at` 是**绝对**累计长度（px），片元直接与它比较，不需要总长；
+/// - 退化段（`|dx| + |dy| < 0.001`）与 `intern_line_chain_edges` 用**同一判定跳过**，
+///   所以 `at` 与边表里的边一一对应；
+/// - 闭合链（首尾距离 < 0.001）最后一个点即首点：它的颜色被忽略，wrap 段终点用
+///   `colors[0]`。
+///
+/// 返回值至少 2 个元素（`at = 0` 与 `at = 总长`），调用方已保证 `colors.len() ==
+/// points.len()` 且 `points.len() >= 2`。
+pub(crate) fn point_colors_to_stops(points: &[(f32, f32)], colors: &[Color]) -> Vec<(f32, Color)> {
+    debug_assert_eq!(points.len(), colors.len());
+    if points.len() < 2 || colors.len() != points.len() {
+        return Vec::new();
+    }
+    let n = points.len();
+    let closed = n > 2
+        && (points[0].0 - points[n - 1].0).abs() < 0.001
+        && (points[0].1 - points[n - 1].1).abs() < 0.001;
+    let vcount = if closed { n - 1 } else { n };
+
+    let mut stops: Vec<(f32, Color)> = Vec::with_capacity(vcount + 1);
+    stops.push((0.0, colors[0]));
+    let mut acc = 0.0f32;
+    for i in 0..vcount.saturating_sub(1) {
+        let a = points[i];
+        let b = points[i + 1];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        if dx.abs() + dy.abs() < 0.001 {
+            continue; // 退化段：与边表一致地跳过，但它后面的点仍然有颜色
+        }
+        acc += (dx * dx + dy * dy).sqrt();
+        // 注意：`colors[i + 1]` 只在**这条段有效**时才落地。退化段（两点重合）的终点色
+        // 被丢弃 —— 该处颜色本来就无法定义，几何上也没有那段边。
+        stops.push((acc, colors[i + 1]));
+    }
+    if closed {
+        // wrap 段（最后一个有效点 → 首点），终点色回到 colors[0]。
+        let a = points[vcount - 1];
+        let b = points[0];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        if dx.abs() + dy.abs() >= 0.001 {
+            acc += (dx * dx + dy * dy).sqrt();
+            stops.push((acc, colors[0]));
+        }
+    }
+    if stops.len() < 2 {
+        // 全退化（所有点重合）：补一个终点，保证 2 个 stop（着色器要求 count >= 1）。
+        stops.push((acc.max(1e-3), colors[0]));
+    }
+    stops
+}
+
+/// 预乘（与片元里的混合空间一致：DP 的误差度量就是最终的视觉误差）。
+#[inline]
+fn premul(c: Color) -> [f32; 4] {
+    [c.r * c.a, c.g * c.a, c.b * c.a, c.a]
+}
+
+/// 两个 5D 点（`at` + 预乘 rgba）在 `at` 上线性插值后的最大通道误差。
+#[inline]
+fn stop_error(a: (f32, [f32; 4]), b: (f32, [f32; 4]), p: (f32, [f32; 4])) -> f32 {
+    let span = b.0 - a.0;
+    let t = if span.abs() < 1e-6 {
+        0.0
+    } else {
+        ((p.0 - a.0) / span).clamp(0.0, 1.0)
+    };
+    let mut worst = 0.0f32;
+    for k in 0..4 {
+        let lerp = a.1[k] + (b.1[k] - a.1[k]) * t;
+        worst = worst.max((p.1[k] - lerp).abs());
+    }
+    worst
+}
+
+/// Douglas–Peucker 简化 `(at, premul rgba)` 折线，保留首尾与拐点，误差 ≤ `eps`。
+///
+/// 用显式栈而不是递归：点数上界不可信（用户可以给一条 4K 点的链）。
+pub(crate) fn simplify_premul_stops(stops: &[(f32, [f32; 4])], eps: f32) -> Vec<(f32, [f32; 4])> {
+    let n = stops.len();
+    if n <= 2 {
+        return stops.to_vec();
+    }
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    let mut stack: Vec<(usize, usize)> = vec![(0, n - 1)];
+    while let Some((lo, hi)) = stack.pop() {
+        if hi <= lo + 1 {
+            continue;
+        }
+        let mut worst = -1.0f32;
+        let mut worst_i = lo;
+        for i in lo + 1..hi {
+            let e = stop_error(stops[lo], stops[hi], stops[i]);
+            if e > worst {
+                worst = e;
+                worst_i = i;
+            }
+        }
+        if worst > eps {
+            keep[worst_i] = true;
+            stack.push((lo, worst_i));
+            stack.push((worst_i, hi));
+        }
+    }
+    stops
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep[*i])
+        .map(|(_, s)| *s)
+        .collect()
+}
+
+/// 把 stop 列编码成扁平 `vec4` 序列（`header` + 每 stop 2 个 vec4，颜色预乘）。
+///
+/// `header = (count as f32, 末个 at, 0, 0)`。
+pub(crate) fn encode_ramp(stops: &[(f32, [f32; 4])]) -> Vec<f32> {
+    let mut out = Vec::with_capacity((1 + stops.len() * 2) * 4);
+    let last_at = stops.last().map(|s| s.0).unwrap_or(0.0);
+    out.extend_from_slice(&[stops.len() as f32, last_at, 0.0, 0.0]);
+    for &(at, c) in stops {
+        out.extend_from_slice(&[at, 0.0, 0.0, 0.0]);
+        out.extend_from_slice(&c);
+    }
+    out
+}
+
+/// 进程级 warn-once（避免每帧刷屏）。
+static RAMP_LEN_WARNED: AtomicBool = AtomicBool::new(false);
+static RAMP_GEOM_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn warn_once(flag: &AtomicBool, msg: &str) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        log::warn!("{msg}");
+    }
+}
+
+/// 哈希一段编码好的色带（用于去重索引）。
+fn ramp_hash(ramp: &[f32]) -> u64 {
+    let mut hash: u64 =
+        0x517c_c1b7_2722_0a95 ^ (ramp.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for f in ramp {
+        hash ^= f.to_bits() as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+        hash ^= hash >> 32;
+    }
+    hash
+}
+
+/// 逐点色 → 编码好的色带（完整流水线：弧长 → 预乘 → DP 简化 → 限量 → 编码）。
+///
+/// `points.len()` 必须等于 `colors.len()`，否则返回空表（调用方负责降级）。
+pub(crate) fn colors_to_ramp(points: &[(f32, f32)], colors: &[Color]) -> Vec<f32> {
+    if points.len() < 2 || points.len() != colors.len() {
+        return Vec::new();
+    }
+    let mut stops = point_colors_to_stops(points, colors);
+    if stops.is_empty() {
+        return Vec::new();
+    }
+    let premul_stops: Vec<(f32, [f32; 4])> =
+        stops.drain(..).map(|(at, c)| (at, premul(c))).collect();
+    let mut simplified = simplify_premul_stops(&premul_stops, RAMP_EPS);
+    if simplified.len() > RAMP_MAX_STOPS {
+        // 极端输入（每个点一种色、且怎么简化都压不下来）：均匀降采样到上限。
+        // 这时误差不再有 1/255 保证 —— 由调用方 warn 一次。
+        let last = premul_stops.len() - 1;
+        let step = last as f32 / (RAMP_MAX_STOPS - 1) as f32;
+        let picked: Vec<(f32, [f32; 4])> = (0..RAMP_MAX_STOPS)
+            .map(|k| premul_stops[((k as f32 * step).round() as usize).min(last)])
+            .collect();
+        simplified = picked;
+    }
+    encode_ramp(&simplified)
+}
+
 #[derive(Clone)]
 pub struct DrawBatch {
     pub vertices: Vec<Vertex>,
@@ -388,6 +586,17 @@ pub struct DrawBatch {
     /// 由 draw_polygon 填充，渲染时合并到 storage buffer。
     pub polygon_edges: Vec<f32>,
     pub(crate) edge_templates: FxHashMap<u64, Vec<EdgeTemplate>>,
+    /// 折线渐变的**弧长色带表**（扁平 `vec4` 序列）：`header = (count, total_arc, 0, 0)`，
+    /// 之后每个 stop 占 **2 个 vec4**：`(at, 0, 0, 0)` + `(r, g, b, a)`（**预乘**）。
+    ///
+    /// 与 [`Self::polygon_edges`] 刻意**不平行**：色带按**实例**寻址（下标存在
+    /// `sdf_params.w`），不参与几何模板缓存（`edge_templates`）——
+    /// 同一份几何可以随时换色带，不存在"边对色错"的失效面。
+    ///
+    /// 由 [`Self::instance_line_chain_colors`] 填充；单色折线不产生任何条目。
+    pub(crate) line_ramps: Vec<f32>,
+    /// 色带去重索引：内容哈希 → 候选基址（vec4 单位）。命中仍要逐项校验（防哈希碰撞）。
+    pub(crate) line_ramp_map: FxHashMap<u64, Vec<u32>>,
     /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
     ///
     /// **槽 0 固定为单位矩阵**（`new`/`clear` 时写入，形状从 1 起占用）：
@@ -556,6 +765,8 @@ impl DrawBatch {
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
             edge_templates: FxHashMap::default(),
+            line_ramps: Vec::new(),
+            line_ramp_map: FxHashMap::default(),
             transform_table,
             transform_map,
             has_sdf: false,
@@ -1640,6 +1851,8 @@ impl DrawBatch {
         self.uv = UvRect::default();
         self.polygon_edges.clear();
         self.edge_templates.clear();
+        self.line_ramps.clear();
+        self.line_ramp_map.clear();
         seed_identity_transform_table(&mut self.transform_table, &mut self.transform_map);
         self.has_sdf = false;
         self.cached_transform_index = None;
@@ -3406,6 +3619,8 @@ impl DrawBatch {
             uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
             edge_templates: self.edge_templates.clone(),
+            line_ramps: self.line_ramps.clone(),
+            line_ramp_map: self.line_ramp_map.clone(),
             transform_table: self.transform_table.clone(),
             transform_map: self.transform_map.clone(),
             has_sdf: self.has_sdf,
@@ -3910,6 +4125,116 @@ impl DrawBatch {
         ) {
             self.line_chain(points, thickness, color);
         }
+    }
+
+    /// 折线**逐点着色**（沿线渐变）的 SDF 实例。
+    ///
+    /// 语义：第 i 个点取 `colors[i]`，两点之间沿**弧长**线性过渡（片元逐像素求值）。
+    /// 与 [`Self::instance_line_chain`] 共享同一份几何（边表/模板缓存按点集去重），
+    /// 颜色走独立的**弧长色带表**：按实例下标寻址，所以同一份几何画两种颜色不会串。
+    ///
+    /// 降级（不 panic、不画错图）：
+    /// - `colors.len() != points.len()` → 用 `colors[0]`（空则 `self.color`）单色画 + warn once；
+    /// - `sdf_feather == None`（几何路径）→ 单色画 + warn once（geo/mesh 无逐点色）；
+    /// - 全部 alpha 为 0 → 直接跳过。
+    pub fn instance_line_chain_colors(
+        &mut self,
+        points: &[(f32, f32)],
+        thickness: f32,
+        colors: &[crate::color::Color],
+    ) {
+        let single = colors.first().copied().unwrap_or(self.color);
+        if self.sdf_feather.is_none() {
+            // 几何/geo 路径做不到逐点色：宁可单色也不要画成错的。
+            warn_once(
+                &RAMP_GEOM_WARNED,
+                "vireo: draw_line_chain_colors 需要 SDF 路径（sdf_feather.is_some()）—— \
+                 已按第一个颜色单色绘制",
+            );
+            self.line_chain(points, thickness, Some(single));
+            return;
+        }
+        if points.len() < 2 || thickness == 0.0 || colors.len() != points.len() {
+            if colors.len() != points.len() && !colors.is_empty() && points.len() >= 2 {
+                warn_once(
+                    &RAMP_LEN_WARNED,
+                    "vireo: draw_line_chain_colors: colors.len() != points.len() —— \
+                     已按第一个颜色单色绘制",
+                );
+            }
+            self.instance_line_chain(points, thickness, Some(single));
+            return;
+        }
+        if colors.iter().all(|c| c.a == 0.0) {
+            return;
+        }
+        let closed = points.len() > 2
+            && (points[0].0 - points[points.len() - 1].0).abs() < 0.001
+            && (points[0].1 - points[points.len() - 1].1).abs() < 0.001;
+        let vertex_count = if closed {
+            points.len() - 1
+        } else {
+            points.len()
+        };
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for &(x, y) in &points[..vertex_count] {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        let Some((start, count)) = self.intern_line_chain_edges(points) else {
+            return;
+        };
+        let ramp = colors_to_ramp(points, colors);
+        if ramp.is_empty() {
+            self.instance_line_chain(points, thickness, Some(single));
+            return;
+        }
+        let ramp_base = self.intern_line_ramp(&ramp);
+        let half = thickness * 0.5;
+        let feather = self.sdf_feather.unwrap();
+        // 实例色传白色：片元会用色带**替换** `in.color`（贴图仍乘进去），
+        // 同时绕开 `push_sdf_instance` 的 `color.a == 0` 早退。
+        if !self.push_sdf_instance(
+            Pos::ZERO,
+            [
+                min_x - half - feather,
+                min_y - half - feather,
+                max_x + half + feather,
+                max_y + half + feather,
+            ],
+            [min_x - half, min_y - half, max_x + half, max_y + half],
+            // `sdf_params.w` = 色带基址 + 1（0 = 单色，见 `patch_instance_ramp_base`）
+            [start as f32, count as f32, half, (ramp_base + 1) as f32],
+            7,
+            [0.0, 0.0],
+            Some(crate::color::colors::WHITE),
+        ) {
+            self.instance_line_chain(points, thickness, Some(single));
+        }
+    }
+
+    /// 把编码好的色带登记进 [`Self::line_ramps`]（内容去重），返回 vec4 基址。
+    fn intern_line_ramp(&mut self, ramp: &[f32]) -> u32 {
+        let hash = ramp_hash(ramp);
+        if let Some(candidates) = self.line_ramp_map.get(&hash) {
+            for &base in candidates {
+                let at = base as usize * 4;
+                if let Some(existing) = self.line_ramps.get(at..at + ramp.len())
+                    && existing == ramp
+                {
+                    return base;
+                }
+            }
+        }
+        let base = (self.line_ramps.len() / 4) as u32;
+        self.line_ramps.extend_from_slice(ramp);
+        self.line_ramp_map.entry(hash).or_default().push(base);
+        base
     }
 
     /// Add an instanced rectangle outline.
@@ -4522,6 +4847,10 @@ impl DrawBatch {
     pub fn line_chain(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) {
         crate::shapes::draw_line_chain(self, pts, t, c);
     }
+    /// 折线沿线渐变（逐点色）。语义见 [`crate::shapes::draw_line_chain_colors`]。
+    pub fn line_chain_colors(&mut self, pts: &[(f32, f32)], t: f32, c: &[crate::color::Color]) {
+        crate::shapes::draw_line_chain_colors(self, pts, t, c);
+    }
     pub fn triangle_outline(
         &mut self,
         x1: f32,
@@ -4599,5 +4928,231 @@ impl DrawBatch {
     ) {
         let idx = self.current_transform_index();
         line.draw_indexed(&mut self.texts, pos, def, ov, idx);
+    }
+}
+
+#[cfg(test)]
+mod line_ramp_tests {
+    use super::{
+        RAMP_EPS, RAMP_MAX_STOPS, colors_to_ramp, encode_ramp, point_colors_to_stops, premul,
+        simplify_premul_stops,
+    };
+    use crate::color::Color;
+
+    fn white(a: f32) -> Color {
+        Color::new(1.0, 1.0, 1.0, a)
+    }
+
+    fn decode(ramp: &[f32]) -> (usize, f32, Vec<(f32, [f32; 4])>) {
+        let count = ramp[0] as usize;
+        let total = ramp[1];
+        let mut stops = Vec::with_capacity(count);
+        for k in 0..count {
+            let at = ramp[(1 + 2 * k) * 4];
+            let c = [
+                ramp[(2 + 2 * k) * 4],
+                ramp[(2 + 2 * k) * 4 + 1],
+                ramp[(2 + 2 * k) * 4 + 2],
+                ramp[(2 + 2 * k) * 4 + 3],
+            ];
+            stops.push((at, c));
+        }
+        (count, total, stops)
+    }
+
+    // ---- 逐点色 → 弧长 stop ----
+
+    /// `at` 必须是**绝对**弧长、单调、首尾精确；片元直接拿它比较，错一点就是错色。
+    #[test]
+    fn stops_use_absolute_arc_length() {
+        let pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 20.0)];
+        let colors = [white(1.0), white(0.5), white(0.0)];
+        let stops = point_colors_to_stops(&pts, &colors);
+        assert_eq!(stops.len(), 3);
+        assert_eq!(stops[0].0, 0.0);
+        assert_eq!(stops[1].0, 10.0);
+        assert_eq!(stops[2].0, 30.0);
+        assert_eq!(stops[2].1.a, 0.0, "末点色必须精确落地");
+    }
+
+    /// 退化段（重合点）必须与边表**同一判定**跳过，且不因此错位后面的颜色。
+    #[test]
+    fn degenerate_segments_are_skipped_like_edges() {
+        let pts = [(0.0, 0.0), (0.0, 0.0), (0.0, 10.0)];
+        let colors = [white(1.0), white(0.9), white(0.2)];
+        let stops = point_colors_to_stops(&pts, &colors);
+        assert_eq!(stops.len(), 2, "重合点不产生 stop");
+        assert_eq!(stops[1].0, 10.0);
+        assert_eq!(stops[1].1.a, 0.2, "有效段终点的颜色必须是它自己的");
+    }
+
+    /// 闭合链：末点即首点，wrap 段终点用 colors[0]。
+    #[test]
+    fn closed_chain_wraps_back_to_first_color() {
+        let pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)];
+        let colors = [white(1.0), white(0.6), white(0.3), white(1.0)];
+        let stops = point_colors_to_stops(&pts, &colors);
+        assert_eq!(stops.len(), 4, "3 个顶点 + wrap 终点");
+        let last = stops.last().unwrap();
+        assert_eq!(last.1.a, 1.0, "wrap 段回到首色");
+        // 周长 = (0,0)→(10,0) 10 + (10,0)→(10,10) 10 + (10,10)→(0,0) √200
+        assert!(
+            (last.0 - (20.0 + 200f32.sqrt())).abs() < 1e-3,
+            "at = {}",
+            last.0
+        );
+    }
+
+    /// 全部点重合：也要给出 2 个 stop，别让着色器读到 count=1。
+    #[test]
+    fn all_coincident_points_still_emit_two_stops() {
+        let pts = [(5.0, 5.0), (5.0, 5.0), (5.0, 5.0)];
+        let colors = [white(1.0), white(0.5), white(0.0)];
+        let stops = point_colors_to_stops(&pts, &colors);
+        assert_eq!(stops.len(), 2);
+    }
+
+    // ---- DP 简化 ----
+
+    /// 线性 ramp 200 点必须塌成 2 个 stop —— 这是"别把 200 个 stop 塞进片元循环"的保证。
+    #[test]
+    fn linear_ramp_simplifies_to_two_stops() {
+        let pts: Vec<(f32, f32)> = (0..200).map(|i| (i as f32, 0.0)).collect();
+        let colors: Vec<Color> = (0..200)
+            .map(|i| white(0.8 - 0.8 * i as f32 / 199.0))
+            .collect();
+        let ramp = colors_to_ramp(&pts, &colors);
+        let (count, total, stops) = decode(&ramp);
+        assert_eq!(count, 2, "线性 ramp 不该留 200 个 stop");
+        assert!((total - 199.0).abs() < 1e-2);
+        assert!((stops[0].1[3] - 0.8).abs() < 1e-6, "起点 alpha");
+        assert!(stops[1].1[3].abs() < 1e-3, "终点 alpha");
+    }
+
+    /// "常量 + 淡出 + 常量"（vault 的形态）必须保留住平台段。
+    #[test]
+    fn constant_then_fade_keeps_plateau() {
+        let mut pts = Vec::new();
+        let mut colors = Vec::new();
+        for i in 0..60 {
+            pts.push((i as f32, 0.0));
+            // 0..30：常量 0.8；30..50：线性到 0；50..60：0
+            let a = if i <= 30 {
+                0.8
+            } else if i <= 50 {
+                0.8 * (1.0 - (i - 30) as f32 / 20.0)
+            } else {
+                0.0
+            };
+            colors.push(white(a));
+        }
+        let ramp = colors_to_ramp(&pts, &colors);
+        let (count, _, stops) = decode(&ramp);
+        assert!(count <= 6, "应压到 ≤6 个 stop，实际 {count}");
+        // 平台段：至少有两个相邻 stop 的 alpha 都是 0.8
+        let plateau = stops
+            .windows(2)
+            .any(|w| (w[0].1[3] - 0.8).abs() < 1e-6 && (w[1].1[3] - 0.8).abs() < 1e-6);
+        assert!(plateau, "常量段不能被简化掉");
+    }
+
+    /// 简化误差必须**真的有上界**：随机折线，逐点比对重建值。
+    #[test]
+    fn simplification_error_is_bounded() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / f32::from_bits(0x4b80_0000) // ~ [0, 2)
+        };
+        for _ in 0..200 {
+            let n = 8 + (next() as usize % 40);
+            let mut stops: Vec<(f32, [f32; 4])> = Vec::with_capacity(n);
+            for k in 0..n {
+                let at = k as f32 * 1.7;
+                let a = (next() * 0.5).clamp(0.0, 1.0);
+                stops.push((at, [a, a * 0.5, a * 0.25, a]));
+            }
+            let simplified = simplify_premul_stops(&stops, RAMP_EPS);
+            // 逐点用简化后的折线重建，误差必须 ≤ eps（加上浮点余量）
+            for &(at, c) in &stops {
+                let mut i = 0;
+                while i + 1 < simplified.len() && simplified[i + 1].0 < at {
+                    i += 1;
+                }
+                let (a0, c0) = simplified[i];
+                let (a1, c1) = simplified[(i + 1).min(simplified.len() - 1)];
+                let t = if (a1 - a0).abs() < 1e-6 {
+                    0.0
+                } else {
+                    ((at - a0) / (a1 - a0)).clamp(0.0, 1.0)
+                };
+                for ch in 0..4 {
+                    let got = c0[ch] + (c1[ch] - c0[ch]) * t;
+                    let err = (got - c[ch]).abs();
+                    assert!(
+                        err <= RAMP_EPS + 1e-4,
+                        "通道 {ch} 误差 {err} 超过 {RAMP_EPS}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// stop 上限：每个点一种色也要被压到 `RAMP_MAX_STOPS` 以内（片元循环有界）。
+    #[test]
+    fn stop_count_is_capped() {
+        let n = 500;
+        let pts: Vec<(f32, f32)> = (0..n).map(|i| (i as f32, 0.0)).collect();
+        let colors: Vec<Color> = (0..n)
+            .map(|i| Color::new(i as f32 / n as f32, 0.3, 0.7, 0.5))
+            .collect();
+        let ramp = colors_to_ramp(&pts, &colors);
+        let (count, _, _) = decode(&ramp);
+        assert!(count <= RAMP_MAX_STOPS, "count={count} 超上限");
+        assert!(count >= 2);
+    }
+
+    // ---- 编码 / 去重 ----
+
+    /// 内容相同的色带必须复用同一个基址（否则静态 UI 每帧都在长 buffer）。
+    #[test]
+    fn identical_ramps_dedupe() {
+        let mut batch = super::DrawBatch::new();
+        let a = colors_to_ramp(&[(0.0, 0.0), (10.0, 0.0)], &[white(1.0), white(0.0)]);
+        let b = a.clone();
+        let base_a = batch.intern_line_ramp(&a);
+        let base_b = batch.intern_line_ramp(&b);
+        assert_eq!(base_a, base_b, "同内容必须共用一份");
+        assert_eq!(batch.line_ramps.len(), a.len(), "不该重复追加");
+    }
+
+    /// 差 1/255 就是不同色带 —— 去重不能靠"看起来差不多"。
+    #[test]
+    fn near_identical_ramps_are_distinct() {
+        let mut batch = super::DrawBatch::new();
+        let a = colors_to_ramp(&[(0.0, 0.0), (10.0, 0.0)], &[white(1.0), white(0.0)]);
+        let b = colors_to_ramp(
+            &[(0.0, 0.0), (10.0, 0.0)],
+            &[white(1.0), white(1.0 / 255.0)],
+        );
+        let base_a = batch.intern_line_ramp(&a);
+        let base_b = batch.intern_line_ramp(&b);
+        assert_ne!(base_a, base_b);
+    }
+
+    /// 编码布局必须与着色器的公式一致：`header` + 每 stop `(at)` + `(rgba 预乘)`。
+    #[test]
+    fn encoding_layout_and_premultiplication() {
+        let stops = vec![(0.0f32, premul(white(0.5))), (10.0, premul(white(0.0)))];
+        let ramp = encode_ramp(&stops);
+        // header 1 个 vec4 + 每 stop 2 个 vec4
+        assert_eq!(ramp.len(), (1 + 2 * 2) * 4);
+        assert_eq!(ramp[0], 2.0, "header.count");
+        assert_eq!(ramp[1], 10.0, "header.total_arc");
+        assert_eq!(ramp[4], 0.0, "stop0.at");
+        assert_eq!(ramp[8], 0.5, "stop0 预乘 r = r*a");
+        assert_eq!(ramp[11], 0.5, "stop0 a");
     }
 }

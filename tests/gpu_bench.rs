@@ -4818,3 +4818,343 @@ fn material_main(in: MaterialInput) -> vec4<f32> {
         "扩容后必须绑定新 buffer（蓝）；仍是红色说明命中了旧 bind group"
     );
 }
+
+// ==================== 折线沿线渐变（draw_line_chain_colors） ====================
+//
+// 注意：离屏 canvas 是 **sRGB** 目标（实测 constant a=0.5 → 像素 187），
+// 断言里的期望值都必须过 sRGB 编码，不能直接拿线性 alpha 比像素。
+
+/// sRGB 传输函数（测试用）。
+fn srgb255(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    let enc = if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    enc * 255.0
+}
+
+/// 单色退化必须与老 `draw_line_chain` **逐像素相同** —— 这是"旧路径零影响"的红线。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_matches_single_color() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let pts: Vec<(f32, f32)> = (0..200)
+        .map(|i| {
+            let t = i as f32 / 199.0;
+            (
+                8.0 + t * 48.0,
+                20.0 + (t * std::f32::consts::TAU).sin() * 12.0,
+            )
+        })
+        .collect();
+
+    // A) 逐点色（全白）—— 走色带分支
+    let a = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let colors = vec![WHITE; pts.len()];
+    draw_line_chain_colors(&mut b, &pts, 3.0, &colors);
+    a.draw(Some(BLACK), &[&b]);
+    let px_a = a.read_pixels();
+
+    // B) 老单色 API
+    let other = OffscreenCanvas::new(&gpu, N, N);
+    let mut b2 = DrawBatch::new();
+    draw_line_chain(&mut b2, &pts, 3.0, Some(WHITE));
+    other.draw(Some(BLACK), &[&b2]);
+    let px_b = other.read_pixels();
+
+    assert!(
+        px_a.iter().any(|v| *v > 0),
+        "整条链一个像素都没画出来（用例本身失效）"
+    );
+    let diff = px_a.iter().zip(px_b.iter()).filter(|(x, y)| x != y).count();
+    assert_eq!(
+        diff, 0,
+        "单色渐变与 draw_line_chain 必须逐像素一致，实际 {diff} 个字节不同"
+    );
+    println!("  line_chain_colors(全白) == draw_line_chain(白)：逐像素一致");
+}
+
+/// 沿线 alpha 必须**连续无台阶**（旧实现是 4 档 ≈ 6.5px 一级）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_alpha_ramp_is_smooth() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 96;
+    const H: u32 = 48;
+    const Y: u32 = 24;
+
+    let n = 200;
+    let pts: Vec<(f32, f32)> = (0..n)
+        .map(|i| (8.0 + 80.0 * i as f32 / 199.0, Y as f32))
+        .collect();
+    let colors: Vec<Color> = (0..n)
+        .map(|i| {
+            let t = i as f32 / 199.0;
+            Color::new(1.0, 1.0, 1.0, 0.8 + (0.12 - 0.8) * t)
+        })
+        .collect();
+
+    let canvas = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    draw_line_chain_colors(&mut b, &pts, 6.0, &colors);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    let at = |x: u32| -> i32 { px[((Y * W + x) * 4) as usize] as i32 };
+
+    // (a) 单调不回弹、单步不跳档
+    let mut prev = at(8);
+    for x in 9..=88u32 {
+        let got = at(x);
+        assert!(
+            got <= prev + 1,
+            "x={x} 出现回弹（alpha 应沿线单调下降）：{prev} -> {got}"
+        );
+        assert!(
+            prev - got <= 8,
+            "x={x} 单像素跳 {} 级 —— 有台阶或档位感",
+            prev - got
+        );
+        prev = got;
+    }
+
+    // (b) 与 sRGB 线性 ramp 的偏差 ≤ 4/255
+    let mut worst = 0.0f32;
+    for x in 8..=88u32 {
+        let t = ((x as f32 + 0.5 - 8.0) / 80.0).clamp(0.0, 1.0);
+        let want = srgb255(0.8 + (0.12 - 0.8) * t);
+        worst = worst.max((at(x) as f32 - want).abs());
+    }
+    assert!(
+        worst <= 4.0,
+        "沿线与线性 ramp 的最大偏差 {worst:.2}/255 过大"
+    );
+
+    // (c) 真的跨越了整段 alpha（防"几乎没渐变"的假通过）
+    //     sRGB 下 0.8 → 231、0.12 → 96。
+    assert!(at(8) > 215, "起点应接近 0.8（sRGB ≈ 231），实际 {}", at(8));
+    assert!(
+        (at(88) - srgb255(0.12) as i32).abs() <= 14,
+        "终点应接近 0.12（sRGB ≈ 96），实际 {}",
+        at(88)
+    );
+    println!("  alpha ramp 0.8->0.12：最大偏差 {worst:.2}/255，单调无台阶");
+}
+
+/// 同一份几何模板 + 不同色带：两条链必须各画各的颜色（防"边对色错"）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_share_geometry_template() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let pure_red = Color::new(1.0, 0.0, 0.0, 1.0);
+    let pure_green = Color::new(0.0, 1.0, 0.0, 1.0);
+
+    let pts = [(8.0f32, 12.0f32), (56.0, 12.0)];
+    let canvas = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    // A：白 → 红
+    draw_line_chain_colors(&mut b, &pts, 6.0, &[WHITE, pure_red]);
+    // B：**同一局部点集**（几何模板必然命中缓存），平移后画 → 白 → 绿
+    b.set_position(0.0, 40.0);
+    draw_line_chain_colors(&mut b, &pts, 6.0, &[WHITE, pure_green]);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    let at = |x: u32, y: u32| -> (i32, i32, i32) {
+        let i = ((y * N + x) * 4) as usize;
+        (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32)
+    };
+
+    let (r1, g1, b1) = at(52, 12);
+    assert!(
+        r1 > 200 && g1 < 140 && b1 < 140,
+        "上链末端应偏红（复用几何模板也不许串色），实际 ({r1},{g1},{b1})"
+    );
+    let (r2, g2, b2) = at(52, 52);
+    assert!(
+        g2 > 200 && r2 < 140 && b2 < 140,
+        "下链末端应偏绿（同点集、不同色带），实际 ({r2},{g2},{b2})"
+    );
+    println!("  同几何模板 + 不同色带：上({r1},{g1},{b1}) / 下({r2},{g2},{b2}) ok");
+}
+
+/// 颜色必须在**预乘空间**插值：直通空间混会让中段偏色（红→蓝会混出紫色）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_premultiplied_mix() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 64;
+
+    let canvas = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    // 红(a=0.9) → 蓝(a=0)，中点：
+    //   预乘：premul0=(0.9,0,0,0.9)、premul1=(0,0,0,0) → (0.45,0,0,0.45) → 反预乘 (1,0,0), a=0.45
+    //         合成后 ≈ sRGB(0.45)*255 ≈ 178，**蓝 = 0**
+    //   直通：rgb=(0.5,0,0.5) a=0.45 → 合成后偏紫（蓝 ≈ 133）
+    draw_line_chain_colors(
+        &mut b,
+        &[(8.0, 32.0), (56.0, 32.0)],
+        10.0,
+        &[
+            Color::new(1.0, 0.0, 0.0, 0.9),
+            Color::new(0.0, 0.0, 1.0, 0.0),
+        ],
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    let i = ((32 * W + 32) * 4) as usize;
+    let (r, g, bl) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+    assert!(
+        bl < 20,
+        "中点蓝分量 {bl} —— 说明在直通空间插值（预乘应为 0）"
+    );
+    assert!(g < 20, "中点不该有绿分量，实际 {g}");
+    let want = srgb255(0.45) as i32;
+    assert!(
+        (r - want).abs() <= 14,
+        "中点红分量应 ≈ sRGB(0.45)*255 ≈ {want}（预乘），实际 {r}"
+    );
+    println!("  预乘混合中点 rgB=({r},{g},{bl})，期望红≈{want} ok");
+}
+
+/// 退化输入：不 panic、不出错图。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_degenerate_inputs() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+
+    // 1) 色数 != 点数 → 按 colors[0] 单色画
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    draw_line_chain_colors(
+        &mut b,
+        &[(8.0, 32.0), (56.0, 32.0), (56.0, 40.0)],
+        6.0,
+        &[Color::new(0.0, 1.0, 0.0, 1.0)],
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    // 用纯绿：vireo 的 `GREEN` 是 (0.00,0.89,0.19)，b 分量不低，不能用 `region_is_green`。
+    let i = ((32 * N + 32) * 4) as usize;
+    let (r, g, bl) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+    assert!(
+        g > 200 && r < 40 && bl < 40,
+        "色数不符时应退化为 colors[0] 单色（绿），实际 ({r},{g},{bl})"
+    );
+
+    // 2) 全透明 → 什么都不画
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let clear = [Color::new(1.0, 1.0, 1.0, 0.0); 2];
+    draw_line_chain_colors(&mut b, &[(8.0, 32.0), (56.0, 32.0)], 6.0, &clear);
+    c.draw(Some(BLACK), &[&b]);
+    // 只看 RGB：清屏后 alpha 通道未必是 0（sRGB 目标），别拿它当"有没有画内容"。
+    let px = c.read_pixels();
+    assert!(
+        px.chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0),
+        "全透明色带应跳过（画布保持全黑）"
+    );
+
+    // 3) 所有点重合 → 没有边，什么都不画
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let same = [(32.0f32, 32.0f32); 4];
+    let colors = [WHITE; 4];
+    draw_line_chain_colors(&mut b, &same, 6.0, &colors);
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    assert!(
+        px.chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0),
+        "全重合点没有边，应什么都不画"
+    );
+
+    // 4) 闭合链 → 画得出来，且 wrap 段回到首色
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let ring = [
+        (16.0f32, 16.0f32),
+        (48.0, 16.0),
+        (48.0, 48.0),
+        (16.0, 48.0),
+        (16.0, 16.0),
+    ];
+    let colors = [
+        Color::new(1.0, 0.0, 0.0, 1.0),
+        Color::new(0.0, 1.0, 0.0, 1.0),
+        Color::new(0.0, 0.0, 1.0, 1.0),
+        WHITE,
+        Color::new(1.0, 0.0, 0.0, 1.0),
+    ];
+    draw_line_chain_colors(&mut b, &ring, 4.0, &colors);
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    assert!(
+        px.iter().any(|v| *v > 0),
+        "闭合链必须画得出来（首尾重合不应被当成退化）"
+    );
+    println!("  退化输入 4 例：色数不符=单色、全透明/全重合=空、闭合链=正常");
+}
+
+/// per-sample 档 smoke：色带在逐采样求值下也要出内容且单调。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_per_sample_aa() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 96;
+    const H: u32 = 96;
+
+    let canvas = OffscreenCanvas::with_aa(
+        &gpu,
+        W,
+        H,
+        AntiAliasing::PerSample {
+            samples: 4,
+            alpha_to_coverage: false,
+        },
+        0.0,
+    );
+    let n = 60;
+    let pts: Vec<(f32, f32)> = (0..n)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            (12.0 + t * 72.0, 12.0 + t * 72.0)
+        })
+        .collect();
+    let colors: Vec<Color> = (0..n)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            Color::new(1.0, 1.0, 1.0, 1.0 - 0.9 * t)
+        })
+        .collect();
+    let mut b = DrawBatch::new();
+    draw_line_chain_colors(&mut b, &pts, 8.0, &colors);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    let at = |x: u32, y: u32| -> i32 { px[((y * W + x) * 4) as usize] as i32 };
+
+    let start = at(16, 16);
+    let end = at(78, 78);
+    assert!(start > 40, "起点应明显可见，实际 {start}");
+    assert!(
+        start > end + 20,
+        "per-sample 下 alpha 也应沿线下降：start={start} end={end}"
+    );
+    println!("  PerSample4 渐变：start={start} end={end} ok");
+}

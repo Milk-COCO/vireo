@@ -39,6 +39,33 @@ struct Camera {
 @group(1) @binding(1) var tex_sampler: sampler;
 @group(2) @binding(0) var<storage> transforms: array<mat3x3<f32>>;
 @group(2) @binding(1) var<storage> polygon_edges: array<vec4<f32>>;
+// 折线渐变的弧长色带表（仅 `sdf_type == 7 && sdf_params.w > 0` 的分支读取）。
+// 布局与 CPU 侧 `encode_ramp` 严格对应：
+//   base + 0        : (count, total_arc, 0, 0)
+//   base + 1 + 2k   : (at_k, 0, 0, 0)   —— 绝对弧长（px）
+//   base + 2 + 2k   : 预乘 rgba_k
+@group(2) @binding(3) var<storage> line_ramp: array<vec4<f32>>;
+
+/// 沿弧长取色带颜色：预乘空间插值，再反预乘回直通 alpha（blend state 是 ALPHA_BLENDING）。
+///
+/// 预乘的理由：两端 alpha 差很大时（例如 0.9 → 0.0）在直通空间插值会在中段压暗，
+/// 出现一条暗边。CPU 侧 DP 简化也按预乘误差度量，所以这里与简化是同一套度量。
+fn vireo_ramp_color(base: u32, arc: f32) -> vec4<f32> {
+    let count = u32(line_ramp[base].x);
+    if (count == 0u) { return vec4<f32>(1.0); }
+    var idx = 0u;
+    for (var k = 1u; k < count; k++) {
+        if (line_ramp[base + 1u + 2u * k].x <= arc) { idx = k; }
+    }
+    let next = min(idx + 1u, count - 1u);
+    let a_at = line_ramp[base + 1u + 2u * idx].x;
+    let b_at = line_ramp[base + 1u + 2u * next].x;
+    let span = b_at - a_at;
+    let f = select(0.0, clamp((arc - a_at) / span, 0.0, 1.0), abs(span) > 1e-6);
+    let mixed = mix(line_ramp[base + 2u + 2u * idx], line_ramp[base + 2u + 2u * next], f);
+    if (mixed.a <= 1e-6) { return vec4<f32>(0.0); }
+    return vec4<f32>(mixed.rgb / mixed.a, mixed.a);
+}
 
 @vertex
 fn vs_main(vertex: QuadVertex, @builtin(instance_index) inst_idx: u32) -> VertexOutput {
@@ -121,9 +148,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             else if d > 0.0 { discard; }
         }
         default: {
+            // 折线（sdf_type = 7）：sdf_params = (edge_start, edge_count, half_thickness, ramp)
+            // `ramp == 0` → 单色（**下面这条 else 分支逐字保留**，保证旧路径逐像素不变）；
+            // `ramp > 0`  → 色带基址 + 1，沿弧长逐像素取色。
             let start = u32(in.sdf_params.x); let count = u32(in.sdf_params.y); let h = in.sdf_params.z;
+            let ramp = in.sdf_params.w;
             d = 1e10;
-            for (var i = start; i < start + count; i++) { let seg = polygon_edges[i]; let a = seg.xy; let b = seg.zw; let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0); d = min(d, length(in.local_pos - (a + t * ab))); }
+            if (ramp > 0.0) {
+                var arc = 0.0;
+                var best_arc = 0.0;
+                for (var i = start; i < start + count; i++) {
+                    let seg = polygon_edges[i]; let a = seg.xy; let b = seg.zw; let ab = b - a;
+                    let ab_len2 = max(dot(ab, ab), 1e-8);
+                    let t = clamp(dot(in.local_pos - a, ab) / ab_len2, 0.0, 1.0);
+                    let dd = length(in.local_pos - (a + t * ab));
+                    if (dd < d) { d = dd; best_arc = arc + t * sqrt(ab_len2); }
+                    arc += sqrt(ab_len2);
+                }
+                // 色带**替换**实例色（贴图仍然乘进来），与逐顶点色的语义一致。
+                out_color = tex_color * vireo_ramp_color(u32(ramp) - 1u, best_arc);
+            } else {
+                for (var i = start; i < start + count; i++) { let seg = polygon_edges[i]; let a = seg.xy; let b = seg.zw; let ab = b - a; let t = clamp(dot(in.local_pos - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0); d = min(d, length(in.local_pos - (a + t * ab))); }
+            }
             d -= h;
             if feather > 0.0 { if d >= feather { discard; } out_color.a *= 1.0 - smoothstep(0.0, feather, d); }
             else if d > 0.0 { discard; }

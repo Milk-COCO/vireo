@@ -14,7 +14,7 @@ use super::{
     BatchEncodeCtx, BatchEncodeInfo, BatchShapeCommand, ClipPath, DepthStencilOps,
     DepthStencilTarget, DrawBatch, DrawEvent, EventInfo, GeoInstanceSegment, InstanceSegment,
     OrderedShapeSegment, ParticleSegment, RenderTarget, Renderer, ShapeInfo, ShapeSegment,
-    TextRenderSegment, patch_instance_poly_base, patch_vertex_poly_base,
+    TextRenderSegment, patch_instance_poly_base, patch_instance_ramp_base, patch_vertex_poly_base,
 };
 
 /// 同步 blend 常量：段用 `Constant` 系数时才调（小众路径；无条件设置，正确优先）。
@@ -251,6 +251,8 @@ impl Renderer {
         global_transforms.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
         let mut polygon_edges_global = self.scratch_poly_edges.lock();
         polygon_edges_global.clear();
+        let mut line_ramps_global = self.scratch_line_ramps.lock();
+        line_ramps_global.clear();
 
         // stencil 两路计数（不可混用）：
         // - `clip_depth`：仅 clips_children 的 Push 层数（不含 Area）
@@ -420,9 +422,12 @@ impl Renderer {
         batch_transform_bases.clear();
         let mut batch_poly_base = self.scratch_batch_poly_base.lock();
         batch_poly_base.clear();
+        let mut batch_ramp_base = self.scratch_batch_ramp_base.lock();
+        batch_ramp_base.clear();
         let mut total_vcount: u32 = 0;
         let mut total_icount: u32 = 0;
         let mut poly_offset: u32 = 0;
+        let mut ramp_offset: u32 = 0;
         let mut pop_screen_verts: u32 = 0; // 全屏 Pop 顶点数
         let mut pop_screen_idx: u32 = 0;
 
@@ -452,6 +457,11 @@ impl Renderer {
                     batch_poly_base.push(poly_offset);
                     poly_offset += batch.polygon_edges.len() as u32 / 4;
                     polygon_edges_global.extend_from_slice(&batch.polygon_edges);
+                    // 折线渐变色带：独立的 append-only 表（**不与 polygon_edges 平行**，
+                    // 见 `DrawBatch::line_ramps` 的说明）。
+                    batch_ramp_base.push(ramp_offset);
+                    ramp_offset += batch.line_ramps.len() as u32 / 4;
+                    line_ramps_global.extend_from_slice(&batch.line_ramps);
                     total_vcount += batch.vertices.len() as u32;
                     total_icount += batch.indices.len() as u32;
                     if batch.custom_material.is_some() {
@@ -468,12 +478,14 @@ impl Renderer {
                     pop_screen_idx += 6;
                     batch_transform_bases.push(0);
                     batch_poly_base.push(poly_offset);
+                    batch_ramp_base.push(ramp_offset);
                     batch_geo_vertex_base.push(0);
                     batch_geo_index_base.push(0);
                 } else if let DrawEvent::ScissorPush(_) | DrawEvent::ScissorPop = event {
                     // Scissor 事件不需要 transform/poly，但保留索引对齐
                     batch_transform_bases.push(0);
                     batch_poly_base.push(poly_offset);
+                    batch_ramp_base.push(ramp_offset);
                     batch_geo_vertex_base.push(0);
                     batch_geo_index_base.push(0);
                 } else if let DrawEvent::AreaOp { op, .. } = event {
@@ -489,6 +501,7 @@ impl Renderer {
                             global_transforms.extend_from_slice(&geom.transform_table);
                         }
                         batch_poly_base.push(poly_offset);
+                        batch_ramp_base.push(ramp_offset);
                         poly_offset += geom.polygon_edges.len() as u32 / 4;
                         polygon_edges_global.extend_from_slice(&geom.polygon_edges);
                     } else {
@@ -496,6 +509,7 @@ impl Renderer {
                         pop_screen_idx += 6;
                         batch_transform_bases.push(0);
                         batch_poly_base.push(poly_offset);
+                        batch_ramp_base.push(ramp_offset);
                     }
                     batch_geo_vertex_base.push(0);
                     batch_geo_index_base.push(0);
@@ -547,9 +561,11 @@ impl Renderer {
                     if use_instances {
                         let transform_base = batch_transform_bases[info_idx];
                         let poly_base = batch_poly_base[info_idx] as f32;
+                        let ramp_base = batch_ramp_base[info_idx];
                         let patch = |mut instance: InstanceData| -> InstanceData {
                             instance.transform_index += transform_base;
                             patch_instance_poly_base(&mut instance, poly_base);
+                            patch_instance_ramp_base(&mut instance, ramp_base);
                             instance
                         };
                         if batch.merge_instance_states
@@ -1478,6 +1494,17 @@ impl Renderer {
             }
         }
 
+        // ---- 上传折线渐变色带 ----
+        if !line_ramps_global.is_empty() {
+            let size = (line_ramps_global.len() * 4) as u64;
+            self.ensure_line_ramp_buffer(size);
+            let buf = self.line_ramp_buf.lock();
+            let buf_ref = buf.as_ref().unwrap();
+            self.gpu
+                .queue
+                .write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&line_ramps_global));
+        }
+
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
         {
             let mut tc = self.gpu.text_ctx.lock().unwrap();
@@ -1583,6 +1610,11 @@ impl Renderer {
                     .as_ref()
                     .map(|(buf, _)| buf)
                     .unwrap_or(&self.gpu.polygon_dummy_buf);
+                let ramps = self.line_ramp_buf.lock();
+                let ramp_buf = ramps
+                    .as_ref()
+                    .map(|(buf, _)| buf)
+                    .unwrap_or(&self.gpu.line_ramp_dummy_buf);
                 // instance storage 是本帧上传阶段刚写入的 buffer；此处 clone 句柄
                 // （绑定不持有所有权），避免临时值在表达式末尾被释放。
                 let instance_buf = {
@@ -1610,6 +1642,10 @@ impl Renderer {
                                 wgpu::BindGroupEntry {
                                     binding: 2,
                                     resource: instance_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: ramp_buf.as_entire_binding(),
                                 },
                             ],
                         }),

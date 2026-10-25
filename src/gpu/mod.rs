@@ -33,6 +33,8 @@ pub struct GpuContext {
     pub white_bind_group: Arc<wgpu::BindGroup>,
     pub engine_storage_dummy_bind_group: wgpu::BindGroup,
     pub(crate) polygon_dummy_buf: wgpu::Buffer,
+    /// 折线渐变色带表的 dummy（无渐变帧绑定 binding 3，避免多一条 Option 分支）。
+    pub(crate) line_ramp_dummy_buf: wgpu::Buffer,
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub(crate) instance_quad_vertex_buf: wgpu::Buffer,
     pub(crate) instance_quad_index_buf: wgpu::Buffer,
@@ -509,6 +511,19 @@ impl GpuContext {
                         },
                         count: None,
                     },
+                    // 3 = 折线渐变的弧长色带表（`array<vec4<f32>>`，仅 FS 读）。
+                    // 只有 `sdf_type == 7 && sdf_params.w > 0` 的分支会访问它；
+                    // 无渐变时绑 `line_ramp_dummy_buf`。
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -597,6 +612,13 @@ impl GpuContext {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        // Dummy 色带表（无渐变时满足 binding 3；至少 1 个 vec4 才能被绑定）
+        let line_ramp_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line ramp dummy buffer"),
+            size: 64, // header + 1 stop（2 个 vec4）也要够大，保守给 4 个 vec4
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         // Custom material bind group layout (group 3)：
         //   0 storage (VS|FS) | 1 tex0 | 2 samp0 | 3 tex1 | 4 samp1 | 5 tex2 | 6 samp2 | 7 tex3 | 8 samp3
         let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
@@ -674,6 +696,10 @@ impl GpuContext {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: instance_storage_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: line_ramp_dummy_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -871,6 +897,7 @@ impl GpuContext {
             white_bind_group,
             engine_storage_dummy_bind_group,
             polygon_dummy_buf,
+            line_ramp_dummy_buf,
             transform_dummy_buf,
             instance_quad_vertex_buf,
             instance_quad_index_buf,

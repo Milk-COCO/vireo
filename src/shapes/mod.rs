@@ -568,6 +568,32 @@ pub fn draw_line_chain(
     );
 }
 
+/// 折线**沿线渐变**（逐点色）：第 i 个点取 `colors[i]`，点与点之间沿**弧长**平滑过渡。
+///
+/// 这是 `draw_line_chain` 的逐点色版本（同一份几何、同一个实例，多一个色带表）：
+/// 一条 200 点的曲线仍然是 **1 个实例 / 1 次 draw**，颜色由片元逐像素求值，
+/// 不是"切成 N 段单色"（那样每个接头都会双 blend 出亮点）。
+///
+/// # 约定
+///
+/// - `colors.len()` 必须等于 `points.len()`：第 i 个点就是 `colors[i]`。
+///   闭合链（首尾重合）同样传 `points.len()` 个，**末色被忽略**（末点 == 首点）。
+/// - 只在 **SDF 路径**生效（`sdf_feather.is_some()`，默认即是）。`clear_sdf_feather()`
+///   之后会退化成 `colors[0]` 单色 + 一次 `log::warn!`（几何/geo 路径做不到逐点色）。
+/// - 需要**内置材质**：自定义 vertex/fragment 材质拿到的是单色（色带由引擎片元读取）。
+/// - 长度不等于点数 → 按 `colors[0]` 单色画 + warn once；全透明 → 跳过。
+///
+/// 性能：每个被覆盖的像素多一次着色器循环内的 `sqrt` 与一次色带查表；色带经过
+/// Douglas–Peucker 简化（误差 ≤ 1/255），线性渐变只占 2 个 stop。
+pub fn draw_line_chain_colors(
+    batch: &mut DrawBatch,
+    points: &[(f32, f32)],
+    thickness: f32,
+    colors: &[Color],
+) {
+    batch.instance_line_chain_colors(points, thickness, colors);
+}
+
 /// 描边三角形
 pub fn draw_triangle_outline(
     batch: &mut DrawBatch,
