@@ -2,276 +2,197 @@
 
 # Vireo
 
-Vireo 只是一种可爱的小鸟！
+**V**ault's **I**nterface and **R**endering **E**ngine for **O**ptics —— 一只可爱的小鸟。
 
-或者说 —— **V**ault's **I**nterface and **R**endering **E**ngine for **O**ptics。
+基于 `wgpu` + `winit` 的 **Rust 2D 渲染库**：单 pass 多 batch、SDF 形状与描边、自绘文本
+（**Android 中文输入法可用**），Windows 与 Android 都实机跑过。
 
-当然，它也是基于 `wgpu` + `winit` 的 2D GPU 渲染库！
+它**不是**游戏引擎，也**不是** UI 框架 —— 没有 ECS、没有控件、没有布局系统。
+它给你的是「这一帧怎么画」这一层：窗口、事件循环、GPU 资源、批处理合并、文字光栅化。
+UI 长什么样、布局怎么算，是你自己的事。
 
-## 平台支持
+[![crates.io](https://img.shields.io/crates/v/vireo.svg)](https://crates.io/crates/vireo)
+[![docs.rs](https://docs.rs/vireo/badge.svg)](https://docs.rs/vireo)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
 
-| 平台 | 状态 |
-|---|---|
-| Windows（DX12 / Vulkan）| ✅ 充分测试 |
-| Linux（Vulkan）| 🟡 可编译，未实测 |
-| macOS（Metal）| 🟡 可编译，未实测 |
-  | **Android**（Vulkan，弱 GPU 自动 GLES 回退）| ✅ **已实测**（HyperOS 16；API 35 模拟器强制 GLES 跑出 fps 60；MuMu12 实例的 EGL 窗口 surface 建不出，属该实例问题）|
+<img src="https://raw.githubusercontent.com/Milk-COCO/vireo/master/logo.png" width="120" alt="Vireo logo">
 
-Android 上用 `AGDK GameActivity`（`winit` 的 `android-game-activity` 后端），
-所以**支持中文输入法**——`NativeActivity` 没有 `InputConnection`，做不到这件事。
-
-额外提供（都在 `vireo::platform::android`，仅该平台编译）：
-沉浸式 / 系统栏 bitmask、**安全区三值**（`safe_area` / `padding` / `ime_insets`）、
-挖孔适配、文本输入（含 UTF-16↔UTF-8 下标换算）、朝向锁定 / 常亮 / 亮度 / 窗口层级。
-
-⚠️ Android 的**构建链与桌面不同**：需要 `cargo ndk` + gradle 工程，
-`xbuild` / `cargo-apk` 不适用。可直接复制的工程模板见 `examples/android/`。
-
-```bash
-cargo run --example hello
-```
-
-## 前言：别用 Vireo
-此项目 95%（**甚至更多**）内容由 **AI生成**。而唯一开发者看过的内容只有 5%（**甚至更少**）。
-
-即使代码经过了 AI 的反复审查，依旧存在随时爆炸的风险。
+> ⚠️ 本项目代码主要由 AI 生成、按作者自己的用例验收，**不承诺生产可用** ——
+> 详见文末[项目状态与风险](#项目状态与风险)。
 
 ## 快速开始
 
-```bash
-cargo run --example ez
+```toml
+[dependencies]
+vireo = "0.1"     # crates.io 上是 0.1.2
+# 想用本文档描述的 API（0.2.0 开发中）：
+# vireo = { git = "https://github.com/Milk-COCO/vireo" }
 ```
 
-## 绘制模型
-
-- **即时模式**：每帧构建 `DrawBatch`，填充形状/文本，提交到窗口
-- **单 pass**：一次 `draw()` 内多 batch 按序渲染；batch 树可嵌套（子节点、继承、裁切）
-- **坐标系**：左上角原点，x 向右，y 向下（vireo 逻辑像素）。`dpi_override=None` 时逻辑即 winit 逻辑（OS 缩放参与）；`Some(d)` 时 vireo 全自持像素，物理 = 逻辑 × d
-- **像素意图**：窗口尺寸/位置 API 接受 `impl ToPx`——裸数值 / `Dp` = vireo 逻辑像素，`Px` = 物理像素；语义由调用点声明，不随 `dpi_override` 翻转
-- **位置 `Pos`**：圆/矩形等锚点形状的位置走 `Pos` + 变换表；线/多边形等点列即几何坐标
-
 ```rust
-// 多 batch：后面的盖住前面的
-win.draw(bg_color, &[&batch1, &batch2, &batch3]);
-```
+use vireo::prelude::*;
 
-### 文本 API
-
-| 参数 | 类型 | 含义 |
-|------|------|------|
-| 内容 | `&str` / `StableText` / parts | 画什么 |
-| 位置 | `Pos` | 在哪 |
-| 定型 | `TextDef` | 字号、换行、对齐、字体属性 |
-| 每帧覆盖 | `TextOverride` | 颜色、clip、额外 transform |
-
-- `draw_text(&mut batch.texts, …)`：默认 `transform_index = 0`（单位阵），`pos` 为逻辑世界坐标  
-- `batch.text(…)`：捕获当前画笔 transform，适合 `set_position` 后随 batch 移动  
-- 形状：`draw_shape` 将 `Pos` 与 batch transform **组合**；`set_position(x,y)` + `Pos(0,0)` 表示在画笔原点处绘制  
-
-### 裁切与剔除
-
-- **`clips_children`**：子树 stencil 裁切；纯轴对齐矩形可自动走 **scissor**  
-- **`area_include` / `area_exclude`**：任意 Area 布尔（∪ ∩ ∖），与 clips 正交  
-- **`bounds`**：子树 AABB 剔除（默认自动；可关 / 可手动）  
-- **`text_clip` / `TextOverride.clip`**：文字逻辑像素裁切（内部 × scale 到物理）  
-
-## 多循环架构
-
-Vireo 支持多线程多循环，每个循环独立运行：
-
-```rust
 #[vireo::main]
-async fn main() {
-    let app = App::new();
-    // ... 创建窗口 ...
-    
-    // 主循环
-    app.run(|ctx| {
-        // ctx.app() 访问应用
-        // ctx.tick_count() 帧计数
-        // ctx.after_secs(1.0, || { ... }) 定时任务
-    }).unwrap();
+async fn main(app: App) {
+    let idx = app.window(WindowDesc::new("EZ Vireo", 800, 600));
+
+    app.run(move |ctx| {
+        let win = match ctx.app().window_ref(&idx) {
+            Ok(v) => v,
+            Err(_) => return true, // 窗口已经关了 → 结束循环
+        };
+
+        let mut batch = DrawBatch::new();
+        draw_rectangle(&mut batch, Pos::new(100.0, 100.0), 200.0, 150.0, Some(RED));
+        draw_circle(&mut batch, Pos::new(500.0, 300.0), 80.0, Some(BLUE));
+        draw_line(&mut batch, 50.0, 50.0, 750.0, 550.0, 2.0, Some(GREEN));
+        draw_text(
+            &mut batch.texts,
+            "你好，Vireo",
+            Pos::new(100.0, 40.0),
+            TextDef::default().font_size(32.0),
+            TextOverride::from_color(WHITE),
+        );
+
+        win.draw(BLACK, &[&batch]);
+        true
+    })
+    .await
+    .unwrap();
 }
 ```
 
-**注意**：虽然这个 `fn main` 看起来是在 `main` 线程上跑，但和 `macroquad` 不同，实际上他是跑在一个叫 `vireo-main` 的线程上，**不是主线程**。具体你可以看这个宏的文档与定义。
+上面就是 [`examples/ez.rs`](https://github.com/Milk-COCO/vireo/blob/master/examples/ez.rs)
+的逐字副本，跑起来能看到黑底 + 红矩形 + 蓝圆 + 一条绿线 + 一行中文。接着看：
 
-## 功能
+- 文字与 HUD 分段 → `cargo run --example text_hud`
+- 自定义 WGSL 材质 → `cargo run --example custom_material`
+- Android 工程 → [`examples/android/`](https://github.com/Milk-COCO/vireo/blob/master/examples/android/README.md)
 
-- 填充形状 + 描边（SDF / 几何双路径，`sdf_feather`）
-- 仿射变换表（顶点 `transform_index`；槽 0 固定单位阵）
-- 文本：shape 缓存、HUD 分段、`StableText`、自定义字体 / attrs
-- **自定义 Material**：一份 `material_main(MaterialInput)` 自动用于 shape / text；MSAA/stencil/SDF 兼容
-- **自管 Bind Group**：用户自带 BGL + 任意 group 编号（`material_self_managed`）
-- **MRT 多目标**：`draw_mrt` 一次提交写多张颜色附件（custom material 多 FS 输出、逐目标 Blend）；
-  引擎形状/文字也能进 MRT pass（只写第 0 个目标，其余附件保留载入内容）
-- **深度 / 模板控制**：`draw_with_depth_stencil`、材质 `depth_write` / `depth_compare`、外部 DS view
-- **GPU compute**：`compute_pipeline` + `dispatch`（写入对后续 render pass 可见）
-- 多窗口 + 离屏渲染
-- 纹理（文件 / 字节 / RGBA，UV 子区域）
-- 粒子（`particle_burst`，VS 解析积分）
-- 窗口控制（全屏、图标、PresentMode、AA、自定义 dpi 覆盖等）
-- 运行时动态建窗
-- 帧统计 + 输入（轮询 / 事件 / 触摸 / IME）
+## 平台
 
-### Material 约定（未冻结）
-
-用户优先依赖注入 helper，不要写内部绑定名：
-
-```wgsl
-fn material_main(in: MaterialInput) -> vec4<f32> {
-    let base = vireo_base_sample(in.base_uv); // DrawBatch::set_texture
-    if in.target_type == 1u { // text
-        return vec4<f32>(base.rgb, in.color.a);
-    }
-    return vec4<f32>(base.rgb * in.color.rgb, in.color.a);
-}
-```
-
-| 字段 / helper | 含义 |
+| 平台 | 状态 |
 |---|---|
-| `in.uv` | 内容自身 UV（shape 图元 / text glyph atlas） |
-| `in.base_uv` | batch 基础贴图 UV（`set_texture` + `set_uv`；text **每字形重复**，非整行连续；连续映射需未来新字段） |
-| `in.color` | 引擎默认基色（rgb）；alpha 由包装器在 `material_main` 后重乘 |
-| `vireo_base_sample(uv)` | 采 batch 基础贴图 |
-| `vireo_base_color(in)` | 当前默认基色 |
-| `vireo_has_*()` | 能力探针（base sample / local_pos / sdf） |
-| `camera.time_secs` | **GPU 时间**（秒，`@group(0)` 的相机 uniform 末尾）：引擎每帧写默认钟时间，CPU 不用改任何 uniform；`batch.set_clock(c)` 换成另一条时间线（可暂停/倍速/定值）。`struct Camera { projection: mat4x4<f32>, dpi_scale: f32, time_secs: f32 }` |
+| **Windows**（DX12 / Vulkan）| ✅ 日常使用 + 全部 example 跑过 |
+| **Android**（Vulkan，弱 GPU 回退 GLES）| ✅ 真机实测（HyperOS 16）；构建链与桌面不同，需 `cargo ndk` + gradle |
+| Linux（Vulkan）/ macOS（Metal）| 🟡 仅保证编译通过，未实机验证 |
+| Web / wasm | ❌ 不支持 |
 
-引擎内部 4-group：`0` 视口、`1` 引擎纹理、`2` transform/polygon、`3` 用户 Material（1024B storage + 4 组 tex/sampler）。
-Shape / text 共用 ABI；默认 shape VS 按 MSAA / per-sample 选 per-pixel / per-sample；自定义 shape VS 全 AA 模式保持 per-pixel（引擎统一 `(linear)`，不会因 AA 档编译失败）。per-sample 只超采样 SDF 几何覆盖度，纹理与屏空间后处理不受益。
+细节、验证程度与已知问题（模拟器兼容、字体来源、工具链）见
+[`docs/platforms.md`](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)。
 
-**MRT**：改写成 `fn material_main(...) -> MaterialOutput`（第 0 个字段必须名为 `color`，
-引擎在其上应用 alpha / SDF；其余 location 原样输出），配 `draw_mrt(clear, &extra_targets, batches)`
-逐目标 Blend 一次提交。引擎自带的形状/文字**也能**画进 MRT pass：它们只写第 0 个目标，
-其余附件保持 `LoadOp::Load` 载入值（不会被清零）；反过来，多输出的材质也能用于单目标 pass。
+## 核心概念
 
-**深度**：`Material::set_depth_write` / `set_depth_compare` + `draw_with_depth_stencil`
-（深度预通道、跨 batch 深度保留）。
+- **即时模式**：每帧新建 `DrawBatch`，往里塞形状/文字，`win.draw(清屏色, &[批次...])` 一次提交。
+  批次树可嵌套（子节点、继承、裁切）。
+- **单 pass 多批次**：一次 `draw()` 内的多个批次按顺序画进同一个 pass —— 不需要为每个批次
+  建 render pass，也不强制你攒顶点。
+- **坐标系**：左上角原点，x 向右、y 向下，单位是 vireo 逻辑像素。尺寸/位置 API 收
+  `impl ToPx`：裸数值与 `Dp` 是逻辑像素，`Px` 是物理像素，语义由调用点声明。
+  `dpi_override(Some(d))` 时 vireo 全自持像素（物理 = 逻辑 × d）；`None` 时逻辑即 winit
+  逻辑（OS 缩放参与）。
+- **三条形状路径**：SDF 实例（默认，`sdf_feather` 控制软边）、几何模板（`clear_sdf_feather()`
+  之后）、mesh 顶点（自己 push）。选哪条决定抗锯齿效果与自由度。
+- **裁切与剔除**：`clips_children`（子树 stencil，轴对齐矩形自动走 scissor）、
+  `area_include` / `area_exclude`（`Area` 布尔遮罩）、`text_clip` / `TextOverride.clip`
+  （文字逻辑像素裁切）、`bounds`（子树 AABB 剔除，默认自动）。
+- **多循环线程**：`app.run(..)` / `app.spawn(Thread)` 每条 Loop 跑在独立 OS 线程上，
+  `App` 是 `Clone`（共享同一个 GPU 设备/队列）。每个线程用自己的 `DrawBatch`，
+  不要跨线程共享正在构建的批次。
+- **文本**：cosmic-text shaping + glyphon 光栅化，默认用**系统字体**（中文一般开箱可用）。
 
-**自管 Bind Group**：`App::material_self_managed(source, &[(group, &bgl)])` —— 用户自带 BGL
-与任意 group 编号，引擎不再插入 group 0/1/2。compute 的资源创建沿用同一 group 模型。
+## 能做什么
+
+- **SDF 形状 + 描边**：16 种内置形状，`sdf_feather` 控制软边；`PerSample` 档做逐采样着色 ——
+  不用自己写距离场，也不用为了抗锯齿去堆 MSAA 采样。
+- **自定义 WGSL 材质**：一份 `material_main` 同时作用于 shape 与 text；改颜色、采样贴图、
+  算屏空间效果都行 —— 不用 fork 引擎。
+- **MRT**：一次提交写多张颜色附件（磨砂玻璃、光晕、法线当样式场）—— 不用多 pass 拼。
+- **深度 / 模板**：深度预通道、跨批次深度保留、`Area` 布尔裁切 —— 阴影与遮罩不用自己搭。
+- **GPU compute**：`compute_pipeline` + `dispatch`，结果对后续 render pass 可见。
+- **多窗口 + 离屏**：`OffscreenCanvas` 与窗口对称，`read_pixels()` 可回读（截图 / 回归测试）。
+- **粒子**：`ParticlePool` + 一次推送，位置在 VS 里解析积分 —— 万级粒子不用每帧回写。
+- **贴图**：文件 / 字节 / RGBA 三种来源，`UvRect` 子区域、Repeat / Clamp 采样模式 ——
+  图集、九宫格、程序化纹理都不用自己写 shader。
+- **按需出帧与节流**：没变化就不画（空闲 0 present/s），四层节流可逐层关，见
+  [帧率与限流](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/throttling.md)。
+- **折线沿线渐变**：一条线逐点变色/变透明，仍是 1 个实例 1 次 draw，见
+  [折线渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)。
+- **文字**：整段 shape 缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
+  COLRv1 彩色 emoji。
+
+## Android：这里是它最特别的地方
+
+桌面 2D 渲染库不缺一个，缺的是**能在 Android 上正常处理中文输入的**：
+
+- **中文输入法开箱可用** —— 走 `AGDK GameActivity`（`InputConnection`），
+  而不是 `NativeActivity`（后者**根本做不到**输入法）。
+- **安全区三值**：`safe_area`（物理最大遮挡）/ `padding`（当前可见）/ `ime_insets`（键盘），
+  外加 `cutouts()` 拿摄像头挖孔矩形。
+- **挖孔 / 沉浸式 / 系统栏 bitmask / 朝向锁定 / 常亮 / 亮度**，都在 `platform::android`。
+- **弱 GPU 自动回退 GLES**，不要求目标设备一定有 Vulkan。
+
+可直接复制的工程模板（NDK、gradle、16KB page size 合规、JNI 接线全在里面）：
+[`examples/android/`](https://github.com/Milk-COCO/vireo/blob/master/examples/android/README.md)。
 
 ## 示例
 
-扁平 `examples/*.rs`，文件名即 `cargo run --example` 名。
+| example | 看什么 |
+|---|---|
+| `ez` | 官方 quickstart（上面那段代码） |
+| `text_hud` | 中文 HUD / 分段文本 |
+| `shapes` | 16 种形状与描边 |
+| `custom_material` | 自定义 WGSL 材质 |
+| `mrt` | 一次提交写多张颜色附件 |
+| `bench` | 压测 + draw call 统计 |
 
-```bash
-# 入门
-cargo run --example hello
-cargo run --example ez
+完整清单（72 个，按主题分类）见
+[`docs/EXAMPLES.md`](https://github.com/Milk-COCO/vireo/blob/master/docs/EXAMPLES.md)。
 
-# 文字
-cargo run --example text_attrs
-cargo run --example text_hud
-cargo run --example text_measure
-cargo run --example text_transform
-cargo run --example text_font
-cargo run --example text_clip
-cargo run --example text_batch_clip
-cargo run --example text_shape_cache
-cargo run --example text_profile
-cargo run --example text_stress
+## 深入阅读
 
-# 形状 / 变换
-cargo run --example shapes
-cargo run --example shapes_lines
-cargo run --example shapes_rotate
-cargo run --example shapes_cover_text
-cargo run --example transform_stack
-
-# 纹理
-cargo run --example texture
-cargo run --example texture_rgba
-cargo run --example texture_region
-cargo run --example texture_repeat
-cargo run --example texture_sdf_geo
-cargo run --example texture_fun
-
-# Batch / 裁切
-cargo run --example batch_inherit
-cargo run --example batch_child_clip
-cargo run --example batch_nest_clip
-cargo run --example batch_area_clip
-cargo run --example batch_scissor_clip
-cargo run --example batch_override
-cargo run --example batch_view
-
-# 渲染目标 / 计算
-cargo run --example depth_stencil
-cargo run --example mrt
-cargo run --example compute
-
-# 粒子
-cargo run --example particle_burst
-
-# 自定义 Material
-cargo run --example custom_material
-cargo run --example custom_material_stencil
-cargo run --example custom_material_textures
-cargo run --example custom_material_vertex
-cargo run --example custom_material_text
-cargo run --example custom_material_post
-cargo run --example custom_material_dynamic
-cargo run --example custom_material_manual
-cargo run --example custom_material_self_managed
-
-# 窗口 / 输入 / 离屏
-cargo run --example window_create
-cargo run --example window_api
-cargo run --example window_multi
-cargo run --example window_resize
-cargo run --example window_present
-cargo run --example on_demand
-cargo run --example window_aa
-cargo run --example exit_guard
-cargo run --example line_gradient
-cargo run --example input
-cargo run --example input_touch
-cargo run --example input_ime
-cargo run --example offscreen
-cargo run --example offscreen_aa
-cargo run --example color_palette
-cargo run --example layout_follow
-cargo run --example deferred
-cargo run --example multi_loop
-
-# 资源
-cargo run --example resource_io
-
-# 压力 / 诊断
-cargo run --example bench
-cargo run --example frame_stats
-cargo run --example frame_stats_multi
-cargo run --example frame_time_probe
-cargo run --example msaa_clamp
-cargo run --example loop_panic
-```
+- [自定义材质（Material ABI）](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/material.md)
+  —— `material_main` 契约、`MaterialInput` 字段、4-group 布局、MRT 多输出、自管 bind group。
+- [帧率、垂直同步与限流](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/throttling.md)
+  —— 四层节流分别是什么、怎么关、关掉之后必须自己接管什么、按需出帧与常见误解。
+- [关窗拦截与退出收尾](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/lifecycle.md)
+  —— `on_close_requested` 否决关窗，`on_exit` / `on_exit_render` 做收尾，四条退出路径各自覆盖到什么。
+- [折线沿线渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
+  —— 逐点色、弧长插值、降级语义与实测。
+- [平台支持](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)
+  —— 各平台验证到什么程度、Android 构建链、工具链与字体。
 
 ## 构建与测试
 
 ```bash
-cargo check
-cargo test --lib          # 推荐（跳过会开窗口的 doc-test）
-cargo build --examples
+cargo check --lib --examples --tests   # 期望 0 warning
+cargo test --lib                       # 只跑 lib 单测
+cargo test --release --test gpu_bench -- --ignored --test-threads=1   # 无头 GPU 用例（需 GPU）
 ```
 
-## 进一步阅读
+`cargo test`（不带 `--lib`）会跑到 crate 文档里的 doc-test，而 **doc-test 会真的开窗口**，
+在无头环境会挂住 —— 这是已知缺陷，所以只跑 `cargo test --lib`。
 
-- [帧率、垂直同步与限流](docs/reference/throttling.md) — 想关掉节流、或关掉之后想自己限流，看这篇：
-  四层节流分别是什么、怎么关、关掉之后必须自己接管什么（含 Windows 的 DWM 遮挡延迟）、
-  四种手动限流配方、按需出帧（脏驱动，空闲时 0 present/s）与常见误解。
-- [关窗拦截与退出收尾](docs/reference/lifecycle.md) — 「有未保存改动就别关窗」用
-  `on_close_requested`（返回 `false` 否决，X 与 `close()` 共用一条路）；退出前收尾用
-  `on_exit`（winit 线程、每进程一次）与 `on_exit_render`（渲染线程、能碰 GPU）。
-  含四条退出路径的覆盖范围、线程约束与反例。
-- [折线沿线渐变](docs/reference/line-gradient.md) — 一条线自己从头到尾变色/变透明：
-  `draw_line_chain_colors` 逐点色、按弧长连续过渡，仍是 1 个实例 1 次 draw
-  （不是切段单色，接头不会双 blend）。含降级语义、性能与实测数据。
+## 项目状态与风险
+
+**版本与文档的对应关系**：crates.io 上是 **0.1.2**；本文档描述的是**仓库 master**（0.2.0，
+未发布），其中 `on_close_requested`、`on_exit`、`set_clock`、`draw_line_chain_colors` 等
+**0.1.2 里还没有**。用 crates.io 版本时请对照
+[`CHANGELOG.md`](https://github.com/Milk-COCO/vireo/blob/master/CHANGELOG.md) 的迁移说明。
+
+**验证程度**：Windows 日常使用 + 全部 example 跑过；Android（HyperOS 16 真机 + API 35 模拟器）
+实测；Linux / macOS 只保证编译通过。测试覆盖等于「作者用过的路径」，不等于全路径 ——
+多窗口并发、极端 DPI、罕见 AA 组合随时可能出问题。
+
+### 前言：别用 Vireo
+
+此项目 95%（**甚至更多**）内容由 **AI生成**。而唯一开发者看过的内容只有 5%（**甚至更少**）。
+
+即使代码经过了 AI 的反复审查，依旧存在随时爆炸的风险。
 
 ## 许可证
 
 Vireo 采用双许可证，可任选以下任一许可证使用：
 
-- [Apache License 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
+- [Apache License 2.0](https://github.com/Milk-COCO/vireo/blob/master/LICENSE-APACHE)
+- [MIT License](https://github.com/Milk-COCO/vireo/blob/master/LICENSE-MIT)

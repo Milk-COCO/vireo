@@ -635,7 +635,20 @@ surface 建不出（`eglCreateWindowSurface`→`BAD_ALLOC`，477+ 次零成功�
 
 ## 非 Android
 
-（暂无）
+### README 首屏没有画面（Demo GIF / 截图）
+
+2026-10-31 README 重构后仍然只有 `logo.png`：一个 2D 渲染库的 README 里没有任何
+「画出来长什么样」的证据，这是选型者流失的最大单一原因（外部无上下文评审的一致结论）。
+
+**为什么还没做**：需要真机录屏 + 把二进制资产提交进仓库，agent 侧做不到。
+
+**做之前需要**：
+
+1. 挑 3 个最能说明质量的场景：`mrt_liquid_glass`（MRT + 自定义材质）、
+   `line_gradient`（沿线渐变 + 文字）、`bench` / `frame_stats`（压力与诊断 HUD）。
+2. 录 5–8 秒、≤5MB 的 GIF（或 MP4 外链），放 `docs/images/`，README 首屏引用 1 个。
+3. 顺带补一张 `examples/android/` 的真机截图 —— Android 是它最大的差异点，却一张图都没有。
+4. 改完跑一遍 README 链接校验（绝对 URL 指向 `master`）。
 
 ---
 
