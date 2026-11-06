@@ -799,6 +799,50 @@ mod tests {
         assert!(d < 0.1, "曲线中点距离应≈0，实际 {d}");
     }
 
+    /// 距离场生成耗时（真实字体）：`cargo test --lib sdf_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要系统字体；用于量化重新栅格化的成本（debug vs release 差很多）"]
+    fn sdf_timing() {
+        use cosmic_text::{Attrs, Buffer, Metrics, Shaping, SwashCache};
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut swash = SwashCache::new();
+        let mut buf = Buffer::new(&mut fs, Metrics::new(44.0, 52.8));
+        buf.set_text("国永光", &Attrs::new(), Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut fs, true);
+
+        let mut keys = Vec::new();
+        for run in buf.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let phys = glyph.physical((0.0, 0.0), 1.0);
+                if let Some(image) = swash.get_image(&mut fs, phys.cache_key) {
+                    let p = image.placement;
+                    if p.width > 0 && p.height > 0 {
+                        keys.push((
+                            phys.cache_key,
+                            (p.left as i16, p.top as i16, p.width as u16, p.height as u16),
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(!keys.is_empty(), "没有排到字形（系统字体缺失？）");
+
+        for band in [4.0f32, 8.0, 16.0] {
+            let start = std::time::Instant::now();
+            let n = 20;
+            for _ in 0..n {
+                for (key, placement) in &keys {
+                    let _ = generate(&mut fs, *key, *placement, band);
+                }
+            }
+            let per_glyph = start.elapsed().as_secs_f64() * 1000.0 / (n * keys.len()) as f64;
+            println!(
+                "  band {band:.0}: {per_glyph:.3} ms/字形（{} 个字形 × {n} 轮）",
+                keys.len()
+            );
+        }
+    }
+
     /// zeno 的 stroker 是否真的区分 Miter / Round（尖角处 miter 应更高）。
     #[test]
     fn zeno_stroke_honors_join() {

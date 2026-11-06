@@ -5,9 +5,13 @@
 //!
 //! 按键：
 //! - `1`..`9` / `0` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 内阴影 / 全部 / 渐变字 /
-//!   emoji / 几何描边）
-//! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变）
+//!   emoji / 几何描边）；默认第 1 组，按 `7` 看全部
+//! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变；按住每 140ms 走 0.5）
 //! - `Q` / `ESC` 退出
+//!
+//! **性能提示**：带样式的字形要现场算距离场（约 0.25–1.8 ms/字形，见
+//! `cargo test --lib sdf_timing -- --ignored --nocapture`）。debug 构建比 release 慢 5–7 倍，
+//! 所以调宽度请在 `--release` 下玩：`cargo run --release --example text_style`。
 
 use std::sync::Arc;
 
@@ -44,7 +48,13 @@ async fn main(app: App) {
     let idx = app.window(WindowDesc::new("Vireo Text Styles", W, H));
 
     let mut width = 2.0f32;
-    let mut group = 7u32;
+    // 默认只画一组：一次上 100+ 个带样式字形在 debug 下要几百毫秒（每个字形都要算距离场）。
+    // 想看全部按 7。
+    let mut group = 1u32;
+    // 描边宽度按"重复延迟"步进，而不是每帧步进：
+    // 每帧步进 = 60 次/秒，会把 band 档位一路撞过去，每次都触发重新栅格化（看着就像卡死）。
+    let mut repeat_at = std::time::Instant::now();
+    let mut held = (false, false);
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -54,12 +64,22 @@ async fn main(app: App) {
         if win.key_down(KeyCode::Escape) || win.key_down(KeyCode::KeyQ) {
             return false;
         }
-        if win.key_down(KeyCode::ArrowLeft) {
-            width = (width - 0.5).max(0.5);
+        let (left, right) = (
+            win.key_down(KeyCode::ArrowLeft),
+            win.key_down(KeyCode::ArrowRight),
+        );
+        let dir = match (left, right) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        // 刚按下立刻响应一次；按住之后每 140ms 走一步。
+        let fresh = dir != 0 && (held.0, held.1) != (left, right);
+        if dir != 0 && (fresh || repeat_at.elapsed().as_millis() >= 140) {
+            width = (width + 0.5 * dir as f32).clamp(0.5, 8.0);
+            repeat_at = std::time::Instant::now();
         }
-        if win.key_down(KeyCode::ArrowRight) {
-            width = (width + 0.5).min(8.0);
-        }
+        held = (left, right);
         for (k, code) in [
             (1u32, KeyCode::Digit1),
             (2, KeyCode::Digit2),

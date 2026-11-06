@@ -388,6 +388,27 @@ pub type TextStyleRef = Arc<TextStyle>;
 pub(crate) const STYLE_STRIDE_U32: usize = 12;
 /// 单层（4 × vec4 = 64B）。
 pub(crate) const LAYER_STRIDE_U32: usize = 16;
+
+/// 距离场带宽的档位。
+///
+/// **为什么是档位而不是 `ceil(reach)`**：band 进了字形缓存键，任何一点变化都会让所有
+/// 带样式的字形**重新栅格化**（从轮廓算距离）。按 1px / 1/8px 递增时，拖一次描边宽度
+/// 滑块就会连续几十帧重算全屏文字 —— 卡的就是这里。档位够粗之后，调宽度几乎不重建。
+///
+/// 代价：档位定得大一点 = 精度略降（8bit 铺在 ±band 上：band=4 约 0.031px/级、
+/// band=8 约 0.063、band=16 约 0.125、band=32 约 0.25），对 1px 级 AA 完全够用；
+/// padding 也跟着变大（2*band），所以只留 4 档。
+const BAND_TIERS: [f32; 4] = [4.0, 8.0, 16.0, 32.0];
+
+/// 把「样式外扩」映射到带宽档位（向上取档）。
+pub(crate) fn band_for_reach(reach: f32) -> f32 {
+    for tier in BAND_TIERS {
+        if reach <= tier {
+            return tier;
+        }
+    }
+    BAND_TIERS[BAND_TIERS.len() - 1]
+}
 /// 单个渐变停点（2 × vec4 = 32B）。
 pub(crate) const STOP_STRIDE_U32: usize = 8;
 
@@ -445,7 +466,7 @@ impl StyleTable {
         if style.layers.len() > 8 {
             warn_once(&LAYER_WARNED, "vireo: 文本样式图层数 > 8，多余的层已忽略");
         }
-        let band = (reach.ceil()).clamp(2.0, 32.0);
+        let band = band_for_reach(reach);
         let layer_count = style.layers.len().min(8) as u32;
 
         let mut style_rec = [0u32; STYLE_STRIDE_U32];
@@ -656,6 +677,29 @@ mod tests {
         assert!(
             reach >= 3.0 + 2.0 * 3.0 + 1.0,
             "reach 应覆盖 3σ 与偏移，实际 {reach}"
+        );
+    }
+
+    /// band 是**档位**：小幅调宽度不会换档，也就不会触发重新栅格化。
+    #[test]
+    fn band_snaps_to_tiers() {
+        assert_eq!(band_for_reach(0.5), 4.0);
+        assert_eq!(band_for_reach(4.0), 4.0);
+        assert_eq!(band_for_reach(4.1), 8.0);
+        assert_eq!(band_for_reach(15.9), 16.0);
+        assert_eq!(band_for_reach(100.0), 32.0, "超上限钳到最后一档");
+
+        // 描边 0.5..8 + 3σ/偏移余量 ⇒ 只有少数几档，滑块拖动不会每帧重建。
+        let mut tiers = std::collections::BTreeSet::new();
+        let mut w = 0.5f64;
+        while w <= 8.0 {
+            let style = TextStyle::outline(crate::dpi::Dp(w), BLACK);
+            tiers.insert(band_for_reach(style.reach_px(1.0)) as u32);
+            w += 0.5;
+        }
+        assert!(
+            tiers.len() <= 3,
+            "宽度 0.5..8 只该落到 ≤3 档，实际 {tiers:?}"
         );
     }
 
