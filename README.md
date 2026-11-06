@@ -121,7 +121,8 @@ async fn main(app: App) {
   [渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)。
 - **文字**：整段 shape 缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
   COLRv1 彩色 emoji；**文本样式**（描边 / 多层描边 / 软投影 / 发光 / 内描边 / 内阴影）走
-  字形距离场，见
+  字形距离场，**精确 SDF 与 MSDF 并存**（`TextDef.sdf_mode`）：MSDF 让改字号/改描边宽度
+  不再重新栅格化。见
   [文本样式](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)。
 
 ## Android：这里是它最特别的地方

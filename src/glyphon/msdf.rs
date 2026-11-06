@@ -475,6 +475,55 @@ mod tests {
         );
     }
 
+    /// MSDF 生成耗时（真实字体）：`cargo test --lib msdf_timing -- --ignored --nocapture`
+    ///
+    /// 与 `sdf::sdf_timing` 的精确 SDF 并列看：MSDF 更贵（三通道 + RGBA8），
+    /// 但**一个字形只算一次**（与字号/宽度无关），所以多尺寸/反复调宽度时总量更省。
+    #[test]
+    #[ignore = "需要系统字体；量化 MSDF 生成成本（debug vs release 差很多）"]
+    fn msdf_timing() {
+        use cosmic_text::{Attrs, Buffer, Metrics, Shaping, SwashCache};
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut swash = SwashCache::new();
+        let mut buf = Buffer::new(&mut fs, Metrics::new(48.0, 57.6));
+        buf.set_text("国永光", &Attrs::new(), Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut fs, true);
+
+        let mut keys = Vec::new();
+        for run in buf.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let phys = glyph.physical((0.0, 0.0), 1.0);
+                if let Some(image) = swash.get_image(&mut fs, phys.cache_key) {
+                    let p = image.placement;
+                    if p.width > 0 && p.height > 0 {
+                        keys.push((
+                            phys.cache_key,
+                            (p.left as i16, p.top as i16, p.width as u16, p.height as u16),
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(!keys.is_empty(), "没有排到字形（系统字体缺失？）");
+
+        for range_em in MSDF_RANGE_EM {
+            let range = range_em * MSDF_EM_LADDER[1]; // 48em
+            let start = std::time::Instant::now();
+            let n = 10;
+            for _ in 0..n {
+                for (key, placement) in &keys {
+                    let _ = generate(&mut fs, *key, *placement, range);
+                }
+            }
+            let per_glyph = start.elapsed().as_secs_f64() * 1000.0 / (n * keys.len()) as f64;
+            println!(
+                "  MSDF em48 range {:.2}em ({range:.1}px): {per_glyph:.3} ms/字形（{} 个字形 × {n} 轮）",
+                range_em,
+                keys.len()
+            );
+        }
+    }
+
     #[test]
     fn pick_em_and_range_ladders() {
         assert_eq!(pick_em(12.0), 24.0, "12px 目标 -> 24em（0.75*12=9 <= 24）");
