@@ -18,7 +18,8 @@ use std::sync::Arc;
 use vireo::prelude::*;
 
 const W: u32 = 900;
-const H: u32 = 520;
+// 10 组 × 84px 行距 ≈ 840，窗口要放得下（之前 520 高，后几组直接被裁掉）
+const H: u32 = 900;
 
 /// 一行演示文字 + 说明。
 fn row(b: &mut DrawBatch, y: f32, label: &str, text: &str, style: Option<TextStyle>, width: f32) {

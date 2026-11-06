@@ -152,8 +152,11 @@ impl TextRenderer {
         };
         let resolution = viewport.resolution();
 
+        // 整个 prepare 调用共用一组桶：**跨 entry（多行/多段）也按层排序**，
+        // 否则下一行的描边会盖住上一行的字形本体（行距 + 描边外扩时特别明显）。
+        let mut buckets = QuadBuckets::default();
+
         for text_area in text_areas {
-            let mut buckets = QuadBuckets::default();
             // 恒等 transform：顶点坐标即屏幕物理像素，可裁到视口。
             // 非恒等：VS 才乘 transform（如 batch 父平移），此处仍是局部坐标；
             // 若再夹到 [0,res]，圆心附近 y<0 的字体会被切掉上半（text_batch_clip）。
@@ -284,8 +287,8 @@ impl TextRenderer {
                     )?;
                 }
             }
-            buckets.flush_into(&mut self.glyph_vertices);
         }
+        buckets.flush_into(&mut self.glyph_vertices);
 
         if !self.defer_upload {
             self.upload(device, queue);

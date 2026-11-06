@@ -6544,6 +6544,44 @@ fn text_style_diagnose_presets() {
         "国",
     );
     dump("仅发光", Some(TextStyle::glow(8.0, red)), "国");
+    // 示例第 1 组的真实文字/字号：整行 "Outline 描边"，看 w>=16 是否真的变方块
+    for w in [12.0f32, 16.0, 20.0] {
+        let c = OffscreenCanvas::new(&gpu, 320, 96);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "Outline 描边",
+            Pos::new(10.0, 10.0),
+            TextDef {
+                style: Some(Arc::new(TextStyle::outline(w, red))),
+                ..TextDef::default().font_size(44.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        println!("  row w={w}:");
+        for y in (0..96).step_by(4) {
+            let mut row = String::new();
+            for x in (0..320).step_by(4) {
+                let i = ((y * 320 + x) * 4) as usize;
+                let (r, g, bl) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+                row.push(if r + g + bl < 40 {
+                    '.'
+                } else if r > 120 && g < 90 && bl < 90 {
+                    'R'
+                } else if r > 170 && g > 170 && bl > 170 {
+                    '#'
+                } else {
+                    '+'
+                });
+            }
+            println!("{row}");
+        }
+    }
+    dump("描边 w=12", Some(TextStyle::outline(12.0, red)), "国");
+    dump("描边 w=16", Some(TextStyle::outline(16.0, red)), "国");
+    dump("描边 w=24", Some(TextStyle::outline(24.0, red)), "国");
     dump(
         "内阴影（偏移 6,6 / 软边 3）",
         Some(TextStyle::inner_shadow((6.0, 6.0), 3.0, ink).with_fill(TextPaint::solid(whitish))),
