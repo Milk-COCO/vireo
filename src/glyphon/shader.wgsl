@@ -265,8 +265,17 @@ fn apply_layer(
     let off = vec2<f32>(bitcast<f32>(geom.x), bitcast<f32>(geom.y));
     let soft = bitcast<f32>(geom.z);
     let thr = bitcast<f32>(geom.w);
-    let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
-    let uv = clamp(at + off / dims, entry_min, entry_max);
+    // 偏移量是**目标设备像素**，要换算成条目 texel：(off / msdf_scale) / dims。
+    // dims 必须取**当前字形所在的图集**（MSDF 是独立 RGBA 图集，尺寸不同）——
+    // 用错图集的尺寸会让偏移被放大/缩小，层带偏移的采样在条目边界被 clamp 成一条直线
+    // （投影/发光看起来像"被矩形裁掉"）。
+    let dims = select(
+        vec2<f32>(textureDimensions(mask_atlas_texture)),
+        vec2<f32>(textureDimensions(msdf_atlas_texture)),
+        content_type == 3u,
+    );
+    let off_uv = off / (max(msdf_scale, 1e-3) * dims);
+    let uv = clamp(at + off_uv, entry_min, entry_max);
     let d = sample_d(uv, content_type, d_range, msdf_scale);
     var cov = coverage(d, thr, soft);
     if ((flags & 4u) != 0u) {

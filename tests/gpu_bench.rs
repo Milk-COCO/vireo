@@ -6389,6 +6389,67 @@ fn text_msdf_opt_in_renders() {
     );
 }
 
+/// 投影在 MSDF 下**不能被条目边界裁掉**：有内容区域的外接矩形应与精确 SDF 一致（±2px）。
+/// 之前 `apply_layer` 用错图集尺寸算偏移，投影右下方被 clamp 成一条直线。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_shadow_extent_matches_exact() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 260;
+    let ink = Color::new(0.05, 0.06, 0.09, 1.0);
+
+    let bbox = |mode: TextSdfMode| -> (u32, u32, u32, u32) {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(40.0, 30.0),
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::shadow((4.0, 4.0), 3.0, ink).with_fill(TextPaint::solid(WHITE)),
+                )),
+                sdf_mode: mode,
+                ..TextDef::default().font_size(90.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let (mut x0, mut y0, mut x1, mut y1) = (N, N, 0u32, 0u32);
+        for y in 0..N {
+            for x in 0..N {
+                let i = ((y * N + x) * 4) as usize;
+                if px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 40 {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    };
+
+    let e = bbox(TextSdfMode::Exact);
+    let m = bbox(TextSdfMode::Msdf);
+    println!("  投影外接矩形：精确 {e:?} vs MSDF {m:?}");
+    for (name, a, b) in [
+        ("x0", e.0, m.0),
+        ("y0", e.1, m.1),
+        ("x1", e.2, m.2),
+        ("y1", e.3, m.3),
+    ] {
+        let d = (a as i64 - b as i64).abs();
+        assert!(
+            d <= 2,
+            "投影外接矩形 {name} 应与精确 SDF 一致（{a} vs {b}，差 {d}px）"
+        );
+    }
+}
+
 /// MSDF 的**边缘对齐**：同一字号（生成 em = 目标字号，scale = 1）下，逐行最左/最右亮像素
 /// 与精确 SDF 的差 ≤1px。比总面积更能代表“边缘位置对不对”。
 #[test]

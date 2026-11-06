@@ -59,6 +59,8 @@ async fn main(app: App) {
     // 距离场表示：M 键在 A/B 行上循环切换
     let mut a_b_mode = TextSdfMode::Auto;
     let mut held_m = false;
+    // 帧耗时统计（HUD 显示；按键后"要等多久"看这个）
+    let mut frame_ms = 0.0f64;
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -314,6 +316,10 @@ async fn main(app: App) {
             }
         }
 
+        // 帧耗时（含"这一帧栅格化了多少字形"）——按键后要等多久，看这个数最直接
+        frame_ms = frame_ms * 0.85 + ctx.frame_time() * 1000.0 * 0.15; // 指数平滑
+        let fps = ctx.fps();
+
         draw_text(
             &mut b.texts,
             &format!(
@@ -323,6 +329,13 @@ async fn main(app: App) {
             Pos::new(28.0, 24.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.72, 0.77, 0.86, 1.0)),
+        );
+        draw_text(
+            &mut b.texts,
+            &format!("帧 {frame_ms:.1} ms（{fps:.0} fps）"),
+            Pos::new(28.0, 42.0),
+            TextDef::default().font_size(12.0),
+            TextOverride::from_color(Color::new(0.5, 0.56, 0.66, 1.0)),
         );
 
         win.draw(Color::new(0.07, 0.075, 0.09, 1.0), &[&b]);
