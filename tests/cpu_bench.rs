@@ -507,7 +507,7 @@ fn bench_particle_push() {
         sdf_type: 0,
         sdf_feather: 1.0,
         transform_index: 0,
-        _pad: 0,
+        grad: 0,
         _pad2: [0, 0],
     };
     for &n in &[500usize, 2000usize] {

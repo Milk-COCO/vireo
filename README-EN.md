@@ -126,8 +126,9 @@ Details, verification depth and known issues (emulator compatibility, font sourc
 - **On-demand rendering & throttling**: skip the frame entirely when nothing changed (0 present/s
   while idle); all four throttling layers can be disabled individually — see
   [throttling](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/throttling.md).
-- **Polyline gradient**: per-point color along one line, still 1 instance / 1 draw call — see
-  [line gradient](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md).
+- **Gradients**: rect / rounded / circle / line / polyline / polygon — one mechanism, either
+  box-axial or along the shape; still 1 instance / 1 draw call — see
+  [gradients](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md).
 - **Text**: whole-run shape cache, HUD parts (monospace stepping), `StableText`, custom fonts and
   attrs, COLRv1 color emoji.
 
@@ -170,8 +171,10 @@ Full list (72 examples, grouped by topic):
   — what the four throttling layers are, how to disable them, what you must take over afterwards.
 - [Close interception and exit hooks](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/lifecycle.md)
   — veto a close with `on_close_requested`; `on_exit` / `on_exit_render` for teardown.
-- [Polyline gradient](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
-  — per-point color, arc-length interpolation, degradation rules, measurements.
+- [Gradients](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)
+  — box-axial / along-shape gradients, stop rules, the SDF-only tradeoff, measurements.
+- [Per-point polyline colors](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
+  — `draw_line_chain_colors`: arc-length colors and measurements.
 - [Platform support](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)
   — verification depth per platform, Android build chain, toolchain, fonts.
 

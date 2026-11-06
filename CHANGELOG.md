@@ -4,6 +4,35 @@
 
 ### Added / 新增
 
+- **渐变通道（轴向 / 线段 / 折线，覆盖全部 SDF 形状）**：新增
+  `draw_rect_gradient` / `draw_rounded_rect_gradient` / `draw_circle_gradient` /
+  `draw_line_gradient` / `draw_shape_gradient`（+ `DrawBatch` 镜像），由 `GradientStop`
+  （`(位置, 颜色)` 停点）与 `LinearGradient`（角度 + 停点）描述。
+  - **渐变坐标由形状决定**：线段沿 `p1→p2`（`draw_line_gradient` 没有角度参数）、
+    折线沿弧长（与 `draw_line_chain_colors` 共用同一通道）、其余形状沿 `angle_deg`
+    并**跨满形状包围盒**（0° = 自上而下，90° = 自左而右）。
+  - **一个形状 = 一个实例 = 一次 draw**，与单色绘制完全同一条路径：没有额外 batch、
+    没有额外 bind group。渐变坐标在顶点着色器算（仿射 ⇒ 插值后逐像素精确），
+    片元只多一次色带查表。
+  - 色带**按内容去重**（同停点 + 同角度 ⇒ 一份数据，与尺寸无关），平台/淡出用停点位置
+    表达（`(0,c),(0.62,c),(1,d)`），半透明压暗不再需要「切 N 条窄带」。
+  - **预乘插值**：透明 → 深色不会再出现边缘发暗；停点可重复（硬边）、可越界（平台）、
+    顺序无关。
+  - 1 个停点或全等色**退化为单色绘制**，与既有路径**逐像素一致**；旧路径（无渐变）
+    逐像素不变（实例的渐变索引恒为 0）。
+  - **只走 SDF 路径**：渐变绘制会强制 SDF 实例（`sdf_feather` 只决定边缘软硬，
+    `None` ⇒ 硬边），不做静默单色回落。geo 模板 / mesh 路径 / 文字 / 自定义材质不支持
+    （文档写明）。
+  - 实测（`tests/gpu_bench.rs`）：8 种形状「单色渐变 ≡ 单色绘制」逐像素一致；竖直渐变与
+    理想 ramp 线性偏差 ≤ 4.3/255 且逐像素无台阶；圆角外像素为 0；线段渐变与两点折线渐变
+    逐像素一致；贴图 × 渐变 = 两者相乘。新增 `docs/reference/gradient.md` 与
+    `examples/gradient.rs`。
+  Gradient channel for all SDF shapes: `draw_rect_gradient` / `draw_shape_gradient` /
+  `draw_line_gradient` (no angle — the segment is its own axis), `GradientStop`-based stops,
+  per-shape gradient coordinates, one instance per shape on the existing SDF path, content-deduped
+  ramp table shared with the polyline gradient. Solid-only paths are pixel-identical when no
+  gradient is used (the instance gradient index stays 0).
+
 - **折线沿线渐变（逐点色）**：新增 `draw_line_chain_colors(batch, points, thickness, colors)`
   与 `DrawBatch::line_chain_colors(..)` —— 第 i 个点取 `colors[i]`，两点之间**沿弧长**
   平滑过渡，颜色在片元里逐像素求值。整条链仍然是 **1 个 SDF 实例 / 1 次 draw**

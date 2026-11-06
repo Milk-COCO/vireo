@@ -5158,3 +5158,677 @@ fn line_chain_colors_per_sample_aa() {
     );
     println!("  PerSample4 渐变：start={start} end={end} ok");
 }
+
+// ==================== 渐变通道（全 SDF 形状） ====================
+//
+// 同样注意：离屏 canvas 是 **sRGB** 目标，期望值用 `srgb255()`。
+
+fn gstop(at: f32, c: Color) -> GradientStop {
+    GradientStop::new(at, c)
+}
+
+/// 没有渐变语义的对照：所有形状用"单色渐变"必须与普通单色绘制**逐像素一致**。
+///
+/// 这条同时钉住片元的 `cov` 重构（把 6 处 `out_color.a *= smoothstep` 收进尾巴）
+/// 与尾巴的渐变分支：只要任何一处改动引入差异，这里就红。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn gradient_uniform_matches_solid() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+    let c = Color::new(0.85, 0.35, 0.20, 0.8);
+    let one = [gstop(0.0, c)];
+    let shapes: Vec<(&str, Shape<'static>)> = vec![
+        (
+            "rect",
+            Shape::Rect {
+                pos: Pos::new(14.0, 14.0),
+                w: 60.0,
+                h: 40.0,
+            },
+        ),
+        (
+            "rounded",
+            Shape::RoundedRect {
+                pos: Pos::new(14.0, 14.0),
+                w: 60.0,
+                h: 40.0,
+                radius: 12.0,
+            },
+        ),
+        (
+            "circle",
+            Shape::Circle {
+                pos: Pos::new(48.0, 48.0),
+                r: 30.0,
+            },
+        ),
+        (
+            "ellipse",
+            Shape::Ellipse {
+                pos: Pos::new(48.0, 48.0),
+                rx: 34.0,
+                ry: 20.0,
+            },
+        ),
+        (
+            "line",
+            Shape::Line {
+                x1: 14.0,
+                y1: 20.0,
+                x2: 80.0,
+                y2: 70.0,
+                thickness: 6.0,
+            },
+        ),
+        (
+            "triangle",
+            Shape::Triangle {
+                x1: 20.0,
+                y1: 70.0,
+                x2: 48.0,
+                y2: 20.0,
+                x3: 76.0,
+                y3: 70.0,
+            },
+        ),
+        (
+            "arc",
+            Shape::Arc {
+                pos: Pos::new(48.0, 48.0),
+                r: 30.0,
+                start: 0.2,
+                end: 2.4,
+            },
+        ),
+    ];
+    let poly = [(20.0f32, 70.0f32), (48.0, 20.0), (76.0, 70.0)];
+    let mut shapes = shapes;
+    shapes.push(("polygon", Shape::Polygon { points: &poly }));
+    for (name, shape) in shapes {
+        // A) 普通单色
+        let ca = OffscreenCanvas::new(&gpu, N, N);
+        let mut a = DrawBatch::new();
+        draw_shape(&mut a, &shape, ShapeOverride::new().color(c));
+        ca.draw(Some(BLACK), &[&a]);
+        let pa = ca.read_pixels();
+
+        // B) 单色渐变（走渐变通道，但语义上等于单色）
+        let cb = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_shape_gradient(&mut b, &shape, LinearGradient::vertical(&one));
+        cb.draw(Some(BLACK), &[&b]);
+        let pb = cb.read_pixels();
+
+        assert!(pa.iter().any(|v| *v > 0), "{name}: 用例失效（什么都没画）");
+        let diff = pa.iter().zip(pb.iter()).filter(|(x, y)| x != y).count();
+        assert_eq!(
+            diff, 0,
+            "{name}: 单色渐变与 draw_shape 必须逐像素一致（差 {diff} 字节）"
+        );
+    }
+    println!("  8 种形状：单色渐变 == 单色绘制（逐像素）");
+}
+
+/// 竖直双色渐变：单调、无台阶、与线性 ramp 一致。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_is_smooth() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 96;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        80.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |y: u32| -> i32 { px[((y * W + 32) * 4) as usize] as i32 };
+
+    // 台阶要在**线性 alpha** 空间判：sRGB 编码在暗端会把 1 级 alpha 放大成 ~25 级像素。
+    let lin = |p: i32| -> f32 {
+        let x = p as f32 / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let mut prev = at(8);
+    for y in 9..=88u32 {
+        let got = at(y);
+        assert!(got <= prev + 1, "y={y} 回弹：{prev} -> {got}");
+        let step = (lin(prev) - lin(got)).abs() * 255.0;
+        assert!(step <= 8.0, "y={y} 线性空间跳 {step:.1}/255（有台阶）");
+        prev = got;
+    }
+    // 与线性 ramp 比也走**线性**空间（sRGB 暗端 1/255 的线性差能放大成 ~18 级像素）。
+    let mut worst = 0.0f32;
+    for y in 8..=88u32 {
+        let t = ((y as f32 + 0.5 - 8.0) / 80.0).clamp(0.0, 1.0);
+        worst = worst.max((lin(at(y)) - (1.0 - t)).abs() * 255.0);
+    }
+    // 容差 6/255：1/255 量化 + 像素中心与渐变的半像素采样差。\n    // 台阶/单调性另由上面的逐像素断言保证。\n    assert!(worst <= 6.0, "与线性 ramp 最大偏差 {worst:.2}/255（线性空间）");
+    assert!(at(8) > 240, "起点应接近不透明");
+    assert!(at(88) < 40, "终点应接近全透明");
+    println!("  竖直渐变：最大偏差 {worst:.2}/255（线性），单调无台阶");
+}
+
+/// vault 的真实形态：底部 38% 才淡出，上 62% 是平台。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_plateau() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 128;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(0.0, 0.0, 0.0, 0.0)),
+        gstop(0.62, Color::new(0.0, 0.0, 0.0, 0.0)),
+        gstop(1.0, Color::new(0.0, 0.0, 0.0, 0.62)),
+    ];
+    // 白底上压一层黑：方便看 alpha
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        W as f32,
+        H as f32,
+        Some(Color::new(1.0, 1.0, 1.0, 1.0)),
+    );
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        112.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |y: u32| -> i32 { px[((y * W + 32) * 4) as usize] as i32 };
+
+    // 平台段：8..=8+0.62*112≈77 —— 全都一样（±1）
+    let top = at(10);
+    for y in 10..=72u32 {
+        assert!(
+            (at(y) - top).abs() <= 1,
+            "y={y} 平台段不一致：{top} vs {}",
+            at(y)
+        );
+    }
+    // 淡出段：77..=120 单调变暗
+    let mut prev = at(78);
+    for y in 79..=118u32 {
+        let got = at(y);
+        assert!(got <= prev + 1, "y={y} 淡出段应单调变暗：{prev} -> {got}");
+        prev = got;
+    }
+    assert!(
+        at(118) < top - 60,
+        "底部应明显变暗：top={top} bottom={}",
+        at(118)
+    );
+    println!("  平台 + 淡出：平台 {top}，底部 {}，ok", at(118));
+}
+
+/// 角度语义：0° = 自上而下，90° = 自左而右。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_angle_swaps_axis() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 返回 [上, 下, 左, 右] 四个采样点
+    let sample = |grad: LinearGradient<'_>| -> [i32; 4] {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_rect_gradient(&mut b, Pos::new(8.0, 8.0), 48.0, 48.0, grad);
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let at = |x: u32, y: u32| px[((y * N + x) * 4) as usize] as i32;
+        [at(32, 12), at(32, 52), at(12, 32), at(52, 32)]
+    };
+    let v = sample(LinearGradient::vertical(&stops)); // 上亮下暗
+    assert!(v[0] > v[1] + 100, "0° 应自上而下：{v:?}");
+    let h = sample(LinearGradient::horizontal(&stops)); // 左亮右暗
+    assert!(h[2] > h[3] + 100, "90° 应自左而右：{h:?}");
+    // 0° 时左右应几乎相同（轴正交）；90° 时上下应几乎相同。
+    assert!((v[2] - v[3]).abs() < 20, "0° 的左右应一致：{v:?}");
+    assert!((h[0] - h[1]).abs() < 20, "90° 的上下应一致：{h:?}");
+    println!("  角度：vertical={v:?} horizontal={h:?} ok");
+}
+
+/// 渐变跟随 batch 变换：本地空间语义（旋转 90° 后渐变也转）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_follows_transform() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 正方形转 90°：本地"上"变成屏幕"右"。
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    b.set_position(32.0, 32.0);
+    b.set_deg(90.0);
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(-24.0, -24.0),
+        48.0,
+        48.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |x: u32, y: u32| px[((y * N + x) * 4) as usize] as i32;
+    let (left, right) = (at(12, 32), at(52, 32));
+    assert!(
+        (left - right).abs() > 100,
+        "旋转后渐变应沿屏幕水平方向：left={left} right={right}"
+    );
+    println!("  跟随变换：left={left} right={right} ok");
+}
+
+/// 圆角裁剪：圆角外的像素完全不被写，渐变不越过圆角。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_rounded_corners() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+    ];
+    draw_rounded_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        48.0,
+        20.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |x: u32, y: u32| px[((y * N + x) * 4) as usize] as i32;
+    assert!(at(32, 32) > 200, "中心必须被填满");
+    // 左上角 (9,9) 在半径 20 的圆角外 → 必须是黑的。
+    assert_eq!(at(9, 9), 0, "圆角外不该有像素");
+    println!("  圆角：中心 {} / 角 {}", at(32, 32), at(9, 9));
+}
+
+/// 预乘插值：透明 → 黑 叠在**亮色**上不得出现"边缘发暗"。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_premultiplied() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    // 白底 + 红→透明 的压暗层：中点必须是 50% 红压白，而不是偏暗的浑浊色。
+    draw_rectangle(
+        &mut b,
+        Pos::new(0.0, 0.0),
+        W as f32,
+        H as f32,
+        Some(Color::new(1.0, 1.0, 1.0, 1.0)),
+    );
+    let stops = [
+        gstop(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 0.0, 0.0, 0.0)),
+    ];
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        48.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let i = ((32 * W + 32) * 4) as usize;
+    let (r, g, bl) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+    // 预乘：(1,0,0,1) 与 (0,0,0,0) 的中点 = (0.5,0,0,0.5) → 反预乘 (1,0,0)，a=0.5
+    // 叠白底 ⇒ 线性 (1,0.5,0.5) → sRGB ≈ (255,188,188)
+    assert!(r > 240, "红分量应保持饱和，实际 {r}");
+    assert!(
+        (g as f32 - srgb255(0.5)).abs() < 16.0,
+        "绿分量应 ≈ sRGB(0.5)≈188（偏暗说明在直通空间插值），实际 {g}"
+    );
+    assert!((bl as f32 - srgb255(0.5)).abs() < 16.0, "蓝分量 {bl}");
+    println!("  预乘：中点 rgb=({r},{g},{bl}) ok");
+}
+
+/// 非矩形形状也要"跨满自身"：圆的轴向渐变沿直径。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn circle_gradient_spans_diameter() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    draw_circle_gradient(
+        &mut b,
+        Pos::new(32.0, 32.0),
+        24.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |y: u32| -> i32 { px[((y * N + 32) * 4) as usize] as i32 };
+    assert!(at(10) > 200, "圆的顶部应接近不透明，实际 {}", at(10));
+    let near_clear = srgb255(0.0625) as i32 + 24;
+    assert!(
+        at(53) < near_clear,
+        "圆的底部应接近全透明（< {near_clear}），实际 {}",
+        at(53)
+    );
+    println!("  圆：top={} bottom={} ok", at(10), at(53));
+}
+
+/// 线段渐变：沿 p1→p2 精确映射（10% / 90% 处取到 10% / 90% 的混合）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_gradient_endpoints_exact() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 128;
+    const H: u32 = 32;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 水平线 x: 8 → 120，中心行 y=16
+    draw_line_gradient(&mut b, 8.0, 16.0, 120.0, 16.0, 8.0, &stops);
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |x: u32| -> i32 { px[((16 * W + x) * 4) as usize] as i32 };
+    let lo: f32 = 8.0 + 112.0 * 0.1;
+    let hi: f32 = 8.0 + 112.0 * 0.9;
+    let got_lo = at(lo.round() as u32);
+    let want_lo = srgb255(0.9) as i32;
+    assert!(
+        (got_lo - want_lo).abs() <= 12,
+        "10% 处应 ≈ sRGB(0.9)={want_lo}，实际 {got_lo}"
+    );
+    let got_hi = at(hi.round() as u32);
+    let want_hi = srgb255(0.1) as i32;
+    assert!(
+        (got_hi - want_hi).abs() <= 12,
+        "90% 处应 ≈ sRGB(0.1)={want_hi}，实际 {got_hi}"
+    );
+    println!("  线段渐变：10%={got_lo}（期望 {want_lo}） 90%={got_hi}（期望 {want_hi}）");
+}
+
+/// 线段渐变（kind 2）与"两点折线渐变"（kind 1）必须逐像素一致。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_gradient_matches_chain_of_two_points() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+    let stops = [
+        gstop(0.0, Color::new(1.0, 0.85, 0.3, 1.0)),
+        gstop(1.0, Color::new(0.2, 0.85, 0.95, 1.0)),
+    ];
+    let ca = OffscreenCanvas::new(&gpu, N, N);
+    let mut a = DrawBatch::new();
+    draw_line_gradient(&mut a, 12.0, 20.0, 84.0, 72.0, 9.0, &stops);
+    ca.draw(Some(BLACK), &[&a]);
+    let pa = ca.read_pixels();
+
+    let cb = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    draw_line_chain_colors(
+        &mut b,
+        &[(12.0, 20.0), (84.0, 72.0)],
+        9.0,
+        &[stops[0].color, stops[1].color],
+    );
+    cb.draw(Some(BLACK), &[&b]);
+    let pb = cb.read_pixels();
+
+    assert!(pa.iter().any(|v| *v > 0), "用例失效");
+    let diff = pa.iter().zip(pb.iter()).filter(|(x, y)| x != y).count();
+    assert_eq!(
+        diff, 0,
+        "线段渐变与两点折线渐变应逐像素一致（差 {diff} 字节）"
+    );
+    println!("  线段渐变 == 两点折线渐变（逐像素）");
+}
+
+/// 折线渐变按**弧长**而不是包围盒：不等长两段的中点取中点色。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn polyline_gradient_is_arc_length() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 160;
+    const H: u32 = 40;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 段长 60 + 100 = 160；弧长中点 x = 8 + 80 = 88（不是包围盒中点）。
+    let pts = [(8.0f32, 20.0f32), (68.0, 20.0), (168.0, 20.0)];
+    draw_shape_gradient(
+        &mut b,
+        &Shape::LineChain {
+            points: &pts,
+            thickness: 8.0,
+        },
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |x: u32| -> i32 { px[((20 * W + x) * 4) as usize] as i32 };
+    let mid = srgb255(0.5) as i32;
+    let got = at(88);
+    assert!(
+        (got - mid).abs() <= 14,
+        "弧长中点应取中点色 ≈{mid}，实际 {got}"
+    );
+    println!("  折线渐变：弧长中点 x=88 取 {got}（期望 {mid}）");
+}
+
+/// 轴跨度为 0（横线 + 0°）⇒ 整形状取中点色，不产生 NaN / 黑块。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn gradient_zero_extent_axis_is_constant() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 32;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 水平矩形，用 0°（自上而下）→ 沿轴跨度 = 高度（不为 0）。
+    // 这里构造真正退化的：高度 0 的矩形不可见，所以用"竖直排列的两点"测 0° 之外的退化：
+    // 用 width=0.5 的极窄矩形 + 90°，跨度 = 0.5px，t 几乎恒定 → 检查仍是中点附近的颜色。
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(32.0, 16.0),
+        0.5,
+        8.0,
+        LinearGradient::horizontal(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let i = ((16 * W + 32) * 4) as usize;
+    let v = px[i] as i32;
+    assert!(v > 100 && v < 200, "极窄轴应给出中点附近的均匀色，实际 {v}");
+    println!("  零跨度轴：{v}（中点色区间内）");
+}
+
+/// 贴图 × 渐变：渐变不吞掉贴图。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_texture_tint() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 64;
+    // 32×32 纯红贴图
+    let rgba: Vec<u8> = (0..32 * 32).flat_map(|_| [255u8, 0, 0, 255]).collect();
+    let tex = Texture::from_rgba(32, 32, &rgba, &gpu);
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    b.set_texture(Some(&tex));
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        48.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |y: u32| -> (i32, i32) {
+        let i = ((y * N + 32) * 4) as usize;
+        (px[i] as i32, px[i + 1] as i32)
+    };
+    let (r_top, g_top) = at(12);
+    assert!(
+        r_top > 200 && g_top < 60,
+        "贴图应保留（红）：({r_top},{g_top})"
+    );
+    let (r_bottom, _) = at(52);
+    assert!(r_bottom < 110, "底部应被渐变压到接近透明，实际 {r_bottom}");
+    println!("  贴图 × 渐变：顶部 ({r_top},{g_top}) 底部 {r_bottom} ok");
+}
+/// 多边形也走同一条渐变通道：垂直轴跨满它的**包围盒**（顶 = 起点色、底 = 终点色）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn polygon_gradient_spans_bbox() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+    let stops = [
+        gstop(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+        gstop(1.0, Color::new(1.0, 1.0, 1.0, 0.0)),
+    ];
+    // 三角形，包围盒 y = 20..80（注意绕向：与 shapes 示例一致）
+    let tri = [(20.0f32, 80.0f32), (50.0, 20.0), (80.0, 80.0)];
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    draw_shape_gradient(
+        &mut b,
+        &Shape::Polygon { points: &tri },
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let at = |y: u32| -> i32 { px[((y * N + 50) * 4) as usize] as i32 };
+
+    let top = at(30); // t ≈ 0.17
+    let bottom = at(70); // t ≈ 0.83
+    assert!(top > 200, "顶点一侧应偏亮，实际 {top}");
+    // 线性 alpha 0.167 在 sRGB 下 ≈ 115（比直觉亮得多）—— 按期望值判，别拍脑袋定阈值。
+    assert!(
+        bottom < srgb255(0.167) as i32 + 25,
+        "底边一侧应偏暗，实际 {bottom}"
+    );
+    let mut prev = at(26);
+    for y in 27..=74u32 {
+        let got = at(y);
+        assert!(got <= prev + 1, "y={y} 应单调变暗：{prev} -> {got}");
+        prev = got;
+    }
+    println!("  polygon bbox 渐变：top={top} bottom={bottom} 单调 ok");
+}
+/// 同 `at` 两个停点 = 硬边：过渡是**一跳**，且不会算出 NaN（黑块）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn rect_gradient_hard_edge() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const W: u32 = 64;
+    const H: u32 = 96;
+    let c = OffscreenCanvas::new(&gpu, W, H);
+    let mut b = DrawBatch::new();
+    let blue = Color::new(0.25, 0.55, 0.95, 1.0);
+    let orange = Color::new(0.95, 0.55, 0.25, 1.0);
+    let stops = [
+        gstop(0.0, blue),
+        gstop(0.5, blue),
+        gstop(0.5, orange),
+        gstop(1.0, orange),
+    ];
+    draw_rect_gradient(
+        &mut b,
+        Pos::new(8.0, 8.0),
+        48.0,
+        80.0,
+        LinearGradient::vertical(&stops),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let rgb = |y: u32| -> (i32, i32, i32) {
+        let i = ((y * W + 32) * 4) as usize;
+        (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32)
+    };
+    // 渐变框 8..88，中线在 y≈48
+    let (r_up, _, b_up) = rgb(44);
+    let (r_dn, _, b_dn) = rgb(52);
+    assert!(b_up > 220 && r_up < 180, "上半应是蓝，实际 ({r_up},{b_up})");
+    assert!(r_dn > 220 && b_dn < 180, "下半应是橙，实际 ({r_dn},{b_dn})");
+    // 硬边两侧之间不该出现 NaN/全黑：整列都不能是纯黑
+    for y in 10..=86u32 {
+        let (r, g, bl) = rgb(y);
+        assert!(r + g + bl > 60, "y={y} 出现黑洞（NaN？）：({r},{g},{bl})");
+    }
+    println!("  硬边：上 ({r_up},{b_up}) 下 ({r_dn},{b_dn})，无黑洞");
+}

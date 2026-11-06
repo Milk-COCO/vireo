@@ -116,8 +116,9 @@ async fn main(app: App) {
   图集、九宫格、程序化纹理都不用自己写 shader。
 - **按需出帧与节流**：没变化就不画（空闲 0 present/s），四层节流可逐层关，见
   [帧率与限流](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/throttling.md)。
-- **折线沿线渐变**：一条线逐点变色/变透明，仍是 1 个实例 1 次 draw，见
-  [折线渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)。
+- **渐变**：矩形 / 圆角 / 圆 / 线段 / 折线 / 多边形……一个机制全覆盖（轴向或沿走向），
+  仍是 1 个实例 1 次 draw，见
+  [渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)。
 - **文字**：整段 shape 缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
   COLRv1 彩色 emoji。
 
@@ -157,8 +158,10 @@ async fn main(app: App) {
   —— 四层节流分别是什么、怎么关、关掉之后必须自己接管什么、按需出帧与常见误解。
 - [关窗拦截与退出收尾](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/lifecycle.md)
   —— `on_close_requested` 否决关窗，`on_exit` / `on_exit_render` 做收尾，四条退出路径各自覆盖到什么。
-- [折线沿线渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
-  —— 逐点色、弧长插值、降级语义与实测。
+- [渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)
+  —— 矩形/圆/线段/折线的渐变、停点规则、强制 SDF 的取舍、降级与实测。
+- [折线逐点色](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
+  —— `draw_line_chain_colors`：沿弧长的逐点色与实测。
 - [平台支持](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)
   —— 各平台验证到什么程度、Android 构建链、工具链与字体。
 

@@ -659,3 +659,126 @@ pub fn draw_arc_outline(
         ShapeOverride::from_color(color),
     );
 }
+
+// ======================= 渐变（逐像素，沿形状自身或指定轴） =======================
+
+/// 一个渐变停点：`at` 是沿渐变坐标的归一化位置（0 = 起点，1 = 终点）。
+///
+/// - 允许**越界**（`< 0` / `> 1`）：越界部分被钳制，形成平台 —— 「只渐变底部 38%」
+///   就是 `(0, c), (0.62, c), (1, d)`。
+/// - 允许**重复**（两个停点同一个 `at`）：该处形成硬边。
+/// - 顺序无关（编码时按 `at` 稳定排序）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientStop {
+    /// 沿渐变坐标的归一化位置。
+    pub at: f32,
+    pub color: Color,
+}
+
+impl GradientStop {
+    pub const fn new(at: f32, color: Color) -> Self {
+        Self { at, color }
+    }
+}
+
+/// 线性渐变。
+///
+/// 渐变坐标**由形状决定**，不由调用方选：
+/// - 线段（[`Shape::Line`]）：沿 `p1 → p2`，`at = 0` 在 `p1`、`at = 1` 在 `p2`；`angle_deg` 被忽略。
+/// - 折线（[`Shape::LineChain`]）：沿**弧长**（`at` 是归一化弧长）；`angle_deg` 被忽略。
+/// - 其余形状：沿 `angle_deg` 指定的轴，且**跨满形状包围盒**（不需要给端点）。
+///
+/// 角度单位是度，屏幕坐标系（y 向下）顺时针：`0` = 自上而下，`90` = 自左而右，
+/// `180` = 自下而上。
+///
+/// 渐变只存在于 SDF 路径：用它绘制会强制走 SDF 实例（`DrawBatch::clear_sdf_feather()`
+/// 之后也照画，只是边缘变成硬边）。
+#[derive(Clone, Copy, Debug)]
+pub struct LinearGradient<'a> {
+    pub angle_deg: f32,
+    pub stops: &'a [GradientStop],
+}
+
+impl<'a> LinearGradient<'a> {
+    /// 自上而下（0°）—— 压暗/提亮最常用的方向。
+    pub const fn vertical(stops: &'a [GradientStop]) -> Self {
+        Self {
+            angle_deg: 0.0,
+            stops,
+        }
+    }
+
+    /// 自左而右（90°）。
+    pub const fn horizontal(stops: &'a [GradientStop]) -> Self {
+        Self {
+            angle_deg: 90.0,
+            stops,
+        }
+    }
+
+    /// 任意角度（度，顺时针，0 = 自上而下）。
+    pub const fn at(angle_deg: f32, stops: &'a [GradientStop]) -> Self {
+        Self { angle_deg, stops }
+    }
+}
+
+/// 用一条渐变绘制任意形状（渐变坐标由形状决定，见 [`LinearGradient`]）。
+///
+/// 1 个有效停点或所有停点同色时退化为普通单色绘制（与不带渐变的路径**逐像素一致**）。
+pub fn draw_shape_gradient(batch: &mut DrawBatch, shape: &Shape<'_>, grad: LinearGradient<'_>) {
+    batch.shape_gradient(shape, grad);
+}
+
+/// 矩形线性渐变。`grad` 的轴跨满矩形宽高（见 [`LinearGradient`]）。
+pub fn draw_rect_gradient(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    w: f32,
+    h: f32,
+    grad: LinearGradient<'_>,
+) {
+    draw_shape_gradient(batch, &Shape::Rect { pos, w, h }, grad);
+}
+
+/// 圆角矩形线性渐变（圆角裁剪照旧，渐变不会越过圆角）。
+pub fn draw_rounded_rect_gradient(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    w: f32,
+    h: f32,
+    radius: f32,
+    grad: LinearGradient<'_>,
+) {
+    draw_shape_gradient(batch, &Shape::RoundedRect { pos, w, h, radius }, grad);
+}
+
+/// 圆的线性渐变（轴向跨越直径，不是径向渐变）。
+pub fn draw_circle_gradient(batch: &mut DrawBatch, pos: Pos, r: f32, grad: LinearGradient<'_>) {
+    draw_shape_gradient(batch, &Shape::Circle { pos, r }, grad);
+}
+
+/// 线段渐变：沿 `p1 → p2`，`at = 0` 在 `p1`、`at = 1` 在 `p2`。
+///
+/// 没有 `angle` 参数 —— 线段的自然轴就是它自己。与
+/// [`draw_line_chain_colors`]（两点两色）等价（同样的线性斜坡）。
+pub fn draw_line_gradient(
+    batch: &mut DrawBatch,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    thickness: f32,
+    stops: &[GradientStop],
+) {
+    draw_shape_gradient(
+        batch,
+        &Shape::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            thickness,
+        },
+        LinearGradient::vertical(stops),
+    );
+}

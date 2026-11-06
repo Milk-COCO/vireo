@@ -34,7 +34,7 @@ pub struct GpuContext {
     pub engine_storage_dummy_bind_group: wgpu::BindGroup,
     pub(crate) polygon_dummy_buf: wgpu::Buffer,
     /// 折线渐变色带表的 dummy（无渐变帧绑定 binding 3，避免多一条 Option 分支）。
-    pub(crate) line_ramp_dummy_buf: wgpu::Buffer,
+    pub(crate) ramp_dummy_buf: wgpu::Buffer,
     pub(crate) transform_dummy_buf: wgpu::Buffer,
     pub(crate) instance_quad_vertex_buf: wgpu::Buffer,
     pub(crate) instance_quad_index_buf: wgpu::Buffer,
@@ -170,7 +170,9 @@ pub struct InstanceData {
     pub sdf_type: u32,
     pub sdf_feather: f32,
     pub transform_index: u32,
-    pub _pad: u32,
+    /// 渐变索引：`0` = 无渐变（旧行为），否则 `色带基址 + 1`。
+    /// 跨全部 SDF 类型通用（原填充位，布局与大小不变）。
+    pub grad: u32,
     pub _pad2: [u32; 2],
 }
 
@@ -511,12 +513,12 @@ impl GpuContext {
                         },
                         count: None,
                     },
-                    // 3 = 折线渐变的弧长色带表（`array<vec4<f32>>`，仅 FS 读）。
-                    // 只有 `sdf_type == 7 && sdf_params.w > 0` 的分支会访问它；
-                    // 无渐变时绑 `line_ramp_dummy_buf`。
+                    // 3 = 渐变色带表（`array<vec4<f32>>`）。
+                    // **VS** 读轴向行（kind 0 的渐变坐标），**FS** 读停点；
+                    // `InstanceData.grad == 0` 时两者都不访问。无渐变帧绑 `ramp_dummy_buf`。
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -613,7 +615,7 @@ impl GpuContext {
             mapped_at_creation: false,
         });
         // Dummy 色带表（无渐变时满足 binding 3；至少 1 个 vec4 才能被绑定）
-        let line_ramp_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let ramp_dummy_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("line ramp dummy buffer"),
             size: 64, // header + 1 stop（2 个 vec4）也要够大，保守给 4 个 vec4
             usage: wgpu::BufferUsages::STORAGE,
@@ -699,7 +701,7 @@ impl GpuContext {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: line_ramp_dummy_buf.as_entire_binding(),
+                        resource: ramp_dummy_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -897,7 +899,7 @@ impl GpuContext {
             white_bind_group,
             engine_storage_dummy_bind_group,
             polygon_dummy_buf,
-            line_ramp_dummy_buf,
+            ramp_dummy_buf,
             transform_dummy_buf,
             instance_quad_vertex_buf,
             instance_quad_index_buf,

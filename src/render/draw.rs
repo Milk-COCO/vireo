@@ -251,8 +251,8 @@ impl Renderer {
         global_transforms.extend_from_slice(&IDENTITY_TRANSFORM_ROW);
         let mut polygon_edges_global = self.scratch_poly_edges.lock();
         polygon_edges_global.clear();
-        let mut line_ramps_global = self.scratch_line_ramps.lock();
-        line_ramps_global.clear();
+        let mut ramps_global = self.scratch_ramps.lock();
+        ramps_global.clear();
 
         // stencil 两路计数（不可混用）：
         // - `clip_depth`：仅 clips_children 的 Push 层数（不含 Area）
@@ -458,10 +458,10 @@ impl Renderer {
                     poly_offset += batch.polygon_edges.len() as u32 / 4;
                     polygon_edges_global.extend_from_slice(&batch.polygon_edges);
                     // 折线渐变色带：独立的 append-only 表（**不与 polygon_edges 平行**，
-                    // 见 `DrawBatch::line_ramps` 的说明）。
+                    // 见 `DrawBatch::ramps` 的说明）。
                     batch_ramp_base.push(ramp_offset);
-                    ramp_offset += batch.line_ramps.len() as u32 / 4;
-                    line_ramps_global.extend_from_slice(&batch.line_ramps);
+                    ramp_offset += batch.ramps.len() as u32 / 4;
+                    ramps_global.extend_from_slice(&batch.ramps);
                     total_vcount += batch.vertices.len() as u32;
                     total_icount += batch.indices.len() as u32;
                     if batch.custom_material.is_some() {
@@ -1495,14 +1495,14 @@ impl Renderer {
         }
 
         // ---- 上传折线渐变色带 ----
-        if !line_ramps_global.is_empty() {
-            let size = (line_ramps_global.len() * 4) as u64;
-            self.ensure_line_ramp_buffer(size);
-            let buf = self.line_ramp_buf.lock();
+        if !ramps_global.is_empty() {
+            let size = (ramps_global.len() * 4) as u64;
+            self.ensure_ramp_buffer(size);
+            let buf = self.ramp_buf.lock();
             let buf_ref = buf.as_ref().unwrap();
             self.gpu
                 .queue
-                .write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&line_ramps_global));
+                .write_buffer(&buf_ref.0, 0, bytemuck::cast_slice(&ramps_global));
         }
 
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
@@ -1610,11 +1610,11 @@ impl Renderer {
                     .as_ref()
                     .map(|(buf, _)| buf)
                     .unwrap_or(&self.gpu.polygon_dummy_buf);
-                let ramps = self.line_ramp_buf.lock();
+                let ramps = self.ramp_buf.lock();
                 let ramp_buf = ramps
                     .as_ref()
                     .map(|(buf, _)| buf)
-                    .unwrap_or(&self.gpu.line_ramp_dummy_buf);
+                    .unwrap_or(&self.gpu.ramp_dummy_buf);
                 // instance storage 是本帧上传阶段刚写入的 buffer；此处 clone 句柄
                 // （绑定不持有所有权），避免临时值在表达式末尾被释放。
                 let instance_buf = {

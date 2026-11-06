@@ -39,6 +39,7 @@
 | `shapes_cover_text` | 图形覆盖文字：验证 batch 的 shapes → texts → 下一个 batch 的顺序 |
 | `transform_stack` | 叠加变换：`translate` / `rotate_*` / `scale_by` / `apply_matrix` |
 | `line_gradient` | 折线沿线渐变：逐点色 vs 旧「切 4 档单色」对照（`D` 键切换） |
+| `gradient` | 渐变能力画廊：停点（平台/硬边/越界/多色）、角度、各形状、贴图 × 渐变、预乘、圆角、单色退化 |
 
 ## 纹理
 

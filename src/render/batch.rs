@@ -352,6 +352,37 @@ pub(crate) const RAMP_MAX_STOPS: usize = 64;
 ///
 /// 返回值至少 2 个元素（`at = 0` 与 `at = 总长`），调用方已保证 `colors.len() ==
 /// points.len()` 且 `points.len() >= 2`。
+/// 折线的总弧长（与 `point_colors_to_stops` 的度量一致：退化段跳过、闭合链含 wrap 段）。
+pub(crate) fn polyline_len(points: &[(f32, f32)]) -> f32 {
+    let n = points.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let closed = n > 2
+        && (points[0].0 - points[n - 1].0).abs() < 0.001
+        && (points[0].1 - points[n - 1].1).abs() < 0.001;
+    let vcount = if closed { n - 1 } else { n };
+    let mut acc = 0.0f32;
+    for i in 0..vcount.saturating_sub(1) {
+        let (ax, ay) = points[i];
+        let (bx, by) = points[i + 1];
+        let (dx, dy) = (bx - ax, by - ay);
+        if dx.abs() + dy.abs() < 0.001 {
+            continue;
+        }
+        acc += (dx * dx + dy * dy).sqrt();
+    }
+    if closed {
+        let (ax, ay) = points[vcount - 1];
+        let (bx, by) = points[0];
+        let (dx, dy) = (bx - ax, by - ay);
+        if dx.abs() + dy.abs() >= 0.001 {
+            acc += (dx * dx + dy * dy).sqrt();
+        }
+    }
+    acc
+}
+
 pub(crate) fn point_colors_to_stops(points: &[(f32, f32)], colors: &[Color]) -> Vec<(f32, Color)> {
     debug_assert_eq!(points.len(), colors.len());
     if points.len() < 2 || colors.len() != points.len() {
@@ -459,13 +490,25 @@ pub(crate) fn simplify_premul_stops(stops: &[(f32, [f32; 4])], eps: f32) -> Vec<
         .collect()
 }
 
-/// 把 stop 列编码成扁平 `vec4` 序列（`header` + 每 stop 2 个 vec4，颜色预乘）。
+/// 色带 kind：渐变坐标从哪来。
+pub(crate) const RAMP_KIND_AXIAL: f32 = 0.0; // 沿角度跨满形状盒（rect/circle/polygon…）
+pub(crate) const RAMP_KIND_ARC: f32 = 1.0; // 折线弧长（px）
+pub(crate) const RAMP_KIND_SEGMENT: f32 = 2.0; // 单段线段参数（0..1）
+
+/// 把 stop 列编码成扁平 `vec4` 序列（两行头 + 每 stop 2 个 vec4，颜色预乘）。
 ///
-/// `header = (count as f32, 末个 at, 0, 0)`。
-pub(crate) fn encode_ramp(stops: &[(f32, [f32; 4])]) -> Vec<f32> {
-    let mut out = Vec::with_capacity((1 + stops.len() * 2) * 4);
-    let last_at = stops.last().map(|s| s.0).unwrap_or(0.0);
-    out.extend_from_slice(&[stops.len() as f32, last_at, 0.0, 0.0]);
+/// ```text
+/// base + 0      : (count, kind, 0, 0)
+/// base + 1      : (sinθ, cosθ, 0, 0)   —— 仅 kind 0；θ=0 ⇒ (0,1) = 自上而下
+/// base + 2 + 2k : (at_k, 0, 0, 0)
+/// base + 3 + 2k : 预乘 rgba_k
+/// ```
+pub(crate) fn encode_ramp(stops: &[(f32, [f32; 4])], kind: f32, angle_rad: f32) -> Vec<f32> {
+    let mut out = Vec::with_capacity((2 + stops.len() * 2) * 4);
+    out.extend_from_slice(&[stops.len() as f32, kind, 0.0, 0.0]);
+    // 角度约定：0° = 自上而下（屏幕 y 向下、顺时针）⇒ 方向 = (sinθ, cosθ)。
+    let (sin, cos) = angle_rad.sin_cos();
+    out.extend_from_slice(&[sin, cos, 0.0, 0.0]);
     for &(at, c) in stops {
         out.extend_from_slice(&[at, 0.0, 0.0, 0.0]);
         out.extend_from_slice(&c);
@@ -520,7 +563,72 @@ pub(crate) fn colors_to_ramp(points: &[(f32, f32)], colors: &[Color]) -> Vec<f32
             .collect();
         simplified = picked;
     }
-    encode_ramp(&simplified)
+    encode_ramp(&simplified, RAMP_KIND_ARC, 0.0)
+}
+
+/// 渐变停点 → 编码好的色带（kind 0 轴向 / 2 线段；`at` 已是 0..1 归一化坐标）。
+///
+/// 流水线：清垃圾 → 稳定排序 → 预乘 → DP 简化 → 限量 → 编码。
+/// 返回空表 = 调用方应降级（< 2 个有效停点，或所有停点颜色相同）。
+pub(crate) fn gradient_to_ramp(
+    stops: &[crate::shapes::GradientStop],
+    kind: f32,
+    angle_deg: f32,
+    arc_scale: f32,
+) -> Vec<f32> {
+    let mut clean: Vec<(f32, [f32; 4])> = Vec::with_capacity(stops.len());
+    for s in stops {
+        let c = s.color;
+        if !s.at.is_finite()
+            || !c.r.is_finite()
+            || !c.g.is_finite()
+            || !c.b.is_finite()
+            || !c.a.is_finite()
+        {
+            continue;
+        }
+        // kind 1（折线弧长）把归一化 `at` 换算到 px；其余保持 0..1。
+        let at = if kind == RAMP_KIND_ARC {
+            s.at * arc_scale.max(0.0)
+        } else {
+            s.at
+        };
+        clean.push((at, premul(c)));
+    }
+    if clean.len() < 2 {
+        return Vec::new();
+    }
+    // 稳定排序：同 `at` 保留输入顺序 ⇒ 后写的那个赢 ⇒ 形成硬边。
+    clean.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // 全等色（含 alpha）没必要求色带 —— 交给调用方按单色画，保证与老路径逐像素一致。
+    let first = clean[0].1;
+    if clean.iter().all(|(_, c)| *c == first) {
+        return Vec::new();
+    }
+    let mut simplified = simplify_premul_stops(&clean, RAMP_EPS);
+    if simplified.len() > RAMP_MAX_STOPS {
+        let last = clean.len() - 1;
+        let step = last as f32 / (RAMP_MAX_STOPS - 1) as f32;
+        simplified = (0..RAMP_MAX_STOPS)
+            .map(|k| clean[((k as f32 * step).round() as usize).min(last)])
+            .collect();
+    }
+    let angle_rad = if angle_deg.is_finite() {
+        angle_deg.to_radians()
+    } else {
+        0.0
+    };
+    encode_ramp(&simplified, kind, angle_rad)
+}
+
+/// 形状 → 渐变的 kind（坐标语义由形状自己决定，不由用户选）。
+pub(crate) fn ramp_kind_for_shape(shape: &crate::shapes::Shape<'_>) -> f32 {
+    use crate::shapes::Shape;
+    match shape {
+        Shape::Line { .. } => RAMP_KIND_SEGMENT,
+        Shape::LineChain { .. } => RAMP_KIND_ARC,
+        _ => RAMP_KIND_AXIAL,
+    }
 }
 
 #[derive(Clone)]
@@ -594,9 +702,9 @@ pub struct DrawBatch {
     /// 同一份几何可以随时换色带，不存在"边对色错"的失效面。
     ///
     /// 由 [`Self::instance_line_chain_colors`] 填充；单色折线不产生任何条目。
-    pub(crate) line_ramps: Vec<f32>,
+    pub(crate) ramps: Vec<f32>,
     /// 色带去重索引：内容哈希 → 候选基址（vec4 单位）。命中仍要逐项校验（防哈希碰撞）。
-    pub(crate) line_ramp_map: FxHashMap<u64, Vec<u32>>,
+    pub(crate) ramp_map: FxHashMap<u64, Vec<u32>>,
     /// 变换矩阵表（batch 内去重）。每个矩阵 12 f32（mat3x3，列 vec4-padded）。
     ///
     /// **槽 0 固定为单位矩阵**（`new`/`clear` 时写入，形状从 1 起占用）：
@@ -765,8 +873,8 @@ impl DrawBatch {
             uv: UvRect::default(),
             polygon_edges: Vec::with_capacity(16),
             edge_templates: FxHashMap::default(),
-            line_ramps: Vec::new(),
-            line_ramp_map: FxHashMap::default(),
+            ramps: Vec::new(),
+            ramp_map: FxHashMap::default(),
             transform_table,
             transform_map,
             has_sdf: false,
@@ -1851,8 +1959,8 @@ impl DrawBatch {
         self.uv = UvRect::default();
         self.polygon_edges.clear();
         self.edge_templates.clear();
-        self.line_ramps.clear();
-        self.line_ramp_map.clear();
+        self.ramps.clear();
+        self.ramp_map.clear();
         seed_identity_transform_table(&mut self.transform_table, &mut self.transform_map);
         self.has_sdf = false;
         self.cached_transform_index = None;
@@ -3619,8 +3727,8 @@ impl DrawBatch {
             uv: self.uv,
             polygon_edges: self.polygon_edges.clone(),
             edge_templates: self.edge_templates.clone(),
-            line_ramps: self.line_ramps.clone(),
-            line_ramp_map: self.line_ramp_map.clone(),
+            ramps: self.ramps.clone(),
+            ramp_map: self.ramp_map.clone(),
             transform_table: self.transform_table.clone(),
             transform_map: self.transform_map.clone(),
             has_sdf: self.has_sdf,
@@ -3803,7 +3911,7 @@ impl DrawBatch {
             sdf_type,
             sdf_feather: feather,
             transform_index,
-            _pad: 0,
+            grad: 0,
             _pad2: [0, 0],
         });
         self.record_instance_command(instance_start);
@@ -4194,12 +4302,13 @@ impl DrawBatch {
             self.instance_line_chain(points, thickness, Some(single));
             return;
         }
-        let ramp_base = self.intern_line_ramp(&ramp);
+        let ramp_base = self.intern_ramp(&ramp);
         let half = thickness * 0.5;
         let feather = self.sdf_feather.unwrap();
         // 实例色传白色：片元会用色带**替换** `in.color`（贴图仍乘进去），
         // 同时绕开 `push_sdf_instance` 的 `color.a == 0` 早退。
-        if !self.push_sdf_instance(
+        let before = self.instance_data.len();
+        let pushed = self.push_sdf_instance(
             Pos::ZERO,
             [
                 min_x - half - feather,
@@ -4208,32 +4317,143 @@ impl DrawBatch {
                 max_y + half + feather,
             ],
             [min_x - half, min_y - half, max_x + half, max_y + half],
-            // `sdf_params.w` = 色带基址 + 1（0 = 单色，见 `patch_instance_ramp_base`）
-            [start as f32, count as f32, half, (ramp_base + 1) as f32],
+            [start as f32, count as f32, half, 0.0],
             7,
             [0.0, 0.0],
             Some(crate::color::colors::WHITE),
-        ) {
+        );
+        if !pushed {
             self.instance_line_chain(points, thickness, Some(single));
+        }
+        // `grad` = 色带基址 + 1（0 = 单色，见 `patch_instance_ramp_base`）。
+        self.tag_last_instance_gradient(before, ramp_base);
+    }
+
+    /// 给"刚刚新增的那一个实例"打上渐变索引（`0` = 无渐变）。
+    ///
+    /// 只在恰好新增 1 个实例时生效：形状若走了几何/模板路径或提前 return，
+    /// 这里什么都不做 —— 避免把渐变错打到别的实例上。
+    fn tag_last_instance_gradient(&mut self, before_len: usize, ramp_base: u32) {
+        if self.instance_data.len() != before_len + 1 {
+            return;
+        }
+        if let Some(inst) = self.instance_data.last_mut() {
+            inst.grad = ramp_base + 1;
         }
     }
 
-    /// 把编码好的色带登记进 [`Self::line_ramps`]（内容去重），返回 vec4 基址。
-    fn intern_line_ramp(&mut self, ramp: &[f32]) -> u32 {
+    /// 用一条渐变绘制任意 [`Shape`](crate::shapes::Shape)。
+    ///
+    /// 渐变坐标由形状决定：线段沿 `p1 → p2`、折线沿弧长（此时 `grad.angle_deg` 被忽略）、
+    /// 其余形状沿 `angle_deg` 并**跨满形状包围盒**。
+    ///
+    /// 渐变只存在于 SDF 实例路径：本方法会**强制**走 SDF 实例（`sdf_feather` 只决定边缘
+    /// 软硬，`None` 等价于羽化 0 = 硬边）。1 个停点或全等色退化为普通单色绘制（逐像素一致）。
+    pub fn shape_gradient(
+        &mut self,
+        shape: &crate::shapes::Shape<'_>,
+        grad: crate::shapes::LinearGradient<'_>,
+    ) {
+        use crate::color::colors::WHITE;
+        // 退化：没有有效停点 → 什么都不画；单色 → 按普通形状画（与老路径逐像素一致）。
+        let kind = ramp_kind_for_shape(shape);
+        let arc_scale = match shape {
+            crate::shapes::Shape::LineChain { points, .. } => polyline_len(points),
+            _ => 0.0,
+        };
+        let ramp = gradient_to_ramp(grad.stops, kind, grad.angle_deg, arc_scale);
+        if ramp.is_empty() {
+            let single = grad
+                .stops
+                .iter()
+                .find(|s| s.color.a > 0.0 && s.color.r.is_finite())
+                .map(|s| s.color);
+            if let Some(c) = single {
+                self.shape(shape, crate::shapes::ShapeOverride::new().color(c));
+            }
+            return;
+        }
+        let ramp_base = self.intern_ramp(&ramp);
+        // 渐变只在 SDF 路径成立：pen state 是"几何"时按羽化 0（硬边）强制走 SDF。
+        let saved_feather = self.sdf_feather;
+        if saved_feather.is_none() {
+            self.sdf_feather = Some(0.0);
+        }
+        let before = self.instance_data.len();
+        self.shape(shape, crate::shapes::ShapeOverride::new().color(WHITE));
+        self.sdf_feather = saved_feather;
+        self.tag_last_instance_gradient(before, ramp_base);
+    }
+
+    /// 矩形线性渐变。见 [`crate::shapes::draw_rect_gradient`]。
+    pub fn rect_gradient(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        grad: crate::shapes::LinearGradient<'_>,
+    ) {
+        self.shape_gradient(&crate::shapes::Shape::Rect { pos, w, h }, grad);
+    }
+
+    /// 圆角矩形线性渐变。见 [`crate::shapes::draw_rounded_rect_gradient`]。
+    pub fn rounded_rect_gradient(
+        &mut self,
+        pos: Pos,
+        w: f32,
+        h: f32,
+        radius: f32,
+        grad: crate::shapes::LinearGradient<'_>,
+    ) {
+        self.shape_gradient(
+            &crate::shapes::Shape::RoundedRect { pos, w, h, radius },
+            grad,
+        );
+    }
+
+    /// 圆的线性渐变（轴向跨越直径）。见 [`crate::shapes::draw_circle_gradient`]。
+    pub fn circle_gradient(&mut self, pos: Pos, r: f32, grad: crate::shapes::LinearGradient<'_>) {
+        self.shape_gradient(&crate::shapes::Shape::Circle { pos, r }, grad);
+    }
+
+    /// 线段渐变（沿 `p1 → p2`）。见 [`crate::shapes::draw_line_gradient`]。
+    pub fn line_gradient(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        thickness: f32,
+        stops: &[crate::shapes::GradientStop],
+    ) {
+        self.shape_gradient(
+            &crate::shapes::Shape::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                thickness,
+            },
+            crate::shapes::LinearGradient::vertical(stops),
+        );
+    }
+
+    /// 把编码好的色带登记进 [`Self::ramps`]（内容去重），返回 vec4 基址。
+    fn intern_ramp(&mut self, ramp: &[f32]) -> u32 {
         let hash = ramp_hash(ramp);
-        if let Some(candidates) = self.line_ramp_map.get(&hash) {
+        if let Some(candidates) = self.ramp_map.get(&hash) {
             for &base in candidates {
                 let at = base as usize * 4;
-                if let Some(existing) = self.line_ramps.get(at..at + ramp.len())
+                if let Some(existing) = self.ramps.get(at..at + ramp.len())
                     && existing == ramp
                 {
                     return base;
                 }
             }
         }
-        let base = (self.line_ramps.len() / 4) as u32;
-        self.line_ramps.extend_from_slice(ramp);
-        self.line_ramp_map.entry(hash).or_default().push(base);
+        let base = (self.ramps.len() / 4) as u32;
+        self.ramps.extend_from_slice(ramp);
+        self.ramp_map.entry(hash).or_default().push(base);
         base
     }
 
@@ -4932,32 +5152,37 @@ impl DrawBatch {
 }
 
 #[cfg(test)]
-mod line_ramp_tests {
+mod ramp_tests {
     use super::{
-        RAMP_EPS, RAMP_MAX_STOPS, colors_to_ramp, encode_ramp, point_colors_to_stops, premul,
+        RAMP_EPS, RAMP_KIND_ARC, RAMP_KIND_AXIAL, RAMP_KIND_SEGMENT, RAMP_MAX_STOPS,
+        colors_to_ramp, encode_ramp, gradient_to_ramp, point_colors_to_stops, premul,
         simplify_premul_stops,
     };
     use crate::color::Color;
+    use crate::math::Pos;
+    use crate::shapes::LinearGradient;
 
     fn white(a: f32) -> Color {
         Color::new(1.0, 1.0, 1.0, a)
     }
 
+    /// 解出新布局：`header(count, kind)` + `axis(cos,sin)` + 每 stop `(at)`+`(rgba)`。
+    /// 返回值里的第二项是 `kind`（旧布局这里是 `total_arc`）。
     fn decode(ramp: &[f32]) -> (usize, f32, Vec<(f32, [f32; 4])>) {
         let count = ramp[0] as usize;
-        let total = ramp[1];
+        let kind = ramp[1];
         let mut stops = Vec::with_capacity(count);
         for k in 0..count {
-            let at = ramp[(1 + 2 * k) * 4];
+            let at = ramp[(2 + 2 * k) * 4];
             let c = [
-                ramp[(2 + 2 * k) * 4],
-                ramp[(2 + 2 * k) * 4 + 1],
-                ramp[(2 + 2 * k) * 4 + 2],
-                ramp[(2 + 2 * k) * 4 + 3],
+                ramp[(3 + 2 * k) * 4],
+                ramp[(3 + 2 * k) * 4 + 1],
+                ramp[(3 + 2 * k) * 4 + 2],
+                ramp[(3 + 2 * k) * 4 + 3],
             ];
             stops.push((at, c));
         }
-        (count, total, stops)
+        (count, kind, stops)
     }
 
     // ---- 逐点色 → 弧长 stop ----
@@ -5022,9 +5247,9 @@ mod line_ramp_tests {
             .map(|i| white(0.8 - 0.8 * i as f32 / 199.0))
             .collect();
         let ramp = colors_to_ramp(&pts, &colors);
-        let (count, total, stops) = decode(&ramp);
+        let (count, _kind, stops) = decode(&ramp);
         assert_eq!(count, 2, "线性 ramp 不该留 200 个 stop");
-        assert!((total - 199.0).abs() < 1e-2);
+        assert!((stops[1].0 - 199.0).abs() < 1e-2, "末个 at 应等于总弧长");
         assert!((stops[0].1[3] - 0.8).abs() < 1e-6, "起点 alpha");
         assert!(stops[1].1[3].abs() < 1e-3, "终点 alpha");
     }
@@ -5122,10 +5347,10 @@ mod line_ramp_tests {
         let mut batch = super::DrawBatch::new();
         let a = colors_to_ramp(&[(0.0, 0.0), (10.0, 0.0)], &[white(1.0), white(0.0)]);
         let b = a.clone();
-        let base_a = batch.intern_line_ramp(&a);
-        let base_b = batch.intern_line_ramp(&b);
+        let base_a = batch.intern_ramp(&a);
+        let base_b = batch.intern_ramp(&b);
         assert_eq!(base_a, base_b, "同内容必须共用一份");
-        assert_eq!(batch.line_ramps.len(), a.len(), "不该重复追加");
+        assert_eq!(batch.ramps.len(), a.len(), "不该重复追加");
     }
 
     /// 差 1/255 就是不同色带 —— 去重不能靠"看起来差不多"。
@@ -5137,22 +5362,240 @@ mod line_ramp_tests {
             &[(0.0, 0.0), (10.0, 0.0)],
             &[white(1.0), white(1.0 / 255.0)],
         );
-        let base_a = batch.intern_line_ramp(&a);
-        let base_b = batch.intern_line_ramp(&b);
+        let base_a = batch.intern_ramp(&a);
+        let base_b = batch.intern_ramp(&b);
         assert_ne!(base_a, base_b);
     }
 
-    /// 编码布局必须与着色器的公式一致：`header` + 每 stop `(at)` + `(rgba 预乘)`。
+    /// 编码布局必须与着色器的公式一致：
+    /// `header(count, kind)` + `axis(cos, sin)` + 每 stop `(at)` + `(rgba 预乘)`。
     #[test]
     fn encoding_layout_and_premultiplication() {
         let stops = vec![(0.0f32, premul(white(0.5))), (10.0, premul(white(0.0)))];
-        let ramp = encode_ramp(&stops);
-        // header 1 个 vec4 + 每 stop 2 个 vec4
-        assert_eq!(ramp.len(), (1 + 2 * 2) * 4);
+        let ramp = encode_ramp(&stops, RAMP_KIND_ARC, 0.0);
+        // 头 2 个 vec4 + 每 stop 2 个 vec4
+        assert_eq!(ramp.len(), (2 + 2 * 2) * 4);
         assert_eq!(ramp[0], 2.0, "header.count");
-        assert_eq!(ramp[1], 10.0, "header.total_arc");
-        assert_eq!(ramp[4], 0.0, "stop0.at");
-        assert_eq!(ramp[8], 0.5, "stop0 预乘 r = r*a");
-        assert_eq!(ramp[11], 0.5, "stop0 a");
+        assert_eq!(ramp[1], RAMP_KIND_ARC, "header.kind");
+        assert_eq!(ramp[8], 0.0, "stop0.at");
+        assert_eq!(ramp[12], 0.5, "stop0 预乘 r = r*a");
+        assert_eq!(ramp[15], 0.5, "stop0 a");
+    }
+
+    /// 轴向编码：方向 = `(sinθ, cosθ)`（0° ⇒ 自上而下），kind = 0。
+    #[test]
+    fn axial_encoding_stores_direction() {
+        let stops = vec![(0.0f32, premul(white(1.0))), (1.0, premul(white(0.0)))];
+        // 0° → (0, 1)：竖直向下
+        let v = encode_ramp(&stops, RAMP_KIND_AXIAL, 0.0);
+        assert_eq!(v[1], RAMP_KIND_AXIAL);
+        assert!(v[4].abs() < 1e-6, "sin(0°) ≈ 0，实际 {}", v[4]);
+        assert!((v[5] - 1.0).abs() < 1e-6, "cos(0°) ≈ 1，实际 {}", v[5]);
+        // 90° → (1, 0)：水平向右
+        let h = encode_ramp(&stops, RAMP_KIND_AXIAL, std::f32::consts::FRAC_PI_2);
+        assert!((h[4] - 1.0).abs() < 1e-6, "sin(90°) ≈ 1，实际 {}", h[4]);
+        assert!(h[5].abs() < 1e-6, "cos(90°) ≈ 0，实际 {}", h[5]);
+    }
+    // ---- 渐变停点编码（kind 0 / 2） ----
+
+    fn gs(at: f32, a: f32) -> crate::shapes::GradientStop {
+        crate::shapes::GradientStop::new(at, white(a))
+    }
+
+    /// 乱序输入必须按 `at` 排序，颜色按预乘写进表里。
+    #[test]
+    fn gradient_stops_sorted_and_premultiplied() {
+        let stops = [gs(1.0, 0.0), gs(0.0, 1.0)];
+        let ramp = gradient_to_ramp(&stops, RAMP_KIND_AXIAL, 0.0, 0.0);
+        let (count, kind, decoded) = decode(&ramp);
+        assert_eq!(count, 2);
+        assert_eq!(kind, RAMP_KIND_AXIAL);
+        assert_eq!(decoded[0].0, 0.0);
+        assert_eq!(decoded[1].0, 1.0);
+        assert_eq!(decoded[0].1, [1.0, 1.0, 1.0, 1.0], "aa=1 → 预乘不变");
+        assert_eq!(decoded[1].1, [0.0, 0.0, 0.0, 0.0], "aa=0 → 全 0");
+    }
+
+    /// 两端同色（含 alpha）⇒ 空表（调用方按单色画，保证与老路径逐像素一致）。
+    #[test]
+    fn identical_colors_collapse_to_solid() {
+        let stops = [gs(0.0, 0.4), gs(0.62, 0.4), gs(1.0, 0.4)];
+        assert!(gradient_to_ramp(&stops, RAMP_KIND_AXIAL, 0.0, 0.0).is_empty());
+    }
+
+    /// 两个停点同 `at` ⇒ 硬边：两个都要留在表里（片元的 span 保护负责不除零）。
+    #[test]
+    fn duplicate_at_keeps_hard_edge() {
+        let stops = [gs(0.0, 1.0), gs(0.5, 1.0), gs(0.5, 0.0), gs(1.0, 0.0)];
+        let ramp = gradient_to_ramp(&stops, RAMP_KIND_AXIAL, 0.0, 0.0);
+        let (count, _, decoded) = decode(&ramp);
+        assert_eq!(count, 4, "硬边的两个停点都得留");
+        assert_eq!(decoded[1].0, 0.5);
+        assert_eq!(decoded[2].0, 0.5);
+        assert_eq!(decoded[1].1[3], 1.0);
+        assert_eq!(decoded[2].1[3], 0.0);
+    }
+
+    /// NaN/∞ 的停点被丢弃；丢掉之后不足 2 个 ⇒ 空表。
+    #[test]
+    fn nan_stops_dropped() {
+        let bad = crate::shapes::GradientStop::new(f32::NAN, white(1.0));
+        let stops = [bad, gs(0.0, 1.0), gs(1.0, 0.0)];
+        let ramp = gradient_to_ramp(&stops, RAMP_KIND_AXIAL, 0.0, 0.0);
+        assert_eq!(decode(&ramp).0, 2);
+        let only_one = [bad, gs(0.0, 1.0)];
+        assert!(gradient_to_ramp(&only_one, RAMP_KIND_AXIAL, 0.0, 0.0).is_empty());
+    }
+
+    /// 停点数被压到 `RAMP_MAX_STOPS` 以内（片元的扫描循环有界）。
+    #[test]
+    fn gradient_stops_capped_at_max() {
+        let stops: Vec<crate::shapes::GradientStop> = (0..500)
+            .map(|i| gs(i as f32 / 499.0, i as f32 / 499.0))
+            .collect();
+        let ramp = gradient_to_ramp(&stops, RAMP_KIND_AXIAL, 0.0, 0.0);
+        assert!(decode(&ramp).0 <= RAMP_MAX_STOPS);
+    }
+
+    /// kind 1（折线弧长）：归一化 `at` 按总弧长换算成 px。
+    #[test]
+    fn arc_kind_scales_stops_by_total_length() {
+        let stops = [gs(0.0, 1.0), gs(1.0, 0.0)];
+        let ramp = gradient_to_ramp(&stops, RAMP_KIND_ARC, 0.0, 120.0);
+        let (_, kind, decoded) = decode(&ramp);
+        assert_eq!(kind, RAMP_KIND_ARC);
+        assert_eq!(decoded[0].0, 0.0);
+        assert!((decoded[1].0 - 120.0).abs() < 1e-4, "末个 at = 总弧长");
+    }
+
+    /// 同停点、不同尺寸/位置的矩形共用一条色带（角度在表头、形状盒在实例）。
+    #[test]
+    fn same_stops_dedupe_across_sizes() {
+        let mut batch = super::DrawBatch::new();
+        let a = [gs(0.0, 1.0), gs(1.0, 0.0)];
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            100.0,
+            50.0,
+            LinearGradient::vertical(&a),
+        );
+        let after_first = batch.ramps.len();
+        assert!(after_first > 0);
+        batch.rect_gradient(
+            Pos::new(300.0, 120.0),
+            448.0,
+            252.0,
+            LinearGradient::vertical(&a),
+        );
+        assert_eq!(batch.ramps.len(), after_first, "不同尺寸不该各存一份色带");
+        assert_eq!(batch.instance_data.len(), 2);
+        assert!(batch.instance_data.iter().all(|i| i.grad > 0));
+    }
+
+    /// 角度不同 ⇒ 表头不同 ⇒ 不同色带。
+    #[test]
+    fn different_angle_allocates_new_ramp() {
+        let mut batch = super::DrawBatch::new();
+        let a = [gs(0.0, 1.0), gs(1.0, 0.0)];
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            100.0,
+            50.0,
+            LinearGradient::vertical(&a),
+        );
+        let first = batch.ramps.len();
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            100.0,
+            50.0,
+            LinearGradient::horizontal(&a),
+        );
+        assert!(batch.ramps.len() > first, "角度是色带身份的一部分");
+    }
+
+    /// 三种 kind 共用一张表，互不污染（折线 kind1 / 矩形 kind0 / 线段 kind2）。
+    #[test]
+    fn three_kinds_share_one_table() {
+        let mut batch = super::DrawBatch::new();
+        let two = [gs(0.0, 1.0), gs(1.0, 0.0)];
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            40.0,
+            20.0,
+            LinearGradient::vertical(&two),
+        );
+        batch.line_gradient(0.0, 0.0, 60.0, 0.0, 4.0, &two);
+        batch.instance_line_chain_colors(
+            &[(0.0, 0.0), (10.0, 0.0)],
+            2.0,
+            &[white(1.0), white(0.0)],
+        );
+        let mut kinds = Vec::new();
+        for inst in &batch.instance_data {
+            let base = (inst.grad - 1) as usize * 4;
+            kinds.push(batch.ramps[base + 1]);
+        }
+        kinds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            kinds,
+            vec![RAMP_KIND_AXIAL, RAMP_KIND_ARC, RAMP_KIND_SEGMENT]
+        );
+    }
+
+    /// 退化输入不 panic：0/1 停点、零尺寸、NaN 角度。
+    #[test]
+    fn gradient_degenerate_inputs_do_not_panic() {
+        let mut batch = super::DrawBatch::new();
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            40.0,
+            20.0,
+            LinearGradient::vertical(&[]),
+        );
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            40.0,
+            20.0,
+            LinearGradient::vertical(&[gs(0.0, 1.0)]),
+        );
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            0.0,
+            20.0,
+            LinearGradient::vertical(&[gs(0.0, 1.0), gs(1.0, 0.0)]),
+        );
+        let two = [gs(0.0, 1.0), gs(1.0, 0.0)];
+        batch.rect_gradient(
+            Pos::new(0.0, 0.0),
+            40.0,
+            20.0,
+            LinearGradient::at(f32::NAN, &two),
+        );
+        // 空停点：不画；单停点：按单色画（无渐变，grad == 0）；零尺寸：与单色路径同行为；
+        // NaN 角：按 0° 画（仍然是渐变）。
+        assert_eq!(
+            batch.instance_data.len(),
+            3,
+            "单停点 / 零尺寸 / NaN 角 各 1 个"
+        );
+        assert_eq!(batch.instance_data[0].grad, 0, "单停点走单色");
+        assert!(batch.instance_data[1].grad > 0);
+        assert!(batch.instance_data[2].grad > 0, "NaN 角仍能画渐变");
+
+        // 零尺寸必须与单色路径**行为一致**（不多也不少画一个实例）。
+        let mut solid = super::DrawBatch::new();
+        solid.rectangle(Pos::new(0.0, 0.0), 0.0, 20.0, Some(white(1.0)));
+        let mut grad = super::DrawBatch::new();
+        grad.rect_gradient(
+            Pos::new(0.0, 0.0),
+            0.0,
+            20.0,
+            LinearGradient::vertical(&two),
+        );
+        assert_eq!(
+            solid.instance_data.len(),
+            grad.instance_data.len(),
+            "零尺寸：渐变与单色不得分歧"
+        );
     }
 }

@@ -233,14 +233,14 @@ pub(crate) fn patch_vertex_poly_base(vertex: &mut Vertex, base: f32) {
     }
 }
 
-/// 给实例补 batch 的**色带基址**（只有折线渐变会用到 `sdf_params.w`）。
+/// 给实例补 batch 的**色带基址**（任何带渐变的 SDF 类型都会用到 `grad`）。
 ///
-/// 编码约定：`0.0` = 单色（旧行为），否则 `w = 色带基址 + 1`。所以这里直接 `+= base`
-/// 之后仍是"1 起"，片元里 `u32(w) - 1` 还原成基址。
+/// 编码约定：`0` = 无渐变（旧行为），否则 `grad = 色带基址 + 1`。所以这里直接 `+= base`
+/// 之后仍是"1 起"，片元里 `grad - 1` 还原成基址。
 #[inline]
 pub(crate) fn patch_instance_ramp_base(instance: &mut InstanceData, base: u32) {
-    if instance.sdf_type == 7 && instance.sdf_params[3] > 0.0 {
-        instance.sdf_params[3] += base as f32;
+    if instance.grad > 0 {
+        instance.grad += base;
     }
 }
 
@@ -887,7 +887,7 @@ pub struct Renderer {
     ds_tex: Mutex<Option<(wgpu::Texture, wgpu::TextureView)>>,
     polygon_edge_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     /// 折线渐变的弧长色带表（rray<vec4<f32>>；无渐变帧不创建）。
-    line_ramp_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
+    ramp_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     transform_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     engine_storage_bind_group_cache: Mutex<Option<wgpu::BindGroup>>,
     /// 逻辑视口尺寸（逻辑像素，浮点用户坐标系）
@@ -898,7 +898,7 @@ pub struct Renderer {
     scratch_idata: Mutex<Vec<u8>>,
     scratch_transforms: Mutex<Vec<f32>>,
     scratch_poly_edges: Mutex<Vec<f32>>,
-    scratch_line_ramps: Mutex<Vec<f32>>,
+    scratch_ramps: Mutex<Vec<f32>>,
     scratch_event_infos: Mutex<Vec<EventInfo>>,
     scratch_aabb_map: Mutex<AabbMap>,
     scratch_view_map: Mutex<ViewMap>,
@@ -990,14 +990,14 @@ impl Renderer {
             msaa_texs: Mutex::new(Vec::new()),
             ds_tex: Mutex::new(None),
             polygon_edge_buf: Mutex::new(None),
-            line_ramp_buf: Mutex::new(None),
+            ramp_buf: Mutex::new(None),
             transform_buf: Mutex::new(None),
             engine_storage_bind_group_cache: Mutex::new(None),
             scratch_vdata: Mutex::new(Vec::new()),
             scratch_idata: Mutex::new(Vec::new()),
             scratch_transforms: Mutex::new(Vec::new()),
             scratch_poly_edges: Mutex::new(Vec::new()),
-            scratch_line_ramps: Mutex::new(Vec::new()),
+            scratch_ramps: Mutex::new(Vec::new()),
             scratch_event_infos: Mutex::new(Vec::new()),
             scratch_aabb_map: Mutex::new(FxHashMap::default()),
             scratch_view_map: Mutex::new(FxHashMap::default()),
@@ -1447,11 +1447,11 @@ impl Renderer {
     }
 
     /// 折线渐变的色带表 buffer（与 `ensure_polygon_edge_buffer` 同构）。
-    fn ensure_line_ramp_buffer(&self, size: u64) {
+    fn ensure_ramp_buffer(&self, size: u64) {
         if size == 0 {
             return;
         }
-        let mut slot = self.line_ramp_buf.lock();
+        let mut slot = self.ramp_buf.lock();
         let cur = slot.as_ref().map(|(_, c)| *c).unwrap_or(0);
         if cur >= size {
             return;
