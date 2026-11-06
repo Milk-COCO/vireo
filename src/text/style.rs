@@ -182,6 +182,86 @@ pub(crate) struct TextLayerPx {
     pub reach: f32,
 }
 
+/// 描边连接方式（几何描边用；距离场描边天然是圆角连接）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextJoin {
+    /// 尖角：延长到自然交点，超过 `miter_limit` 退化成 `Bevel`（与 SVG 一致）。
+    Miter,
+    /// 斜切：两段各切一刀。
+    #[default]
+    Bevel,
+    /// 圆角。
+    Round,
+}
+
+/// 线帽（只对开放轮廓有意义；字形轮廓通常闭合）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextCap {
+    #[default]
+    Butt,
+    Square,
+    Round,
+}
+
+/// **几何**描边：从字体轮廓做真正的描边（有 miter/bevel 连接），不是距离场取阈。
+///
+/// 与 [`TextStyle::outline`] 的区别：
+/// - 距离场描边：圆角连接、任意宽度都平滑、开销低（推荐默认）；
+/// - 几何描边：尖角/斜切精确（SVG 观感），但每次宽度变化都要重新栅格化。
+#[derive(Clone, Debug)]
+pub struct TextStroke {
+    /// 描边宽度（总宽，即两侧各半宽）。
+    pub width: Pp,
+    pub color: Color,
+    pub join: TextJoin,
+    pub cap: TextCap,
+    /// `Miter` 的上限（超过就退化成 bevel），默认 4。
+    pub miter_limit: f32,
+}
+
+impl TextStroke {
+    pub fn new(width: impl Into<Pp>, color: Color) -> Self {
+        Self {
+            width: width.into(),
+            color,
+            join: TextJoin::Miter,
+            cap: TextCap::Butt,
+            miter_limit: 4.0,
+        }
+    }
+
+    pub fn join(mut self, join: TextJoin) -> Self {
+        self.join = join;
+        self
+    }
+
+    pub fn cap(mut self, cap: TextCap) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    pub fn miter_limit(mut self, limit: f32) -> Self {
+        self.miter_limit = limit.max(1.0);
+        self
+    }
+}
+
+/// 折算成设备像素的几何描边参数（内部用，`Copy`，便于塞进 `AreaMeta`）。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextStrokePx {
+    pub width: f32,
+    pub color: Color,
+    pub join: u8,
+    pub cap: u8,
+    pub miter_limit: f32,
+}
+
+impl TextStrokePx {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.width <= 0.0
+    }
+}
+
 /// 文本样式：有序图层 + 填充。
 ///
 /// 绘制顺序：`layers` 从**下到上**依次叠加，最后画 `fill`。
@@ -190,6 +270,8 @@ pub struct TextStyle {
     pub layers: Vec<TextLayer>,
     /// 最后绘制；`None` = 用 `TextOverride` / `TextDef` 给的默认颜色。
     pub fill: Option<TextPaint>,
+    /// 几何描边（真 miter/bevel）。画在所有图层与 fill **之下**。
+    pub vector_stroke: Option<TextStroke>,
 }
 
 impl TextStyle {
@@ -197,12 +279,17 @@ impl TextStyle {
         Self::default()
     }
 
+    fn empty_with(layers: Vec<TextLayer>, fill: Option<TextPaint>) -> Self {
+        Self {
+            layers,
+            fill,
+            vector_stroke: None,
+        }
+    }
+
     /// 外描边（硬边，`width` 向外）。
     pub fn outline(width: impl Into<Pp>, color: Color) -> Self {
-        Self {
-            layers: vec![TextLayer::hard(width, TextPaint::solid(color))],
-            fill: None,
-        }
+        Self::empty_with(vec![TextLayer::hard(width, TextPaint::solid(color))], None)
     }
 
     /// 内描边（向内）。
@@ -210,10 +297,7 @@ impl TextStyle {
         let w = width.into();
         let mut layer = TextLayer::hard(w, TextPaint::solid(color));
         layer.threshold = negate_pp(w);
-        Self {
-            layers: vec![layer],
-            fill: None,
-        }
+        Self::empty_with(vec![layer], None)
     }
 
     /// 硬/软投影。
@@ -222,25 +306,25 @@ impl TextStyle {
         blur: impl Into<Pp>,
         color: Color,
     ) -> Self {
-        Self {
-            layers: vec![
+        Self::empty_with(
+            vec![
                 TextLayer::soft(Pp::Dp(crate::dpi::Dp(0.0)), blur, TextPaint::solid(color))
                     .offset(offset.0, offset.1),
             ],
-            fill: None,
-        }
+            None,
+        )
     }
 
     /// 发光（无偏移的软阴影）。
     pub fn glow(blur: impl Into<Pp>, color: Color) -> Self {
-        Self {
-            layers: vec![TextLayer::soft(
+        Self::empty_with(
+            vec![TextLayer::soft(
                 Pp::Dp(crate::dpi::Dp(0.0)),
                 blur,
                 TextPaint::solid(color),
             )],
-            fill: None,
-        }
+            None,
+        )
     }
 
     /// 浮雕：一亮一暗两层的经典组合。
@@ -251,10 +335,22 @@ impl TextStyle {
         hi.blend = TextBlend::Add;
         let mut lo = TextLayer::hard(Pp::Dp(crate::dpi::Dp(0.0)), TextPaint::solid(dark));
         lo.offset = (d, d);
+        Self::empty_with(vec![lo, hi], None)
+    }
+
+    /// 几何描边（真 miter/bevel）：垫在填充与所有图层之下。
+    pub fn vector_outline(stroke: TextStroke) -> Self {
         Self {
-            layers: vec![lo, hi],
+            layers: Vec::new(),
             fill: None,
+            vector_stroke: Some(stroke),
         }
+    }
+
+    /// 加一条几何描边（可与距离场图层共存）。
+    pub fn with_vector_stroke(mut self, stroke: TextStroke) -> Self {
+        self.vector_stroke = Some(stroke);
+        self
     }
 
     pub fn with_layer(mut self, layer: TextLayer) -> Self {

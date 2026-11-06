@@ -35,7 +35,11 @@ pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
-pub use style::{TextBlend, TextGradient, TextLayer, TextPaint, TextStyle, TextStyleRef};
+pub(crate) use style::TextStrokePx;
+pub use style::{
+    TextBlend, TextCap, TextGradient, TextJoin, TextLayer, TextPaint, TextStroke, TextStyle,
+    TextStyleRef,
+};
 
 /// 文本水平对齐
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

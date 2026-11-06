@@ -5993,6 +5993,80 @@ fn text_style_shadow_offsets_down_right() {
     println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
 }
 
+/// 几何描边：miter 会在尖角上补出像素，面积应大于 round。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_vector_miter_vs_round() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 160;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |join: Option<TextJoin>| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        let style = join.map(|j| {
+            Arc::new(TextStyle::vector_outline(
+                TextStroke::new(10.0, red).join(j).miter_limit(8.0),
+            ))
+        });
+        draw_text(
+            &mut b.texts,
+            "V",
+            Pos::new(30.0, 30.0),
+            TextDef {
+                style,
+                ..TextDef::default().font_size(70.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    let none = render(None);
+    let round = render(Some(TextJoin::Round));
+    let miter = render(Some(TextJoin::Miter));
+
+    let lit = |px: &[u8]| -> usize {
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 40)
+            .count()
+    };
+    let (n0, nr, nm) = (lit(&none), lit(&round), lit(&miter));
+    assert!(n0 > 200, "用例失效：无描边的 'V' 没画出来（{n0}）");
+    assert!(nr > n0, "几何描边应让覆盖变大：无描边 {n0} vs round {nr}");
+    assert!(nm > n0, "几何描边应让覆盖变大：无描边 {n0} vs miter {nm}");
+
+    // 宽度是像素意图：描边让外轮廓每侧各扩 w/2 ⇒ 纵向跨度大约 +w。
+    let span = |px: &[u8]| -> i64 {
+        let row_lit = |y: u32| {
+            (0..N).any(|x| {
+                let i = ((y * N + x) * 4) as usize;
+                px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 40
+            })
+        };
+        let top = (0..N).find(|y| row_lit(*y)).unwrap_or(N);
+        let bot = (0..N).rev().find(|y| row_lit(*y)).unwrap_or(0);
+        bot as i64 - top as i64
+    };
+    let grown = span(&round) - span(&none);
+    assert!(
+        (6..=26).contains(&grown),
+        "10px 描边应让纵向跨度大约 +10（含 AA 余量），实际 {grown}"
+    );
+
+    let reds = miter
+        .chunks(4)
+        .filter(|p| p[0] > 130 && p[1] < 80 && p[2] < 80)
+        .count();
+    assert!(reds > 100, "应出现红色描边像素，实际 {reds}");
+    println!(
+        "  几何描边：面积 无 {n0} / round {nr} / miter {nm}；跨度增量 {grown}px；红 {reds} px"
+    );
+}
+
 /// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

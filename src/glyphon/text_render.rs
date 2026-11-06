@@ -260,7 +260,7 @@ impl TextRenderer {
 
             for run in layout_runs {
                 for glyph in run.glyphs.iter() {
-                    if let Some(glyph_to_render) = append_text_glyph(
+                    let (stroke_quad, fill_quad) = append_text_glyph(
                         &state,
                         &mut system,
                         glyph,
@@ -274,10 +274,16 @@ impl TextRenderer {
                         text_area.base_uv_rect,
                         text_area.style_index,
                         text_area.sdf_band,
+                        text_area.vector_stroke,
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
-                    )? {
-                        self.glyph_vertices.push(glyph_to_render);
+                    )?;
+                    // 几何描边先画，填充盖在上面。
+                    if let Some(quad) = stroke_quad {
+                        self.glyph_vertices.push(quad);
+                    }
+                    if let Some(quad) = fill_quad {
+                        self.glyph_vertices.push(quad);
                     }
                 }
             }
@@ -317,7 +323,7 @@ impl TextRenderer {
                 continue;
             }
             let bounds = glyph_bounds(area.bounds, area.transform_index, resolution);
-            if let Some(glyph_to_render) = append_text_glyph(
+            let (stroke_quad, fill_quad) = append_text_glyph(
                 &state,
                 &mut system,
                 area.glyph,
@@ -331,10 +337,16 @@ impl TextRenderer {
                 area.base_uv_rect,
                 area.style_index,
                 area.sdf_band,
+                // resolved 路径不支持几何描边（没有 custom-glyph 光栅化器）
+                None,
                 zero_depth,
                 |_| None,
-            )? {
-                self.glyph_vertices.push(glyph_to_render);
+            )?;
+            if let Some(quad) = stroke_quad {
+                self.glyph_vertices.push(quad);
+            }
+            if let Some(quad) = fill_quad {
+                self.glyph_vertices.push(quad);
             }
         }
 
@@ -526,6 +538,14 @@ pub(crate) enum GlyphonCacheKey {
     CustomSdf {
         key: CustomGlyphCacheKey,
         band_q: u16,
+    },
+    /// **几何描边**（真 miter/bevel）：zeno stroker 生成的覆盖度掩码。
+    Stroke {
+        base: cosmic_text::CacheKey,
+        width_q: u16,
+        join: u8,
+        cap: u8,
+        miter_q: u16,
     },
 }
 
@@ -935,6 +955,44 @@ pub(crate) fn rasterize_glyph(
                 data: sdf.data,
             })
         }
+        GlyphonCacheKey::Stroke {
+            base,
+            width_q,
+            join,
+            cap,
+            miter_q,
+        } => {
+            // 几何描边：需要 swash 的放置当几何基准（与覆盖度字形对齐）
+            let placement_image = cache.get_image_uncached(font_system, base)?;
+            let swash_w = placement_image.placement.width;
+            let swash_h = placement_image.placement.height;
+            if swash_w == 0 || swash_h == 0 {
+                return None;
+            }
+            let width_px = width_q as f32 / 16.0;
+            let stroke = sdf::stroke_mask(
+                font_system,
+                base,
+                (
+                    placement_image.placement.left as i16,
+                    placement_image.placement.top as i16,
+                    swash_w as u16,
+                    swash_h as u16,
+                ),
+                width_px,
+                join,
+                cap,
+                miter_q as f32 / 16.0,
+            )?;
+            Some(RasterizedGlyph {
+                content_type: ContentType::Mask,
+                top: stroke.top,
+                left: stroke.left,
+                width: stroke.width,
+                height: stroke.height,
+                data: stroke.data,
+            })
+        }
         GlyphonCacheKey::CustomSdf { key, band_q } => {
             // 彩色字形：先光栅化一遍拿到 alpha，再从 alpha 反推距离场。
             let input = RasterizeCustomGlyphRequest {
@@ -1044,14 +1102,66 @@ fn append_text_glyph<R>(
     base_uv_rect: [f32; 4],
     style_index: u32,
     sdf_band: f32,
-    metadata_to_depth: impl FnMut(usize) -> f32,
+    vector_stroke: Option<crate::text::TextStrokePx>,
+    mut metadata_to_depth: impl FnMut(usize) -> f32,
     rasterize_custom_glyph: R,
-) -> Result<Option<GlyphToRender>, PrepareError>
+) -> Result<(Option<GlyphToRender>, Option<GlyphToRender>), PrepareError>
 where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
     let physical_glyph = glyph.physical((left, top), scale);
     let color = glyph.color_opt.unwrap_or(default_color);
+
+    // 几何描边（真 miter）：先画，垫在填充下面。
+    let stroke_quad = match vector_stroke {
+        Some(px) if !px.is_empty() => {
+            let width_q = (px.width * 16.0).round().clamp(16.0, 65535.0) as u16;
+            let miter_q = (px.miter_limit * 16.0).round().clamp(16.0, 65535.0) as u16;
+            let key = GlyphonCacheKey::Stroke {
+                base: physical_glyph.cache_key,
+                width_q,
+                join: px.join,
+                cap: px.cap,
+                miter_q,
+            };
+            prepare_glyph(
+                state,
+                system,
+                GlyphMetadata {
+                    x: physical_glyph.x,
+                    y: physical_glyph.y,
+                    line_y,
+                    color: cosmic_text::Color::rgba(
+                        (px.color.r * 255.0) as u8,
+                        (px.color.g * 255.0) as u8,
+                        (px.color.b * 255.0) as u8,
+                        (px.color.a * 255.0) as u8,
+                    ),
+                    metadata: glyph.metadata,
+                    cache_key: key,
+                    scale_factor: scale,
+                    transform_index,
+                    base_uv_rect,
+                    style_index: 0,
+                    sdf_band: 0.0,
+                },
+                bounds,
+                |system, rasterize_custom_glyph| {
+                    rasterize_glyph(
+                        system.font_system,
+                        system.cache,
+                        key,
+                        scale,
+                        rasterize_custom_glyph,
+                    )
+                },
+                &mut metadata_to_depth,
+                |_| None,
+            )?
+        }
+        _ => None,
+    };
+
     // 有样式 ⇒ 走距离场变体（缓存键带 band 量化值）。
     let cache_key = if style_index > 0 {
         GlyphonCacheKey::Styled {
@@ -1061,7 +1171,7 @@ where
     } else {
         GlyphonCacheKey::Text(physical_glyph.cache_key)
     };
-    prepare_glyph(
+    let fill_quad = prepare_glyph(
         state,
         system,
         GlyphMetadata {
@@ -1089,7 +1199,9 @@ where
         },
         metadata_to_depth,
         rasterize_custom_glyph,
-    )
+    )?;
+
+    Ok((stroke_quad, fill_quad))
 }
 
 /// band 量化到 1/8 像素，限制缓存变体数量。

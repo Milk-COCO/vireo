@@ -354,6 +354,145 @@ pub(crate) fn generate(
     if swash_w == 0 || swash_h == 0 {
         return None;
     }
+    let geo = outline_geometry(font_system, key)?;
+    let band_i = band.ceil().max(1.0);
+    let pad = band_i;
+
+    // 设备像素（y 向上）→ padding 后的图像空间（y 向下）
+    let map = geo.map(swash_left, swash_top, pad);
+    let (segs, cmds) = collect_segments(&geo.pen, &map);
+
+    // 段的起点（Line/Quad/Cubic 共用）：MoveTo 之后的当前点。
+    // `collect_segments` 已经保证每段都从前一段终点接上，这里重建一次。
+    let starts = segment_starts(&geo.pen, &map);
+
+    let w = swash_w as usize + 2 * pad as usize;
+    let h = swash_h as usize + 2 * pad as usize;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+
+    // 符号：zeno 在同一空间栅格化填充掩码
+    let mut inside = vec![0u8; w * h];
+    let mut scratch = Scratch::new();
+    Mask::with_scratch(&cmds, &mut scratch)
+        .style(Fill::NonZero)
+        .origin(Origin::TopLeft)
+        .offset(Vector::ZERO)
+        .render_offset(Vector::ZERO)
+        .size(w as u32, h as u32)
+        .render_into(&mut inside, None);
+
+    let data = field_from_segments(&segs, &starts, &inside, w, h, band_i);
+
+    Some(GlyphSdf {
+        width: w as u16,
+        height: h as u16,
+        left: swash_left.saturating_sub(pad as i16),
+        top: swash_top.saturating_add(pad as i16),
+        data,
+    })
+}
+
+/// 从字体轮廓做**几何描边**（真 miter / bevel / round 连接）。
+///
+/// 与距离场描边（天然圆角连接）互补：这里交给 zeno 的 stroker 生成描边轮廓再栅格化，
+/// 得到的是**覆盖度掩码**（`content_type = Mask`），因此不需要新管线也不需要改着色器。
+pub(crate) fn stroke_mask(
+    font_system: &mut cosmic_text::FontSystem,
+    key: CacheKey,
+    placement: (i16, i16, u16, u16),
+    width_px: f32,
+    join: u8,
+    cap: u8,
+    miter_limit: f32,
+) -> Option<GlyphSdf> {
+    let (swash_left, swash_top, swash_w, swash_h) = placement;
+    if swash_w == 0 || swash_h == 0 || !(width_px > 0.0) {
+        return None;
+    }
+    let geo = outline_geometry(font_system, key)?;
+    // miter 尖角可能伸出很多：按 miter_limit 留 padding（有上限，防止爆图）。
+    let limit = miter_limit.clamp(1.0, 32.0);
+    let pad = (width_px * 0.5 * limit).ceil().clamp(1.0, 48.0);
+    let map = geo.map(swash_left, swash_top, pad);
+    let (_segs, cmds) = collect_segments(&geo.pen, &map);
+
+    let w = swash_w as usize + 2 * pad as usize;
+    let h = swash_h as usize + 2 * pad as usize;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+
+    let mut stroke = zeno::Stroke::new(width_px);
+    stroke
+        .join(match join {
+            1 => zeno::Join::Bevel,
+            2 => zeno::Join::Round,
+            _ => zeno::Join::Miter,
+        })
+        .cap(match cap {
+            1 => zeno::Cap::Square,
+            2 => zeno::Cap::Round,
+            _ => zeno::Cap::Butt,
+        })
+        .miter_limit(limit);
+
+    let mut data = vec![0u8; w * h];
+    let mut scratch = Scratch::new();
+    Mask::with_scratch(&cmds, &mut scratch)
+        .style(stroke)
+        .origin(Origin::TopLeft)
+        .offset(Vector::ZERO)
+        .render_offset(Vector::ZERO)
+        .size(w as u32, h as u32)
+        .render_into(&mut data, None);
+
+    Some(GlyphSdf {
+        width: w as u16,
+        height: h as u16,
+        left: swash_left.saturating_sub(pad as i16),
+        top: swash_top.saturating_add(pad as i16),
+        data,
+    })
+}
+
+/// 字形的轮廓几何：路径（font units）+ 缩放/子像素偏移/斜体标志。
+pub(crate) struct OutlineGeometry {
+    pen: Vec<PathElement>,
+    scale: f32,
+    bx: f32,
+    by: f32,
+    italic: bool,
+}
+
+impl OutlineGeometry {
+    /// 返回「设备像素（y 向上）→ padding 后的图像空间（y 向下）」的映射。
+    fn map(
+        &self,
+        swash_left: i16,
+        swash_top: i16,
+        pad: f32,
+    ) -> impl Fn(f32, f32) -> (f32, f32) + '_ {
+        move |x: f32, y: f32| {
+            let mut dx = x * self.scale + self.bx;
+            let dy = y * self.scale + self.by;
+            if self.italic {
+                // swash 的合成斜体：`Transform::skew(14°, 0)`，作用在设备坐标上
+                dx += TAN_ITALIC * dy;
+            }
+            let img_x = dx - swash_left as f32 + pad;
+            let img_y = swash_top as f32 - dy + pad;
+            (img_x, img_y)
+        }
+    }
+}
+
+/// 解析字体、variations、upem 与轮廓，得到可复用的几何。
+fn outline_geometry(
+    font_system: &mut cosmic_text::FontSystem,
+    key: CacheKey,
+) -> Option<OutlineGeometry> {
     let font = font_system.get_font(key.font_id, key.font_weight)?;
     let face_index = font_system
         .db()
@@ -400,53 +539,13 @@ pub(crate) fn generate(
         by = by.round();
     }
     let italic = key.flags.contains(cosmic_text::CacheKeyFlags::FAKE_ITALIC);
-    let scale = size_px / upem;
-    let band_i = band.ceil().max(1.0);
-    let pad = band_i;
 
-    // 设备像素（y 向上）→ padding 后的图像空间（y 向下）
-    let map = |x: f32, y: f32| -> (f32, f32) {
-        let mut dx = x * scale + bx;
-        let dy = y * scale + by;
-        if italic {
-            // swash 的合成斜体：`Transform::skew(14°, 0)`，作用在设备坐标上
-            dx += TAN_ITALIC * dy;
-        }
-        let img_x = dx - swash_left as f32 + pad;
-        let img_y = swash_top as f32 - dy + pad;
-        (img_x, img_y)
-    };
-    let (segs, cmds) = collect_segments(&pen, &map);
-
-    // 段的起点（Line/Quad/Cubic 共用）：MoveTo 之后的当前点。
-    // `collect_segments` 已经保证每段都从前一段终点接上，这里重建一次。
-    let starts = segment_starts(&pen, &map);
-
-    let w = swash_w as usize + 2 * pad as usize;
-    let h = swash_h as usize + 2 * pad as usize;
-    if w == 0 || h == 0 || w > 4096 || h > 4096 {
-        return None;
-    }
-
-    // 符号：zeno 在同一空间栅格化填充掩码
-    let mut inside = vec![0u8; w * h];
-    let mut scratch = Scratch::new();
-    Mask::with_scratch(&cmds, &mut scratch)
-        .style(Fill::NonZero)
-        .origin(Origin::TopLeft)
-        .offset(Vector::ZERO)
-        .render_offset(Vector::ZERO)
-        .size(w as u32, h as u32)
-        .render_into(&mut inside, None);
-
-    let data = field_from_segments(&segs, &starts, &inside, w, h, band_i);
-
-    Some(GlyphSdf {
-        width: w as u16,
-        height: h as u16,
-        left: swash_left.saturating_sub(pad as i16),
-        top: swash_top.saturating_add(pad as i16),
-        data,
+    Some(OutlineGeometry {
+        pen,
+        scale: size_px / upem,
+        bx,
+        by,
+        italic,
     })
 }
 
@@ -700,7 +799,39 @@ mod tests {
         assert!(d < 0.1, "曲线中点距离应≈0，实际 {d}");
     }
 
-    /// 彩色字形：从 alpha 反推的距离场，方块中心为负、外部为正、边缘居中。
+    /// zeno 的 stroker 是否真的区分 Miter / Round（尖角处 miter 应更高）。
+    #[test]
+    fn zeno_stroke_honors_join() {
+        let cmds = [
+            zeno::Command::MoveTo(Vector::new(10.0, 50.0)),
+            zeno::Command::LineTo(Vector::new(50.0, 10.0)),
+            zeno::Command::LineTo(Vector::new(90.0, 50.0)),
+        ];
+        let raster = |join: zeno::Join| -> u32 {
+            let mut stroke = zeno::Stroke::new(10.0);
+            stroke.join(join).miter_limit(8.0);
+            let (w, h) = (100u32, 100u32);
+            let mut out = vec![0u8; (w * h) as usize];
+            let mut scratch = Scratch::new();
+            Mask::with_scratch(cmds.as_slice(), &mut scratch)
+                .style(stroke)
+                .origin(Origin::TopLeft)
+                .offset(Vector::ZERO)
+                .render_offset(Vector::ZERO)
+                .size(w, h)
+                .render_into(&mut out, None);
+            (0..h)
+                .find(|y| (0..w).any(|x| out[(y * w + x) as usize] > 40))
+                .unwrap_or(h)
+        };
+        let miter = raster(zeno::Join::Miter);
+        let round = raster(zeno::Join::Round);
+        assert!(
+            miter < round,
+            "zeno 的 miter 应比 round 更高：miter y={miter} round y={round}"
+        );
+    }
+
     #[test]
     fn alpha_field_is_signed_and_centered() {
         let (w, h) = (12usize, 12usize);

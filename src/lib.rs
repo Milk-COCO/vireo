@@ -218,14 +218,17 @@ pub mod prelude {
     pub use crate::text::Style;
     pub use crate::text::TextAlign;
     pub use crate::text::TextBlend;
+    pub use crate::text::TextCap;
     pub use crate::text::TextDef;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
     pub use crate::text::TextGradient;
+    pub use crate::text::TextJoin;
     pub use crate::text::TextLayer;
     pub use crate::text::TextOverride;
     pub use crate::text::TextPaint;
     pub use crate::text::TextPart;
+    pub use crate::text::TextStroke;
     pub use crate::text::TextStyle;
     pub use crate::text::TextTextureState;
     pub use crate::text::Weight;

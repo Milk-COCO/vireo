@@ -152,6 +152,8 @@ pub struct TextArea<'a> {
     pub style_layers_only: u32,
     /// 距离场带宽（设备像素）；`style_index == 0` 时忽略。
     pub sdf_band: f32,
+    /// 几何描边（真 miter/bevel），画在填充与图层之下。`None` = 没有。
+    pub(crate) vector_stroke: Option<crate::text::TextStrokePx>,
 }
 
 /// A pre-resolved glyph that bypasses `Buffer::layout_runs()` while retaining

@@ -82,8 +82,21 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 多层描边 | 多个 `threshold = +w1, +w2…`（宽的先画） |
 | 浮雕 | 两个 `threshold = 0`、`offset = ±(1,1)`、一亮一暗 |
 | 内阴影 | `threshold = -w, offset = +d, softness = blur` |
+| **几何描边（真 miter）** | `TextStyle::vector_outline(TextStroke::new(w, c).join(TextJoin::Miter))` |
+
+### 3.1 距离场描边 vs 几何描边
+
+| | 距离场描边（`TextStyle::outline`） | 几何描边（`TextStyle::vector_outline`） |
+|---|---|---|
+| 连接方式 | 天生**圆角** | `Miter` / `Bevel` / `Round`，`miter_limit` 超过就退化 bevel |
+| 宽度变化 | 免费（同一份距离场） | 每种宽度一份图集数据 |
+| 开销 | 低（片元取阈） | 每条描边组合多一份光栅化 |
+| 适合 | 99% 的场景：文字描边、投影、发光 | SVG 观感、尖角必须精确的标题字 |
+
+几何描边画在所有图层与 fill **之下**，所以两者可以混用（例如几何描边 + 距离场投影）。
 
 ## 4. 为什么软边一次采样就够
+
 
 距离场下，"高斯模糊过的边缘"**精确**是误差函数：`cov = Φ(-d/σ)`。所以软投影/发光
 **不需要多 tap** —— 只有"模糊半径 ≫ 字形特征尺寸"时才有可见偏差。
@@ -128,6 +141,8 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 纹理填充 | 左右红蓝贴图：左 R/B = 89089/24005，右 0/35868 |
 | 彩色字形（emoji）描边 | 无样式 3253 px → 4px 描边 4595 px，其中 2145 px 为描边色 |
 | 图集不变量 | 样式绘制前后彩色图集不变（R8 256²=65536B，彩色 256²=262144B） |
+| 几何描边 | 10px 描边让纵向跨度恰好 +10px；覆盖 675 → 1771 px（round）/ 1753 px（miter） |
+| zeno stroker 连接 | 单测确认 `Miter` 确实比 `Round` 在尖角处更高 |
 | MRT 中的文本 | 目标 0 正常写入、其它目标保留 |
 
 复跑：`cargo test --release --test gpu_bench text_style -- --ignored --test-threads=1 --nocapture`
@@ -139,5 +154,4 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 ## 9. 尚未支持（后续版本）
 
-- miter/bevel 连接的几何描边（距离场描边天然是圆角连接）。
 - MSDF（跨尺度不重栅格）—— 当前按设备像素尺寸生成，缩放会重新生成（与无样式文本一致）。

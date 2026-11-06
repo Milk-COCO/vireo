@@ -30,6 +30,31 @@ pub(super) struct AreaMeta {
     pub(super) style_layers_only: u32,
     /// 距离场带宽（设备像素）。
     pub(super) sdf_band: f32,
+    /// 几何描边（真 miter/bevel）；画在填充之下。
+    pub(super) vector_stroke: Option<crate::text::TextStrokePx>,
+}
+
+/// 几何描边：折算成设备像素（`None` = 该样式没有几何描边）。
+fn stroke_px(style: &crate::text::TextStyle, dpi: f64) -> Option<crate::text::TextStrokePx> {
+    use crate::dpi::ToPx;
+    style
+        .vector_stroke
+        .as_ref()
+        .map(|s| crate::text::TextStrokePx {
+            width: s.width.to_px(dpi).0 as f32,
+            color: s.color,
+            join: match s.join {
+                crate::text::TextJoin::Miter => 0,
+                crate::text::TextJoin::Bevel => 1,
+                crate::text::TextJoin::Round => 2,
+            },
+            cap: match s.cap {
+                crate::text::TextCap::Butt => 0,
+                crate::text::TextCap::Square => 1,
+                crate::text::TextCap::Round => 2,
+            },
+            miter_limit: s.miter_limit,
+        })
 }
 
 pub(super) enum MetaBuf {
@@ -267,9 +292,11 @@ impl TextEntryList {
                 }
                 _ => (0, 0, 0.0),
             };
+            let row_vector_stroke = entry.style().and_then(|s| stroke_px(s, scale as f64));
             let mut style_index = row_style_index;
             let mut style_layers_only = row_style_layers_only;
             let mut sdf_band = row_sdf_band;
+            let mut vector_stroke = row_vector_stroke;
 
             match entry {
                 TextEntry::Stable { pos, .. } => {
@@ -292,6 +319,7 @@ impl TextEntryList {
                                 style_index,
                                 style_layers_only,
                                 sdf_band,
+                                vector_stroke,
                             });
                         }
                     }
@@ -304,7 +332,9 @@ impl TextEntryList {
                     for part in parts {
                         // 每段从行级样式起算（上一段的设置不能渗到下一段）。
                         style_index = row_style_index;
+                        style_layers_only = row_style_layers_only;
                         sdf_band = row_sdf_band;
+                        vector_stroke = row_vector_stroke;
                         match part {
                             TextPart::Normal(s, _) => {
                                 if s.is_empty() {
@@ -324,6 +354,8 @@ impl TextEntryList {
                                 style_index = si;
                                 style_layers_only = lo;
                                 sdf_band = band;
+                                vector_stroke =
+                                    pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
                                 metas.push(AreaMeta {
@@ -340,6 +372,7 @@ impl TextEntryList {
                                     style_index,
                                     style_layers_only,
                                     sdf_band,
+                                    vector_stroke,
                                 });
                                 cursor_x += w;
                             }
@@ -361,6 +394,8 @@ impl TextEntryList {
                                 style_index = si;
                                 style_layers_only = lo;
                                 sdf_band = band;
+                                vector_stroke =
+                                    pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 let opts = TextDef {
                                     max_width: None,
                                     align: TextAlign::Left,
@@ -386,6 +421,7 @@ impl TextEntryList {
                                                 style_index,
                                                 style_layers_only,
                                                 sdf_band,
+                                                vector_stroke,
                                             },
                                             w,
                                         )
@@ -423,6 +459,7 @@ impl TextEntryList {
                                                 style_index,
                                                 style_layers_only,
                                                 sdf_band,
+                                                vector_stroke,
                                             },
                                             lw,
                                         )
@@ -447,6 +484,7 @@ impl TextEntryList {
                                         style_index,
                                         style_layers_only,
                                         sdf_band,
+                                        vector_stroke,
                                     });
                                 }
                                 cursor_x += h.line_width();
@@ -466,6 +504,8 @@ impl TextEntryList {
                                 style_index = si;
                                 style_layers_only = lo;
                                 sdf_band = band;
+                                vector_stroke =
+                                    pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 for ch in s.chars() {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
                                     for glyph in cluster.glyphs.iter() {
@@ -483,6 +523,7 @@ impl TextEntryList {
                                             style_index,
                                             style_layers_only,
                                             sdf_band,
+                                            vector_stroke,
                                         });
                                     }
                                     cursor_x += cluster.advance;
@@ -508,6 +549,7 @@ impl TextEntryList {
                         style_index,
                         style_layers_only,
                         sdf_band,
+                        vector_stroke,
                     });
                 }
             }
@@ -633,6 +675,7 @@ impl TextEntryList {
                                     style_index: meta.style_index,
                                     style_layers_only: meta.style_layers_only,
                                     sdf_band: meta.sdf_band,
+                                    vector_stroke: meta.vector_stroke,
                                 })
                             });
                             match text_renderer.prepare(

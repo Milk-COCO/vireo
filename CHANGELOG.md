@@ -21,13 +21,17 @@
     同一次绘制里发两个 quad —— 只画图层的距离场垫在底下、彩色字形盖在上面，emoji 保留
     自己的颜色（此时 `style.fill` 被忽略）。
   - 降级（不 panic）：图层 > 8 截断 + warn；外扩 > 32px 钳制 + warn。
+  - **几何描边（真 miter / bevel / round 连接）**：`TextStroke` + `TextStyle::vector_outline` /
+    `with_vector_stroke`。与距离场描边互补 —— 距离场描边天生圆角连接且改宽度免费，
+    几何描边用 zeno 的 stroker 生成轮廓再栅格化，尖角精确（SVG 观感），复用覆盖度图集
+    （`content_type = Mask`），**不需要新管线也不需要改着色器**；`miter_limit` 超过退化成 bevel。
   - **逐段样式**：`TextPart::xxx_def(_, def)` 里的 `def.style` 按段生效（与字号/字体同一套语义）。
   - **可观测**：`GpuContext::text_atlas_stats()` → `TextAtlasStats`（R8 / 彩色图集尺寸与字节数）；
     样式文本不进彩色图集（有不变量用例盯着）。
   - 实测（`tests/gpu_bench.rs`）：3px 描边使覆盖面积 404 → 967 px 且 556 px 为描边色；
     同色描边的 258 个深内部像素与无样式**逐像素一致**；软投影重心在文字右下；
     页面矩形渐变上红下蓝（R/B 1.32 vs 0.56）；纹理填充左红右蓝（89089/24005 vs 0/35868）；
-    emoji 描边 3253 → 4595 px 且 2145 px 为描边色。
+    emoji 描边 3253 → 4595 px 且 2145 px 为描边色；几何描边 10px 让纵向跨度恰好 +10px。
   Text styles via a signed-distance-field layer stack: `TextDef.style` + `TextStyle` (outline,
   multi-outline, soft shadow, glow, inner outline, emboss, custom fill). Styled glyphs get an exact
   distance field derived from the font outline, sharing the existing R8 atlas; unstyled text is
