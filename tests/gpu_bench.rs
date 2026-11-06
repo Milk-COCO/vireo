@@ -5993,6 +5993,64 @@ fn text_style_shadow_offsets_down_right() {
     println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
 }
 
+/// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_uses_mask_atlas_only() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 128, 128);
+
+    let mut plain = DrawBatch::new();
+    draw_text(
+        &mut plain.texts,
+        "H",
+        Pos::new(20.0, 20.0),
+        TextDef::default().font_size(40.0),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&plain]);
+    let before = gpu.text_atlas_stats();
+
+    let style = TextStyle::shadow((2.0, 2.0), 2.0, Color::new(0.0, 0.0, 0.0, 0.8))
+        .with_layer(TextLayer::hard(2.0, TextPaint::solid(WHITE)));
+    let mut styled = DrawBatch::new();
+    draw_text(
+        &mut styled.texts,
+        "H",
+        Pos::new(20.0, 20.0),
+        TextDef {
+            style: Some(Arc::new(style)),
+            ..TextDef::default().font_size(40.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&styled]);
+    let after = gpu.text_atlas_stats();
+
+    assert_eq!(
+        before.color_size, after.color_size,
+        "样式字形不该进彩色图集：{} -> {}",
+        before.color_size, after.color_size
+    );
+    assert!(after.mask_size >= before.mask_size, "R8 图集只增不减");
+    assert!(
+        after.mask_bytes > 0 && after.mask_bytes <= 8 * 1024 * 1024,
+        "R8 图集占用异常：{} 字节",
+        after.mask_bytes
+    );
+    assert_eq!(
+        after.total_bytes(),
+        after.mask_bytes + after.color_bytes,
+        "total_bytes 定义应自洽"
+    );
+    println!(
+        "  图集：R8 {}²={}B，彩色 {}²={}B（样式前后彩色不变）",
+        after.mask_size, after.mask_bytes, after.color_size, after.color_bytes
+    );
+}
+
 /// 彩色字形（COLRv1 emoji）加描边：彩色字形保留自己的颜色，描边垫在底下。
 ///
 /// 判据：带描边的 emoji 比不带描边的覆盖面积更大，且多出来的部分以描边色为主。

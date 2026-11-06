@@ -1111,6 +1111,15 @@ impl GpuContext {
         (max_w, line_height * num_lines)
     }
 
+    /// 文本图集的当前占用（覆盖度 / 距离场共用 R8 图 + 彩色图）。
+    ///
+    /// 带样式的字形把距离场存在同一张 R8 图集里，所以这个数字同时反映了样式文本的
+    /// 显存开销（32px 字形 + band 4 ≈ 1.6KB/字形）。
+    pub fn text_atlas_stats(&self) -> crate::glyphon::TextAtlasStats {
+        let text_ctx = self.text_ctx.lock().unwrap();
+        text_ctx.text_atlas.stats()
+    }
+
     /// 文本的**视觉**包围盒（逻辑像素）：在 [`Self::measure_text`] 之上加上样式的溢出
     /// （描边宽度 + 3σ 软边 + 偏移）。
     ///

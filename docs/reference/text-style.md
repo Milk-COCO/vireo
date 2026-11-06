@@ -110,6 +110,9 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
   多套样式共用一份数据（band 是"最大外扩"，不是具体样式）。
 - 图集仍是**同一张 R8**（SDF 与覆盖度靠 `content_type` 区分）⇒ 零格式改动。
 - 内存量级：32px 字形 + band 4 ⇒ 40×40×1B ≈ **1.6KB/字形**（1000 字形 ≈ 1.6MB）。
+- **可观测**：`GpuContext::text_atlas_stats()` 返回 `TextAtlasStats`
+  （`mask_size` / `color_size` / `mask_bytes` / `color_bytes` / `total_bytes()`）——
+  样式文本不会进彩色图集（有 GPU 用例盯着这条不变量）。
 - 片元：每层一次采样（层数 ≤ 8），只在 `content_type == 2` 的分支里。
 - 生成成本：从轮廓算精确距离（线/二次/三次贝塞尔 Newton + 按段 bbox 剪枝），
   首次绘制该字形时一次性支付。
@@ -124,6 +127,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 渐变填充 | 页面矩形参照系：上部 R/B = 1.32（偏红）、下部 0.56（偏蓝） |
 | 纹理填充 | 左右红蓝贴图：左 R/B = 89089/24005，右 0/35868 |
 | 彩色字形（emoji）描边 | 无样式 3253 px → 4px 描边 4595 px，其中 2145 px 为描边色 |
+| 图集不变量 | 样式绘制前后彩色图集不变（R8 256²=65536B，彩色 256²=262144B） |
 | MRT 中的文本 | 目标 0 正常写入、其它目标保留 |
 
 复跑：`cargo test --release --test gpu_bench text_style -- --ignored --test-threads=1 --nocapture`

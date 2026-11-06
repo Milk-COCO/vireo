@@ -299,6 +299,25 @@ pub enum ColorMode {
     Web,
 }
 
+/// 图集占用快照（一次绘制后可读，用来决定要不要缩样式/换字号）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextAtlasStats {
+    /// 覆盖度 / 距离场图集边长（像素）。两者共用同一张 R8 图。
+    pub mask_size: u32,
+    /// 彩色图集边长（像素）。
+    pub color_size: u32,
+    /// R8 图集占用的字节数（`mask_size²`，SDF 与覆盖度共用）。
+    pub mask_bytes: u64,
+    /// 彩色图集占用的字节数（`color_size² × 4`）。
+    pub color_bytes: u64,
+}
+
+impl TextAtlasStats {
+    pub fn total_bytes(&self) -> u64 {
+        self.mask_bytes + self.color_bytes
+    }
+}
+
 /// An atlas containing a cache of rasterized glyphs that can be rendered.
 pub struct TextAtlas {
     cache: Cache,
@@ -312,6 +331,17 @@ pub struct TextAtlas {
 }
 
 impl TextAtlas {
+    /// 当前图集占用（纹理尺寸与字节数）。带样式的字形与普通字形**共用** R8 图集。
+    pub fn stats(&self) -> TextAtlasStats {
+        let mask_size = self.mask_atlas.size;
+        let color_size = self.color_atlas.size;
+        TextAtlasStats {
+            mask_size,
+            color_size,
+            mask_bytes: u64::from(mask_size) * u64::from(mask_size),
+            color_bytes: u64::from(color_size) * u64::from(color_size) * 4,
+        }
+    }
     /// Creates a new [`TextAtlas`].
     pub fn new(
         device: &Device,
