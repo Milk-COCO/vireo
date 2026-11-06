@@ -23,6 +23,24 @@ impl Color {
         }
     }
 
+    /// 从 `0xAARRGGBB` 位打包整数构造（**ARGB**，alpha 在高 8 位）。
+    ///
+    /// 这是渲染 / 皮肤 / 导入三条路径共用的"位打包 → `Color`"入口：
+    /// `255.0` 这个分母只在 [`Color::from_u8`] 里出现一次，调用方不必自己移位拆通道，
+    /// 也就不会出现"改一处分母、漏一处"的静默 255 倍错误。
+    ///
+    /// 与 [`Color::from_hex`]（字符串、支持 `#RGB`/`#RRGGBBAA` 等）区分：
+    /// 那个是**解析文本**，这个是**拆整数位段**，两者的通道顺序约定不同（ARGB vs RGBA）。
+    pub const fn from_hex_u32(hex: u32) -> Self {
+        Self::new(
+            ((hex >> 16) & 0xFF) as f32 / 255.0,
+            ((hex >> 8) & 0xFF) as f32 / 255.0,
+            (hex & 0xFF) as f32 / 255.0,
+            ((hex >> 24) & 0xFF) as f32 / 255.0,
+        )
+    }
+
+
     /// 从 hex 字符串构造（支持 `#RGB` `#RGBA` `#RRGGBB` `#RRGGBBAA`）
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim_start_matches('#');
@@ -255,6 +273,21 @@ pub mod colors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// ⭐ `0xAARRGGBB` → Color：通道顺序**必须是 ARGB**（alpha 在高字节）。
+    ///
+    /// 这条是三个 crate 共用"位打包构造"的唯一入口，错一位就是全局配色错乱而且不报错。
+    #[test]
+    fn from_hex_u32_unpacks_argb() {
+        let c = Color::from_hex_u32(0x80_11_22_33);
+        assert_eq!(c.a, 0x80 as f32 / 255.0);
+        assert_eq!(c.r, 0x11 as f32 / 255.0);
+        assert_eq!(c.g, 0x22 as f32 / 255.0);
+        assert_eq!(c.b, 0x33 as f32 / 255.0);
+        // 不透明黑 / 白：端点在 0 与 1。
+        assert_eq!(Color::from_hex_u32(0xFF00_0000), Color::new(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(Color::from_hex_u32(0xFFFF_FFFF), Color::new(1.0, 1.0, 1.0, 1.0));
+    }
+
 
     #[test]
     fn color_to_u8_array() {
