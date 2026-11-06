@@ -4,7 +4,7 @@
 //! `docs/reference/text-style.md`）。所以这里每种效果都只是 `TextStyle` 的一个图层列表。
 //!
 //! 按键：
-//! - `1`..`8` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字）
+//! - `1`..`9` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字 / emoji）
 //! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变）
 //! - `Q` / `ESC` 退出
 
@@ -68,6 +68,7 @@ async fn main(app: App) {
             (6, KeyCode::Digit6),
             (7, KeyCode::Digit7),
             (8, KeyCode::Digit8),
+            (9, KeyCode::Digit9),
         ] {
             if win.key_down(code) {
                 group = k;
@@ -182,11 +183,38 @@ async fn main(app: App) {
                 width,
             );
         }
+        if show_all || group == 9 {
+            // 彩色字形（emoji）：描边垫在底下，emoji 保留自己的颜色
+            let y_row = next(84.0);
+            draw_text(
+                &mut b.texts,
+                "彩色字形加描边（COLRv1 走 alpha 距离场）",
+                Pos::new(28.0, y_row + 10.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(Color::new(0.62, 0.67, 0.76, 1.0)),
+            );
+            let def = TextDef {
+                style: Some(Arc::new(TextStyle::outline(
+                    width + 1.0,
+                    Color::new(0.05, 0.06, 0.09, 0.9),
+                ))),
+                ..TextDef::default()
+                    .font_size(44.0)
+                    .with_family(Family::Name("Segoe UI Emoji"))
+            };
+            draw_text(
+                &mut b.texts,
+                "😀🍑🌈🦄",
+                Pos::new(230.0, y_row),
+                def,
+                TextOverride::from_color(WHITE),
+            );
+        }
 
         draw_text(
             &mut b.texts,
             &format!(
-                "1-8 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
+                "1-9 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
             ),
             Pos::new(28.0, 24.0),
             TextDef::default().font_size(13.0),
