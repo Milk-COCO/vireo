@@ -219,7 +219,7 @@ impl TextRenderer {
 
                 let color = glyph.color.unwrap_or(text_area.default_color);
 
-                if let Some(glyph_to_render) = append_custom_glyph(
+                let (layers_quad, color_quad) = append_custom_glyph(
                     &state,
                     &mut system,
                     x,
@@ -230,10 +230,17 @@ impl TextRenderer {
                     cache_key,
                     text_area.transform_index,
                     text_area.base_uv_rect,
+                    text_area.style_layers_only,
+                    text_area.sdf_band,
                     bounds,
                     &mut rasterize_custom_glyph,
-                )? {
-                    self.glyph_vertices.push(glyph_to_render);
+                )?;
+                // 顺序要紧：描边/投影先画，彩色字形盖在上面。
+                if let Some(quad) = layers_quad {
+                    self.glyph_vertices.push(quad);
+                }
+                if let Some(quad) = color_quad {
+                    self.glyph_vertices.push(quad);
                 }
             }
 
@@ -513,6 +520,11 @@ pub(crate) enum GlyphonCacheKey {
     /// 多套样式共用一份图集数据。
     Styled {
         base: cosmic_text::CacheKey,
+        band_q: u16,
+    },
+    /// 彩色字形的距离场变体：从光栅化后的 alpha 反推形状（emoji 描边/投影用）。
+    CustomSdf {
+        key: CustomGlyphCacheKey,
         band_q: u16,
     },
 }
@@ -923,6 +935,36 @@ pub(crate) fn rasterize_glyph(
                 data: sdf.data,
             })
         }
+        GlyphonCacheKey::CustomSdf { key, band_q } => {
+            // 彩色字形：先光栅化一遍拿到 alpha，再从 alpha 反推距离场。
+            let input = RasterizeCustomGlyphRequest {
+                id: key.glyph_id,
+                width: key.width,
+                height: key.height,
+                x_bin: key.x_bin,
+                y_bin: key.y_bin,
+                scale: scale_factor,
+            };
+            let output = (rasterize_custom_glyph)(input)?;
+            output.validate(&input, None);
+            let channels = output.content_type.bytes_per_pixel();
+            let band = band_q as f32 / 8.0;
+            let sdf = sdf::from_alpha(
+                &output.data,
+                key.width as usize,
+                key.height as usize,
+                channels,
+                band,
+            )?;
+            Some(RasterizedGlyph {
+                content_type: ContentType::Sdf,
+                top: sdf.top,
+                left: sdf.left,
+                width: sdf.width,
+                height: sdf.height,
+                data: sdf.data,
+            })
+        }
     }
 }
 
@@ -1066,13 +1108,61 @@ fn append_custom_glyph<R>(
     cache_key: GlyphonCacheKey,
     transform_index: u32,
     base_uv_rect: [f32; 4],
+    style_layers_only: u32,
+    sdf_band: f32,
     bounds: GlyphBounds,
-    rasterize_custom_glyph: R,
-) -> Result<Option<GlyphToRender>, PrepareError>
+    rasterize_custom_glyph: &mut R,
+) -> Result<(Option<GlyphToRender>, Option<GlyphToRender>), PrepareError>
 where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
-    prepare_glyph(
+    // 有样式 ⇒ 先发一个"只画图层"的距离场 quad（垫在彩色字形底下），
+    // 再发原来的彩色 quad（`style_index = 0`，保留 emoji 自己的颜色）。
+    let layers_quad = if style_layers_only > 0 {
+        if let GlyphonCacheKey::Custom(key) = cache_key {
+            prepare_glyph(
+                state,
+                system,
+                GlyphMetadata {
+                    x,
+                    y,
+                    line_y: 0.0,
+                    scale_factor: scale,
+                    color,
+                    metadata,
+                    cache_key: GlyphonCacheKey::CustomSdf {
+                        key,
+                        band_q: quantize_band(sdf_band),
+                    },
+                    transform_index,
+                    base_uv_rect,
+                    style_index: style_layers_only,
+                    sdf_band,
+                },
+                bounds,
+                |system, rasterize_custom_glyph| {
+                    rasterize_glyph(
+                        system.font_system,
+                        system.cache,
+                        GlyphonCacheKey::CustomSdf {
+                            key,
+                            band_q: quantize_band(sdf_band),
+                        },
+                        scale,
+                        rasterize_custom_glyph,
+                    )
+                },
+                |_| 0.0,
+                &mut *rasterize_custom_glyph,
+            )?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let color_quad = prepare_glyph(
         state,
         system,
         GlyphMetadata {
@@ -1085,7 +1175,7 @@ where
             cache_key,
             transform_index,
             base_uv_rect,
-            // 自定义/彩色字形：P1 不支持样式（见 docs：彩色字形没有单通道距离场）。
+            // 彩色字形自己保留颜色：样式只由上面那个 layers-only quad 负责
             style_index: 0,
             sdf_band: 0.0,
         },
@@ -1100,6 +1190,8 @@ where
             )
         },
         zero_depth,
-        rasterize_custom_glyph,
-    )
+        &mut *rasterize_custom_glyph,
+    )?;
+
+    Ok((layers_quad, color_quad))
 }

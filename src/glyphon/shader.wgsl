@@ -311,13 +311,13 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 out = apply_layer(layer_first + i * 4u, in_frag.sdf_band, in_frag.uv, in_frag.local01, frag_pos.xy, out);
                 i = i + 1u;
             }
-            // fill（style_meta.z: 0 = 用顶点色，1/2 = 纯色/渐变填充）
+            // fill（style_meta.z: 0 = 用顶点色，1/2/3 = 纯色/渐变/纹理，4 = 不填）
             let fill_kind = style_meta.z;
             let cov = coverage(d0, 0.0, 0.0);
             if fill_kind == 0u {
                 let a = in_frag.color.a * cov;
                 out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
-            } else {
+            } else if fill_kind != 4u {
                 let painted = paint_color(
                     fill_kind,
                     text_styles[sbase + 1u],

@@ -198,6 +198,7 @@ impl TextContext {
                 transform_index: 0,
                 base_uv_rect: [0.0, 0.0, 1.0, 1.0],
                 style_index: 0,
+                style_layers_only: 0,
                 sdf_band: 0.0,
             }],
             &mut self.swash_cache,

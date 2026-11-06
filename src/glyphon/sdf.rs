@@ -450,6 +450,140 @@ pub(crate) fn generate(
     })
 }
 
+/// 从**覆盖率位图**生成距离场（彩色字形专用）。
+///
+/// 彩色字形（COLRv1 / 位图 emoji）在字体轮廓里没有颜色信息，只能从光栅化后的
+/// **alpha** 反推形状。这里用 8SSEDT（两遍扫描的精确欧氏距离）在 padding 后的画布上算：
+/// 内部像素到最近外部像素、外部像素到最近内部像素，符号由 `alpha > 127` 决定。
+///
+/// `channels` 是源位图的通道数（1 = 单通道掩码，4 = RGBA；alpha 取最后一个通道）。
+pub(crate) fn from_alpha(
+    data: &[u8],
+    w: usize,
+    h: usize,
+    channels: usize,
+    band: f32,
+) -> Option<GlyphSdf> {
+    if w == 0 || h == 0 || channels == 0 || data.len() < w * h * channels {
+        return None;
+    }
+    let pad = band.ceil().max(1.0) as usize;
+    let pw = w + pad * 2;
+    let ph = h + pad * 2;
+
+    let mut inside = vec![false; pw * ph];
+    let mut any = false;
+    for y in 0..h {
+        for x in 0..w {
+            let a = data[(y * w + x) * channels + (channels - 1)];
+            if a > 127 {
+                inside[(y + pad) * pw + (x + pad)] = true;
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+
+    // 到最近「内部」像素的距离（外部用）与到最近「外部」像素的距离（内部用）
+    let d_out = edt(&inside, pw, ph, true);
+    let d_in = edt(&inside, pw, ph, false);
+
+    let inv_band = 1.0 / band.max(1e-3);
+    let mut out = vec![0u8; pw * ph];
+    for i in 0..pw * ph {
+        let signed = if inside[i] { -d_in[i] } else { d_out[i] };
+        let q = (signed.clamp(-band, band) * inv_band * 0.5 + 0.5) * 255.0;
+        out[i] = q.clamp(0.0, 255.0) as u8;
+    }
+
+    Some(GlyphSdf {
+        width: pw as u16,
+        height: ph as u16,
+        // 位图字形的 placement 是 (0,0,w,h)：padding 后左上角外扩 `pad`
+        left: 0i16.saturating_sub(pad as i16),
+        top: (h as i16).saturating_add(pad as i16),
+        data: out,
+    })
+}
+
+/// 8SSEDT：每个 texel 到最近目标像素的欧氏距离。
+///
+/// `target_inside = true` 表示求"到内部像素"的距离（用于外部），
+/// `false` 表示求"到外部像素"的距离（用于内部）。
+fn edt(inside: &[bool], w: usize, h: usize, target_inside: bool) -> Vec<f32> {
+    // 哨兵值取 2^20：平方后 2^40，i64 里不会溢出（2^40 的平方就会）
+    const BIG: i64 = 1 << 20;
+    let mut dx = vec![BIG; w * h];
+    let mut dy = vec![BIG; w * h];
+    let is_target = |i: usize| inside[i] == target_inside;
+    for i in 0..w * h {
+        if is_target(i) {
+            dx[i] = 0;
+            dy[i] = 0;
+        }
+    }
+    // 用一个"当前候选偏移"更新：保持 (dx,dy) 是到最近目标的向量
+    let relax = |i: usize, j: usize, ox: i64, oy: i64, dx: &mut Vec<i64>, dy: &mut Vec<i64>| {
+        if dx[j].abs() >= BIG {
+            return;
+        }
+        let cx = dx[j] + ox;
+        let cy = dy[j] + oy;
+        if cx * cx + cy * cy < dx[i] * dx[i] + dy[i] * dy[i] {
+            dx[i] = cx;
+            dy[i] = cy;
+        }
+    };
+    // 第一遍：左 → 右，上 → 下
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if x > 0 {
+                relax(i, i - 1, 1, 0, &mut dx, &mut dy);
+            }
+            if y > 0 {
+                if x > 0 {
+                    relax(i, i - w - 1, 1, 1, &mut dx, &mut dy);
+                }
+                relax(i, i - w, 0, 1, &mut dx, &mut dy);
+                if x + 1 < w {
+                    relax(i, i - w + 1, -1, 1, &mut dx, &mut dy);
+                }
+            }
+        }
+    }
+    // 第二遍：右 → 左，下 → 上
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            if x + 1 < w {
+                relax(i, i + 1, -1, 0, &mut dx, &mut dy);
+            }
+            if y + 1 < h {
+                if x + 1 < w {
+                    relax(i, i + w + 1, -1, -1, &mut dx, &mut dy);
+                }
+                relax(i, i + w, 0, -1, &mut dx, &mut dy);
+                if x > 0 {
+                    relax(i, i + w - 1, 1, -1, &mut dx, &mut dy);
+                }
+            }
+        }
+    }
+    (0..w * h)
+        .map(|i| {
+            if dx[i].abs() >= BIG {
+                // 完全没有目标（例如整张图都是内部，求"到外部"）
+                (w.max(h) + 1) as f32
+            } else {
+                (((dx[i] * dx[i] + dy[i] * dy[i]) as f64).sqrt()) as f32
+            }
+        })
+        .collect()
+}
+
 /// 与 `collect_segments` 同序的段起点列表。
 fn segment_starts(
     elements: &[PathElement],
@@ -564,5 +698,32 @@ mod tests {
         let from = [0.0, 0.0];
         let d = seg_dist2(&seg, from, [5.0, 7.5]).sqrt();
         assert!(d < 0.1, "曲线中点距离应≈0，实际 {d}");
+    }
+
+    /// 彩色字形：从 alpha 反推的距离场，方块中心为负、外部为正、边缘居中。
+    #[test]
+    fn alpha_field_is_signed_and_centered() {
+        let (w, h) = (12usize, 12usize);
+        // 中间 4×4 不透明，其余透明
+        let mut data = vec![0u8; w * h * 4];
+        for y in 4..8 {
+            for x in 4..8 {
+                data[(y * w + x) * 4 + 3] = 255;
+            }
+        }
+        let band = 4.0;
+        let f = from_alpha(&data, w, h, 4, band).expect("应生成距离场");
+        assert_eq!(f.width as usize, w + 8, "边框要加 2*band");
+        let pw = f.width as usize;
+        let decode = |q: u8| (q as f32 / 255.0 * 2.0 - 1.0) * band;
+        // padding 后方块中心 = (4+4, 4+4) + (band, band) = (10, 10)
+        let center = decode(f.data[10 * pw + 10]);
+        assert!(center < -1.0, "方块中心应为负（内部），实际 {center}");
+        // 画布左上角是外部
+        let corner = decode(f.data[0]);
+        assert!(corner > 0.0, "画布角应为正（外部），实际 {corner}");
+        // 方块边缘（x=4+4=8 与 9 之间的 texel）应接近 0
+        let edge = decode(f.data[10 * pw + 8]);
+        assert!(edge.abs() < 1.5, "边缘应接近 0，实际 {edge}");
     }
 }

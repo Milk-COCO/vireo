@@ -97,7 +97,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 外扩 > 32px | 距离场带宽钳到 32 + warn-once（效果变淡，不崩） |
 | `TextPaint::Texture` | 支持：`set_texture` 的那张批贴图 + uv 矩形 + 页面矩形；不传 rect 则逐字形 |
 | `TextPaint::Gradient` | 支持：`in_rect(..)` 跨满页面矩形，不给则逐字形 |
-| COLRv1 彩色字形（emoji） | 不支持样式：按原样绘制（彩色位图没有单通道距离场） |
+| COLRv1 彩色字形（emoji） | **支持**：从 alpha 反推距离场（8SSEDT）+ 双 quad —— 描边/投影垫在底下，emoji 保留自己的颜色；此时 `style.fill` 被忽略 |
 | 自定义材质 | 引擎图层不生效（材质替换 FS）；`material_main` 里可用基色与 UV 自绘 |
 | `measure_text` | **不变**（样式不影响排版） |
 | MRT / stencil / Area 裁切 | 不受影响（与普通文本同一条路径） |
@@ -123,6 +123,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 软投影方向 | 蓝色投影 958 px，重心 (47.5, 61.9)，在文字起点 (30,30) 的右下 |
 | 渐变填充 | 页面矩形参照系：上部 R/B = 1.32（偏红）、下部 0.56（偏蓝） |
 | 纹理填充 | 左右红蓝贴图：左 R/B = 89089/24005，右 0/35868 |
+| 彩色字形（emoji）描边 | 无样式 3253 px → 4px 描边 4595 px，其中 2145 px 为描边色 |
 | MRT 中的文本 | 目标 0 正常写入、其它目标保留 |
 
 复跑：`cargo test --release --test gpu_bench text_style -- --ignored --test-threads=1 --nocapture`
@@ -134,6 +135,5 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 ## 9. 尚未支持（后续版本）
 
-- COLRv1 彩色字形（emoji）的描边/投影：当前按原样绘制（彩色位图没有单通道距离场）。
 - miter/bevel 连接的几何描边（距离场描边天然是圆角连接）。
 - MSDF（跨尺度不重栅格）—— 当前按设备像素尺寸生成，缩放会重新生成（与无样式文本一致）。

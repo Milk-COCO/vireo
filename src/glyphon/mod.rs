@@ -147,6 +147,9 @@ pub struct TextArea<'a> {
     pub base_uv_rect: [f32; 4],
     /// 样式表下标 + 1（`0` = 无样式 ⇒ 走普通覆盖度图集，零额外开销）。
     pub style_index: u32,
+    /// 只画图层（不画 fill）的样式下标 + 1 —— 彩色字形用它把描边/投影垫在底下，
+    /// emoji 自己的颜色保持不变。`0` = 没有。
+    pub style_layers_only: u32,
     /// 距离场带宽（设备像素）；`style_index == 0` 时忽略。
     pub sdf_band: f32,
 }

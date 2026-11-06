@@ -311,6 +311,8 @@ pub(crate) const PAINT_DEFAULT: u32 = 0;
 pub(crate) const PAINT_SOLID: u32 = 1;
 pub(crate) const PAINT_GRADIENT: u32 = 2;
 pub(crate) const PAINT_TEXTURE: u32 = 3;
+/// 只画图层、不画 fill（彩色字形垫底用；填充由彩色字形自己负责）。
+pub(crate) const PAINT_NONE: u32 = 4;
 
 /// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..3)`。
 #[derive(Default)]
@@ -339,6 +341,15 @@ impl StyleTable {
     /// 同样的 `(层, 填充)` 只登记一次（去重），所以同一样式在多段文字间共享。
     /// 去重键**不含** `layer_first`（那是登记后才确定的），命中时复用旧下标。
     pub(crate) fn register(&mut self, style: &TextStyle, dpi: f64) -> (u32, f32) {
+        self.register_impl(style, dpi, false)
+    }
+
+    /// 登记「只画图层、不画 fill」的变体（彩色字形垫底用），返回 `(下标, band)`。
+    pub(crate) fn register_layers_only(&mut self, style: &TextStyle, dpi: f64) -> (u32, f32) {
+        self.register_impl(style, dpi, true)
+    }
+
+    fn register_impl(&mut self, style: &TextStyle, dpi: f64, layers_only: bool) -> (u32, f32) {
         let reach = style.reach_px(dpi);
         if reach > 32.0 {
             warn_once(
@@ -375,9 +386,14 @@ impl StyleTable {
         }
 
         // fill 永远最后画；`None` = 用调用方的默认颜色。
-        let (fill_kind, fill_color, fill_aux) = match style.fill.as_ref() {
-            Some(paint) => encode_paint(paint, &mut stops, dpi),
-            None => (PAINT_DEFAULT, [0u32; 4], [0u32; 4]),
+        // `layers_only`（彩色字形）：`fill_kind = PAINT_NONE` ⇒ 着色器一层都不填。
+        let (fill_kind, fill_color, fill_aux) = if layers_only {
+            (PAINT_NONE, [0u32; 4], [0u32; 4])
+        } else {
+            match style.fill.as_ref() {
+                Some(paint) => encode_paint(paint, &mut stops, dpi),
+                None => (PAINT_DEFAULT, [0u32; 4], [0u32; 4]),
+            }
         };
         style_rec[1] = layer_count;
         style_rec[2] = fill_kind;

@@ -5993,6 +5993,67 @@ fn text_style_shadow_offsets_down_right() {
     println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
 }
 
+/// 彩色字形（COLRv1 emoji）加描边：彩色字形保留自己的颜色，描边垫在底下。
+///
+/// 判据：带描边的 emoji 比不带描边的覆盖面积更大，且多出来的部分以描边色为主。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_emoji_outline() {
+    let Some((_path, family)) = colr_v1_test_font() else {
+        eprintln!("跳过：本机没有 COLRv1 字体");
+        return;
+    };
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 128;
+    let ring = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |styled: bool| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        let def = TextDef {
+            style: if styled {
+                Some(Arc::new(TextStyle::outline(4.0, ring)))
+            } else {
+                None
+            },
+            ..TextDef::default()
+                .font_size(64.0)
+                .with_family(Family::Name(family))
+        };
+        draw_text(
+            &mut b.texts,
+            "😀",
+            Pos::new(24.0, 24.0),
+            def,
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    let plain = render(false);
+    let styled = render(true);
+    let lit = |px: &[u8]| -> usize {
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 40)
+            .count()
+    };
+    let (na, nb) = (lit(&plain), lit(&styled));
+    assert!(na > 200, "用例失效：无样式 emoji 没画出来（{na}）");
+    assert!(
+        nb > na + 80,
+        "带描边的 emoji 覆盖面积应更大：无样式 {na} vs 描边 {nb}"
+    );
+    let reds = styled
+        .chunks(4)
+        .filter(|p| p[0] > 130 && p[1] < 80 && p[2] < 80)
+        .count();
+    assert!(reds > 60, "应出现红色描边像素，实际 {reds}");
+    println!("  emoji 描边：无样式 {na} px / 带描边 {nb} px，其中红色 {reds} px");
+}
+
 /// 纹理填充：字形按页面矩形铺一张左右红蓝的贴图 → 左红右蓝。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

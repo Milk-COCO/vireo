@@ -26,6 +26,8 @@ pub(super) struct AreaMeta {
     pub(super) blend_constant: wgpu::Color,
     /// 样式表下标 + 1（`0` = 无样式）。
     pub(super) style_index: u32,
+    /// 只画图层的样式下标 + 1（彩色字形用）。
+    pub(super) style_layers_only: u32,
     /// 距离场带宽（设备像素）。
     pub(super) sdf_band: f32,
 }
@@ -257,11 +259,16 @@ impl TextEntryList {
             let top = entry.pos().y * scale;
 
             // 行级样式（`TextPart` 逐段覆盖的话，下面在段内重新算一次并 shadow）。
-            let (row_style_index, row_sdf_band) = match entry.style() {
-                Some(style) if style.needs_style() => style_table.register(style, scale as f64),
-                _ => (0, 0.0),
+            let (row_style_index, row_style_layers_only, row_sdf_band) = match entry.style() {
+                Some(style) if style.needs_style() => {
+                    let (a, band) = style_table.register(style, scale as f64);
+                    let (b, _) = style_table.register_layers_only(style, scale as f64);
+                    (a, b, band)
+                }
+                _ => (0, 0, 0.0),
             };
             let mut style_index = row_style_index;
+            let mut style_layers_only = row_style_layers_only;
             let mut sdf_band = row_sdf_band;
 
             match entry {
@@ -283,6 +290,7 @@ impl TextEntryList {
                                 blend: entry.blend(),
                                 blend_constant: entry.blend_constant(),
                                 style_index,
+                                style_layers_only,
                                 sdf_band,
                             });
                         }
@@ -304,13 +312,17 @@ impl TextEntryList {
                                 }
                                 let pdef = part.resolve_def(def);
                                 // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
-                                let (si, band) = match pdef.style.as_ref() {
+                                let (si, lo, band) = match pdef.style.as_ref() {
                                     Some(st) if st.needs_style() => {
-                                        style_table.register(st, scale as f64)
+                                        let (a, bd) = style_table.register(st, scale as f64);
+                                        let (b, _) =
+                                            style_table.register_layers_only(st, scale as f64);
+                                        (a, b, bd)
                                     }
-                                    _ => (0, 0.0),
+                                    _ => (0, 0, 0.0),
                                 };
                                 style_index = si;
+                                style_layers_only = lo;
                                 sdf_band = band;
                                 let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
@@ -326,6 +338,7 @@ impl TextEntryList {
                                     blend: entry.blend(),
                                     blend_constant: entry.blend_constant(),
                                     style_index,
+                                    style_layers_only,
                                     sdf_band,
                                 });
                                 cursor_x += w;
@@ -336,13 +349,17 @@ impl TextEntryList {
                                 }
                                 let pdef = part.resolve_def(def);
                                 // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
-                                let (si, band) = match pdef.style.as_ref() {
+                                let (si, lo, band) = match pdef.style.as_ref() {
                                     Some(st) if st.needs_style() => {
-                                        style_table.register(st, scale as f64)
+                                        let (a, bd) = style_table.register(st, scale as f64);
+                                        let (b, _) =
+                                            style_table.register_layers_only(st, scale as f64);
+                                        (a, b, bd)
                                     }
-                                    _ => (0, 0.0),
+                                    _ => (0, 0, 0.0),
                                 };
                                 style_index = si;
+                                style_layers_only = lo;
                                 sdf_band = band;
                                 let opts = TextDef {
                                     max_width: None,
@@ -367,6 +384,7 @@ impl TextEntryList {
                                                 blend: entry.blend(),
                                                 blend_constant: entry.blend_constant(),
                                                 style_index,
+                                                style_layers_only,
                                                 sdf_band,
                                             },
                                             w,
@@ -403,6 +421,7 @@ impl TextEntryList {
                                                 blend: entry.blend(),
                                                 blend_constant: entry.blend_constant(),
                                                 style_index,
+                                                style_layers_only,
                                                 sdf_band,
                                             },
                                             lw,
@@ -426,6 +445,7 @@ impl TextEntryList {
                                         blend: entry.blend(),
                                         blend_constant: entry.blend_constant(),
                                         style_index,
+                                        style_layers_only,
                                         sdf_band,
                                     });
                                 }
@@ -434,13 +454,17 @@ impl TextEntryList {
                             TextPart::Glyphs(s, _) => {
                                 let pdef = part.resolve_def(def);
                                 // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
-                                let (si, band) = match pdef.style.as_ref() {
+                                let (si, lo, band) = match pdef.style.as_ref() {
                                     Some(st) if st.needs_style() => {
-                                        style_table.register(st, scale as f64)
+                                        let (a, bd) = style_table.register(st, scale as f64);
+                                        let (b, _) =
+                                            style_table.register_layers_only(st, scale as f64);
+                                        (a, b, bd)
                                     }
-                                    _ => (0, 0.0),
+                                    _ => (0, 0, 0.0),
                                 };
                                 style_index = si;
+                                style_layers_only = lo;
                                 sdf_band = band;
                                 for ch in s.chars() {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
@@ -457,6 +481,7 @@ impl TextEntryList {
                                             blend: entry.blend(),
                                             blend_constant: entry.blend_constant(),
                                             style_index,
+                                            style_layers_only,
                                             sdf_band,
                                         });
                                     }
@@ -481,6 +506,7 @@ impl TextEntryList {
                         blend: entry.blend(),
                         blend_constant: entry.blend_constant(),
                         style_index,
+                        style_layers_only,
                         sdf_band,
                     });
                 }
@@ -605,6 +631,7 @@ impl TextEntryList {
                                     transform_index: meta.transform_index,
                                     base_uv_rect: meta.base_uv_rect,
                                     style_index: meta.style_index,
+                                    style_layers_only: meta.style_layers_only,
                                     sdf_band: meta.sdf_band,
                                 })
                             });
