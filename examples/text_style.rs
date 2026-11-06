@@ -4,7 +4,8 @@
 //! `docs/reference/text-style.md`）。所以这里每种效果都只是 `TextStyle` 的一个图层列表。
 //!
 //! 按键：
-//! - `1`..`9` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字 / emoji）
+//! - `1`..`9` / `0` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字 /
+//!   emoji / 几何描边）
 //! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变）
 //! - `Q` / `ESC` 退出
 
@@ -69,6 +70,7 @@ async fn main(app: App) {
             (7, KeyCode::Digit7),
             (8, KeyCode::Digit8),
             (9, KeyCode::Digit9),
+            (10, KeyCode::Digit0),
         ] {
             if win.key_down(code) {
                 group = k;
@@ -211,10 +213,37 @@ async fn main(app: App) {
             );
         }
 
+        if show_all || group == 10 {
+            // 几何描边：真 miter 尖角（距离场描边是圆角连接）
+            let y_row = next(84.0);
+            draw_text(
+                &mut b.texts,
+                "几何描边（miter 尖角，SVG 观感）",
+                Pos::new(28.0, y_row + 10.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(Color::new(0.62, 0.67, 0.76, 1.0)),
+            );
+            let def = TextDef {
+                style: Some(Arc::new(TextStyle::vector_outline(
+                    TextStroke::new(width * 2.0, ink)
+                        .join(TextJoin::Miter)
+                        .miter_limit(6.0),
+                ))),
+                ..TextDef::default().font_size(44.0)
+            };
+            draw_text(
+                &mut b.texts,
+                "Vector 尖角 AMW",
+                Pos::new(230.0, y_row),
+                def,
+                TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
+            );
+        }
+
         draw_text(
             &mut b.texts,
             &format!(
-                "1-9 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
+                "1-9 / 0 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
             ),
             Pos::new(28.0, 24.0),
             TextDef::default().font_size(13.0),
