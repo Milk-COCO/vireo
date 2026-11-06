@@ -221,6 +221,7 @@ pub mod prelude {
     pub use crate::text::TextDef;
     pub use crate::text::TextEntry;
     pub use crate::text::TextEntryList;
+    pub use crate::text::TextGradient;
     pub use crate::text::TextLayer;
     pub use crate::text::TextOverride;
     pub use crate::text::TextPaint;

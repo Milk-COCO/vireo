@@ -4,7 +4,7 @@
 //! `docs/reference/text-style.md`）。所以这里每种效果都只是 `TextStyle` 的一个图层列表。
 //!
 //! 按键：
-//! - `1`..`7` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部）
+//! - `1`..`8` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字）
 //! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变）
 //! - `Q` / `ESC` 退出
 
@@ -67,6 +67,7 @@ async fn main(app: App) {
             (5, KeyCode::Digit5),
             (6, KeyCode::Digit6),
             (7, KeyCode::Digit7),
+            (8, KeyCode::Digit8),
         ] {
             if win.key_down(code) {
                 group = k;
@@ -160,11 +161,32 @@ async fn main(app: App) {
                 width,
             );
         }
+        if show_all || group == 8 {
+            // 渐变字：`in_rect` 让渐变跨满整行（不给则逐字形）
+            let y_row = next(84.0);
+            let grad = TextGradient::vertical(
+                Color::new(1.0, 0.72, 0.28, 1.0),
+                Color::new(0.92, 0.25, 0.55, 1.0),
+            )
+            .in_rect(230.0, y_row, 420.0, 56.0);
+            row(
+                &mut b,
+                y_row,
+                "渐变填充（页面矩形参照系 + 描边）",
+                "Gradient 渐变字",
+                Some(
+                    TextStyle::new()
+                        .with_layer(TextLayer::hard(width, TextPaint::solid(ink)))
+                        .with_fill(TextPaint::Gradient(grad)),
+                ),
+                width,
+            );
+        }
 
         draw_text(
             &mut b.texts,
             &format!(
-                "1-7 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
+                "1-8 切换示例组（当前 {group}，7 = 全部）    ←→ 描边宽度 {width:.1}     Q 退出"
             ),
             Pos::new(28.0, 24.0),
             TextDef::default().font_size(13.0),

@@ -22,6 +22,8 @@ struct VertexOutput {
     @location(3) base_uv: vec2<f32>,
     @location(4) @interpolate(flat) style_index: u32,
     @location(5) sdf_band: f32,
+    /// 字形 quad 内的归一化坐标（0..1），逐字形渐变/纹理填充用。
+    @location(6) local01: vec2<f32>,
 }
 
 struct Params {
@@ -57,6 +59,10 @@ var<storage> text_styles: array<vec4<u32>>;
 /// 图层表：每层 4 个 vec4 —— `geom` + `paint` + `color` + `aux`。
 @group(1) @binding(2)
 var<storage> text_layers: array<vec4<u32>>;
+
+/// 渐变停点表：每停点 2 个 vec4 —— `(at,0,0,0)` + 预乘 rgba。
+@group(1) @binding(3)
+var<storage> text_stops: array<vec4<u32>>;
 
 @group(2) @binding(0)
 var<storage> transforms: array<mat3x3<f32>>;
@@ -141,6 +147,7 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.content_type = content_type;
     vert_output.style_index = in_vert.style_index;
     vert_output.sdf_band = in_vert.sdf_band;
+    vert_output.local01 = vec2<f32>(corner_position);
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
     let base_uv0 = in_vert.base_uv_rect.xy;
@@ -173,7 +180,14 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
 }
 
 /// 一条样式的某一层：取阈 → 偏移采样 → 合成（`band` 是字形距离场的带宽）。
-fn apply_layer(base: u32, band: f32, at: vec2<f32>, out: vec4<f32>) -> vec4<f32> {
+fn apply_layer(
+    base: u32,
+    band: f32,
+    at: vec2<f32>,
+    glyph01: vec2<f32>,
+    page: vec2<f32>,
+    out: vec4<f32>,
+) -> vec4<f32> {
     let geom = text_layers[base];
     let off = vec2<f32>(bitcast<f32>(geom.x), bitcast<f32>(geom.y));
     let soft = bitcast<f32>(geom.z);
@@ -183,22 +197,72 @@ fn apply_layer(base: u32, band: f32, at: vec2<f32>, out: vec4<f32>) -> vec4<f32>
     let d = decode_sdf(textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x, band);
     let cov = coverage(d, thr, soft);
     let paint = text_layers[base + 1u];
-    let col = text_layers[base + 2u];
-    let rgb = vec3<f32>(
-        bitcast<f32>(col.x),
-        bitcast<f32>(col.y),
-        bitcast<f32>(col.z),
-    );
-    let a = bitcast<f32>(col.w) * cov;
-    let src = vec4<f32>(rgb * a, a);
+    let col = paint_color(paint.x, text_layers[base + 2u], text_layers[base + 3u], glyph01, page);
+    let a = col.a * cov;
+    let src = vec4<f32>(col.rgb * cov, a);
     if paint.y == 1u {
         return out + src; // Add
     }
     return over(out, src);
 }
 
+fn unpack(v: vec4<u32>) -> vec4<f32> {
+    return vec4<f32>(bitcast<f32>(v.x), bitcast<f32>(v.y), bitcast<f32>(v.z), bitcast<f32>(v.w));
+}
+
+/// 沿色带取色（预乘）——与形状渐变的 `vireo_ramp_color` 同一套布局。
+fn ramp_at(first: u32, count: u32, t: f32) -> vec4<f32> {
+    if (count == 0u) { return vec4<f32>(0.0); }
+    var idx = 0u;
+    for (var k = 1u; k < count; k = k + 1u) {
+        if (bitcast<f32>(text_stops[first + k * 2u].x) <= t) { idx = k; }
+    }
+    let next = min(idx + 1u, count - 1u);
+    let a_at = bitcast<f32>(text_stops[first + idx * 2u].x);
+    let b_at = bitcast<f32>(text_stops[first + next * 2u].x);
+    let span = b_at - a_at;
+    let f = select(0.0, clamp((t - a_at) / span, 0.0, 1.0), abs(span) > 1e-6);
+    let mixed = mix(
+        unpack(text_stops[first + idx * 2u + 1u]),
+        unpack(text_stops[first + next * 2u + 1u]),
+        f,
+    );
+    if (mixed.a <= 1e-6) { return vec4<f32>(0.0); }
+    return mixed; // 已是预乘
+}
+
+/// 一种填充的预乘颜色（`kind`: 0 默认色 / 1 纯色 / 2 渐变）。
+fn paint_color(kind: u32, color: vec4<u32>, aux: vec4<u32>, glyph01: vec2<f32>, page: vec2<f32>) -> vec4<f32> {
+    if (kind == 1u) {
+        return vec4<f32>(
+            bitcast<f32>(color.x),
+            bitcast<f32>(color.y),
+            bitcast<f32>(color.z),
+            bitcast<f32>(color.w),
+        );
+    }
+    if (kind == 2u) {
+        let center = vec2<f32>(bitcast<f32>(color.x), bitcast<f32>(color.y));
+        let span = bitcast<f32>(color.z);
+        let dir = vec2<f32>(bitcast<f32>(aux.x), bitcast<f32>(aux.y));
+        let first = aux.z;
+        let count = aux.w;
+        var t = 0.0;
+        if (span > 0.0) {
+            t = clamp(dot(page - center, dir) / span + 0.5, 0.0, 1.0);
+        } else {
+            // 逐字形：字形框内 0..1
+            t = clamp(dot(glyph01 - vec2<f32>(0.5), dir) + 0.5, 0.0, 1.0);
+        }
+        return ramp_at(first, count, t);
+    }
+    return vec4<f32>(0.0);
+}
+
 @fragment
 fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
+    // 片元在帧缓冲里的像素坐标（页面空间渐变用）
+    let frag_pos = in_frag.position;
     switch in_frag.content_type {
         case 0u: {
             return textureSampleLevel(color_atlas_texture, atlas_sampler, in_frag.uv, 0.0);
@@ -221,23 +285,25 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             var i = 0u;
             loop {
                 if i >= layer_count { break; }
-                out = apply_layer(layer_first + i * 4u, in_frag.sdf_band, in_frag.uv, out);
+                out = apply_layer(layer_first + i * 4u, in_frag.sdf_band, in_frag.uv, in_frag.local01, frag_pos.xy, out);
                 i = i + 1u;
             }
-            // fill（style_meta.z: 0 = 用顶点色，1 = 纯色填充）
+            // fill（style_meta.z: 0 = 用顶点色，1/2 = 纯色/渐变填充）
             let fill_kind = style_meta.z;
-            if fill_kind == 1u {
-                let fc = text_styles[sbase + 1u];
-                let rgb = vec3<f32>(
-                    bitcast<f32>(fc.x),
-                    bitcast<f32>(fc.y),
-                    bitcast<f32>(fc.z),
-                );
-                let a = bitcast<f32>(fc.w) * coverage(d0, 0.0, 0.0);
-                out = over(out, vec4<f32>(rgb * a, a));
-            } else {
-                let a = in_frag.color.a * coverage(d0, 0.0, 0.0);
+            let cov = coverage(d0, 0.0, 0.0);
+            if fill_kind == 0u {
+                let a = in_frag.color.a * cov;
                 out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
+            } else {
+                let painted = paint_color(
+                    fill_kind,
+                    text_styles[sbase + 1u],
+                    text_styles[sbase + 2u],
+                    in_frag.local01,
+                    frag_pos.xy,
+                );
+                let a = painted.a * cov;
+                out = over(out, vec4<f32>(painted.rgb * cov, a));
             }
             if out.a <= 1e-6 {
                 return vec4<f32>(0.0);

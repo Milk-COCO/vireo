@@ -15,9 +15,10 @@ const EMPTY_STYLE_BYTES: u64 = 16;
 pub struct Viewport {
     params: Params,
     params_buffer: Buffer,
-    /// 样式表 / 图层表（`group(1) @binding(1..2)`）。空表时用 16B 的占位缓冲。
+    /// 样式表 / 图层表 / 停点表（`group(1) @binding(1..3)`）。空表时用 16B 的占位缓冲。
     styles_buffer: Buffer,
     layers_buffer: Buffer,
+    stops_buffer: Buffer,
     pub(crate) bind_group: BindGroup,
 }
 
@@ -49,12 +50,14 @@ impl Viewport {
         };
         let styles_buffer = empty("glyphon text styles");
         let layers_buffer = empty("glyphon text layers");
+        let stops_buffer = empty("glyphon text stops");
 
         let bind_group = cache.create_uniforms_bind_group(
             device,
             &params_buffer,
             &styles_buffer,
             &layers_buffer,
+            &stops_buffer,
         );
 
         Self {
@@ -62,25 +65,29 @@ impl Viewport {
             params_buffer,
             styles_buffer,
             layers_buffer,
+            stops_buffer,
             bind_group,
         }
     }
 
-    /// 用新的样式表 / 图层表缓冲重建 bind group（缓冲增长或每帧换数据后调用）。
+    /// 用新的样式表 / 图层表 / 停点表缓冲重建 bind group（缓冲增长后调用）。
     pub(crate) fn rebind_style_buffers(
         &mut self,
         device: &Device,
         cache: &Cache,
         styles: Buffer,
         layers: Buffer,
+        stops: Buffer,
     ) {
         self.styles_buffer = styles;
         self.layers_buffer = layers;
+        self.stops_buffer = stops;
         self.bind_group = cache.create_uniforms_bind_group(
             device,
             &self.params_buffer,
             &self.styles_buffer,
             &self.layers_buffer,
+            &self.stops_buffer,
         );
     }
 
@@ -113,13 +120,22 @@ impl Viewport {
         });
     }
 
-    /// 每帧整块重写样式表 / 图层表（空表时跳过 —— 着色器不会读）。
-    pub(crate) fn write_style_buffers(&mut self, queue: &Queue, styles: &[u8], layers: &[u8]) {
+    /// 每帧整块重写样式表 / 图层表 / 停点表（空表时跳过 —— 着色器不会读）。
+    pub(crate) fn write_style_buffers(
+        &mut self,
+        queue: &Queue,
+        styles: &[u8],
+        layers: &[u8],
+        stops: &[u8],
+    ) {
         if !styles.is_empty() {
             queue.write_buffer(&self.styles_buffer, 0, styles);
         }
         if !layers.is_empty() {
             queue.write_buffer(&self.layers_buffer, 0, layers);
+        }
+        if !stops.is_empty() {
+            queue.write_buffer(&self.stops_buffer, 0, stops);
         }
     }
 

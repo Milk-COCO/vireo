@@ -29,6 +29,7 @@ const BUFFER_POOL_CAP: usize = 128;
 struct StyleBuffers {
     styles_cap: u64,
     layers_cap: u64,
+    stops_cap: u64,
 }
 
 pub struct TextContext {
@@ -663,12 +664,16 @@ impl TextContext {
     ) {
         let styles_bytes: &[u8] = bytemuck::cast_slice(&table.styles);
         let layers_bytes: &[u8] = bytemuck::cast_slice(&table.layers);
+        let stops_bytes: &[u8] = bytemuck::cast_slice(&table.stops);
         let style_need = (styles_bytes.len().max(16) as u64).next_power_of_two();
         let layer_need = (layers_bytes.len().max(16) as u64).next_power_of_two();
+        let stop_need = (stops_bytes.len().max(16) as u64).next_power_of_two();
 
         let needs_rebuild = match &self.style_buffers {
             None => true,
-            Some(b) => style_need > b.styles_cap || layer_need > b.layers_cap,
+            Some(b) => {
+                style_need > b.styles_cap || layer_need > b.layers_cap || stop_need > b.stops_cap
+            }
         };
         if needs_rebuild {
             let styles = device.create_buffer(&wgpu::BufferDescriptor {
@@ -683,19 +688,27 @@ impl TextContext {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            let stops = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glyphon text stops"),
+                size: stop_need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             self.viewport
-                .rebind_style_buffers(device, cache, styles, layers);
+                .rebind_style_buffers(device, cache, styles, layers, stops);
             let b = self.style_buffers.get_or_insert_with(|| StyleBuffers {
                 styles_cap: 0,
                 layers_cap: 0,
+                stops_cap: 0,
             });
             // `rebind_style_buffers` 把缓冲移交给 Viewport；这里只记容量，
             // 实际写入走 Viewport 暴露的缓冲句柄。
             b.styles_cap = style_need;
             b.layers_cap = layer_need;
+            b.stops_cap = stop_need;
         }
         self.viewport
-            .write_style_buffers(queue, styles_bytes, layers_bytes);
+            .write_style_buffers(queue, styles_bytes, layers_bytes, stops_bytes);
         self.viewport.set_style_count(queue, table.style_count());
     }
 }

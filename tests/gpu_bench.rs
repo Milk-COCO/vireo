@@ -5992,3 +5992,80 @@ fn text_style_shadow_offsets_down_right() {
     );
     println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
 }
+
+/// 渐变填充：同一个字形上红下蓝（页面矩形参照系，跨满给定框）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_gradient_fill() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let grad = TextGradient::vertical(
+        Color::new(1.0, 0.15, 0.15, 1.0),
+        Color::new(0.15, 0.35, 1.0, 1.0),
+    )
+    // 框贴着字形上下沿：顶部 t≈0（纯红）、底部 t≈1（纯蓝）
+    .in_rect(20.0, 30.0, 56.0, 46.0);
+    let style = TextStyle::new().with_fill(TextPaint::Gradient(grad));
+    draw_text(
+        &mut b.texts,
+        "H",
+        Pos::new(24.0, 20.0),
+        TextDef {
+            style: Some(Arc::new(style)),
+            ..TextDef::default().font_size(56.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+
+    // 按行汇总，取亮像素的上下两段比红/蓝比例（AA 边缘像素会整体压暗，
+    // 所以用**比例**而不是绝对值）。
+    let mut rows: Vec<(u32, i64, i64)> = Vec::new();
+    for y in 0..N {
+        let mut r_sum = 0i64;
+        let mut b_sum = 0i64;
+        for x in 0..N {
+            let i = ((y * N + x) * 4) as usize;
+            let (r, g, bl) = (px[i] as i64, px[i + 1] as i64, px[i + 2] as i64);
+            if r + g + bl > 90 {
+                r_sum += r;
+                b_sum += bl;
+            }
+        }
+        if r_sum + b_sum > 0 {
+            rows.push((y, r_sum, b_sum));
+        }
+    }
+    assert!(rows.len() > 10, "用例失效：亮像素行太少（{}）", rows.len());
+    let (top_y, _, _) = rows[0];
+    let (bot_y, _, _) = rows[rows.len() - 1];
+    assert!(top_y + 8 < bot_y, "字形太矮，看不出上下差异");
+    let third = (rows.len() / 3).max(1);
+    let (mut tr, mut tb, mut br, mut bb) = (0i64, 0i64, 0i64, 0i64);
+    for &(_, r, b) in &rows[..third] {
+        tr += r;
+        tb += b;
+    }
+    for &(_, r, b) in &rows[rows.len() - third..] {
+        br += r;
+        bb += b;
+    }
+    println!(
+        "  渐变填充：上部 R/B={:.2}，下部 R/B={:.2}（中心像素 {:?}）",
+        tr as f64 / tb.max(1) as f64,
+        br as f64 / bb.max(1) as f64,
+        {
+            let i = ((48 * N + 48) * 4) as usize;
+            (px[i], px[i + 1], px[i + 2])
+        }
+    );
+    // sRGB 目标 + AA 边缘会把比例压低，1.25 已经足以证明"上红下蓝"。
+    assert!(tr > tb * 5 / 4, "上三分之一应偏红：R={tr} B={tb}");
+    assert!(bb > br * 5 / 4, "下三分之一应偏蓝：R={br} B={bb}");
+}

@@ -256,11 +256,13 @@ impl TextEntryList {
             };
             let top = entry.pos().y * scale;
 
-            // 样式：行级 `TextDef`（逐段覆盖属 P2）。无样式 ⇒ (0, 0.0)，完全走旧路径。
-            let (style_index, sdf_band) = match entry.style() {
+            // 行级样式（`TextPart` 逐段覆盖的话，下面在段内重新算一次并 shadow）。
+            let (row_style_index, row_sdf_band) = match entry.style() {
                 Some(style) if style.needs_style() => style_table.register(style, scale as f64),
                 _ => (0, 0.0),
             };
+            let mut style_index = row_style_index;
+            let mut sdf_band = row_sdf_band;
 
             match entry {
                 TextEntry::Stable { pos, .. } => {
@@ -292,12 +294,24 @@ impl TextEntryList {
                     // HUD 多段：逻辑 x 横拼，再 * scale；每段可用 resolve_def 覆盖字号等
                     let mut cursor_x = pos.x;
                     for part in parts {
+                        // 每段从行级样式起算（上一段的设置不能渗到下一段）。
+                        style_index = row_style_index;
+                        sdf_band = row_sdf_band;
                         match part {
                             TextPart::Normal(s, _) => {
                                 if s.is_empty() {
                                     continue;
                                 }
                                 let pdef = part.resolve_def(def);
+                                // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
+                                let (si, band) = match pdef.style.as_ref() {
+                                    Some(st) if st.needs_style() => {
+                                        style_table.register(st, scale as f64)
+                                    }
+                                    _ => (0, 0.0),
+                                };
+                                style_index = si;
+                                sdf_band = band;
                                 let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
                                 metas.push(AreaMeta {
@@ -321,6 +335,15 @@ impl TextEntryList {
                                     continue;
                                 }
                                 let pdef = part.resolve_def(def);
+                                // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
+                                let (si, band) = match pdef.style.as_ref() {
+                                    Some(st) if st.needs_style() => {
+                                        style_table.register(st, scale as f64)
+                                    }
+                                    _ => (0, 0.0),
+                                };
+                                style_index = si;
+                                sdf_band = band;
                                 let opts = TextDef {
                                     max_width: None,
                                     align: TextAlign::Left,
@@ -410,6 +433,15 @@ impl TextEntryList {
                             }
                             TextPart::Glyphs(s, _) => {
                                 let pdef = part.resolve_def(def);
+                                // 逐段样式：本段 `TextDef` 覆盖行级（与字号/字体同一套语义）。
+                                let (si, band) = match pdef.style.as_ref() {
+                                    Some(st) if st.needs_style() => {
+                                        style_table.register(st, scale as f64)
+                                    }
+                                    _ => (0, 0.0),
+                                };
+                                style_index = si;
+                                sdf_band = band;
                                 for ch in s.chars() {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
                                     for glyph in cluster.glyphs.iter() {

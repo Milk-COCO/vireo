@@ -13,11 +13,15 @@
   - 软边用误差函数：距离场下"高斯模糊过的边缘"精确是 erf，所以**软投影/发光一次采样**，
     不需要多 tap。
   - 单位是像素意图（裸值/`Dp` 逻辑像素、`Px` 物理像素）⇒ **DPI 变化时描边视觉宽度不变**；
-    `measure_text` 语义不变（样式不参与排版）。
+    `measure_text` 语义不变（样式不参与排版），新增 `measure_text_visual` 给出含溢出的视觉外框。
+  - **填充**：纯色、**渐变**（`TextPaint::Gradient` + `TextGradient::in_rect` 指定跨满的页面矩形，
+    不给则逐字形）；纹理填充仍降级为白 + warn。
+  - **逐段样式**：`TextPart::xxx_def(_, def)` 里的 `def.style` 按段生效（与字号/字体同一套语义）。
   - 降级（不 panic）：图层 > 8 截断 + warn；外扩 > 32px 钳制 + warn；彩色字形（COLRv1）不支持
-    样式；文字渐变/纹理填充已进类型但**当前降级为纯色**（取首停点/白）+ warn。
+    样式。
   - 实测（`tests/gpu_bench.rs`）：3px 描边使覆盖面积 404 → 967 px 且 556 px 为描边色；
-    同色描边的 258 个深内部像素与无样式**逐像素一致**；软投影重心在文字右下。
+    同色描边的 258 个深内部像素与无样式**逐像素一致**；软投影重心在文字右下；
+    页面矩形渐变上红下蓝（R/B 1.32 vs 0.56）。
   Text styles via a signed-distance-field layer stack: `TextDef.style` + `TextStyle` (outline,
   multi-outline, soft shadow, glow, inner outline, emboss, custom fill). Styled glyphs get an exact
   distance field derived from the font outline, sharing the existing R8 atlas; unstyled text is

@@ -202,6 +202,8 @@ impl Cache {
                 storage_entry(1),
                 // 2 = 图层表（4 个 vec4 / 层）
                 storage_entry(2),
+                // 3 = 渐变停点表（2 个 vec4 / 停点）
+                storage_entry(3),
             ],
             label: Some("glyphon uniforms bind group layout"),
         });
@@ -269,6 +271,7 @@ impl Cache {
         buffer: &Buffer,
         styles: &Buffer,
         layers: &Buffer,
+        stops: &Buffer,
     ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
             layout: &self.0.uniforms_layout,
@@ -284,6 +287,10 @@ impl Cache {
                 BindGroupEntry {
                     binding: 2,
                     resource: layers.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: stops.as_entire_binding(),
                 },
             ],
             label: Some("glyphon uniforms bind group"),

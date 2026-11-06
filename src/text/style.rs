@@ -32,17 +32,41 @@ impl TextPaint {
 
 /// 文字用的线性渐变：角度 + 停点，语义与 [`crate::shapes::LinearGradient`] 一致，
 /// 但**拥有**停点（`TextStyle` 要能长期存在）。
+///
+/// `rect` 决定渐变坐标的参照系：
+/// - `Some((x, y, w, h))`：跨满这个**页面矩形**（物理/逻辑按 `Pp` 意图折算）—— 标题、
+///   卡片这类"整段文字一个渐变"用它；
+/// - `None`：退化成**每个字形独立**的渐变（字形框内 0..1），只适合单字装饰。
 #[derive(Clone, Debug)]
 pub struct TextGradient {
     /// 度，顺时针；0 = 自上而下，90 = 自左而右。
     pub angle_deg: f32,
     pub stops: Vec<crate::shapes::GradientStop>,
+    /// 页面矩形参照系；`None` = 逐字形。
+    pub rect: Option<(Pp, Pp, Pp, Pp)>,
 }
 
 impl TextGradient {
     pub fn new(angle_deg: f32, stops: Vec<crate::shapes::GradientStop>) -> Self {
-        Self { angle_deg, stops }
+        Self {
+            angle_deg,
+            stops,
+            rect: None,
+        }
     }
+
+    /// 指定页面矩形（跨满这个框）。
+    pub fn in_rect(
+        mut self,
+        x: impl Into<Pp>,
+        y: impl Into<Pp>,
+        w: impl Into<Pp>,
+        h: impl Into<Pp>,
+    ) -> Self {
+        self.rect = Some((x.into(), y.into(), w.into(), h.into()));
+        self
+    }
+
     /// 两色竖直（自上而下）。
     pub fn vertical(from: Color, to: Color) -> Self {
         Self::new(
@@ -255,18 +279,23 @@ pub type TextStyleRef = Arc<TextStyle>;
 pub(crate) const STYLE_STRIDE_U32: usize = 12;
 /// 单层（4 × vec4 = 64B）。
 pub(crate) const LAYER_STRIDE_U32: usize = 16;
+/// 单个渐变停点（2 × vec4 = 32B）。
+pub(crate) const STOP_STRIDE_U32: usize = 8;
 
 /// 填充类型（与着色器里的 `paint_kind` 一致）。
 pub(crate) const PAINT_DEFAULT: u32 = 0;
 pub(crate) const PAINT_SOLID: u32 = 1;
+pub(crate) const PAINT_GRADIENT: u32 = 2;
 
-/// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..2)`。
+/// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..3)`。
 #[derive(Default)]
 pub(crate) struct StyleTable {
     /// `styles`：`(layer_first, layer_count, fill_kind, 0)` + `fill_color` + `fill_aux`
     pub(crate) styles: Vec<u32>,
     /// `layers`：`geom` + `paint` + `color` + `aux`
     pub(crate) layers: Vec<u32>,
+    /// `stops`：`(at,0,0,0)` + 预乘 rgba（渐变停点，去重前先攒在局部，命中就丢弃）
+    pub(crate) stops: Vec<u32>,
     /// 去重表：内容哈希 → styles 里的 1-based 下标
     map: rustc_hash::FxHashMap<u64, Vec<u32>>,
 }
@@ -290,10 +319,11 @@ impl StyleTable {
 
         let mut style_rec = [0u32; STYLE_STRIDE_U32];
         let mut layers: Vec<u32> = Vec::with_capacity(layer_count as usize * LAYER_STRIDE_U32);
+        let mut stops: Vec<u32> = Vec::new();
 
         for layer in style.layers.iter().take(layer_count as usize) {
             let px = layer.to_px(dpi);
-            let (kind, color, aux) = encode_paint(&layer.paint);
+            let (kind, color, aux) = encode_paint(&layer.paint, &mut stops, dpi);
             let mut rec = [0u32; LAYER_STRIDE_U32];
             rec[0] = px.offset.0.to_bits();
             rec[1] = px.offset.1.to_bits();
@@ -311,7 +341,7 @@ impl StyleTable {
 
         // fill 永远最后画；`None` = 用调用方的默认颜色。
         let (fill_kind, fill_color, fill_aux) = match style.fill.as_ref() {
-            Some(paint) => encode_paint(paint),
+            Some(paint) => encode_paint(paint, &mut stops, dpi),
             None => (PAINT_DEFAULT, [0u32; 4], [0u32; 4]),
         };
         style_rec[1] = layer_count;
@@ -321,7 +351,7 @@ impl StyleTable {
 
         // 去重：样式头（不含 layer_first）+ 层 + 停点
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for v in style_rec.iter().chain(layers.iter()) {
+        for v in style_rec.iter().chain(layers.iter()).chain(stops.iter()) {
             hash ^= *v as u64;
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
@@ -331,7 +361,6 @@ impl StyleTable {
                 if self.styles.len() < at + STYLE_STRIDE_U32 {
                     continue;
                 }
-                // 逐字段比较样式头（`layer_first` 单独比，因为它指向旧层）
                 let existing = &self.styles[at..at + STYLE_STRIDE_U32];
                 let same_header = existing[1] == style_rec[1]
                     && existing[2..]
@@ -354,6 +383,7 @@ impl StyleTable {
         let layer_first = (self.layers.len() / LAYER_STRIDE_U32) as u32;
         style_rec[0] = layer_first;
         self.layers.extend_from_slice(&layers);
+        self.stops.extend_from_slice(&stops);
         self.styles.extend_from_slice(&style_rec);
         let idx = (self.styles.len() / STYLE_STRIDE_U32) as u32;
         self.map.entry(hash).or_default().push(idx);
@@ -361,41 +391,69 @@ impl StyleTable {
     }
 }
 
-/// 编码一种填充，返回 `(kind, color vec4, aux vec4)`。
+/// 编码一种填充，返回 `(kind, color vec4, aux vec4)`；渐变停点追加到 `stops`。
 ///
-/// P1 只支持纯色：渐变/纹理填充会**降级为纯色**（渐变取首个停点、纹理取白）并 warn-once，
-/// 真正的渐变/纹理字填充排在 P2（需要给文字建立自己的渐变坐标基准）。
-fn encode_paint(paint: &TextPaint) -> (u32, [u32; 4], [u32; 4]) {
-    let color = match paint {
-        TextPaint::Solid(c) => *c,
+/// - 纯色：`color` = rgba。
+/// - 渐变：`color` = `(center_x, center_y, span, 0)`（设备像素；`span == 0` ⇒ 逐字形），
+///   `aux` = `(cos, sin, first_stop, count)`。
+/// - 纹理：当前仍降级为纯白（下一轮做，需要文字自己的 UV 参照系）。
+fn encode_paint(paint: &TextPaint, stops: &mut Vec<u32>, dpi: f64) -> (u32, [u32; 4], [u32; 4]) {
+    match paint {
+        TextPaint::Solid(c) => (
+            PAINT_SOLID,
+            [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()],
+            [0; 4],
+        ),
         TextPaint::Gradient(g) => {
-            warn_once(
-                &TEXT_PAINT_WARNED,
-                "vireo: 文字渐变填充尚未实现（P2）—— 已按首个停点纯色绘制",
-            );
-            g.stops
-                .first()
-                .map(|s| s.color)
-                .unwrap_or(crate::color::colors::WHITE)
+            let (sin, cos) = g.angle_deg.to_radians().sin_cos();
+            let (cx, cy, span) = match g.rect {
+                Some((x, y, w, h)) => {
+                    let px = x.to_px(dpi).0 as f32;
+                    let py = y.to_px(dpi).0 as f32;
+                    let pw = w.to_px(dpi).0 as f32;
+                    let ph = h.to_px(dpi).0 as f32;
+                    let span = pw * sin.abs() + ph * cos.abs();
+                    (px + pw * 0.5, py + ph * 0.5, span)
+                }
+                // 逐字形：span = 0 让着色器改用字形局部 uv
+                None => (0.0, 0.0, 0.0),
+            };
+            let first = (stops.len() / STOP_STRIDE_U32) as u32;
+            let n = g.stops.len().min(16);
+            for stop in &g.stops[..n] {
+                let c = stop.color;
+                let a = c.a;
+                stops.extend_from_slice(&[
+                    stop.at.to_bits(),
+                    0,
+                    0,
+                    0,
+                    (c.r * a).to_bits(),
+                    (c.g * a).to_bits(),
+                    (c.b * a).to_bits(),
+                    a.to_bits(),
+                ]);
+            }
+            (
+                PAINT_GRADIENT,
+                [cx.to_bits(), cy.to_bits(), span.to_bits(), 0],
+                // 方向 = (sinθ, cosθ)：0° ⇒ (0,1) 自上而下（与形状渐变同一约定）
+                [sin.to_bits(), cos.to_bits(), first, n as u32],
+            )
         }
         TextPaint::Texture(_) => {
             warn_once(
                 &TEXT_PAINT_WARNED,
-                "vireo: 文字纹理填充尚未实现（P2）—— 已按纯白绘制",
+                "vireo: 文字纹理填充尚未实现 —— 已按纯白绘制",
             );
-            crate::color::colors::WHITE
+            let c = crate::color::colors::WHITE;
+            (
+                PAINT_SOLID,
+                [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()],
+                [0; 4],
+            )
         }
-    };
-    (
-        PAINT_SOLID,
-        [
-            color.r.to_bits(),
-            color.g.to_bits(),
-            color.b.to_bits(),
-            color.a.to_bits(),
-        ],
-        [0; 4],
-    )
+    }
 }
 
 /// 进程级 warn-once（P1 的文字填充降级提示）。

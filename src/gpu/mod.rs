@@ -1111,6 +1111,21 @@ impl GpuContext {
         (max_w, line_height * num_lines)
     }
 
+    /// 文本的**视觉**包围盒（逻辑像素）：在 [`Self::measure_text`] 之上加上样式的溢出
+    /// （描边宽度 + 3σ 软边 + 偏移）。
+    ///
+    /// 排版仍然用 `measure_text` —— 这个只用于裁剪/居中这类"视觉外框"需求。
+    /// 注意：`Px` 意图在这里按 1:1 处理（没有 dpi 上下文），需要精确设备像素时自己换算。
+    pub fn measure_text_visual(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
+        let (w, h) = self.measure_text(text, options);
+        let pad = options
+            .style
+            .as_ref()
+            .map(|s| s.reach_px(1.0))
+            .unwrap_or(0.0);
+        (w + pad * 2.0, h + pad * 2.0)
+    }
+
     /// 从文件加载字体（TTF/OTF），使该字体可用于 TextOptions::with_family
     pub fn load_font_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
         let data =
