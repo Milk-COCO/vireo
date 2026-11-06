@@ -265,6 +265,38 @@ async fn main(app: App) {
                 TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
             );
         }
+        if show_all {
+            // MSDF：生成 em 固定，改字号/宽度同档都不重栅格化（`sdf_mode` 默认 Auto 已启用）
+            let y_row = next(84.0);
+            draw_text(
+                &mut b.texts,
+                "MSDF（固定生成 em，与字号无关）vs 精确 SDF",
+                Pos::new(28.0, y_row + 10.0),
+                TextDef::default().font_size(12.0),
+                TextOverride::from_color(Color::new(0.62, 0.67, 0.76, 1.0)),
+            );
+            let msdf = TextStyle::outline(width, ink)
+                .with_fill(TextPaint::solid(Color::new(0.55, 0.85, 0.75, 1.0)));
+            let exact = TextStyle::outline(width, ink)
+                .with_fill(TextPaint::solid(Color::new(0.85, 0.65, 0.45, 1.0)));
+            for (i, mode) in [TextSdfMode::Msdf, TextSdfMode::Exact].iter().enumerate() {
+                draw_text(
+                    &mut b.texts,
+                    if i == 0 {
+                        "MSDF 国永光"
+                    } else {
+                        "Exact 国永光"
+                    },
+                    Pos::new(230.0 + i as f32 * 210.0, y_row),
+                    TextDef {
+                        style: Some(Arc::new(if i == 0 { msdf.clone() } else { exact.clone() })),
+                        sdf_mode: *mode,
+                        ..TextDef::default().font_size(44.0)
+                    },
+                    TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
+                );
+            }
+        }
 
         draw_text(
             &mut b.texts,
