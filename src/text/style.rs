@@ -18,15 +18,39 @@ use crate::math::UvRect;
 pub enum TextPaint {
     /// 纯色。
     Solid(Color),
-    /// 线性渐变：复用引擎的渐变通道（与 `draw_rect_gradient` 同一份数据与取色函数）。
+    /// 线性渐变：复用引擎的渐变通道（与 `draw_rect_gradient` 同一套取色规则）。
     Gradient(TextGradient),
     /// 批基础贴图（`DrawBatch::set_texture` 的那张）。
-    Texture(UvRect),
+    ///
+    /// `rect` 语义与 [`TextGradient::rect`] 相同：给了就按页面矩形铺（整行一张图），
+    /// 不给就是每个字形各自铺满。
+    Texture {
+        uv: UvRect,
+        rect: Option<(Pp, Pp, Pp, Pp)>,
+    },
 }
 
 impl TextPaint {
     pub fn solid(color: Color) -> Self {
         Self::Solid(color)
+    }
+
+    pub fn texture(uv: UvRect) -> Self {
+        Self::Texture { uv, rect: None }
+    }
+
+    /// 纹理填充 + 页面矩形参照系。
+    pub fn texture_in_rect(
+        uv: UvRect,
+        x: impl Into<Pp>,
+        y: impl Into<Pp>,
+        w: impl Into<Pp>,
+        h: impl Into<Pp>,
+    ) -> Self {
+        Self::Texture {
+            uv,
+            rect: Some((x.into(), y.into(), w.into(), h.into())),
+        }
     }
 }
 
@@ -286,6 +310,7 @@ pub(crate) const STOP_STRIDE_U32: usize = 8;
 pub(crate) const PAINT_DEFAULT: u32 = 0;
 pub(crate) const PAINT_SOLID: u32 = 1;
 pub(crate) const PAINT_GRADIENT: u32 = 2;
+pub(crate) const PAINT_TEXTURE: u32 = 3;
 
 /// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..3)`。
 #[derive(Default)]
@@ -314,7 +339,17 @@ impl StyleTable {
     /// 同样的 `(层, 填充)` 只登记一次（去重），所以同一样式在多段文字间共享。
     /// 去重键**不含** `layer_first`（那是登记后才确定的），命中时复用旧下标。
     pub(crate) fn register(&mut self, style: &TextStyle, dpi: f64) -> (u32, f32) {
-        let band = (style.reach_px(dpi).ceil()).clamp(2.0, 32.0);
+        let reach = style.reach_px(dpi);
+        if reach > 32.0 {
+            warn_once(
+                &CLAMP_WARNED,
+                "vireo: 文本样式外扩 > 32px，距离场带宽已钳制到 32（描边/阴影会变淡）",
+            );
+        }
+        if style.layers.len() > 8 {
+            warn_once(&LAYER_WARNED, "vireo: 文本样式图层数 > 8，多余的层已忽略");
+        }
+        let band = (reach.ceil()).clamp(2.0, 32.0);
         let layer_count = style.layers.len().min(8) as u32;
 
         let mut style_rec = [0u32; STYLE_STRIDE_U32];
@@ -408,12 +443,12 @@ fn encode_paint(paint: &TextPaint, stops: &mut Vec<u32>, dpi: f64) -> (u32, [u32
             let (sin, cos) = g.angle_deg.to_radians().sin_cos();
             let (cx, cy, span) = match g.rect {
                 Some((x, y, w, h)) => {
-                    let px = x.to_px(dpi).0 as f32;
-                    let py = y.to_px(dpi).0 as f32;
-                    let pw = w.to_px(dpi).0 as f32;
-                    let ph = h.to_px(dpi).0 as f32;
-                    let span = pw * sin.abs() + ph * cos.abs();
-                    (px + pw * 0.5, py + ph * 0.5, span)
+                    let (px, py, pw, ph) = rect_px(x, y, w, h, dpi);
+                    (
+                        px + pw * 0.5,
+                        py + ph * 0.5,
+                        pw * sin.abs() + ph * cos.abs(),
+                    )
                 }
                 // 逐字形：span = 0 让着色器改用字形局部 uv
                 None => (0.0, 0.0, 0.0),
@@ -441,23 +476,41 @@ fn encode_paint(paint: &TextPaint, stops: &mut Vec<u32>, dpi: f64) -> (u32, [u32
                 [sin.to_bits(), cos.to_bits(), first, n as u32],
             )
         }
-        TextPaint::Texture(_) => {
-            warn_once(
-                &TEXT_PAINT_WARNED,
-                "vireo: 文字纹理填充尚未实现 —— 已按纯白绘制",
-            );
-            let c = crate::color::colors::WHITE;
+        TextPaint::Texture { uv, rect } => {
+            let (cx, cy, hw, hh) = match rect {
+                Some((x, y, w, h)) => {
+                    let (px, py, pw, ph) = rect_px(*x, *y, *w, *h, dpi);
+                    (px + pw * 0.5, py + ph * 0.5, pw * 0.5, ph * 0.5)
+                }
+                None => (0.0, 0.0, 0.0, 0.0),
+            };
             (
-                PAINT_SOLID,
-                [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()],
-                [0; 4],
+                PAINT_TEXTURE,
+                [
+                    uv.u0.to_bits(),
+                    uv.v0.to_bits(),
+                    uv.u1.to_bits(),
+                    uv.v1.to_bits(),
+                ],
+                [cx.to_bits(), cy.to_bits(), hw.to_bits(), hh.to_bits()],
             )
         }
     }
 }
 
-/// 进程级 warn-once（P1 的文字填充降级提示）。
-static TEXT_PAINT_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 页面矩形 → 设备像素 `(x, y, w, h)`。
+fn rect_px(x: Pp, y: Pp, w: Pp, h: Pp, dpi: f64) -> (f32, f32, f32, f32) {
+    (
+        x.to_px(dpi).0 as f32,
+        y.to_px(dpi).0 as f32,
+        w.to_px(dpi).0 as f32,
+        h.to_px(dpi).0 as f32,
+    )
+}
+
+/// 进程级 warn-once（外扩钳制 / 图层截断）。
+static CLAMP_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAYER_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn warn_once(flag: &std::sync::atomic::AtomicBool, msg: &str) {
     if !flag.swap(true, std::sync::atomic::Ordering::Relaxed) {

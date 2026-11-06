@@ -231,8 +231,14 @@ fn ramp_at(first: u32, count: u32, t: f32) -> vec4<f32> {
     return mixed; // 已是预乘
 }
 
-/// 一种填充的预乘颜色（`kind`: 0 默认色 / 1 纯色 / 2 渐变）。
-fn paint_color(kind: u32, color: vec4<u32>, aux: vec4<u32>, glyph01: vec2<f32>, page: vec2<f32>) -> vec4<f32> {
+/// 一种填充的预乘颜色（`kind`: 0 默认色 / 1 纯色 / 2 渐变 / 3 纹理）。
+fn paint_color(
+    kind: u32,
+    color: vec4<u32>,
+    aux: vec4<u32>,
+    glyph01: vec2<f32>,
+    page: vec2<f32>,
+) -> vec4<f32> {
     if (kind == 1u) {
         return vec4<f32>(
             bitcast<f32>(color.x),
@@ -255,6 +261,23 @@ fn paint_color(kind: u32, color: vec4<u32>, aux: vec4<u32>, glyph01: vec2<f32>, 
             t = clamp(dot(glyph01 - vec2<f32>(0.5), dir) + 0.5, 0.0, 1.0);
         }
         return ramp_at(first, count, t);
+    }
+    if (kind == 3u) {
+        // 纹理：uv 矩形 + 页面矩形（半宽/半高为 0 ⇒ 逐字形）
+        let uv_rect = vec4<f32>(
+            bitcast<f32>(color.x),
+            bitcast<f32>(color.y),
+            bitcast<f32>(color.z),
+            bitcast<f32>(color.w),
+        );
+        let center = vec2<f32>(bitcast<f32>(aux.x), bitcast<f32>(aux.y));
+        let half = vec2<f32>(bitcast<f32>(aux.z), bitcast<f32>(aux.w));
+        var p01 = glyph01;
+        if (half.x > 0.0 && half.y > 0.0) {
+            p01 = clamp((page - center) / (half * 2.0) + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+        }
+        let uv = mix(uv_rect.xy, uv_rect.zw, p01);
+        return textureSampleLevel(base_texture, base_sampler, uv, 0.0);
     }
     return vec4<f32>(0.0);
 }

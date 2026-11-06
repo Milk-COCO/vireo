@@ -5993,6 +5993,81 @@ fn text_style_shadow_offsets_down_right() {
     println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
 }
 
+/// 纹理填充：字形按页面矩形铺一张左右红蓝的贴图 → 左红右蓝。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_texture_fill() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 128;
+
+    // 8×8 贴图：左半红、右半蓝
+    let mut tex_bytes = Vec::with_capacity(8 * 8 * 4);
+    for _ in 0..8 {
+        for x in 0..8 {
+            if x < 4 {
+                tex_bytes.extend_from_slice(&[255, 0, 0, 255]);
+            } else {
+                tex_bytes.extend_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+    }
+    let tex = Texture::from_rgba(8, 8, &tex_bytes, &gpu);
+
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    b.set_texture(Some(&tex));
+    let paint = TextPaint::texture_in_rect(
+        UvRect {
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+        },
+        30.0,
+        30.0,
+        60.0,
+        60.0,
+    );
+    let style = TextStyle::new().with_fill(paint);
+    draw_text(
+        &mut b.texts,
+        "H",
+        Pos::new(30.0, 30.0),
+        TextDef {
+            style: Some(Arc::new(style)),
+            ..TextDef::default().font_size(60.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+
+    // 左右各取三分之一，比红/蓝总量
+    let (mut lr, mut lb, mut rr, mut rb) = (0i64, 0i64, 0i64, 0i64);
+    for y in 0..N {
+        for x in 0..N {
+            let i = ((y * N + x) * 4) as usize;
+            let (r, g, bl) = (px[i] as i64, px[i + 1] as i64, px[i + 2] as i64);
+            if r + g + bl <= 60 {
+                continue;
+            }
+            if x < N / 2 {
+                lr += r;
+                lb += bl;
+            } else {
+                rr += r;
+                rb += bl;
+            }
+        }
+    }
+    assert!(lr + lb > 0 && rr + rb > 0, "用例失效：没找到字像素");
+    assert!(lr > lb, "左半边应偏红：R={lr} B={lb}");
+    assert!(rb > rr, "右半边应偏蓝：R={rr} B={rb}");
+    println!("  纹理填充：左 R/B={lr}/{lb}，右 R/B={rr}/{rb}");
+}
+
 /// 渐变填充：同一个字形上红下蓝（页面矩形参照系，跨满给定框）。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

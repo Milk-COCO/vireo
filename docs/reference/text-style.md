@@ -67,7 +67,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | `threshold` | 阈值位置：`> 0` 字形外侧（外描边/投影）、`< 0` 内侧（内描边）、`0` = 轮廓 |
 | `softness` | 软边 ≈ 模糊半径；`0` = 硬边（1px 解析 AA） |
 | `offset` | 采样偏移（设备像素意图）—— 投影/浮雕靠它 |
-| `paint` | `Solid(Color)` / `Gradient(TextGradient)`（`in_rect` 跨满页面矩形，不传则逐字形）/ `Texture`（仍降级为白 + warn） |
+| `paint` | `Solid(Color)` / `Gradient(TextGradient)` / `Texture { uv, rect }`；渐变与纹理都靠 `rect` 决定跨满哪个页面矩形，不传则逐字形 |
 | `blend` | `Over`（默认）/ `Add` |
 
 常见效果的参数组合：
@@ -95,7 +95,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | `style: None` / 空图层且无 fill | 完全走旧路径（覆盖度图集），**零额外开销** |
 | 图层数 > 8 | 截断到 8 + warn-once |
 | 外扩 > 32px | 距离场带宽钳到 32 + warn-once（效果变淡，不崩） |
-| `TextPaint::Texture` | 当前降级为纯白 + warn-once（下一轮做） |
+| `TextPaint::Texture` | 支持：`set_texture` 的那张批贴图 + uv 矩形 + 页面矩形；不传 rect 则逐字形 |
 | `TextPaint::Gradient` | 支持：`in_rect(..)` 跨满页面矩形，不给则逐字形 |
 | COLRv1 彩色字形（emoji） | 不支持样式：按原样绘制（彩色位图没有单通道距离场） |
 | 自定义材质 | 引擎图层不生效（材质替换 FS）；`material_main` 里可用基色与 UV 自绘 |
@@ -122,6 +122,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 同色描边不压暗填充 | 258 个深内部像素与无样式版本逐像素一致（±3） |
 | 软投影方向 | 蓝色投影 958 px，重心 (47.5, 61.9)，在文字起点 (30,30) 的右下 |
 | 渐变填充 | 页面矩形参照系：上部 R/B = 1.32（偏红）、下部 0.56（偏蓝） |
+| 纹理填充 | 左右红蓝贴图：左 R/B = 89089/24005，右 0/35868 |
 | MRT 中的文本 | 目标 0 正常写入、其它目标保留 |
 
 复跑：`cargo test --release --test gpu_bench text_style -- --ignored --test-threads=1 --nocapture`
@@ -133,7 +134,6 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 ## 9. 尚未支持（后续版本）
 
-- 文字**纹理填充**（`TextPaint::Texture` 当前降级为白）。
-- `measure_text_visual` 之外的视觉包围盒 API（目前只有这一个查询）。
+- COLRv1 彩色字形（emoji）的描边/投影：当前按原样绘制（彩色位图没有单通道距离场）。
 - miter/bevel 连接的几何描边（距离场描边天然是圆角连接）。
 - MSDF（跨尺度不重栅格）—— 当前按设备像素尺寸生成，缩放会重新生成（与无样式文本一致）。
