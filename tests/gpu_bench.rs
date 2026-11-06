@@ -6389,6 +6389,90 @@ fn text_msdf_opt_in_renders() {
     );
 }
 
+/// MSDF 的**边缘对齐**：同一字号（生成 em = 目标字号，scale = 1）下，逐行最左/最右亮像素
+/// 与精确 SDF 的差 ≤1px。比总面积更能代表“边缘位置对不对”。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_edges_align_with_exact() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 200;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |mode: TextSdfMode, text: &str, font_size: f32| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(24.0, 20.0),
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(2.0, red).with_fill(TextPaint::solid(WHITE)),
+                )),
+                sdf_mode: mode,
+                ..TextDef::default().font_size(font_size)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    // 每个字形单独对比（CJK + Latin 两种轮廓复杂度；再加一个 scale≠1 的档）
+    for (label, text, font_size) in [
+        ("CJK 96px (scale 1.0)", "国", 96.0f32),
+        ("Latin 96px (scale 1.0)", "Ag", 96.0),
+        ("CJK 44px (scale 0.92)", "国", 44.0),
+    ] {
+        let exact = render(TextSdfMode::Exact, text, font_size);
+        let msdf = render(TextSdfMode::Msdf, text, font_size);
+        let edges = |px: &[u8]| -> Vec<(u32, u32)> {
+            (0..N)
+                .map(|y| {
+                    let mut left = N;
+                    let mut right = 0u32;
+                    for x in 0..N {
+                        let i = ((y * N + x) * 4) as usize;
+                        if px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 90 {
+                            left = left.min(x);
+                            right = right.max(x);
+                        }
+                    }
+                    (left, right)
+                })
+                .filter(|(l, _)| *l < N)
+                .collect()
+        };
+        let (ea, ma) = (edges(&exact), edges(&msdf));
+        assert!(
+            (ea.len() as i64 - ma.len() as i64).abs() <= 4,
+            "{label}: 有内容的行数应接近（{} vs {}）",
+            ea.len(),
+            ma.len()
+        );
+        let rows = ea.len().min(ma.len());
+        let mut within1 = 0;
+        for i in 0..rows {
+            let d = (ea[i].0 as i64 - ma[i].0 as i64).abs();
+            if d <= 1 {
+                within1 += 1;
+            }
+        }
+        let ratio = within1 as f64 / rows as f64;
+        println!(
+            "  {label}: {within1}/{rows} 行左边缘差 ≤1px（{:.0}%）",
+            ratio * 100.0
+        );
+        assert!(
+            ratio > 0.85,
+            "{label}: 至少 85% 的行左边缘应与精确 SDF 对齐（实际 {:.0}%）",
+            ratio * 100.0
+        );
+    }
+}
+
 /// MSDF 的**尺度无关性**：2px 描边在 44px 与 88px 下视觉宽度必须一致（±1px）。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

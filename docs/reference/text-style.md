@@ -209,6 +209,7 @@ range 阶梯 `0.08 / 0.20 / 0.45 em`（超出最大档 → 精确）；`Auto` �
 | 内描边（环） | 红环 2816 px + 环内白 1613 px；轮廓面积 5926 vs 无样式 6139（内描边不外扩） |
 | **MSDF vs 精确** | 44 / 48 / 72 / 96 / 120px 下面积差 **+3.0 / +1.5 / +2.8 / +3.4 / +4.1%**（略胖，量化+AA 差异） |
 | MSDF 尺度无关 | 同一 2px 描边在 44px 与 88px 下跨度增量一致（±2px） |
+| **MSDF 边缘对齐** | 逐行最左亮像素与精确 SDF 差 ≤1px 的比例：CJK 96px **100%**、Latin 96px **98%**、CJK 44px（scale 0.92）**100%** |
 | MSDF 不重建 | 同 range 档内宽 1.0 → 2.5：`msdf_entries` 与 `mask_entries` 均不变 |
 | MSDF 超档回退 | 宽 30（reach_em≈0.7 > 0.45）→ `msdf_entries` 不变、`mask_entries` 增加（改走精确 SDF） |
 | 无样式 MSDF（可选） | `sdf_mode = Msdf` 时面积与覆盖度差 8.2%，`msdf_entries` 0 → 3 |
