@@ -130,7 +130,9 @@ Details, verification depth and known issues (emulator compatibility, font sourc
   box-axial or along the shape; still 1 instance / 1 draw call — see
   [gradients](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md).
 - **Text**: whole-run shape cache, HUD parts (monospace stepping), `StableText`, custom fonts and
-  attrs, COLRv1 color emoji.
+  attrs, COLRv1 color emoji; **text styles** (outline, multi-outline, soft shadow, glow, inner
+  outline, emboss) render from a glyph distance field — see
+  [text styles](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md).
 
 ## Android: the most distinctive part
 
@@ -175,6 +177,8 @@ Full list (72 examples, grouped by topic):
   — box-axial / along-shape gradients, stop rules, the SDF-only tradeoff, measurements.
 - [Per-point polyline colors](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
   — `draw_line_chain_colors`: arc-length colors and measurements.
+- [Text styles](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)
+  — the layer model for outline / shadow / glow / inner outline / emboss, pixel intent, limits.
 - [Platform support](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)
   — verification depth per platform, Android build chain, toolchain, fonts.
 

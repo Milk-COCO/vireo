@@ -25,6 +25,12 @@ const SHAPE_GC_INTERVAL: Duration = Duration::from_millis(250);
 /// 空闲 Buffer 池上限。
 const BUFFER_POOL_CAP: usize = 128;
 
+/// 样式表缓冲的容量记录（缓冲本体在 `Viewport` 里）。
+struct StyleBuffers {
+    styles_cap: u64,
+    layers_cap: u64,
+}
+
 pub struct TextContext {
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
@@ -36,6 +42,10 @@ pub struct TextContext {
     pub(crate) base_sampler: Sampler,
     pub viewport: Viewport,
     last_viewport: Option<(u32, u32)>,
+    /// 上次写入的 dpi（与 `last_viewport` 一起决定要不要重写 `Params`）。
+    last_dpi: Option<u32>,
+    /// 文本样式表 / 图层表的容量记录（缓冲本体在 `Viewport` 里，写入走它）。
+    style_buffers: Option<StyleBuffers>,
     sample_count: u32,
     /// 已 shape 的 Buffer 槽位
     pub(crate) shape_slots: Vec<ShapeCacheSlot>,
@@ -161,6 +171,7 @@ impl TextContext {
                 width: physical_width,
                 height: physical_height,
             },
+            1.0,
         );
 
         self.text_renderer.clear();
@@ -185,6 +196,8 @@ impl TextContext {
                 custom_glyphs: &[],
                 transform_index: 0,
                 base_uv_rect: [0.0, 0.0, 1.0, 1.0],
+                style_index: 0,
+                sdf_band: 0.0,
             }],
             &mut self.swash_cache,
         );
@@ -627,14 +640,63 @@ impl TextContext {
         resolved
     }
 
-    pub(crate) fn ensure_viewport(&mut self, queue: &Queue, width: u32, height: u32) {
+    pub(crate) fn ensure_viewport(&mut self, queue: &Queue, width: u32, height: u32, dpi: f32) {
         let next = (width, height);
-        if self.last_viewport == Some(next) {
+        if self.last_viewport == Some(next) && self.last_dpi == Some(dpi.to_bits()) {
             return;
         }
         self.viewport
-            .update(queue, crate::glyphon::Resolution { width, height });
+            .update(queue, crate::glyphon::Resolution { width, height }, dpi);
         self.last_viewport = Some(next);
+        self.last_dpi = Some(dpi.to_bits());
+    }
+
+    /// 上传本帧的样式表 / 图层表，并按需重建 `group(1)` 的 bind group。
+    ///
+    /// 无样式帧：两张表都是空的（`style_count == 0`），着色器不会读它们。
+    pub(crate) fn ensure_styles(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        cache: &crate::glyphon::Cache,
+        table: &crate::text::style::StyleTable,
+    ) {
+        let styles_bytes: &[u8] = bytemuck::cast_slice(&table.styles);
+        let layers_bytes: &[u8] = bytemuck::cast_slice(&table.layers);
+        let style_need = (styles_bytes.len().max(16) as u64).next_power_of_two();
+        let layer_need = (layers_bytes.len().max(16) as u64).next_power_of_two();
+
+        let needs_rebuild = match &self.style_buffers {
+            None => true,
+            Some(b) => style_need > b.styles_cap || layer_need > b.layers_cap,
+        };
+        if needs_rebuild {
+            let styles = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glyphon text styles"),
+                size: style_need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let layers = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glyphon text layers"),
+                size: layer_need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.viewport
+                .rebind_style_buffers(device, cache, styles, layers);
+            let b = self.style_buffers.get_or_insert_with(|| StyleBuffers {
+                styles_cap: 0,
+                layers_cap: 0,
+            });
+            // `rebind_style_buffers` 把缓冲移交给 Viewport；这里只记容量，
+            // 实际写入走 Viewport 暴露的缓冲句柄。
+            b.styles_cap = style_need;
+            b.layers_cap = layer_need;
+        }
+        self.viewport
+            .write_style_buffers(queue, styles_bytes, layers_bytes);
+        self.viewport.set_style_count(queue, table.style_count());
     }
 }
 
@@ -679,6 +741,8 @@ impl TextContext {
             base_sampler: default_base_sampler.clone(),
             viewport,
             last_viewport: None,
+            last_dpi: None,
+            style_buffers: None,
             sample_count: 1,
             shape_slots: Vec::with_capacity(64),
             shape_map: FxHashMap::default(),

@@ -40,7 +40,6 @@ impl Color {
         )
     }
 
-
     /// 从 hex 字符串构造（支持 `#RGB` `#RGBA` `#RRGGBB` `#RRGGBBAA`）
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim_start_matches('#');
@@ -284,10 +283,15 @@ mod tests {
         assert_eq!(c.g, 0x22 as f32 / 255.0);
         assert_eq!(c.b, 0x33 as f32 / 255.0);
         // 不透明黑 / 白：端点在 0 与 1。
-        assert_eq!(Color::from_hex_u32(0xFF00_0000), Color::new(0.0, 0.0, 0.0, 1.0));
-        assert_eq!(Color::from_hex_u32(0xFFFF_FFFF), Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(
+            Color::from_hex_u32(0xFF00_0000),
+            Color::new(0.0, 0.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            Color::from_hex_u32(0xFFFF_FFFF),
+            Color::new(1.0, 1.0, 1.0, 1.0)
+        );
     }
-
 
     #[test]
     fn color_to_u8_array() {

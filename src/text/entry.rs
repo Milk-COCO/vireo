@@ -111,6 +111,19 @@ impl TextEntry {
         }
     }
 
+    /// 该条目的行级 `TextDef`（`Stable` 没有 —— 它在 `make_stable_text` 时定型）。
+    pub fn def(&self) -> Option<&crate::text::TextDef> {
+        match self {
+            TextEntry::Normal { def, .. } | TextEntry::Parts { def, .. } => Some(def),
+            TextEntry::Stable { .. } => None,
+        }
+    }
+
+    /// 该条目的样式引用（行级；`Parts` 的逐段覆盖在 P2 支持）。
+    pub fn style(&self) -> Option<&std::sync::Arc<crate::text::TextStyle>> {
+        self.def().and_then(|d| d.style.as_ref())
+    }
+
     /// 入队时冻结的 blend 常量。
     pub fn blend_constant(&self) -> wgpu::Color {
         match self {

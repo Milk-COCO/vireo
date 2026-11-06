@@ -8,6 +8,10 @@ struct VertexInput {
     @location(5) depth: f32,
     @location(6) @interpolate(flat) transform_index: u32,
     @location(7) base_uv_rect: vec4<f32>,
+    /// 样式表下标 + 1（0 = 无样式）
+    @location(8) @interpolate(flat) style_index: u32,
+    /// 距离场带宽（设备像素），仅 content_type == Sdf 时有意义
+    @location(9) sdf_band: f32,
 }
 
 struct VertexOutput {
@@ -16,11 +20,16 @@ struct VertexOutput {
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) content_type: u32,
     @location(3) base_uv: vec2<f32>,
-};
+    @location(4) @interpolate(flat) style_index: u32,
+    @location(5) sdf_band: f32,
+}
 
 struct Params {
     screen_resolution: vec2<u32>,
-    _pad: vec2<u32>,
+    /// 逻辑像素 → 设备像素
+    dpi_scale: f32,
+    /// 本帧样式数量（0 = 无样式）
+    style_count: u32,
 };
 
 @group(0) @binding(0)
@@ -40,6 +49,14 @@ var base_sampler: sampler;
 
 @group(1) @binding(0)
 var<uniform> params: Params;
+
+/// 样式表：每条 3 个 vec4 —— `(layer_first, layer_count, fill_kind, 0)` + `fill_color` + 保留。
+@group(1) @binding(1)
+var<storage> text_styles: array<vec4<u32>>;
+
+/// 图层表：每层 4 个 vec4 —— `geom` + `paint` + `color` + `aux`。
+@group(1) @binding(2)
+var<storage> text_layers: array<vec4<u32>>;
 
 @group(2) @binding(0)
 var<storage> transforms: array<mat3x3<f32>>;
@@ -113,7 +130,8 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
             dim = textureDimensions(color_atlas_texture);
             break;
         }
-        case 1u: {
+        // SDF 与覆盖度共用 mask 图集
+        case 1u, 2u: {
             dim = textureDimensions(mask_atlas_texture);
             break;
         }
@@ -121,6 +139,8 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     }
 
     vert_output.content_type = content_type;
+    vert_output.style_index = in_vert.style_index;
+    vert_output.sdf_band = in_vert.sdf_band;
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
     let base_uv0 = in_vert.base_uv_rect.xy;
@@ -128,6 +148,53 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.base_uv = base_uv0 + vec2<f32>(corner_position) * (base_uv1 - base_uv0);
 
     return vert_output;
+}
+
+/// 覆盖率：`soft == 0` 时是 1px 解析 AA；否则用误差函数（距离场下"高斯模糊过的边缘"
+/// 精确就是 erf，所以软投影/发光一次采样就够，不需要多 tap）。
+fn coverage(d: f32, threshold: f32, soft: f32) -> f32 {
+    let x = d - threshold;
+    if soft <= 0.5 {
+        return clamp(0.5 - x, 0.0, 1.0);
+    }
+    // erf 的 tanh 近似（误差 ~1e-3，对阴影足够）
+    let u = x / (soft * 1.41421356);
+    let t = tanh(1.1283791670955126 * u + 0.147 * u * u * u);
+    return clamp(0.5 * (1.0 - t), 0.0, 1.0);
+}
+
+/// 预乘 over：`src` 盖在 `dst` 上。
+fn over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
+    return src + dst * (1.0 - src.a);
+}
+
+fn decode_sdf(q: f32, band: f32) -> f32 {
+    return (q * 2.0 - 1.0) * band;
+}
+
+/// 一条样式的某一层：取阈 → 偏移采样 → 合成（`band` 是字形距离场的带宽）。
+fn apply_layer(base: u32, band: f32, at: vec2<f32>, out: vec4<f32>) -> vec4<f32> {
+    let geom = text_layers[base];
+    let off = vec2<f32>(bitcast<f32>(geom.x), bitcast<f32>(geom.y));
+    let soft = bitcast<f32>(geom.z);
+    let thr = bitcast<f32>(geom.w);
+    let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
+    let uv = at + off / dims;
+    let d = decode_sdf(textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x, band);
+    let cov = coverage(d, thr, soft);
+    let paint = text_layers[base + 1u];
+    let col = text_layers[base + 2u];
+    let rgb = vec3<f32>(
+        bitcast<f32>(col.x),
+        bitcast<f32>(col.y),
+        bitcast<f32>(col.z),
+    );
+    let a = bitcast<f32>(col.w) * cov;
+    let src = vec4<f32>(rgb * a, a);
+    if paint.y == 1u {
+        return out + src; // Add
+    }
+    return over(out, src);
 }
 
 @fragment
@@ -138,6 +205,44 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 1u: {
             return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);
+        }
+        case 2u: {
+            // 距离场字形：逐层取阈 + 最后 fill。合成全程在**预乘**空间，出口再反预乘
+            // （blend state 是 ALPHA_BLENDING，着色器必须输出直通 alpha）。
+            let sbase = (in_frag.style_index - 1u) * 3u;
+            let style_meta = text_styles[sbase];
+            let layer_first = style_meta.x;
+            let layer_count = min(style_meta.y, 8u);
+            let d0 = decode_sdf(
+                textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x,
+                in_frag.sdf_band,
+            );
+            var out = vec4<f32>(0.0);
+            var i = 0u;
+            loop {
+                if i >= layer_count { break; }
+                out = apply_layer(layer_first + i * 4u, in_frag.sdf_band, in_frag.uv, out);
+                i = i + 1u;
+            }
+            // fill（style_meta.z: 0 = 用顶点色，1 = 纯色填充）
+            let fill_kind = style_meta.z;
+            if fill_kind == 1u {
+                let fc = text_styles[sbase + 1u];
+                let rgb = vec3<f32>(
+                    bitcast<f32>(fc.x),
+                    bitcast<f32>(fc.y),
+                    bitcast<f32>(fc.z),
+                );
+                let a = bitcast<f32>(fc.w) * coverage(d0, 0.0, 0.0);
+                out = over(out, vec4<f32>(rgb * a, a));
+            } else {
+                let a = in_frag.color.a * coverage(d0, 0.0, 0.0);
+                out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
+            }
+            if out.a <= 1e-6 {
+                return vec4<f32>(0.0);
+            }
+            return vec4<f32>(out.rgb / out.a, out.a);
         }
         default: {
             return vec4<f32>(0.0);

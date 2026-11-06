@@ -24,6 +24,10 @@ pub(super) struct AreaMeta {
     pub(super) texture_state: TextTextureState,
     pub(super) blend: wgpu::BlendState,
     pub(super) blend_constant: wgpu::Color,
+    /// 样式表下标 + 1（`0` = 无样式）。
+    pub(super) style_index: u32,
+    /// 距离场带宽（设备像素）。
+    pub(super) sdf_band: f32,
 }
 
 pub(super) enum MetaBuf {
@@ -175,9 +179,11 @@ impl TextEntryList {
         let mut text_ctx = gpu.text_ctx.lock().unwrap();
         text_ctx.begin_prepare_pins();
 
-        text_ctx.ensure_viewport(&gpu.queue, physical_width, physical_height);
+        text_ctx.ensure_viewport(&gpu.queue, physical_width, physical_height, scale);
 
         let mut metas: Vec<AreaMeta> = Vec::with_capacity(self.entries.len() * 2);
+        // 样式表：本批次的样式去重后整块上传（`group(1)` 的 storage）。
+        let mut style_table = crate::text::style::StyleTable::new();
         // 注：StableText 的 Arc<Buffer> 直接放 metas.buf.Stable 里，延寿到第二次循环消费完。
         // 不再需要平行 stable_bufs vec + hi 计数器。
 
@@ -250,6 +256,12 @@ impl TextEntryList {
             };
             let top = entry.pos().y * scale;
 
+            // 样式：行级 `TextDef`（逐段覆盖属 P2）。无样式 ⇒ (0, 0.0)，完全走旧路径。
+            let (style_index, sdf_band) = match entry.style() {
+                Some(style) if style.needs_style() => style_table.register(style, scale as f64),
+                _ => (0, 0.0),
+            };
+
             match entry {
                 TextEntry::Stable { pos, .. } => {
                     if let TextEntry::Stable {
@@ -268,6 +280,8 @@ impl TextEntryList {
                                 texture_state: texture_state.clone(),
                                 blend: entry.blend(),
                                 blend_constant: entry.blend_constant(),
+                                style_index,
+                                sdf_band,
                             });
                         }
                     }
@@ -297,6 +311,8 @@ impl TextEntryList {
                                     texture_state: texture_state.clone(),
                                     blend: entry.blend(),
                                     blend_constant: entry.blend_constant(),
+                                    style_index,
+                                    sdf_band,
                                 });
                                 cursor_x += w;
                             }
@@ -327,6 +343,8 @@ impl TextEntryList {
                                                 texture_state: texture_state.clone(),
                                                 blend: entry.blend(),
                                                 blend_constant: entry.blend_constant(),
+                                                style_index,
+                                                sdf_band,
                                             },
                                             w,
                                         )
@@ -361,6 +379,8 @@ impl TextEntryList {
                                                 texture_state: texture_state.clone(),
                                                 blend: entry.blend(),
                                                 blend_constant: entry.blend_constant(),
+                                                style_index,
+                                                sdf_band,
                                             },
                                             lw,
                                         )
@@ -382,6 +402,8 @@ impl TextEntryList {
                                         texture_state: texture_state.clone(),
                                         blend: entry.blend(),
                                         blend_constant: entry.blend_constant(),
+                                        style_index,
+                                        sdf_band,
                                     });
                                 }
                                 cursor_x += h.line_width();
@@ -402,6 +424,8 @@ impl TextEntryList {
                                             texture_state: texture_state.clone(),
                                             blend: entry.blend(),
                                             blend_constant: entry.blend_constant(),
+                                            style_index,
+                                            sdf_band,
                                         });
                                     }
                                     cursor_x += cluster.advance;
@@ -424,10 +448,16 @@ impl TextEntryList {
                         texture_state: texture_state.clone(),
                         blend: entry.blend(),
                         blend_constant: entry.blend_constant(),
+                        style_index,
+                        sdf_band,
                     });
                 }
             }
         }
+
+        // 样式表：整块上传（group 1），并按需重建 bind group。无样式时两张表都是空的。
+        let style_cache = text_ctx.cache.clone();
+        text_ctx.ensure_styles(&gpu.device, &gpu.queue, &style_cache, &style_table);
 
         let mut segments = Vec::new();
         {
@@ -488,6 +518,8 @@ impl TextEntryList {
                                     default_color: meta.color,
                                     transform_index: meta.transform_index,
                                     base_uv_rect: meta.base_uv_rect,
+                                    style_index: meta.style_index,
+                                    sdf_band: meta.sdf_band,
                                 })
                             });
                             match text_renderer.prepare_resolved_glyphs(
@@ -540,6 +572,8 @@ impl TextEntryList {
                                     custom_glyphs: &[],
                                     transform_index: meta.transform_index,
                                     base_uv_rect: meta.base_uv_rect,
+                                    style_index: meta.style_index,
+                                    sdf_band: meta.sdf_band,
                                 })
                             });
                             match text_renderer.prepare(

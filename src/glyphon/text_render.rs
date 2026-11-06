@@ -2,7 +2,7 @@ use super::{
     ColorMode, ContentType, FontSystem, GlyphDetails, GlyphToRender, GpuCacheStatus, PrepareError,
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, RenderError, ResolvedGlyphArea, State,
     SwashCache, SwashContent, TextArea, TextAtlas, Viewport, colr,
-    custom_glyph::CustomGlyphCacheKey,
+    custom_glyph::CustomGlyphCacheKey, sdf,
 };
 use cosmic_text::{CacheKeyFlags, Color, SubpixelBin};
 use skrifa::MetadataProvider;
@@ -265,6 +265,8 @@ impl TextRenderer {
                         text_area.default_color,
                         text_area.transform_index,
                         text_area.base_uv_rect,
+                        text_area.style_index,
+                        text_area.sdf_band,
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
                     )? {
@@ -320,6 +322,8 @@ impl TextRenderer {
                 area.default_color,
                 area.transform_index,
                 area.base_uv_rect,
+                area.style_index,
+                area.sdf_band,
                 zero_depth,
                 |_| None,
             )? {
@@ -503,6 +507,14 @@ enum TextColorConversion {
 pub(crate) enum GlyphonCacheKey {
     Text(cosmic_text::CacheKey),
     Custom(CustomGlyphCacheKey),
+    /// 带样式的字形：距离场变体（`band_q` 是带宽的 1/8 像素量化值）。
+    ///
+    /// 距离场只依赖「字形 × 尺寸 × band」，与具体图层无关 —— 所以同一 band 的
+    /// 多套样式共用一份图集数据。
+    Styled {
+        base: cosmic_text::CacheKey,
+        band_q: u16,
+    },
 }
 
 fn next_copy_buffer_size(size: u64) -> u64 {
@@ -558,6 +570,10 @@ struct GlyphMetadata {
     cache_key: GlyphonCacheKey,
     transform_index: u32,
     base_uv_rect: [f32; 4],
+    /// 样式表下标 + 1（`0` = 无样式）。
+    style_index: u32,
+    /// 该字形的距离场带宽（设备像素）；`style_index == 0` 时不用。
+    sdf_band: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -763,6 +779,8 @@ where
         depth,
         transform_index: metadata.transform_index,
         base_uv_rect: metadata.base_uv_rect,
+        style_index: metadata.style_index,
+        sdf_band: metadata.sdf_band,
     }))
 }
 
@@ -875,6 +893,36 @@ pub(crate) fn rasterize_glyph(
                 data: output.data,
             })
         }
+        GlyphonCacheKey::Styled { base, band_q } => {
+            // 先拿 swash 的放置（宽/高/左右/上），用它当几何基准 ⇒ SDF 字形与覆盖度字形
+            // 落在同一像素格上（换样式不会让文字跳动）。
+            let placement_image = cache.get_image_uncached(font_system, base)?;
+            let swash_w = placement_image.placement.width;
+            let swash_h = placement_image.placement.height;
+            if swash_w == 0 || swash_h == 0 {
+                return None;
+            }
+            let band = band_q as f32 / 8.0;
+            let sdf = sdf::generate(
+                font_system,
+                base,
+                (
+                    placement_image.placement.left as i16,
+                    placement_image.placement.top as i16,
+                    swash_w as u16,
+                    swash_h as u16,
+                ),
+                band,
+            )?;
+            Some(RasterizedGlyph {
+                content_type: ContentType::Sdf,
+                top: sdf.top,
+                left: sdf.left,
+                width: sdf.width,
+                height: sdf.height,
+                data: sdf.data,
+            })
+        }
     }
 }
 
@@ -952,6 +1000,8 @@ fn append_text_glyph<R>(
     default_color: Color,
     transform_index: u32,
     base_uv_rect: [f32; 4],
+    style_index: u32,
+    sdf_band: f32,
     metadata_to_depth: impl FnMut(usize) -> f32,
     rasterize_custom_glyph: R,
 ) -> Result<Option<GlyphToRender>, PrepareError>
@@ -960,6 +1010,15 @@ where
 {
     let physical_glyph = glyph.physical((left, top), scale);
     let color = glyph.color_opt.unwrap_or(default_color);
+    // 有样式 ⇒ 走距离场变体（缓存键带 band 量化值）。
+    let cache_key = if style_index > 0 {
+        GlyphonCacheKey::Styled {
+            base: physical_glyph.cache_key,
+            band_q: quantize_band(sdf_band),
+        }
+    } else {
+        GlyphonCacheKey::Text(physical_glyph.cache_key)
+    };
     prepare_glyph(
         state,
         system,
@@ -969,17 +1028,19 @@ where
             line_y,
             color,
             metadata: glyph.metadata,
-            cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
+            cache_key,
             scale_factor: scale,
             transform_index,
             base_uv_rect,
+            style_index,
+            sdf_band,
         },
         bounds,
         |system, rasterize_custom_glyph| {
             rasterize_glyph(
                 system.font_system,
                 system.cache,
-                GlyphonCacheKey::Text(physical_glyph.cache_key),
+                cache_key,
                 scale,
                 rasterize_custom_glyph,
             )
@@ -987,6 +1048,11 @@ where
         metadata_to_depth,
         rasterize_custom_glyph,
     )
+}
+
+/// band 量化到 1/8 像素，限制缓存变体数量。
+pub(crate) fn quantize_band(band: f32) -> u16 {
+    (band.max(1.0) * 8.0).round().clamp(8.0, 256.0) as u16
 }
 
 fn append_custom_glyph<R>(
@@ -1019,6 +1085,9 @@ where
             cache_key,
             transform_index,
             base_uv_rect,
+            // 自定义/彩色字形：P1 不支持样式（见 docs：彩色字形没有单通道距离场）。
+            style_index: 0,
+            sdf_band: 0.0,
         },
         bounds,
         move |system, rasterize_custom_glyph| -> Option<RasterizedGlyph> {

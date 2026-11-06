@@ -9,6 +9,7 @@ mod cache;
 mod colr;
 mod custom_glyph;
 mod error;
+mod sdf;
 mod text_atlas;
 mod text_render;
 mod viewport;
@@ -68,6 +69,10 @@ pub(crate) struct GlyphToRender {
     depth: f32,
     transform_index: u32,
     base_uv_rect: [f32; 4],
+    /// 样式表下标 + 1（`0` = 无样式）。
+    style_index: u32,
+    /// 该字形的距离场带宽（设备像素）；仅 `content_type == Sdf` 时有意义。
+    sdf_band: f32,
 }
 
 /// The screen resolution to use when rendering text.
@@ -81,10 +86,14 @@ pub struct Resolution {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Params {
     screen_resolution: Resolution,
-    _pad: [u32; 2],
+    /// 逻辑像素 → 设备像素的换算因子（描边/偏移的 `Dp` 意图靠它折算）。
+    /// 文本管线没有相机 uniform，所以这个量放在这里。
+    dpi_scale: f32,
+    /// 本帧样式数量（0 = 本帧没有任何带样式的文本）。
+    style_count: u32,
 }
 
 /// Controls the visible area of the text. Any text outside of the visible area will be clipped.
@@ -136,6 +145,10 @@ pub struct TextArea<'a> {
     /// 当前 batch 基础贴图 UV 区域 `(u0, v0, u1, v1)`。
     /// VS 按字形 corner 插值到 `VertexOutput.base_uv`（每字形独立映射，可重复）。
     pub base_uv_rect: [f32; 4],
+    /// 样式表下标 + 1（`0` = 无样式 ⇒ 走普通覆盖度图集，零额外开销）。
+    pub style_index: u32,
+    /// 距离场带宽（设备像素）；`style_index == 0` 时忽略。
+    pub sdf_band: f32,
 }
 
 /// A pre-resolved glyph that bypasses `Buffer::layout_runs()` while retaining
@@ -152,6 +165,10 @@ pub(crate) struct ResolvedGlyphArea<'a> {
     pub default_color: Color,
     pub transform_index: u32,
     pub base_uv_rect: [f32; 4],
+    /// 样式表下标 + 1（`0` = 无样式）。
+    pub style_index: u32,
+    /// 距离场带宽（设备像素）。
+    pub sdf_band: f32,
 }
 
 pub(crate) struct State<'a> {

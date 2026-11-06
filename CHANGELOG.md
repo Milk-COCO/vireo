@@ -4,6 +4,25 @@
 
 ### Added / 新增
 
+- **文本样式（距离场图层栈）**：`TextDef.style` 新增 `TextStyle` —— 描边 / 多层描边 / 软投影 /
+  发光 / 内描边 / 浮雕 / 自定义填充色，全部由**同一个原语**表达：对字形的**有符号距离场**
+  取带软边的阈值。新增 `TextStyle` / `TextLayer` / `TextPaint` / `TextBlend`。
+  - 字形表示升级：带样式的字形从**字体轮廓**（`skrifa`）生成**精确距离场**（线/二次/三次
+    贝塞尔的最近点 Newton + 按段 bbox 剪枝），与覆盖度共用同一张 R8 图集（`content_type`
+    区分），**无样式文本零改动、零额外开销**。
+  - 软边用误差函数：距离场下"高斯模糊过的边缘"精确是 erf，所以**软投影/发光一次采样**，
+    不需要多 tap。
+  - 单位是像素意图（裸值/`Dp` 逻辑像素、`Px` 物理像素）⇒ **DPI 变化时描边视觉宽度不变**；
+    `measure_text` 语义不变（样式不参与排版）。
+  - 降级（不 panic）：图层 > 8 截断 + warn；外扩 > 32px 钳制 + warn；彩色字形（COLRv1）不支持
+    样式；文字渐变/纹理填充已进类型但**当前降级为纯色**（取首停点/白）+ warn。
+  - 实测（`tests/gpu_bench.rs`）：3px 描边使覆盖面积 404 → 967 px 且 556 px 为描边色；
+    同色描边的 258 个深内部像素与无样式**逐像素一致**；软投影重心在文字右下。
+  Text styles via a signed-distance-field layer stack: `TextDef.style` + `TextStyle` (outline,
+  multi-outline, soft shadow, glow, inner outline, emboss, custom fill). Styled glyphs get an exact
+  distance field derived from the font outline, sharing the existing R8 atlas; unstyled text is
+  byte-for-byte unchanged. Soft edges use an error function (one tap for blurred shadows).
+
 - **渐变通道（轴向 / 线段 / 折线，覆盖全部 SDF 形状）**：新增
   `draw_rect_gradient` / `draw_rounded_rect_gradient` / `draw_circle_gradient` /
   `draw_line_gradient` / `draw_shape_gradient`（+ `DrawBatch` 镜像），由 `GradientStop`

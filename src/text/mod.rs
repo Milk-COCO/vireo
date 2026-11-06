@@ -29,11 +29,13 @@ mod entry;
 mod hud;
 mod prepare;
 mod stencil;
+mod style;
 pub(crate) use context::ResolvedTextGlyph;
 pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
+pub use style::{TextBlend, TextGradient, TextLayer, TextPaint, TextStyle, TextStyleRef};
 
 /// 文本水平对齐
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -154,6 +156,9 @@ pub struct TextDef {
     pub align: TextAlign,
     /// 字体属性（family、weight、style 等）。None 使用默认 Attrs。
     pub attrs: Option<AttrsOwned>,
+    /// 文本样式（描边 / 投影 / 发光 / 内阴影 / 浮雕 / 渐变字…）。
+    /// `None`（默认）= 完全走旧路径：覆盖度图集、零额外开销。
+    pub style: Option<std::sync::Arc<TextStyle>>,
 }
 
 impl Default for TextDef {
@@ -163,6 +168,7 @@ impl Default for TextDef {
             max_width: None,
             align: TextAlign::Left,
             attrs: None,
+            style: None,
         }
     }
 }

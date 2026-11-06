@@ -403,7 +403,8 @@ impl TextAtlas {
         rasterize_custom_glyph: impl FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
     ) -> bool {
         let did_grow = match content_type {
-            ContentType::Mask => self.mask_atlas.grow(
+            // SDF 与覆盖度共用同一张 R8 图集（靠 `content_type` 区分解释方式）。
+            ContentType::Mask | ContentType::Sdf => self.mask_atlas.grow(
                 state,
                 font_system,
                 cache,
@@ -429,7 +430,7 @@ impl TextAtlas {
     pub(crate) fn inner_for_content_mut(&mut self, content_type: ContentType) -> &mut InnerAtlas {
         match content_type {
             ContentType::Color => &mut self.color_atlas,
-            ContentType::Mask => &mut self.mask_atlas,
+            ContentType::Mask | ContentType::Sdf => &mut self.mask_atlas,
         }
     }
 

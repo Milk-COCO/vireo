@@ -5832,3 +5832,163 @@ fn rect_gradient_hard_edge() {
     }
     println!("  硬边：上 ({r_up},{b_up}) 下 ({r_dn},{b_dn})，无黑洞");
 }
+
+// ==================== 文本样式（距离场描边 / 投影） ====================
+
+/// 描边必须**长在字形外面**：同一段文字，带描边版本的非黑像素明显更多，
+/// 且多出来的部分是描边色（几何无关的断言，不依赖具体字形轮廓）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_outline_extends_beyond_glyph() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let ca = OffscreenCanvas::new(&gpu, N, N);
+    let mut a = DrawBatch::new();
+    draw_text(
+        &mut a.texts,
+        "H",
+        Pos::new(24.0, 20.0),
+        TextDef::default().font_size(48.0),
+        TextOverride::from_color(WHITE),
+    );
+    ca.draw(Some(BLACK), &[&a]);
+    let pa = ca.read_pixels();
+
+    let cb = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let style = TextStyle::outline(3.0, red);
+    draw_text(
+        &mut b.texts,
+        "H",
+        Pos::new(24.0, 20.0),
+        TextDef {
+            style: Some(Arc::new(style)),
+            ..TextDef::default().font_size(48.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    cb.draw(Some(BLACK), &[&b]);
+    let pb = cb.read_pixels();
+
+    let lit = |px: &[u8]| -> usize {
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30)
+            .count()
+    };
+    let (na, nb) = (lit(&pa), lit(&pb));
+    assert!(na > 100, "用例失效：无样式文字一个像素都没画出来（{na}）");
+    assert!(
+        nb > na + 150,
+        "带描边的覆盖面积应明显更大：无样式 {na} vs 描边 {nb}"
+    );
+
+    let reds = pb
+        .chunks(4)
+        .filter(|p| p[0] > 120 && p[1] < 90 && p[2] < 90)
+        .count();
+    assert!(reds > 80, "应出现红色描边像素，实际 {reds}");
+    println!("  描边：无样式 {na} px / 带描边 {nb} px，其中红色 {reds} px");
+}
+
+/// 同色描边的"填充区域"必须与无样式版本一致（描边不压暗、不缩放字形）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_same_color_outline_keeps_fill() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 96;
+    let white = WHITE;
+
+    let render = |styled: bool| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        let def = TextDef {
+            style: if styled {
+                Some(Arc::new(TextStyle::outline(1.0, white)))
+            } else {
+                None
+            },
+            ..TextDef::default().font_size(48.0)
+        };
+        draw_text(
+            &mut b.texts,
+            "H",
+            Pos::new(24.0, 24.0),
+            def,
+            TextOverride::from_color(white),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+    let plain = render(false);
+    let styled = render(true);
+
+    let mut checked = 0;
+    for (a, b) in plain.chunks(4).zip(styled.chunks(4)) {
+        // 只比**深内部**（两版都接近纯白）：边缘像素本来就是覆盖率与距离场两种重建
+        // 方式的差异区，不属于"填充被压暗"这个断言。
+        if a[0] > 250 && b[0] > 250 {
+            for ch in 0..3 {
+                let (x, y) = (a[ch] as i32, b[ch] as i32);
+                assert!(
+                    (x - y).abs() <= 3,
+                    "填充处像素不该被描边压暗：通道 {ch} 无样式 {x} vs 有样式 {y}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 60, "空转：两版都亮的像素只有 {checked}");
+    println!("  同色描边：{checked} 个深内部像素与无样式版本一致");
+}
+
+/// 软投影必须向**下/右**扩散（偏移方向）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_shadow_offsets_down_right() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 128;
+
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let style = TextStyle::shadow((3.0, 3.0), 2.0, Color::new(0.0, 0.0, 1.0, 1.0));
+    draw_text(
+        &mut b.texts,
+        "H",
+        Pos::new(30.0, 30.0),
+        TextDef {
+            style: Some(Arc::new(style)),
+            ..TextDef::default().font_size(48.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    let mut sx = 0f64;
+    let mut sy = 0f64;
+    let mut n = 0f64;
+    for y in 0..N {
+        for x in 0..N {
+            let i = ((y * N + x) * 4) as usize;
+            if px[i + 2] as i32 > px[i] as i32 + 40 {
+                sx += x as f64;
+                sy += y as f64;
+                n += 1.0;
+            }
+        }
+    }
+    assert!(n > 100.0, "应出现蓝色投影像素，实际 {n}");
+    let (cx, cy) = (sx / n, sy / n);
+    assert!(
+        cx > 30.0 && cy > 30.0,
+        "投影重心应偏右下，实际 ({cx:.1},{cy:.1})"
+    );
+    println!("  软投影：蓝色像素 {n:.0} 个，重心 ({cx:.1},{cy:.1})");
+}

@@ -28,6 +28,7 @@
 | `text_shape_cache` | 文字 shape 缓存压力 + 动态 transform |
 | `text_profile` | 文字路径剖析：无头跑固定帧后退出，便于 `cargo flamegraph` |
 | `text_stress` | 文本极端情况压测（超长、空串、混合脚本等） |
+| `text_style` | 文本样式画廊：描边 / 多层描边 / 软投影 / 发光 / 内描边 / 浮雕（`1..7` 切组，`←→` 改宽度） |
 
 ## 形状与变换
 

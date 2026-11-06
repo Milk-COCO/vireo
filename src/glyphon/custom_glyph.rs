@@ -108,6 +108,11 @@ pub enum ContentType {
     Color,
     /// Each pixel contains a single 8 bit channel
     Mask,
+    /// 单通道有符号距离场：`.x` 存 `(clamp(d,-band,band)/band*0.5+0.5)*255`，
+    /// 字形轮廓上为 0（存 127.5）、内部为负、外部为正。
+    ///
+    /// 与 `Mask` 共用同一张 R8 图集 —— 靠 `content_type` 区分解释方式。
+    Sdf,
 }
 
 impl ContentType {
@@ -115,7 +120,7 @@ impl ContentType {
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             Self::Color => 4,
-            Self::Mask => 1,
+            Self::Mask | Self::Sdf => 1,
         }
     }
 }

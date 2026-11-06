@@ -115,6 +115,16 @@ impl Cache {
                     offset: mem::size_of::<u32>() as u64 * 8,
                     shader_location: 7,
                 },
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Uint32,
+                    offset: mem::size_of::<u32>() as u64 * 12,
+                    shader_location: 8,
+                },
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Float32,
+                    offset: mem::size_of::<u32>() as u64 * 13,
+                    shader_location: 9,
+                },
             ],
         };
 
@@ -166,24 +176,40 @@ impl Cache {
             label: Some("glyphon atlas bind group layout"),
         });
 
+        let storage_entry = |binding: u32| BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let uniforms_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(mem::size_of::<Params>() as u64),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(mem::size_of::<Params>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // 1 = 样式表（`array<vec4<u32>>`，3 个 vec4 / 条）
+                storage_entry(1),
+                // 2 = 图层表（4 个 vec4 / 层）
+                storage_entry(2),
+            ],
             label: Some("glyphon uniforms bind group layout"),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             bind_group_layouts: &[
                 Some(&atlas_layout), // group 0: color/mask atlas + sampler + batch base texture
-                Some(&uniforms_layout), // group 1: screen resolution
+                Some(&uniforms_layout), // group 1: screen resolution + 文本样式表
                 Some(engine_storage_bgl), // group 2: transforms + polygon dummy
             ],
             ..Default::default()
@@ -237,13 +263,29 @@ impl Cache {
         })
     }
 
-    pub(crate) fn create_uniforms_bind_group(&self, device: &Device, buffer: &Buffer) -> BindGroup {
+    pub(crate) fn create_uniforms_bind_group(
+        &self,
+        device: &Device,
+        buffer: &Buffer,
+        styles: &Buffer,
+        layers: &Buffer,
+    ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
             layout: &self.0.uniforms_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: styles.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: layers.as_entire_binding(),
+                },
+            ],
             label: Some("glyphon uniforms bind group"),
         })
     }
