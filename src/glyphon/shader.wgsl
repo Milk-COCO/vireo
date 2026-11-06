@@ -201,9 +201,15 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
     return (q * 2.0 - 1.0) * band;
 }
 
-/// 三通道中位数（MSDF 的核心：两通道正确、一通道被最近的「别的边」占据，中位数即真值）。
-fn median3(v: vec3<f32>) -> f32 {
-    return max(min(v.x, v.y), min(max(v.x, v.y), v.z));
+/// 三通道取**最小值**：每个通道存的是「该颜色子集的最短距离」，三色掩码并集覆盖全部边，
+/// 所以 min 就是到最近边的真实距离。
+///
+/// 为什么不用经典 MSDF 的 `median`：median 需要配合「逐边伪距离」（只在边的 Voronoi
+/// 区域内有效）才能保尖角；我们存的是**真实段距离**，median 会在两通道不同的相邻
+/// texel 之间插值时被远处通道带偏 —— 实测轮廓外扩 8%~23%。min 对真实距离是精确的，
+/// 因此不会变胖；尖角锐化留待引入伪距离后再做。
+fn min3(v: vec3<f32>) -> f32 {
+    return min(min(v.x, v.y), v.z);
 }
 
 /// 采样一个有符号距离（单位统一为**目标设备像素**）。
@@ -218,7 +224,7 @@ fn sample_d(
 ) -> f32 {
     if (content_type == 3u) {
         let rgb = textureSampleLevel(msdf_atlas_texture, atlas_sampler, uv, 0.0).rgb;
-        let d_gen = (median3(rgb) * 2.0 - 1.0) * d_range;
+        let d_gen = (min3(rgb) * 2.0 - 1.0) * d_range;
         return d_gen * msdf_scale;
     }
     return decode_sdf(

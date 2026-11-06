@@ -6344,7 +6344,7 @@ fn text_msdf_opt_in_renders() {
     const N: u32 = 200;
     let red = Color::new(1.0, 0.0, 0.0, 1.0);
 
-    let render = |mode: TextSdfMode| -> usize {
+    let render = |mode: TextSdfMode, font_size: f32| -> usize {
         let c = OffscreenCanvas::new(&gpu, N, N);
         let mut b = DrawBatch::new();
         draw_text(
@@ -6356,7 +6356,7 @@ fn text_msdf_opt_in_renders() {
                     TextStyle::outline(3.0, red).with_fill(TextPaint::solid(WHITE)),
                 )),
                 sdf_mode: mode,
-                ..TextDef::default().font_size(120.0)
+                ..TextDef::default().font_size(font_size)
             },
             TextOverride::from_color(WHITE),
         );
@@ -6367,16 +6367,21 @@ fn text_msdf_opt_in_renders() {
             .count()
     };
 
-    let exact = render(TextSdfMode::Exact);
-    let msdf = render(TextSdfMode::Msdf);
+    // 质量是**尺寸相关**的：目标字号 > 生成 em 时是放大（插值伪影明显），
+    // ≤ 生成 em 时是缩小（更锐）。这决定了 `Auto` 的取舍。
+    let mut last_msdf = 0usize;
+    for font_size in [44.0f32, 72.0, 120.0] {
+        let exact = render(TextSdfMode::Exact, font_size);
+        let msdf = render(TextSdfMode::Msdf, font_size);
+        println!(
+            "  font {font_size}: 精确 {exact} vs MSDF {msdf} px（{:+.1}%）",
+            (msdf as f64 - exact as f64) / exact as f64 * 100.0
+        );
+        last_msdf = msdf;
+    }
     let stats = gpu.text_atlas_stats();
-    println!(
-        "  MSDF vs 精确：覆盖 {exact} vs {msdf} px（差 {:.1}%），msdf 图集 {}²={}B",
-        (msdf as f64 - exact as f64) / exact as f64 * 100.0,
-        stats.msdf_size,
-        stats.msdf_bytes
-    );
-    assert!(msdf > 500, "MSDF 路径应能出图，实际 {msdf} px");
+    println!("  msdf 图集 {}²={}B", stats.msdf_size, stats.msdf_bytes);
+    assert!(last_msdf > 500, "MSDF 路径应能出图，实际 {last_msdf} px");
     assert!(
         stats.msdf_bytes > 0,
         "MSDF 应占用独立的 msdf 图集（实际 0）"

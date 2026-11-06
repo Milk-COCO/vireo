@@ -439,6 +439,42 @@ mod tests {
         assert!(outer.iter().all(|v| *v > 0.0), "外部距离应为正：{outer:?}");
     }
 
+    /// 三通道必须**不总是相同**：若通道全等，min/median 就退化成单通道，
+    /// 说明着色（掩码）没写进不同通道。
+    #[test]
+    fn channels_differ_near_edges() {
+        let path = [
+            PathElement::MoveTo { x: 2.0, y: 2.0 },
+            PathElement::LineTo { x: 18.0, y: 2.0 },
+            PathElement::LineTo { x: 18.0, y: 18.0 },
+            PathElement::LineTo { x: 2.0, y: 18.0 },
+            PathElement::Close,
+        ];
+        let id = |x: f32, y: f32| (x, y);
+        let edges = collect_edges(&path, &id);
+        let (w, h) = (20usize, 20usize);
+        let mut inside = vec![0u8; w * h];
+        for y in 2..18 {
+            for x in 2..18 {
+                inside[y * w + x] = 255;
+            }
+        }
+        let range = 6.0;
+        let img = field(&edges, &inside, w, h, range);
+        let mut differ = 0;
+        for idx in 0..w * h {
+            let c = [img[idx * 4], img[idx * 4 + 1], img[idx * 4 + 2]];
+            if !(c[0] == c[1] && c[1] == c[2]) {
+                differ += 1;
+            }
+        }
+        assert!(
+            differ > (w * h) / 10,
+            "至少 10% 的 texel 三通道应互不相同（实际 {differ}/{}）",
+            w * h
+        );
+    }
+
     #[test]
     fn pick_em_and_range_ladders() {
         assert_eq!(pick_em(12.0), 24.0, "12px 目标 -> 24em（0.75*12=9 <= 24）");
