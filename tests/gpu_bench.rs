@@ -6389,6 +6389,204 @@ fn text_msdf_opt_in_renders() {
     );
 }
 
+/// MSDF 的**尺度无关性**：2px 描边在 44px 与 88px 下视觉宽度必须一致（±1px）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_scale_invariance() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    // 返回（描边后的纵向跨度 − 无样式纵向跨度）≈ 2 × 描边宽度
+    let grown = |font_size: f32| -> i64 {
+        let span = |styled: bool| -> i64 {
+            let c = OffscreenCanvas::new(&gpu, 400, 300);
+            let mut b = DrawBatch::new();
+            draw_text(
+                &mut b.texts,
+                "国",
+                Pos::new(20.0, 20.0),
+                TextDef {
+                    style: styled.then(|| {
+                        Arc::new(TextStyle::outline(2.0, red).with_fill(TextPaint::solid(WHITE)))
+                    }),
+                    ..TextDef::default().font_size(font_size)
+                },
+                TextOverride::from_color(WHITE),
+            );
+            c.draw(Some(BLACK), &[&b]);
+            let px = c.read_pixels();
+            let row_lit = |y: u32| {
+                (0..400).any(|x| {
+                    let i = ((y * 400 + x) * 4) as usize;
+                    px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 60
+                })
+            };
+            let top = (0..300).find(|y| row_lit(*y)).unwrap_or(0);
+            let bot = (0..300).rev().find(|y| row_lit(*y)).unwrap_or(0);
+            bot as i64 - top as i64
+        };
+        span(true) - span(false)
+    };
+
+    let g44 = grown(44.0);
+    let g88 = grown(88.0);
+    println!("  描边跨度增量：44px = {g44}px，88px = {g88}px");
+    assert!(
+        (g44 - g88).abs() <= 2,
+        "同一 2px 描边在不同字号下的跨度增量应一致（44px: {g44}, 88px: {g88}）"
+    );
+    assert!((3..=7).contains(&g44), "2px 描边应让跨度 +≈4px，实际 {g44}");
+}
+
+/// 同一 range 档内改宽度**不新增图集条目**（MSDF 的核心收益）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_no_rebuild_within_range() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 300, 200);
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let draw = |width: f32| {
+        let mut b = DrawBatch::new();
+        for (i, ch) in ["国", "永", "光"].iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                ch,
+                Pos::new(20.0 + i as f32 * 90.0, 20.0),
+                TextDef {
+                    style: Some(Arc::new(
+                        TextStyle::outline(width, red).with_fill(TextPaint::solid(WHITE)),
+                    )),
+                    ..TextDef::default().font_size(60.0)
+                },
+                TextOverride::from_color(WHITE),
+            );
+        }
+        canvas.draw(Some(BLACK), &[&b]);
+        gpu.text_atlas_stats()
+    };
+
+    let a = draw(1.0);
+    let b = draw(2.5);
+    println!(
+        "  条目：w=1.0 msdf={} / w=2.5 msdf={}（mask {} vs {}）",
+        a.msdf_entries, b.msdf_entries, a.mask_entries, b.mask_entries
+    );
+    assert!(
+        a.msdf_entries > 0,
+        "样式文字应走 MSDF（msdf 条目为 0 说明回退到了精确 SDF）"
+    );
+    assert_eq!(
+        a.msdf_entries, b.msdf_entries,
+        "同一 range 档内改宽度不该重新栅格化"
+    );
+    assert_eq!(
+        a.mask_entries, b.mask_entries,
+        "也不该往 R8 图集里加精确 SDF 条目"
+    );
+}
+
+/// 超出最大 range 档 → 回退精确 SDF（大外扩单通道更省）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_falls_back_beyond_max_range() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 300, 200);
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let draw = |width: f32, mode: TextSdfMode| {
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(20.0, 20.0),
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(width, red).with_fill(TextPaint::solid(WHITE)),
+                )),
+                sdf_mode: mode,
+                ..TextDef::default().font_size(44.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+        gpu.text_atlas_stats()
+    };
+
+    let base = draw(1.0, TextSdfMode::Msdf); // 小范围：MSDF
+    let big = draw(30.0, TextSdfMode::Auto); // reach_em ≈ 0.7 > 0.45：精确 SDF
+    println!(
+        "  条目：msdf {}=>{}  mask {}=>{}",
+        base.msdf_entries, big.msdf_entries, base.mask_entries, big.mask_entries
+    );
+    assert_eq!(
+        big.msdf_entries, base.msdf_entries,
+        "超范围不该再生成 MSDF 条目"
+    );
+    assert!(
+        big.mask_entries > base.mask_entries,
+        "超范围应回退到精确 SDF（R8 条目增加）"
+    );
+}
+
+/// 无样式文字也可以显式走 MSDF（默认仍是覆盖度）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_unstyled_opt_in() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 300;
+
+    let render = |mode: TextSdfMode| -> (usize, vireo::glyphon::TextAtlasStats) {
+        let c = OffscreenCanvas::new(&gpu, N, 200);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国永光",
+            Pos::new(20.0, 20.0),
+            TextDef {
+                sdf_mode: mode,
+                ..TextDef::default().font_size(60.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let lit = px
+            .chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 90)
+            .count();
+        (lit, gpu.text_atlas_stats())
+    };
+
+    let (cov, cov_stats) = render(TextSdfMode::Auto); // 无样式 + Auto = 覆盖度
+    let (msdf, msdf_stats) = render(TextSdfMode::Msdf);
+    let diff = (msdf as i64 - cov as i64).abs() as f64 / cov as f64;
+    println!(
+        "  无样式：覆盖度 {cov} vs MSDF {msdf} px（差 {:.1}%），msdf 条目 {}（Auto 时 {}）",
+        diff * 100.0,
+        msdf_stats.msdf_entries,
+        cov_stats.msdf_entries
+    );
+    assert!(
+        msdf_stats.msdf_entries > cov_stats.msdf_entries,
+        "Msdf 模式应生成 MSDF 条目"
+    );
+    // MSDF 比 swash 覆盖度略胖（固定 em 生成 + 8bit 量化，实测 +3~8%）
+    assert!(
+        diff < 0.10,
+        "无样式 MSDF 应和覆盖度面积接近（差 {:.1}%）",
+        diff * 100.0
+    );
+}
+
 /// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

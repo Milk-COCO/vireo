@@ -320,6 +320,12 @@ pub struct TextAtlasStats {
     pub color_bytes: u64,
     /// MSDF 图集占用的字节数（`msdf_size² × 4`）。
     pub msdf_bytes: u64,
+    /// R8 图集里的字形条目数（覆盖度 + 精确 SDF）。
+    pub mask_entries: u32,
+    /// 彩色图集里的字形条目数。
+    pub color_entries: u32,
+    /// MSDF 图集里的字形条目数 —— 「改宽度/改字号有没有重新栅格化」看这个。
+    pub msdf_entries: u32,
 }
 
 impl TextAtlasStats {
@@ -355,6 +361,9 @@ impl TextAtlas {
             mask_bytes: u64::from(mask_size) * u64::from(mask_size),
             color_bytes: u64::from(color_size) * u64::from(color_size) * 4,
             msdf_bytes: u64::from(msdf_size) * u64::from(msdf_size) * 4,
+            mask_entries: self.mask_atlas.glyph_cache.len() as u32,
+            color_entries: self.color_atlas.glyph_cache.len() as u32,
+            msdf_entries: self.msdf_atlas.glyph_cache.len() as u32,
         }
     }
     /// Creates a new [`TextAtlas`].

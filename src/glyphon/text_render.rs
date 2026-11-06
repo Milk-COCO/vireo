@@ -1229,6 +1229,57 @@ where
     }
 
     if style_index == 0 {
+        // 无样式文字：默认一直走覆盖度；**只有显式 `Msdf`** 才用 MSDF
+        // （`Auto` 不能把全站正文切到 MSDF —— 12–16px 的清晰度靠覆盖度）。
+        let em_px = glyph.font_size * scale;
+        let force_msdf = sdf_mode == crate::text::TextSdfMode::Msdf;
+        if let Some((em_gen, range_em)) = force_msdf
+            .then(|| crate::text::pick_msdf(sdf_mode, em_px, 0.0))
+            .flatten()
+        {
+            let mut base = physical_glyph.cache_key;
+            base.font_size_bits = em_gen.to_bits();
+            base.x_bin = SubpixelBin::Zero;
+            base.y_bin = SubpixelBin::Zero;
+            let key = GlyphonCacheKey::Msdf {
+                base,
+                range_q: (range_em * 1000.0).round() as u16,
+            };
+            let quad = prepare_glyph(
+                state,
+                system,
+                GlyphMetadata {
+                    x: physical_glyph.x,
+                    y: physical_glyph.y,
+                    line_y,
+                    color,
+                    metadata: glyph.metadata,
+                    cache_key: key,
+                    scale_factor: scale,
+                    transform_index,
+                    base_uv_rect,
+                    style_index: 0,
+                    sdf_band: range_em * em_gen,
+                    quad_scale: em_px / em_gen,
+                },
+                bounds,
+                |system, rasterize_custom_glyph| {
+                    rasterize_glyph(
+                        system.font_system,
+                        system.cache,
+                        key,
+                        scale,
+                        rasterize_custom_glyph,
+                    )
+                },
+                &mut metadata_to_depth,
+                &mut rasterize_custom_glyph,
+            )?;
+            if let Some(quad) = quad {
+                buckets.fill.push(quad);
+            }
+            return Ok(());
+        }
         // 无样式：单 quad（覆盖度图集，行为与旧版本一致）。
         let quad = prepare_glyph(
             state,

@@ -4,6 +4,16 @@
 
 ### Added / 新增
 
+- **MSDF 表示层（与精确 SDF 并存）**：`TextDef.sdf_mode` 新增 `TextSdfMode::{Auto, Msdf, Exact}`。
+  - 带样式的文字在 `reach_em` 落进 range 阶梯（`0.08 / 0.20 / 0.45 em`）时走 MSDF：
+    缓存键只含 `(字形, 生成 em 档, range 档)`，**改字号、改宽度（同档）都不再重新栅格化**。
+  - 三通道各存一组边的距离（每条边写**两个**通道），片元取中位数还原真实距离。
+  - 生成 em 阶梯 `24 / 48 / 96`；独立 `Rgba8Unorm` 图集（`group(0) @binding(5)`）。
+  - `Auto`（默认）：带样式且 `em_px ≥ 18` 时用 MSDF，否则精确 SDF；无样式文字仍走覆盖度。
+    `Msdf` 可强制无样式文字也走 MSDF；`Exact` 是质量保险丝。
+  - 实测：MSDF 与精确 SDF 面积差 **+1.5%~+4.1%**（略胖）；同档改宽度 `msdf_entries` 不变；
+    超最大档自动回退精确 SDF（R8 单通道更省）。
+
 - **文本样式（距离场图层栈）**：`TextDef.style` 新增 `TextStyle` —— 描边 / 多层描边 / 软投影 /
   发光 / 内描边 / 内阴影 / 自定义填充色，全部由**同一个原语**表达：对字形的**有符号距离场**
   取带软边的阈值。新增 `TextStyle` / `TextLayer` / `TextPaint` / `TextBlend`。
