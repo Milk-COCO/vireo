@@ -457,10 +457,11 @@ pub enum TextSdfMode {
 
 /// 选 MSDF 档位：返回 `(生成 em, range(em 比例))`；`None` = 该字号/外扩不适合 MSDF。
 pub(crate) fn pick_msdf(mode: TextSdfMode, em_px: f32, reach_px: f32) -> Option<(f32, f32)> {
-    // `Auto` 暂时保持精确 SDF：MSDF 管线已接通，但插值伪影的质量验收还没过，
-    // 默认走 MSDF 会牺牲小字/边缘清晰度。等 MSDF 的 error-correction 与调参落地后再改回。
-    // 现在 MSDF 是 `TextSdfMode::Msdf` 显式可选路径，方便 A/B 与逐轮质量对比。
-    if mode != TextSdfMode::Msdf || em_px <= 0.0 {
+    if mode == TextSdfMode::Exact || em_px <= 0.0 {
+        return None;
+    }
+    // 小字号下 MSDF 是降采样（更糊），保留精确 SDF 的清晰度
+    if mode == TextSdfMode::Auto && em_px < 18.0 {
         return None;
     }
     let reach_em = reach_px.max(0.0) / em_px;

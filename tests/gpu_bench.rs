@@ -6369,8 +6369,9 @@ fn text_msdf_opt_in_renders() {
 
     // 质量是**尺寸相关**的：目标字号 > 生成 em 时是放大（插值伪影明显），
     // ≤ 生成 em 时是缩小（更锐）。这决定了 `Auto` 的取舍。
+    // 96 是生成 em 档，scale 恰好 1.0 —— 用来分离「场本身错」与「缩放路径错」。
     let mut last_msdf = 0usize;
-    for font_size in [44.0f32, 72.0, 120.0] {
+    for font_size in [44.0f32, 48.0, 72.0, 96.0, 120.0] {
         let exact = render(TextSdfMode::Exact, font_size);
         let msdf = render(TextSdfMode::Msdf, font_size);
         println!(

@@ -101,7 +101,14 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
 
     let corner_offset = vec2<u32>(width, height) * corner_position;
 
-    uv = uv + corner_offset;
+    // UV 的推进量是**图集条目的 texel 尺寸**，不是 quad 的设备像素尺寸 ——
+    // MSDF 的 quad 会按「目标/生成」比例缩放，两者不再相等；用错会把字放大 1/scale。
+    let entry_u = select(
+        vec2<u32>(width, height),
+        vec2<u32>(in_vert.entry_dim >> 16u, in_vert.entry_dim & 0xffffu),
+        in_vert.entry_dim != 0u,
+    );
+    uv = uv + entry_u * corner_position;
     pos = pos + vec2<i32>(corner_offset);
 
     var vert_output: VertexOutput;
@@ -201,15 +208,11 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
     return (q * 2.0 - 1.0) * band;
 }
 
-/// 三通道取**最小值**：每个通道存的是「该颜色子集的最短距离」，三色掩码并集覆盖全部边，
-/// 所以 min 就是到最近边的真实距离。
-///
-/// 为什么不用经典 MSDF 的 `median`：median 需要配合「逐边伪距离」（只在边的 Voronoi
-/// 区域内有效）才能保尖角；我们存的是**真实段距离**，median 会在两通道不同的相邻
-/// texel 之间插值时被远处通道带偏 —— 实测轮廓外扩 8%~23%。min 对真实距离是精确的，
-/// 因此不会变胖；尖角锐化留待引入伪距离后再做。
-fn min3(v: vec3<f32>) -> f32 {
-    return min(min(v.x, v.y), v.z);
+/// 三通道取**中位数**：每个通道存的是「该色边子集」的有符号距离，两条最近的边由两位
+/// 掩码保证落在两个通道里，第三个通道更远 —— 有符号值的中位数就是真实距离
+/// （内部同样成立；用 min 会被更远的通道拉走，内描边的环会整条消失）。
+fn median3(v: vec3<f32>) -> f32 {
+    return max(min(v.x, v.y), min(max(v.x, v.y), v.z));
 }
 
 /// 采样一个有符号距离（单位统一为**目标设备像素**）。
@@ -224,7 +227,7 @@ fn sample_d(
 ) -> f32 {
     if (content_type == 3u) {
         let rgb = textureSampleLevel(msdf_atlas_texture, atlas_sampler, uv, 0.0).rgb;
-        let d_gen = (min3(rgb) * 2.0 - 1.0) * d_range;
+        let d_gen = (median3(rgb) * 2.0 - 1.0) * d_range;
         return d_gen * msdf_scale;
     }
     return decode_sdf(
