@@ -6125,6 +6125,160 @@ fn text_style_uses_mask_atlas_only() {
     );
 }
 
+/// **同一帧里出现多个样式**时，每个样式的图层都必须正确（回归：`layer_first` 曾是
+/// 层下标，却被着色器当 vec4 下标用，导致第 2 个及以后样式的层参数整体错位）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_multiple_styles_in_one_frame() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 160;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+    let blue = Color::new(0.1, 0.2, 1.0, 1.0);
+
+    let c = OffscreenCanvas::new(&gpu, N, N);
+    let mut b = DrawBatch::new();
+    let styles = [
+        // 第 1 个样式：单层红描边
+        TextStyle::outline(4.0, red),
+        // 第 2 个样式：红 7px + 蓝 3px（层参数错位时蓝层会消失/乱）
+        TextStyle::new()
+            .with_layer(TextLayer::hard(7.0, TextPaint::solid(red)))
+            .with_layer(TextLayer::hard(3.0, TextPaint::solid(blue))),
+    ];
+    for (i, style) in styles.iter().enumerate() {
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(10.0 + i as f32 * 80.0, 20.0),
+            TextDef {
+                style: Some(Arc::new(style.clone())),
+                ..TextDef::default().font_size(70.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+    }
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+
+    let count = |x0: u32, x1: u32, f: &dyn Fn(&[u8]) -> bool| {
+        let mut n = 0;
+        for y in 0..N {
+            for x in x0..x1 {
+                let i = ((y * N + x) * 4) as usize;
+                if f(&px[i..i + 3]) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let reds_l = count(0, 80, &|p| p[0] > 150 && p[1] < 80 && p[2] < 80);
+    let reds_r = count(80, 160, &|p| p[0] > 150 && p[1] < 80 && p[2] < 80);
+    let blues_r = count(80, 160, &|p| p[2] > 150 && p[0] < 90);
+    println!("  同帧两样式：左红 {reds_l} / 右红 {reds_r} 右蓝 {blues_r}");
+    assert!(reds_l > 300, "第 1 个样式的红描边应可见，实际 {reds_l}");
+    assert!(reds_r > 200, "第 2 个样式的外红层应可见，实际 {reds_r}");
+    assert!(blues_r > 30, "第 2 个样式的蓝层应可见，实际 {blues_r}");
+}
+
+/// 诊断用：把每个预设单独渲染并打印像素分类图（临时，跑完删）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_diagnose_presets() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 160;
+
+    let dump = |name: &str, style: Option<TextStyle>, glyph: &str| {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            glyph,
+            Pos::new(20.0, 20.0),
+            TextDef {
+                style: style.map(Arc::new),
+                ..TextDef::default().font_size(80.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let (mut red, mut blue, mut white, mut other) = (0, 0, 0, 0);
+        for p in px.chunks(4) {
+            let (r, g, bl) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            if r + g + bl < 30 {
+                continue;
+            }
+            if r > 120 && g < 90 && bl < 90 {
+                red += 1;
+            } else if bl > 120 && r < 90 && g < 90 {
+                blue += 1;
+            } else if r > 180 && g > 180 && bl > 180 {
+                white += 1;
+            } else {
+                other += 1;
+            }
+        }
+        println!("\n[{name}] red={red} blue={blue} white={white} other={other}");
+        // 4px 下采样的分类图
+        let mut map = String::new();
+        for y in (0..N).step_by(4) {
+            let mut row = String::new();
+            for x in (0..N).step_by(4) {
+                let i = ((y * N + x) * 4) as usize;
+                let (r, g, bl) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+                row.push(if r + g + bl < 40 {
+                    '.'
+                } else if r > 120 && g < 90 && bl < 90 {
+                    'R'
+                } else if bl > 120 && r < 90 && g < 90 {
+                    'B'
+                } else if r > 170 && g > 170 && bl > 170 {
+                    '#'
+                } else {
+                    '+'
+                });
+            }
+            map.push_str(&row);
+            map.push('\n');
+        }
+        println!("{map}");
+    };
+
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+    let blue = Color::new(0.1, 0.2, 1.0, 1.0);
+    let ink = Color::new(0.05, 0.05, 0.05, 1.0);
+
+    dump("单层外描边", Some(TextStyle::outline(4.0, red)), "国");
+    dump(
+        "双层外描边",
+        Some(
+            TextStyle::new()
+                .with_layer(TextLayer::hard(7.0, TextPaint::solid(red)))
+                .with_layer(TextLayer::hard(3.0, TextPaint::solid(blue))),
+        ),
+        "国",
+    );
+    dump(
+        "内描边",
+        Some(TextStyle::inner_outline(5.0, red).with_fill(TextPaint::solid(blue))),
+        "国",
+    );
+    dump(
+        "软投影+描边",
+        Some(
+            TextStyle::shadow((5.0, 5.0), 3.0, red)
+                .with_layer(TextLayer::hard(3.0, TextPaint::solid(ink))),
+        ),
+        "国",
+    );
+    dump("仅发光", Some(TextStyle::glow(8.0, red)), "国");
+}
+
 /// 彩色字形（COLRv1 emoji）加描边：彩色字形保留自己的颜色，描边垫在底下。
 ///
 /// 判据：带描边的 emoji 比不带描边的覆盖面积更大，且多出来的部分以描边色为主。

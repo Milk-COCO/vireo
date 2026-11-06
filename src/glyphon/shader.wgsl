@@ -298,7 +298,8 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             // （blend state 是 ALPHA_BLENDING，着色器必须输出直通 alpha）。
             let sbase = (in_frag.style_index - 1u) * 3u;
             let style_meta = text_styles[sbase];
-            let layer_first = style_meta.x;
+            // `style_meta.x` 是**层下标**，而 `text_layers` 按 vec4 寻址（每层 4 个 vec4）
+            let layer_base = style_meta.x * 4u;
             let layer_count = min(style_meta.y, 8u);
             let d0 = decode_sdf(
                 textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x,
@@ -308,7 +309,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             var i = 0u;
             loop {
                 if i >= layer_count { break; }
-                out = apply_layer(layer_first + i * 4u, in_frag.sdf_band, in_frag.uv, in_frag.local01, frag_pos.xy, out);
+                out = apply_layer(layer_base + i * 4u, in_frag.sdf_band, in_frag.uv, in_frag.local01, frag_pos.xy, out);
                 i = i + 1u;
             }
             // fill（style_meta.z: 0 = 用顶点色，1/2/3 = 纯色/渐变/纹理，4 = 不填）

@@ -703,6 +703,43 @@ mod tests {
         );
     }
 
+    /// 多图层样式的编码：层必须连续、`layer_first`/`layer_count` 必须对得上。
+    #[test]
+    fn multi_layer_style_encodes_all_layers() {
+        let style = TextStyle::new()
+            .with_layer(TextLayer::hard(3.0, TextPaint::solid(WHITE)))
+            .with_layer(TextLayer::hard(1.0, TextPaint::solid(BLACK)));
+        let mut table = StyleTable::new();
+        let (idx, band) = table.register(&style, 1.0);
+        assert_eq!(idx, 1);
+        assert_eq!(band, 4.0, "外扩 3+1 ⇒ band 4");
+
+        let sbase = 0usize;
+        assert_eq!(table.styles[sbase], 0, "layer_first");
+        assert_eq!(table.styles[sbase + 1], 2, "layer_count");
+        // 第 0 层 threshold = 3，第 1 层 threshold = 1
+        let thr0 = f32::from_bits(table.layers[3]);
+        let thr1 = f32::from_bits(table.layers[LAYER_STRIDE_U32 + 3]);
+        assert!(
+            (thr0 - 3.0).abs() < 1e-6,
+            "第 0 层 threshold 应为 3，实际 {thr0}"
+        );
+        assert!(
+            (thr1 - 1.0).abs() < 1e-6,
+            "第 1 层 threshold 应为 1，实际 {thr1}"
+        );
+        // 颜色：第 0 层白、第 1 层黑
+        assert_eq!(table.layers[8 + 3], f32::from(WHITE.a).to_bits());
+        assert_eq!(
+            table.layers[LAYER_STRIDE_U32 + 8 + 3],
+            f32::from(BLACK.a).to_bits()
+        );
+        // 同内容重复登记必须命中同一份
+        let (idx2, _) = table.register(&style, 1.0);
+        assert_eq!(idx2, 1, "同内容应去重");
+        assert_eq!(table.style_count(), 1);
+    }
+
     #[test]
     fn empty_style_needs_no_sdf() {
         assert!(!TextStyle::new().needs_style());
