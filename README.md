@@ -120,7 +120,7 @@ async fn main(app: App) {
   仍是 1 个实例 1 次 draw，见
   [渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)。
 - **文字**：整段 shape 缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
-  COLRv1 彩色 emoji；**文本样式**（描边 / 多层描边 / 软投影 / 发光 / 内描边 / 浮雕）走
+  COLRv1 彩色 emoji；**文本样式**（描边 / 多层描边 / 软投影 / 发光 / 内描边 / 内阴影）走
   字形距离场，见
   [文本样式](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)。
 
@@ -165,7 +165,7 @@ async fn main(app: App) {
 - [折线逐点色](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
   —— `draw_line_chain_colors`：沿弧长的逐点色与实测。
 - [文本样式](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)
-  —— 描边/投影/发光/内描边/浮雕的图层模型、像素意图与降级表。
+  —— 描边/投影/发光/内描边/内阴影的图层模型、像素意图与降级表。
 - [平台支持](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)
   —— 各平台验证到什么程度、Android 构建链、工具链与字体。
 

@@ -1,10 +1,10 @@
-//! 文本样式展示：描边 / 多层描边 / 软投影 / 发光 / 内描边 / 浮雕。
+//! 文本样式展示：描边 / 多层描边 / 软投影 / 发光 / 内描边 / 内阴影 / 渐变字 / emoji / 几何描边。
 //!
 //! 全部来自同一个原语：**对字形的有符号距离场取带软边的阈值**（见
 //! `docs/reference/text-style.md`）。所以这里每种效果都只是 `TextStyle` 的一个图层列表。
 //!
 //! 按键：
-//! - `1`..`9` / `0` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 浮雕 / 全部 / 渐变字 /
+//! - `1`..`9` / `0` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 内阴影 / 全部 / 渐变字 /
 //!   emoji / 几何描边）
 //! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变）
 //! - `Q` / `ESC` 退出
@@ -155,12 +155,21 @@ async fn main(app: App) {
             );
         }
         if show_all || group == 6 {
+            // 内阴影：内描边（阈值取负）+ 反向偏移 + 软边 ⇒ 暗部贴着左上内缘。
+            // 这组顺便演示"拿到层之后自己改字段"（layer 全是 pub）。
+            let y_row = next(84.0);
+            let mut inner_shadow = TextStyle::inner_outline(width + 2.0, ink);
+            if let Some(layer) = inner_shadow.layers.first_mut() {
+                layer.offset = (3.0.into(), 3.0.into());
+                layer.softness = 2.5.into();
+            }
+            inner_shadow.fill = Some(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
             row(
                 &mut b,
-                next(84.0),
-                "浮雕（一亮一暗两层，不同偏移）",
-                "Emboss 浮雕",
-                Some(TextStyle::emboss(width, WHITE, ink).with_fill(TextPaint::solid(blue))),
+                y_row,
+                "内阴影（内描边 + 反向偏移 + 软边）",
+                "Inner shadow 内阴影",
+                Some(inner_shadow),
                 width,
             );
         }

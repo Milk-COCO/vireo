@@ -1,4 +1,4 @@
-# 文本样式（描边 / 投影 / 发光 / 内阴影 / 浮雕）
+# 文本样式（描边 / 投影 / 发光 / 内阴影 / 渐变字）
 
 > 面向 vireo 使用者。适用版本：0.2.0。
 >
@@ -45,8 +45,13 @@ let glow = TextStyle::glow(6.0, Color::new(0.35, 0.75, 1.0, 0.55));
 // 内描边 + 自定义填充色
 let inner = TextStyle::inner_outline(2.0, ORANGE).with_fill(TextPaint::solid(Color::new(0.08,0.09,0.12,1.0)));
 
-// 浮雕
-let emboss = TextStyle::emboss(1.0, WHITE, BLACK).with_fill(TextPaint::solid(BLUE));
+// 内阴影：内描边那一层 + 反向偏移 + 软边（层字段全 pub，可以自己改）
+let mut inner_shadow = TextStyle::inner_outline(3.0, BLACK);
+if let Some(l) = inner_shadow.layers.first_mut() {
+    l.offset = (3.0.into(), 3.0.into());
+    l.softness = 2.5.into();
+}
+inner_shadow.fill = Some(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
 
 // 渐变字：`in_rect` 决定渐变跨满哪个页面矩形（不传 = 逐字形）
 let grad = TextGradient::vertical(Color::new(1.0, 0.75, 0.3, 1.0), Color::new(0.9, 0.2, 0.5, 1.0))
@@ -66,7 +71,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 |---|---|
 | `threshold` | 阈值位置：`> 0` 字形外侧（外描边/投影）、`< 0` 内侧（内描边）、`0` = 轮廓 |
 | `softness` | 软边 ≈ 模糊半径；`0` = 硬边（1px 解析 AA） |
-| `offset` | 采样偏移（设备像素意图）—— 投影/浮雕靠它 |
+| `offset` | 采样偏移（设备像素意图）—— 投影/内阴影靠它 |
 | `paint` | `Solid(Color)` / `Gradient(TextGradient)` / `Texture { uv, rect }`；渐变与纹理都靠 `rect` 决定跨满哪个页面矩形，不传则逐字形 |
 | `blend` | `Over`（默认）/ `Add` |
 
@@ -80,9 +85,12 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 软投影 | `threshold = 0, offset, softness = blur` |
 | 发光 | `offset = 0, softness = blur` |
 | 多层描边 | 多个 `threshold = +w1, +w2…`（宽的先画） |
-| 浮雕 | 两个 `threshold = 0`、`offset = ±(1,1)`、一亮一暗 |
 | 内阴影 | `threshold = -w, offset = +d, softness = blur` |
 | **几何描边（真 miter）** | `TextStyle::vector_outline(TextStroke::new(w, c).join(TextJoin::Miter))` |
+
+> **没有「浮雕」预设**：把整个字形往左上/右下各挪一次只能得到「错位双影」——
+> 斜边上带宽会变成 `d·√2`、亮暗方向不随边法线变化、圆弧上的高光位置是错的。
+> 真要浮雕得按距离场梯度做 Lambert 打光，那是另一个原语；在那之前，宁可没有这个预设。
 
 ### 3.1 距离场描边 vs 几何描边
 
@@ -149,8 +157,8 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 ## 8. 可跑示例
 
-`cargo run --example text_style` —— 七个示例组（描边/多层/投影/发光/内描边/浮雕/全部），
-`←→` 改描边宽度，`1..7` 切组。
+`cargo run --example text_style` —— 十个示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 内阴影 /
+渐变字 / emoji / 几何描边 / 全部），`1..9` + `0` 切组、`←→` 改描边宽度。
 
 ## 9. 尚未支持（后续版本）
 

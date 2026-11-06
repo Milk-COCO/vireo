@@ -160,7 +160,7 @@ pub struct TextDef {
     pub align: TextAlign,
     /// 字体属性（family、weight、style 等）。None 使用默认 Attrs。
     pub attrs: Option<AttrsOwned>,
-    /// 文本样式（描边 / 投影 / 发光 / 内阴影 / 浮雕 / 渐变字…）。
+    /// 文本样式（描边 / 投影 / 发光 / 内阴影 / 渐变字…）。
     /// `None`（默认）= 完全走旧路径：覆盖度图集、零额外开销。
     pub style: Option<std::sync::Arc<TextStyle>>,
 }

@@ -5,7 +5,7 @@
 ### Added / 新增
 
 - **文本样式（距离场图层栈）**：`TextDef.style` 新增 `TextStyle` —— 描边 / 多层描边 / 软投影 /
-  发光 / 内描边 / 浮雕 / 自定义填充色，全部由**同一个原语**表达：对字形的**有符号距离场**
+  发光 / 内描边 / 内阴影 / 自定义填充色，全部由**同一个原语**表达：对字形的**有符号距离场**
   取带软边的阈值。新增 `TextStyle` / `TextLayer` / `TextPaint` / `TextBlend`。
   - 字形表示升级：带样式的字形从**字体轮廓**（`skrifa`）生成**精确距离场**（线/二次/三次
     贝塞尔的最近点 Newton + 按段 bbox 剪枝），与覆盖度共用同一张 R8 图集（`content_type`
@@ -33,9 +33,9 @@
     页面矩形渐变上红下蓝（R/B 1.32 vs 0.56）；纹理填充左红右蓝（89089/24005 vs 0/35868）；
     emoji 描边 3253 → 4595 px 且 2145 px 为描边色；几何描边 10px 让纵向跨度恰好 +10px。
   Text styles via a signed-distance-field layer stack: `TextDef.style` + `TextStyle` (outline,
-  multi-outline, soft shadow, glow, inner outline, emboss, custom fill). Styled glyphs get an exact
-  distance field derived from the font outline, sharing the existing R8 atlas; unstyled text is
-  byte-for-byte unchanged. Soft edges use an error function (one tap for blurred shadows).
+  multi-outline, soft shadow, glow, inner outline, inner shadow, custom fill). Styled glyphs get an
+  exact distance field derived from the font outline, sharing the existing R8 atlas; unstyled text
+  is byte-for-byte unchanged. Soft edges use an error function (one tap for blurred shadows).
 
 - **渐变通道（轴向 / 线段 / 折线，覆盖全部 SDF 形状）**：新增
   `draw_rect_gradient` / `draw_rounded_rect_gradient` / `draw_circle_gradient` /

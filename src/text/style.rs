@@ -1,4 +1,4 @@
-//! 文本样式：图层栈（描边 / 投影 / 发光 / 内阴影 / 浮雕 / 渐变字 / 纹理字）。
+//! 文本样式：图层栈（描边 / 投影 / 发光 / 内阴影 / 渐变字 / 纹理字）。
 //!
 //! 模型只有一条原语：**对字形的有符号距离场取带软边的阈值**。
 //! 一层 = 一次阈值 + 一种填充；描边、投影、发光都是这一条的参数组合，
@@ -325,17 +325,6 @@ impl TextStyle {
             )],
             None,
         )
-    }
-
-    /// 浮雕：一亮一暗两层的经典组合。
-    pub fn emboss(offset: impl Into<Pp>, light: Color, dark: Color) -> Self {
-        let d = offset.into();
-        let mut hi = TextLayer::hard(Pp::Dp(crate::dpi::Dp(0.0)), TextPaint::solid(light));
-        hi.offset = (negate_pp(d), negate_pp(d));
-        hi.blend = TextBlend::Add;
-        let mut lo = TextLayer::hard(Pp::Dp(crate::dpi::Dp(0.0)), TextPaint::solid(dark));
-        lo.offset = (d, d);
-        Self::empty_with(vec![lo, hi], None)
     }
 
     /// 几何描边（真 miter/bevel）：垫在填充与所有图层之下。
