@@ -442,7 +442,33 @@ pub(crate) const STYLE_STRIDE_U32: usize = 12;
 /// 单层（4 × vec4 = 64B）。
 pub(crate) const LAYER_STRIDE_U32: usize = 16;
 
-/// 距离场带宽的档位。
+/// 距离场表示方式：**精确按尺寸 SDF** 与 **MSDF** 并存，由这里选择。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextSdfMode {
+    /// 默认：带样式文字在合适时走 MSDF，否则精确 SDF；无样式文字保持覆盖度。
+    #[default]
+    Auto,
+    /// 尽量用 MSDF（超出 range 阶梯或像素字体时 warn-once 后仍回退精确）；
+    /// 无样式文字也会走 MSDF（顶点色填充）。
+    Msdf,
+    /// 一律用精确按尺寸 SDF（质量保险丝；无样式文字仍是覆盖度）。
+    Exact,
+}
+
+/// 选 MSDF 档位：返回 `(生成 em, range(em 比例))`；`None` = 该字号/外扩不适合 MSDF。
+pub(crate) fn pick_msdf(mode: TextSdfMode, em_px: f32, reach_px: f32) -> Option<(f32, f32)> {
+    // `Auto` 暂时保持精确 SDF：MSDF 管线已接通，但插值伪影的质量验收还没过，
+    // 默认走 MSDF 会牺牲小字/边缘清晰度。等 MSDF 的 error-correction 与调参落地后再改回。
+    // 现在 MSDF 是 `TextSdfMode::Msdf` 显式可选路径，方便 A/B 与逐轮质量对比。
+    if mode != TextSdfMode::Msdf || em_px <= 0.0 {
+        return None;
+    }
+    let reach_em = reach_px.max(0.0) / em_px;
+    let range_em = crate::glyphon::msdf_pick_range_em(reach_em)?;
+    Some((crate::glyphon::msdf_pick_em(em_px), range_em))
+}
+
+/// 精确 SDF 的带宽档位。
 ///
 /// **为什么是档位而不是 `ceil(reach)`**：band 进了字形缓存键，任何一点变化都会让所有
 /// 带样式的字形**重新栅格化**（从轮廓算距离）。按 1px / 1/8px 递增时，拖一次描边宽度

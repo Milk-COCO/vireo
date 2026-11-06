@@ -6333,6 +6333,56 @@ fn text_style_adjacent_glyphs_do_not_cover() {
     );
 }
 
+/// MSDF 是**显式可选**路径（`TextDef.sdf_mode = Msdf`）：先保证它确实能出图，
+/// 并把当前与精确 SDF 的面积差打印出来（质量收紧要等 error-correction 落地）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_msdf_opt_in_renders() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 200;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |mode: TextSdfMode| -> usize {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(20.0, 16.0),
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(3.0, red).with_fill(TextPaint::solid(WHITE)),
+                )),
+                sdf_mode: mode,
+                ..TextDef::default().font_size(120.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60)
+            .count()
+    };
+
+    let exact = render(TextSdfMode::Exact);
+    let msdf = render(TextSdfMode::Msdf);
+    let stats = gpu.text_atlas_stats();
+    println!(
+        "  MSDF vs 精确：覆盖 {exact} vs {msdf} px（差 {:.1}%），msdf 图集 {}²={}B",
+        (msdf as f64 - exact as f64) / exact as f64 * 100.0,
+        stats.msdf_size,
+        stats.msdf_bytes
+    );
+    assert!(msdf > 500, "MSDF 路径应能出图，实际 {msdf} px");
+    assert!(
+        stats.msdf_bytes > 0,
+        "MSDF 应占用独立的 msdf 图集（实际 0）"
+    );
+}
+
 /// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
@@ -6382,7 +6432,7 @@ fn text_style_uses_mask_atlas_only() {
     );
     assert_eq!(
         after.total_bytes(),
-        after.mask_bytes + after.color_bytes,
+        after.mask_bytes + after.color_bytes + after.msdf_bytes,
         "total_bytes 定义应自洽"
     );
     println!(

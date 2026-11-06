@@ -51,7 +51,7 @@ pub(crate) enum Seg {
 }
 
 /// 把 `skrifa` 的路径元素收集成段列表（`map` 负责空间变换）。
-fn collect_segments(
+pub(crate) fn collect_segments(
     elements: &[PathElement],
     map: &impl Fn(f32, f32) -> (f32, f32),
 ) -> (Vec<Seg>, Vec<zeno::Command>) {
@@ -144,7 +144,7 @@ fn seg_bbox(seg: &Seg, from: [f32; 2], pad: f32) -> [f32; 4] {
 
 /// 段到点的**平方**距离；`from` 是段的起点（Line/Quad/Cubic 共用）。
 #[inline]
-fn seg_dist2(seg: &Seg, from: [f32; 2], p: [f32; 2]) -> f32 {
+pub(crate) fn seg_dist2(seg: &Seg, from: [f32; 2], p: [f32; 2]) -> f32 {
     match *seg {
         Seg::Line([_, _, x1, y1]) => {
             let a = from;
@@ -459,7 +459,7 @@ pub(crate) fn stroke_mask(
 
 /// 字形的轮廓几何：路径（font units）+ 缩放/子像素偏移/斜体标志。
 pub(crate) struct OutlineGeometry {
-    pen: Vec<PathElement>,
+    pub(crate) pen: Vec<PathElement>,
     scale: f32,
     bx: f32,
     by: f32,
@@ -468,7 +468,7 @@ pub(crate) struct OutlineGeometry {
 
 impl OutlineGeometry {
     /// 返回「设备像素（y 向上）→ padding 后的图像空间（y 向下）」的映射。
-    fn map(
+    pub(crate) fn map(
         &self,
         swash_left: i16,
         swash_top: i16,
@@ -489,7 +489,7 @@ impl OutlineGeometry {
 }
 
 /// 解析字体、variations、upem 与轮廓，得到可复用的几何。
-fn outline_geometry(
+pub(crate) fn outline_geometry(
     font_system: &mut cosmic_text::FontSystem,
     key: CacheKey,
 ) -> Option<OutlineGeometry> {

@@ -34,6 +34,10 @@ pub(super) struct AreaMeta {
     pub(super) style_layers: u32,
     /// 位图：第 i 位 = 第 i 层画在填充之上。
     pub(super) style_above_mask: u32,
+    /// 样式向字形外侧的最大外扩（设备像素）。
+    pub(super) style_reach: f32,
+    /// 距离场表示方式。
+    pub(super) sdf_mode: crate::text::TextSdfMode,
     /// 几何描边（真 miter/bevel）；画在填充之下。
     pub(super) vector_stroke: Option<crate::text::TextStrokePx>,
 }
@@ -315,11 +319,21 @@ impl TextEntryList {
             let row_vector_stroke = entry.style().and_then(|s| stroke_px(s, scale as f64));
             let row_style_layers = entry.style().map(layer_count_of).unwrap_or(0);
             let row_style_above_mask = entry.style().map(above_mask).unwrap_or(0);
+            let row_style_reach = entry
+                .style()
+                .map(|s| s.reach_px(scale as f64))
+                .unwrap_or(0.0);
+            let row_sdf_mode = entry
+                .def()
+                .map(|d| d.sdf_mode)
+                .unwrap_or(crate::text::TextSdfMode::Auto);
             let mut style_index = row_style_index;
             let mut style_layers_only = row_style_layers_only;
             let mut sdf_band = row_sdf_band;
             let mut style_layers = row_style_layers;
             let mut style_above_mask = row_style_above_mask;
+            let mut style_reach = row_style_reach;
+            let mut sdf_mode = row_sdf_mode;
             let mut vector_stroke = row_vector_stroke;
 
             match entry {
@@ -345,6 +359,8 @@ impl TextEntryList {
                                 sdf_band,
                                 style_layers,
                                 style_above_mask,
+                                style_reach,
+                                sdf_mode,
                                 vector_stroke,
                             });
                         }
@@ -362,6 +378,8 @@ impl TextEntryList {
                         sdf_band = row_sdf_band;
                         style_layers = row_style_layers;
                         style_above_mask = row_style_above_mask;
+                        style_reach = row_style_reach;
+                        sdf_mode = row_sdf_mode;
                         vector_stroke = row_vector_stroke;
                         match part {
                             TextPart::Normal(s, _) => {
@@ -386,6 +404,12 @@ impl TextEntryList {
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 style_above_mask = pdef.style.as_ref().map(above_mask).unwrap_or(0);
                                 style_layers = pdef.style.as_ref().map(layer_count_of).unwrap_or(0);
+                                style_reach = pdef
+                                    .style
+                                    .as_ref()
+                                    .map(|s| s.reach_px(scale as f64))
+                                    .unwrap_or(0.0);
+                                sdf_mode = pdef.sdf_mode;
                                 let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
                                 metas.push(AreaMeta {
@@ -404,6 +428,8 @@ impl TextEntryList {
                                     sdf_band,
                                     style_layers,
                                     style_above_mask,
+                                    style_reach,
+                                    sdf_mode,
                                     vector_stroke,
                                 });
                                 cursor_x += w;
@@ -430,6 +456,12 @@ impl TextEntryList {
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 style_above_mask = pdef.style.as_ref().map(above_mask).unwrap_or(0);
                                 style_layers = pdef.style.as_ref().map(layer_count_of).unwrap_or(0);
+                                style_reach = pdef
+                                    .style
+                                    .as_ref()
+                                    .map(|s| s.reach_px(scale as f64))
+                                    .unwrap_or(0.0);
+                                sdf_mode = pdef.sdf_mode;
                                 let opts = TextDef {
                                     max_width: None,
                                     align: TextAlign::Left,
@@ -457,6 +489,8 @@ impl TextEntryList {
                                                 sdf_band,
                                                 style_layers,
                                                 style_above_mask,
+                                                style_reach,
+                                                sdf_mode,
                                                 vector_stroke,
                                             },
                                             w,
@@ -497,6 +531,8 @@ impl TextEntryList {
                                                 sdf_band,
                                                 style_layers,
                                                 style_above_mask,
+                                                style_reach,
+                                                sdf_mode,
                                                 vector_stroke,
                                             },
                                             lw,
@@ -524,6 +560,8 @@ impl TextEntryList {
                                         sdf_band,
                                         style_layers,
                                         style_above_mask,
+                                        style_reach,
+                                        sdf_mode,
                                         vector_stroke,
                                     });
                                 }
@@ -548,6 +586,12 @@ impl TextEntryList {
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
                                 style_above_mask = pdef.style.as_ref().map(above_mask).unwrap_or(0);
                                 style_layers = pdef.style.as_ref().map(layer_count_of).unwrap_or(0);
+                                style_reach = pdef
+                                    .style
+                                    .as_ref()
+                                    .map(|s| s.reach_px(scale as f64))
+                                    .unwrap_or(0.0);
+                                sdf_mode = pdef.sdf_mode;
                                 for ch in s.chars() {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
                                     for glyph in cluster.glyphs.iter() {
@@ -567,6 +611,8 @@ impl TextEntryList {
                                             sdf_band,
                                             style_layers,
                                             style_above_mask,
+                                            style_reach,
+                                            sdf_mode,
                                             vector_stroke,
                                         });
                                     }
@@ -595,6 +641,8 @@ impl TextEntryList {
                         sdf_band,
                         style_layers,
                         style_above_mask,
+                        style_reach,
+                        sdf_mode,
                         vector_stroke,
                     });
                 }
@@ -723,6 +771,8 @@ impl TextEntryList {
                                     sdf_band: meta.sdf_band,
                                     style_layers: meta.style_layers,
                                     style_above_mask: meta.style_above_mask,
+                                    style_reach: meta.style_reach,
+                                    sdf_mode: meta.sdf_mode,
                                     vector_stroke: meta.vector_stroke,
                                 })
                             });

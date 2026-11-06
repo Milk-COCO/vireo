@@ -125,6 +125,11 @@ impl Cache {
                     offset: mem::size_of::<u32>() as u64 * 13,
                     shader_location: 9,
                 },
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Uint32,
+                    offset: mem::size_of::<u32>() as u64 * 14,
+                    shader_location: 10,
+                },
             ],
         };
 
@@ -170,6 +175,17 @@ impl Cache {
                     binding: 4,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // 5 = MSDF 图集（Rgba8Unorm，三通道距离场）
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: TextureSampleType::Float { filterable: true },
+                    },
                     count: None,
                 },
             ],
@@ -234,6 +250,7 @@ impl Cache {
         device: &Device,
         color_atlas: &TextureView,
         mask_atlas: &TextureView,
+        msdf_atlas: &TextureView,
         base_texture: &TextureView,
         base_sampler: &Sampler,
     ) -> BindGroup {
@@ -259,6 +276,10 @@ impl Cache {
                 BindGroupEntry {
                     binding: 4,
                     resource: BindingResource::Sampler(base_sampler),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: BindingResource::TextureView(msdf_atlas),
                 },
             ],
             label: Some("glyphon atlas bind group"),

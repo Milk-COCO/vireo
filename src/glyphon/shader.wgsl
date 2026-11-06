@@ -12,6 +12,8 @@ struct VertexInput {
     @location(8) @interpolate(flat) style_index: u32,
     /// 距离场带宽（设备像素），仅 content_type == Sdf 时有意义
     @location(9) sdf_band: f32,
+    /// 图集里的 texel 尺寸 `(w<<16)|h`（0 = 与 quad 同尺寸，即精确 SDF 路径）
+    @location(10) @interpolate(flat) entry_dim: u32,
 }
 
 struct VertexOutput {
@@ -24,8 +26,10 @@ struct VertexOutput {
     @location(5) sdf_band: f32,
     /// 字形 quad 内的归一化坐标（0..1），逐字形渐变/纹理填充用。
     @location(6) local01: vec2<f32>,
-    /// 该字形在图集里的 texel 尺寸（宽, 高）—— 层带偏移时把采样夹紧在自己的矩形内。
+    /// 该字形 quad 的设备像素尺寸 —— 层带偏移时把采样夹紧在自己的矩形内。
     @location(7) @interpolate(flat) glyph_size: vec2<f32>,
+    /// 图集条目的 texel 尺寸；MSDF 时 `glyph_size / entry_texels` = 目标/生成 比例。
+    @location(8) @interpolate(flat) entry_texels: vec2<f32>,
 }
 
 struct Params {
@@ -50,6 +54,10 @@ var base_texture: texture_2d<f32>;
 
 @group(0) @binding(4)
 var base_sampler: sampler;
+
+/// MSDF 图集：RGB 三通道各存一组边的距离，取中位数还原真实距离。
+@group(0) @binding(5)
+var msdf_atlas_texture: texture_2d<f32>;
 
 @group(1) @binding(0)
 var<uniform> params: Params;
@@ -143,6 +151,10 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
             dim = textureDimensions(mask_atlas_texture);
             break;
         }
+        case 3u: {
+            dim = textureDimensions(msdf_atlas_texture);
+            break;
+        }
         default: {}
     }
 
@@ -151,6 +163,13 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.sdf_band = in_vert.sdf_band;
     vert_output.local01 = vec2<f32>(corner_position);
     vert_output.glyph_size = vec2<f32>(f32(width), f32(height));
+    // entry_dim == 0 ⇒ 图集条目与 quad 同尺寸（精确 SDF / 覆盖度路径，行为不变）
+    let ed = vec2<u32>(in_vert.entry_dim >> 16u, in_vert.entry_dim & 0xffffu);
+    vert_output.entry_texels = select(
+        vec2<f32>(f32(width), f32(height)),
+        vec2<f32>(f32(ed.x), f32(ed.y)),
+        in_vert.entry_dim != 0u,
+    );
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
     let base_uv0 = in_vert.base_uv_rect.xy;
@@ -182,15 +201,43 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
     return (q * 2.0 - 1.0) * band;
 }
 
+/// 三通道中位数（MSDF 的核心：两通道正确、一通道被最近的「别的边」占据，中位数即真值）。
+fn median3(v: vec3<f32>) -> f32 {
+    return max(min(v.x, v.y), min(max(v.x, v.y), v.z));
+}
+
+/// 采样一个有符号距离（单位统一为**目标设备像素**）。
+///
+/// - `content_type == 2`：单通道精确 SDF，`d_range` 是带宽；
+/// - `content_type == 3`：MSDF，`d_range` 是生成 em 下的 range，乘 `msdf_scale` 换算到目标像素。
+fn sample_d(
+    uv: vec2<f32>,
+    content_type: u32,
+    d_range: f32,
+    msdf_scale: f32,
+) -> f32 {
+    if (content_type == 3u) {
+        let rgb = textureSampleLevel(msdf_atlas_texture, atlas_sampler, uv, 0.0).rgb;
+        let d_gen = (median3(rgb) * 2.0 - 1.0) * d_range;
+        return d_gen * msdf_scale;
+    }
+    return decode_sdf(
+        textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x,
+        d_range,
+    );
+}
+
 /// 一条样式的某一层：取区间 → 偏移采样 → 合成。
 ///
-/// - `selected`：本趟只画这一层（层号），`want_above` 表示这一趟画"填充之上"的层；
+/// - `want_above`：这一趟画"填充之上"的层；层自己的 `above` 标志不匹配就跳过；
 /// - `flags` bit0 = 有 cutoff（区间 `(cutoff, threshold]`），bit1 = 画在填充之上，
 ///   bit2 = **内阴影**（`字形内部 − 偏移后的覆盖率`，需要两个采样点）；
 /// - 采样 UV **夹紧到本字形的图集矩形内**，否则带偏移的层会读到隔壁字形的数据（边缘细框）。
 fn apply_layer(
     base: u32,
-    band: f32,
+    content_type: u32,
+    d_range: f32,
+    msdf_scale: f32,
     at: vec2<f32>,
     glyph01: vec2<f32>,
     page: vec2<f32>,
@@ -211,14 +258,11 @@ fn apply_layer(
     let thr = bitcast<f32>(geom.w);
     let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
     let uv = clamp(at + off / dims, entry_min, entry_max);
-    let d = decode_sdf(textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x, band);
+    let d = sample_d(uv, content_type, d_range, msdf_scale);
     var cov = coverage(d, thr, soft);
     if ((flags & 4u) != 0u) {
         // 内阴影：字形内部（未偏移）减去偏移后的覆盖率 —— 两个采样点，不是同一采样点的两个阈值
-        let d0 = decode_sdf(
-            textureSampleLevel(mask_atlas_texture, atlas_sampler, at, 0.0).x,
-            band,
-        );
+        let d0 = sample_d(at, content_type, d_range, msdf_scale);
         cov = clamp(coverage(d0, 0.0, 0.0) - cov, 0.0, 1.0);
     }
     if ((flags & 1u) != 0u) {
@@ -323,24 +367,42 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
         case 1u: {
             return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);
         }
-        case 2u: {
-            // 距离场字形：每一层一趟 + 填充一趟（跨字形按层排序）。
+        case 2u, 3u: {
+            // 距离场字形（2 = 精确按尺寸 SDF，3 = MSDF）：每一层一趟 + 填充一趟（跨字形按层排序）。
             // 合成全程在**预乘**空间，出口再反预乘（blend state 是 ALPHA_BLENDING）。
             let pass_id = in_frag.style_index >> 24u;
             let style_id = in_frag.style_index & 0xffffffu;
+            // MSDF：quad 与图集条目不是 1:1，距离要按「目标/生成」比例换算
+            let msdf_scale = select(
+                1.0,
+                in_frag.glyph_size.x / max(in_frag.entry_texels.x, 1.0),
+                in_frag.content_type == 3u,
+            );
+            let at = in_frag.uv;
+            let entry_dims = select(
+                vec2<f32>(textureDimensions(mask_atlas_texture)),
+                vec2<f32>(textureDimensions(msdf_atlas_texture)),
+                in_frag.content_type == 3u,
+            );
+            let entry0 = at - in_frag.local01 * in_frag.entry_texels / entry_dims;
+            let entry_min = entry0 + 0.5 / entry_dims;
+            let entry_max = entry0 + (in_frag.entry_texels - 0.5) / entry_dims;
+
+            // 无样式（`style_id == 0`）：纯顶点色覆盖 —— 无样式文字也可以走 MSDF。
             if (style_id == 0u) {
+                let d = sample_d(at, in_frag.content_type, in_frag.sdf_band, msdf_scale);
+                let cov = coverage(d, 0.0, 0.0);
+                if (in_frag.content_type == 3u) {
+                    return vec4<f32>(in_frag.color.rgb, in_frag.color.a * cov);
+                }
                 return vec4<f32>(0.0);
             }
+
             let sbase = (style_id - 1u) * 3u;
             let style_meta = text_styles[sbase];
             // `style_meta.x` 是**层下标**，而 `text_layers` 按 vec4 寻址（每层 4 个 vec4）
             let layer_base = style_meta.x * 4u;
             let layer_count = min(style_meta.y, 8u);
-            let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
-            // 本字形在图集里的矩形（采样夹紧用）
-            let entry0 = in_frag.uv - in_frag.local01 * in_frag.glyph_size / dims;
-            let entry_min = entry0 + 0.5 / dims;
-            let entry_max = entry0 + (in_frag.glyph_size - 0.5) / dims;
 
             var out = vec4<f32>(0.0);
             if (pass_id == 9u) {
@@ -348,10 +410,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 var filled = vec4<f32>(0.0);
                 let fill_kind = style_meta.z;
                 if (fill_kind != 4u) {
-                    let d0 = decode_sdf(
-                        textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x,
-                        in_frag.sdf_band,
-                    );
+                    let d0 = sample_d(at, in_frag.content_type, in_frag.sdf_band, msdf_scale);
                     let cov = coverage(d0, 0.0, 0.0);
                     if (fill_kind == 0u) {
                         let a = in_frag.color.a * cov;
@@ -376,8 +435,10 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 if (selected < layer_count) {
                     out = apply_layer(
                         layer_base + selected * 4u,
+                        in_frag.content_type,
                         in_frag.sdf_band,
-                        in_frag.uv,
+                        msdf_scale,
+                        at,
                         in_frag.local01,
                         frag_pos.xy,
                         want_above,

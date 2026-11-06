@@ -280,6 +280,8 @@ impl TextRenderer {
                         text_area.style_layers,
                         text_area.style_above_mask,
                         text_area.sdf_band,
+                        text_area.style_reach,
+                        text_area.sdf_mode,
                         text_area.vector_stroke,
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
@@ -341,6 +343,9 @@ impl TextRenderer {
                 0,
                 0,
                 area.sdf_band,
+                // resolved 路径拿不到样式的外扩量：强制精确 SDF（行为与旧版一致）
+                0.0,
+                crate::text::TextSdfMode::Exact,
                 // resolved 路径不支持几何描边（没有 custom-glyph 光栅化器）
                 None,
                 zero_depth,
@@ -547,6 +552,12 @@ pub(crate) enum GlyphonCacheKey {
         cap: u8,
         miter_q: u16,
     },
+    /// **MSDF**：一个字形一份数据（`base` 的 `font_size_bits` 固定为生成 em、
+    /// 亚像素 bin 归零），`range_q` 是 range（em 比例 ×1000）的量化值。
+    Msdf {
+        base: cosmic_text::CacheKey,
+        range_q: u16,
+    },
 }
 
 fn next_copy_buffer_size(size: u64) -> u64 {
@@ -606,6 +617,8 @@ struct GlyphMetadata {
     style_index: u32,
     /// 该字形的距离场带宽（设备像素）；`style_index == 0` 时不用。
     sdf_band: f32,
+    /// MSDF 的「目标像素 / 生成像素」比值；精确 SDF 恒为 1.0。
+    quad_scale: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -742,17 +755,30 @@ where
             })
     };
 
-    let mut x = metadata.x + details.left as i32;
-    let mut y =
-        (metadata.line_y * metadata.scale_factor).round() as i32 + metadata.y - details.top as i32;
+    let mut x = metadata.x + (details.left as f32 * metadata.quad_scale).round() as i32;
+    let mut y = (metadata.line_y * metadata.scale_factor).round() as i32 + metadata.y
+        - (details.top as f32 * metadata.quad_scale).round() as i32;
 
     let (mut atlas_x, mut atlas_y, content_type) = match details.gpu_cache {
         GpuCacheStatus::InAtlas { x, y, content_type } => (x, y, content_type),
         GpuCacheStatus::SkipRasterization => return Ok(None),
     };
 
-    let mut width = details.width as i32;
-    let mut height = details.height as i32;
+    let mut width = (details.width as f32 * metadata.quad_scale)
+        .round()
+        .max(1.0) as i32;
+    let mut height = (details.height as f32 * metadata.quad_scale)
+        .round()
+        .max(1.0) as i32;
+    // 图集里的 texel 尺寸（MSDF 的生成尺寸）；两种表示共用同一套裁剪逻辑，
+    // 只是 MSDF 的 quad 与 texel 不是 1:1，裁剪位移要按 quad_scale 折算回 texel。
+    let entry_w = details.width;
+    let entry_h = details.height;
+    let inv_scale = if metadata.quad_scale > 0.0 {
+        1.0 / metadata.quad_scale
+    } else {
+        1.0
+    };
 
     // Starts beyond right edge or ends beyond left edge
     let max_x = x + width;
@@ -772,7 +798,7 @@ where
 
         x = bounds.x.min;
         width = max_x - bounds.x.min;
-        atlas_x += right_shift as u16;
+        atlas_x += (right_shift as f32 * inv_scale) as u16;
     }
 
     // Clip right edge
@@ -786,7 +812,7 @@ where
 
         y = bounds.y.min;
         height = max_y - bounds.y.min;
-        atlas_y += bottom_shift as u16;
+        atlas_y += (bottom_shift as f32 * inv_scale) as u16;
     }
 
     // Clip bottom edge
@@ -813,6 +839,7 @@ where
         base_uv_rect: metadata.base_uv_rect,
         style_index: metadata.style_index,
         sdf_band: metadata.sdf_band,
+        entry_dim: ((entry_w as u32) << 16) | entry_h as u32,
     }))
 }
 
@@ -993,6 +1020,37 @@ pub(crate) fn rasterize_glyph(
                 data: stroke.data,
             })
         }
+        GlyphonCacheKey::Msdf { base, range_q } => {
+            // 生成 em 已经编码在 `base.font_size_bits` 里；range = range_em × 生成 em
+            let em_gen = f32::from_bits(base.font_size_bits);
+            let range_em = range_q as f32 / 1000.0;
+            let range_px = (range_em * em_gen).max(1.0);
+            let placement_image = cache.get_image_uncached(font_system, base)?;
+            let swash_w = placement_image.placement.width;
+            let swash_h = placement_image.placement.height;
+            if swash_w == 0 || swash_h == 0 {
+                return None;
+            }
+            let glyph = crate::glyphon::msdf::generate(
+                font_system,
+                base,
+                (
+                    placement_image.placement.left as i16,
+                    placement_image.placement.top as i16,
+                    swash_w as u16,
+                    swash_h as u16,
+                ),
+                range_px,
+            )?;
+            Some(RasterizedGlyph {
+                content_type: ContentType::Msdf,
+                top: glyph.top,
+                left: glyph.left,
+                width: glyph.width,
+                height: glyph.height,
+                data: glyph.data,
+            })
+        }
         GlyphonCacheKey::CustomSdf { key, band_q } => {
             // 彩色字形：先光栅化一遍拿到 alpha，再从 alpha 反推距离场。
             let input = RasterizeCustomGlyphRequest {
@@ -1104,6 +1162,8 @@ fn append_text_glyph<R>(
     style_layers: u32,
     style_above_mask: u32,
     sdf_band: f32,
+    style_reach: f32,
+    sdf_mode: crate::text::TextSdfMode,
     vector_stroke: Option<crate::text::TextStrokePx>,
     mut metadata_to_depth: impl FnMut(usize) -> f32,
     rasterize_custom_glyph: R,
@@ -1147,6 +1207,7 @@ where
                 base_uv_rect,
                 style_index: 0,
                 sdf_band: 0.0,
+                quad_scale: 1.0,
             },
             bounds,
             |system, rasterize_custom_glyph| {
@@ -1184,6 +1245,7 @@ where
                 base_uv_rect,
                 style_index: 0,
                 sdf_band: 0.0,
+                quad_scale: 1.0,
             },
             bounds,
             |system, rasterize_custom_glyph| {
@@ -1207,9 +1269,35 @@ where
     // 有样式：同一份距离场，**每层一个 quad**。
     // 为什么要按层拆：所有字形先铺完第 k 层、再铺第 k+1 层，字符串里的描边/发光才是
     // 「并集」；否则后一个字的同层（甚至更内层）会盖住前一个字的描边。填充单独一趟。
-    let key = GlyphonCacheKey::Styled {
-        base: physical_glyph.cache_key,
-        band_q: quantize_band(sdf_band),
+    //
+    // 表示方式（精确 SDF / MSDF）由 `sdf_mode + style_reach + 字号` 决定：
+    // - MSDF：一个字形一份数据，改字号/改宽度（同档）都不重栅格化；
+    // - 精确 SDF：小字号 / 大外扩 / 像素字体，按尺寸生成，质量优先。
+    let em_px = glyph.font_size * scale;
+    let msdf = crate::text::pick_msdf(sdf_mode, em_px, style_reach);
+    let (key, sdf_band, quad_scale) = match msdf {
+        Some((em_gen, range_em)) => {
+            let mut base = physical_glyph.cache_key;
+            base.font_size_bits = em_gen.to_bits();
+            base.x_bin = SubpixelBin::Zero;
+            base.y_bin = SubpixelBin::Zero;
+            (
+                GlyphonCacheKey::Msdf {
+                    base,
+                    range_q: (range_em * 1000.0).round() as u16,
+                },
+                range_em * em_gen,
+                em_px / em_gen,
+            )
+        }
+        None => (
+            GlyphonCacheKey::Styled {
+                base: physical_glyph.cache_key,
+                band_q: quantize_band(sdf_band),
+            },
+            sdf_band,
+            1.0,
+        ),
     };
     let mut emit = |pass: u32, sink: PassSink| -> Result<(), PrepareError> {
         let quad = prepare_glyph(
@@ -1227,6 +1315,7 @@ where
                 base_uv_rect,
                 style_index: style_index | (pass << crate::text::PASS_SHIFT),
                 sdf_band,
+                quad_scale,
             },
             bounds,
             |system, rasterize_custom_glyph| {
@@ -1354,6 +1443,7 @@ where
                     base_uv_rect,
                     style_index: style_layers_only,
                     sdf_band,
+                    quad_scale: 1.0,
                 },
                 bounds,
                 |system, rasterize_custom_glyph| {
@@ -1394,6 +1484,7 @@ where
             // 彩色字形自己保留颜色：样式只由上面那个 layers-only quad 负责
             style_index: 0,
             sdf_band: 0.0,
+            quad_scale: 1.0,
         },
         bounds,
         move |system, rasterize_custom_glyph| -> Option<RasterizedGlyph> {

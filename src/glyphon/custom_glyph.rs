@@ -113,13 +113,18 @@ pub enum ContentType {
     ///
     /// 与 `Mask` 共用同一张 R8 图集 —— 靠 `content_type` 区分解释方式。
     Sdf,
+    /// **多通道**有符号距离场（RGB 各存一组边的距离，alpha 保留）：
+    /// 一个字形一份数据服务任意字号，片元取三通道中位数。
+    ///
+    /// 存在独立的 `Rgba8Unorm` 图集里（见 `TextAtlas::msdf_atlas`）。
+    Msdf,
 }
 
 impl ContentType {
     /// The number of bytes per pixel for this content type
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
-            Self::Color => 4,
+            Self::Color | Self::Msdf => 4,
             Self::Mask | Self::Sdf => 1,
         }
     }

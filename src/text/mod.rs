@@ -35,10 +35,10 @@ pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
-pub(crate) use style::{PASS_FILL, PASS_SHIFT, TextStrokePx, pass_above, pass_below};
+pub(crate) use style::{PASS_FILL, PASS_SHIFT, TextStrokePx, pass_above, pass_below, pick_msdf};
 pub use style::{
-    TextBlend, TextCap, TextGradient, TextJoin, TextLayer, TextPaint, TextStroke, TextStyle,
-    TextStyleRef,
+    TextBlend, TextCap, TextGradient, TextJoin, TextLayer, TextPaint, TextSdfMode, TextStroke,
+    TextStyle, TextStyleRef,
 };
 
 /// 文本水平对齐
@@ -163,6 +163,8 @@ pub struct TextDef {
     /// 文本样式（描边 / 投影 / 发光 / 内阴影 / 渐变字…）。
     /// `None`（默认）= 完全走旧路径：覆盖度图集、零额外开销。
     pub style: Option<std::sync::Arc<TextStyle>>,
+    /// 距离场表示方式：`Auto`（默认）/ `Msdf` / `Exact`，见 [`TextSdfMode`]。
+    pub sdf_mode: TextSdfMode,
 }
 
 impl Default for TextDef {
@@ -173,6 +175,7 @@ impl Default for TextDef {
             align: TextAlign::Left,
             attrs: None,
             style: None,
+            sdf_mode: TextSdfMode::Auto,
         }
     }
 }
