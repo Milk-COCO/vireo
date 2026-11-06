@@ -113,32 +113,50 @@ pub enum TextBlend {
     Add,
 }
 
-/// 一层：对距离场取阈 + 偏移 + 填充。
+/// 一层：对距离场取**区间** `(cutoff, threshold]` + 偏移 + 填充。
+///
+/// `cutoff == None` 时退化成半空间 `d > threshold`（外描边/投影/发光）；
+/// 给了 `cutoff` 就是一条**带**（内描边 = `(−w, 0]`）。
 #[derive(Clone, Debug)]
 pub struct TextLayer {
-    /// 阈值位置：`> 0` 字形外侧（外描边 / 投影），`< 0` 内侧（内描边），`0` = 轮廓。
+    /// 阈值下界：`> 0` 字形外侧（外描边 / 投影），`< 0` 内侧（内描边），`0` = 轮廓。
     pub threshold: Pp,
+    /// 上界：给 `Some` 就只画 `cutoff < d < threshold` 的**带**（内描边/内阴影必须用它，
+    /// 否则半空间会涂满整个字内、再被填充盖住）。
+    pub cutoff: Option<Pp>,
     /// 软边（≈ 模糊半径）：距离场下边缘按误差函数过渡，0 = 硬边（1px 解析 AA）。
     pub softness: Pp,
     /// 偏移。
     pub offset: (Pp, Pp),
     pub paint: TextPaint,
     pub blend: TextBlend,
+    /// 画在**填充之上**（内描边/内阴影必须为 `true`，否则会被填充盖住）。
+    pub above_fill: bool,
 }
 
 impl TextLayer {
-    /// 硬边一层（无偏移、无软边）。
+    /// 硬边一层（无偏移、无软边、半空间、画在填充之下）。
     pub fn hard(threshold: impl Into<Pp>, paint: TextPaint) -> Self {
         Self {
             threshold: threshold.into(),
+            cutoff: None,
             softness: Pp::Dp(crate::dpi::Dp(0.0)),
             offset: (Pp::Dp(crate::dpi::Dp(0.0)), Pp::Dp(crate::dpi::Dp(0.0))),
             paint,
             blend: TextBlend::Over,
+            above_fill: false,
         }
     }
 
-    /// 软边一层。
+    /// 硬边**带**：只画 `cutoff < d < threshold`（内描边 / 内阴影用）。
+    pub fn band(cutoff: impl Into<Pp>, threshold: impl Into<Pp>, paint: TextPaint) -> Self {
+        let mut layer = Self::hard(threshold, paint);
+        layer.cutoff = Some(cutoff.into());
+        layer.above_fill = true;
+        layer
+    }
+
+    /// 软边一层（半空间）。
     pub fn soft(threshold: impl Into<Pp>, softness: impl Into<Pp>, paint: TextPaint) -> Self {
         let mut layer = Self::hard(threshold, paint);
         layer.softness = softness.into();
@@ -155,16 +173,26 @@ impl TextLayer {
         self
     }
 
-    /// 折算成设备像素：(阈值, 软边, 偏移 x, 偏移 y)，以及"该层向字形外侧的最大外扩"。
+    /// 画在填充之上 / 之下。
+    pub fn above_fill(mut self, above: bool) -> Self {
+        self.above_fill = above;
+        self
+    }
+
+    /// 折算成设备像素：(阈值, cutoff, 软边, 偏移 x/y, 该层向字形外侧的最大外扩)。
     pub(crate) fn to_px(&self, dpi: f64) -> TextLayerPx {
         let threshold = self.threshold.to_px(dpi).0 as f32;
+        let cutoff = self.cutoff.map(|c| c.to_px(dpi).0 as f32);
         let softness = self.softness.to_px(dpi).0.max(0.0) as f32;
         let ox = self.offset.0.to_px(dpi).0 as f32;
         let oy = self.offset.1.to_px(dpi).0 as f32;
         // 3σ 之外的 erf 尾部不足 1/255，按 3σ 计外扩（外加 1px 兜底）。
-        let reach = threshold + softness * 3.0 + 1.0 + ox.abs().max(oy.abs());
+        // 带（cutoff 在上方）也一样：带的外缘是 max(threshold, cutoff)。
+        let outer = threshold.max(cutoff.unwrap_or(f32::NEG_INFINITY));
+        let reach = outer + softness * 3.0 + 1.0 + ox.abs().max(oy.abs());
         TextLayerPx {
             threshold,
+            cutoff,
             softness,
             offset: (ox, oy),
             reach: reach.max(threshold.abs() + 1.0),
@@ -176,6 +204,7 @@ impl TextLayer {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextLayerPx {
     pub threshold: f32,
+    pub cutoff: Option<f32>,
     pub softness: f32,
     pub offset: (f32, f32),
     /// 该层向外的最大外扩（决定图集 padding 与 band）。
@@ -292,11 +321,32 @@ impl TextStyle {
         Self::empty_with(vec![TextLayer::hard(width, TextPaint::solid(color))], None)
     }
 
-    /// 内描边（向内）。
+    /// 内描边（字形内侧的一条**带** `(−w, 0]`，画在填充之上）。
     pub fn inner_outline(width: impl Into<Pp>, color: Color) -> Self {
         let w = width.into();
-        let mut layer = TextLayer::hard(w, TextPaint::solid(color));
-        layer.threshold = negate_pp(w);
+        Self::empty_with(
+            vec![TextLayer::band(
+                negate_pp(w),
+                Pp::Dp(crate::dpi::Dp(0.0)),
+                TextPaint::solid(color),
+            )],
+            None,
+        )
+    }
+
+    /// 内阴影：字形内的 `(−w, 0]` 带，偏移 + 软边（画在填充之上）。
+    pub fn inner_shadow(
+        offset: (impl Into<Pp>, impl Into<Pp>),
+        blur: impl Into<Pp>,
+        color: Color,
+    ) -> Self {
+        let mut layer = TextLayer::band(
+            crate::dpi::Dp(-1024.0),
+            Pp::Dp(crate::dpi::Dp(0.0)),
+            TextPaint::solid(color),
+        );
+        layer.softness = blur.into();
+        layer.offset = (offset.0.into(), offset.1.into());
         Self::empty_with(vec![layer], None)
     }
 
@@ -420,6 +470,17 @@ pub(crate) const PAINT_TEXTURE: u32 = 3;
 /// 只画图层、不画 fill（彩色字形垫底用；填充由彩色字形自己负责）。
 pub(crate) const PAINT_NONE: u32 = 4;
 
+/// 层标志位（编码进 `paint.w`）：有 cutoff ⇒ 区间；否则半空间。
+pub(crate) const LAYER_FLAG_CUTOFF: u32 = 1;
+/// 画在填充之上（内描边/内阴影）。
+pub(crate) const LAYER_FLAG_ABOVE: u32 = 2;
+
+/// 样式表的 pass 选择（编码进顶点的 `style_index` 高 8 位）。
+pub(crate) const PASS_BELOW: u32 = 1;
+pub(crate) const PASS_FILL: u32 = 2;
+pub(crate) const PASS_ABOVE: u32 = 3;
+pub(crate) const PASS_SHIFT: u32 = 24;
+
 /// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..3)`。
 #[derive(Default)]
 pub(crate) struct StyleTable {
@@ -486,6 +547,19 @@ impl StyleTable {
                 TextBlend::Over => 0,
                 TextBlend::Add => 1,
             };
+            // rec[6] = cutoff（有 cutoff 时有效），rec[7] = 标志位
+            if let Some(cutoff) = px.cutoff {
+                rec[6] = cutoff.to_bits();
+            }
+            rec[7] = (if px.cutoff.is_some() {
+                LAYER_FLAG_CUTOFF
+            } else {
+                0
+            }) | (if layer.above_fill {
+                LAYER_FLAG_ABOVE
+            } else {
+                0
+            });
             rec[8..12].copy_from_slice(&color);
             rec[12..16].copy_from_slice(&aux);
             layers.extend_from_slice(&rec);

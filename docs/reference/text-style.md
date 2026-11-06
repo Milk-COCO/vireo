@@ -45,12 +45,9 @@ let glow = TextStyle::glow(6.0, Color::new(0.35, 0.75, 1.0, 0.55));
 // 内描边 + 自定义填充色
 let inner = TextStyle::inner_outline(2.0, ORANGE).with_fill(TextPaint::solid(Color::new(0.08,0.09,0.12,1.0)));
 
-// 内阴影：内描边那一层 + 反向偏移 + 软边（层字段全 pub，可以自己改）
-let mut inner_shadow = TextStyle::inner_outline(3.0, BLACK);
-if let Some(l) = inner_shadow.layers.first_mut() {
-    l.offset = (3.0.into(), 3.0.into());
-    l.softness = 2.5.into();
-}
+// 内阴影：字形内的 `(−∞, 0]` 带 + 偏移 + 软边（自动画在填充之上）
+let inner_shadow = TextStyle::inner_shadow((4.0, 4.0), 3.0, BLACK)
+    .with_fill(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
 inner_shadow.fill = Some(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
 
 // 渐变字：`in_rect` 决定渐变跨满哪个页面矩形（不传 = 逐字形）
@@ -69,7 +66,9 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 | 字段 | 含义 |
 |---|---|
-| `threshold` | 阈值位置：`> 0` 字形外侧（外描边/投影）、`< 0` 内侧（内描边）、`0` = 轮廓 |
+| `threshold` | 阈值下界：`> 0` 字形外侧（外描边/投影）、`< 0` 内侧（内描边）、`0` = 轮廓 |
+| `cutoff` | 上界。给 `Some` 就只画 `cutoff < d < threshold` 的**带**（内描边/内阴影必须用它） |
+| `above_fill` | 画在填充**之上**（内描边/内阴影必须为 `true`，否则会被填充盖住） |
 | `softness` | 软边 ≈ 模糊半径；`0` = 硬边（1px 解析 AA） |
 | `offset` | 采样偏移（设备像素意图）—— 投影/内阴影靠它 |
 | `paint` | `Solid(Color)` / `Gradient(TextGradient)` / `Texture { uv, rect }`；渐变与纹理都靠 `rect` 决定跨满哪个页面矩形，不传则逐字形 |
@@ -85,7 +84,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 软投影 | `threshold = 0, offset, softness = blur` |
 | 发光 | `offset = 0, softness = blur` |
 | 多层描边 | 多个 `threshold = +w1, +w2…`（宽的先画） |
-| 内阴影 | `threshold = -w, offset = +d, softness = blur` |
+| 内阴影 | `TextStyle::inner_shadow(offset, blur, c)`：字形内 `(−∞, 0]` 带 + 偏移 + 软边，画在填充之上 |
 | **几何描边（真 miter）** | `TextStyle::vector_outline(TextStroke::new(w, c).join(TextJoin::Miter))` |
 
 > **没有「浮雕」预设**：把整个字形往左上/右下各挪一次只能得到「错位双影」——
@@ -103,13 +102,30 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 
 几何描边画在所有图层与 fill **之下**，所以两者可以混用（例如几何描边 + 距离场投影）。
 
-## 4. 为什么软边一次采样就够
+## 4. 合成顺序（三趟）
+
+样式字形**不是一个 quad**，而是按趟拆开、**跨字形**排序：
+
+```
+① 填充之下的层（外描边/投影/发光） + 几何描边   ← 所有字形
+② 填充                                          ← 所有字形
+③ 填充之上的层（内描边/内阴影）                  ← 所有字形
+```
+
+为什么要三趟而不是逐字形一次画完：描边/投影会**伸出字形轮廓**，逐字形合成时后一个字的
+描边会盖住前一个字的字形本体（紧排文字尤其明显）。拆趟 + 跨字形排序才能保证
+「描边永远在字下面、内阴影永远在字上面」。
+
+代价：带样式的文字每个字形 2–3 个 quad（顶点 ×2–3、overdraw 相应增加），
+且三趟共用同一份距离场（不会重复栅格化）。
+
+## 5. 为什么软边一次采样就够
 
 
 距离场下，"高斯模糊过的边缘"**精确**是误差函数：`cov = Φ(-d/σ)`。所以软投影/发光
 **不需要多 tap** —— 只有"模糊半径 ≫ 字形特征尺寸"时才有可见偏差。
 
-## 5. 边界与降级
+## 6. 边界与降级
 
 | 输入 | 行为 |
 |---|---|
@@ -124,7 +140,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | MRT / stencil / Area 裁切 | 不受影响（与普通文本同一条路径） |
 | 空格 / 零轮廓字形 | 不生成距离场、不占图集 |
 
-## 6. 性能与内存
+## 7. 性能与内存
 
 - **只有带样式的字形**生成距离场；无样式文本一个字节都不多。
 - **带宽分档**：距离场只存 `±band` 内的距离，`band` 取值 `4 / 8 / 16 / 32`（按样式外扩向上取档）。
@@ -145,7 +161,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 - 生成成本：从轮廓算精确距离（线/二次/三次贝塞尔 Newton + 按段 bbox 剪枝），
   首次绘制该字形时一次性支付。
 
-## 7. 实测（`tests/gpu_bench.rs`）
+## 8. 实测（`tests/gpu_bench.rs`）
 
 | 用例 | 结果 |
 |---|---|
@@ -157,17 +173,20 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 | 彩色字形（emoji）描边 | 无样式 3253 px → 4px 描边 4595 px，其中 2145 px 为描边色 |
 | 图集不变量 | 样式绘制前后彩色图集不变（R8 256²=65536B，彩色 256²=262144B） |
 | 几何描边 | 10px 描边让纵向跨度恰好 +10px；覆盖 675 → 1771 px（round）/ 1753 px（miter） |
+| 内描边（环） | 红环 2816 px + 环内白 1613 px；轮廓面积 5926 vs 无样式 6139（内描边不外扩） |
+| 内阴影 | 轮廓面积不变（5926 → 6142），内部暗部 3872 px（不漏到字形外） |
+| 相邻字形互不覆盖 | 单个 "H" 白色 1200 px，紧排 "HH" 2400 px（比值 **2.00**） |
 | 距离场生成耗时 | release 0.25 / 0.37 / 1.81 ms per 字形（band 4 / 8 / 16，44px 汉字）；debug 约 5–7× |
 | zeno stroker 连接 | 单测确认 `Miter` 确实比 `Round` 在尖角处更高 |
 | MRT 中的文本 | 目标 0 正常写入、其它目标保留 |
 
 复跑：`cargo test --release --test gpu_bench text_style -- --ignored --test-threads=1 --nocapture`
 
-## 8. 可跑示例
+## 9. 可跑示例
 
 `cargo run --example text_style` —— 十个示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 内阴影 /
 渐变字 / emoji / 几何描边 / 全部），`1..9` + `0` 切组、`←→` 改描边宽度。
 
-## 9. 尚未支持（后续版本）
+## 10. 尚未支持（后续版本）
 
 - MSDF（跨尺度不重栅格）—— 当前按设备像素尺寸生成，缩放会重新生成（与无样式文本一致）。

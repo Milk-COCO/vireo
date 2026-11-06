@@ -165,7 +165,7 @@ async fn main(app: App) {
             row(
                 &mut b,
                 next(84.0),
-                "内描边（阈值取负，只在字形内侧）",
+                "内描边（字形内的环 (−w, 0]，画在填充之上）",
                 "Inner 内描边",
                 Some(
                     TextStyle::inner_outline(width + 1.0, warm)
@@ -175,19 +175,14 @@ async fn main(app: App) {
             );
         }
         if show_all || group == 6 {
-            // 内阴影：内描边（阈值取负）+ 反向偏移 + 软边 ⇒ 暗部贴着左上内缘。
-            // 这组顺便演示"拿到层之后自己改字段"（layer 全是 pub）。
+            // 内阴影：字形内的 `(−∞, 0]` 带 + 偏移 + 软边，画在填充之上（否则会被填充盖住）。
             let y_row = next(84.0);
-            let mut inner_shadow = TextStyle::inner_outline(width + 2.0, ink);
-            if let Some(layer) = inner_shadow.layers.first_mut() {
-                layer.offset = (3.0.into(), 3.0.into());
-                layer.softness = 2.5.into();
-            }
-            inner_shadow.fill = Some(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
+            let inner_shadow = TextStyle::inner_shadow((4.0, 4.0), width.max(1.5), ink)
+                .with_fill(TextPaint::solid(Color::new(0.55, 0.68, 0.95, 1.0)));
             row(
                 &mut b,
                 y_row,
-                "内阴影（内描边 + 反向偏移 + 软边）",
+                "内阴影（字形内暗部，不越界）",
                 "Inner shadow 内阴影",
                 Some(inner_shadow),
                 width,

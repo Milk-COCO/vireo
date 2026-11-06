@@ -30,8 +30,15 @@ pub(super) struct AreaMeta {
     pub(super) style_layers_only: u32,
     /// 距离场带宽（设备像素）。
     pub(super) sdf_band: f32,
+    /// 该样式「画在填充之上」的层数（> 0 才需要 above 那一趟）。
+    pub(super) style_above: u32,
     /// 几何描边（真 miter/bevel）；画在填充之下。
     pub(super) vector_stroke: Option<crate::text::TextStrokePx>,
+}
+
+/// 该样式里「画在填充之上」的层数。
+fn above_layers(style: &std::sync::Arc<crate::text::TextStyle>) -> u32 {
+    style.layers.iter().filter(|l| l.above_fill).count().min(8) as u32
 }
 
 /// 几何描边：折算成设备像素（`None` = 该样式没有几何描边）。
@@ -293,9 +300,11 @@ impl TextEntryList {
                 _ => (0, 0, 0.0),
             };
             let row_vector_stroke = entry.style().and_then(|s| stroke_px(s, scale as f64));
+            let row_style_above = entry.style().map(above_layers).unwrap_or(0);
             let mut style_index = row_style_index;
             let mut style_layers_only = row_style_layers_only;
             let mut sdf_band = row_sdf_band;
+            let mut style_above = row_style_above;
             let mut vector_stroke = row_vector_stroke;
 
             match entry {
@@ -319,6 +328,7 @@ impl TextEntryList {
                                 style_index,
                                 style_layers_only,
                                 sdf_band,
+                                style_above,
                                 vector_stroke,
                             });
                         }
@@ -334,6 +344,7 @@ impl TextEntryList {
                         style_index = row_style_index;
                         style_layers_only = row_style_layers_only;
                         sdf_band = row_sdf_band;
+                        style_above = row_style_above;
                         vector_stroke = row_vector_stroke;
                         match part {
                             TextPart::Normal(s, _) => {
@@ -356,6 +367,7 @@ impl TextEntryList {
                                 sdf_band = band;
                                 vector_stroke =
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
+                                style_above = pdef.style.as_ref().map(above_layers).unwrap_or(0);
                                 let slot = text_ctx.get_or_shape_text(s, pdef);
                                 let w = text_ctx.slot_line_width(slot);
                                 metas.push(AreaMeta {
@@ -372,6 +384,7 @@ impl TextEntryList {
                                     style_index,
                                     style_layers_only,
                                     sdf_band,
+                                    style_above,
                                     vector_stroke,
                                 });
                                 cursor_x += w;
@@ -396,6 +409,7 @@ impl TextEntryList {
                                 sdf_band = band;
                                 vector_stroke =
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
+                                style_above = pdef.style.as_ref().map(above_layers).unwrap_or(0);
                                 let opts = TextDef {
                                     max_width: None,
                                     align: TextAlign::Left,
@@ -421,6 +435,7 @@ impl TextEntryList {
                                                 style_index,
                                                 style_layers_only,
                                                 sdf_band,
+                                                style_above,
                                                 vector_stroke,
                                             },
                                             w,
@@ -459,6 +474,7 @@ impl TextEntryList {
                                                 style_index,
                                                 style_layers_only,
                                                 sdf_band,
+                                                style_above,
                                                 vector_stroke,
                                             },
                                             lw,
@@ -484,6 +500,7 @@ impl TextEntryList {
                                         style_index,
                                         style_layers_only,
                                         sdf_band,
+                                        style_above,
                                         vector_stroke,
                                     });
                                 }
@@ -506,6 +523,7 @@ impl TextEntryList {
                                 sdf_band = band;
                                 vector_stroke =
                                     pdef.style.as_ref().and_then(|s| stroke_px(s, scale as f64));
+                                style_above = pdef.style.as_ref().map(above_layers).unwrap_or(0);
                                 for ch in s.chars() {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
                                     for glyph in cluster.glyphs.iter() {
@@ -523,6 +541,7 @@ impl TextEntryList {
                                             style_index,
                                             style_layers_only,
                                             sdf_band,
+                                            style_above,
                                             vector_stroke,
                                         });
                                     }
@@ -549,6 +568,7 @@ impl TextEntryList {
                         style_index,
                         style_layers_only,
                         sdf_band,
+                        style_above,
                         vector_stroke,
                     });
                 }
@@ -675,6 +695,7 @@ impl TextEntryList {
                                     style_index: meta.style_index,
                                     style_layers_only: meta.style_layers_only,
                                     sdf_band: meta.sdf_band,
+                                    style_above: meta.style_above,
                                     vector_stroke: meta.vector_stroke,
                                 })
                             });

@@ -24,6 +24,8 @@ struct VertexOutput {
     @location(5) sdf_band: f32,
     /// 字形 quad 内的归一化坐标（0..1），逐字形渐变/纹理填充用。
     @location(6) local01: vec2<f32>,
+    /// 该字形在图集里的 texel 尺寸（宽, 高）—— 层带偏移时把采样夹紧在自己的矩形内。
+    @location(7) @interpolate(flat) glyph_size: vec2<f32>,
 }
 
 struct Params {
@@ -148,6 +150,7 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.style_index = in_vert.style_index;
     vert_output.sdf_band = in_vert.sdf_band;
     vert_output.local01 = vec2<f32>(corner_position);
+    vert_output.glyph_size = vec2<f32>(f32(width), f32(height));
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
     let base_uv0 = in_vert.base_uv_rect.xy;
@@ -179,24 +182,42 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
     return (q * 2.0 - 1.0) * band;
 }
 
-/// 一条样式的某一层：取阈 → 偏移采样 → 合成（`band` 是字形距离场的带宽）。
+/// 一条样式的某一层：取区间 → 偏移采样 → 合成。
+///
+/// - `pass`：1 = 填充之下的层、3 = 填充之上的层（层自己带 `above` 标志，不匹配直接跳过）；
+/// - `flags` bit0 = 有 cutoff（区间 `(cutoff, threshold]`），bit1 = 画在填充之上；
+/// - 采样 UV **夹紧到本字形的图集矩形内**，否则带偏移的层会读到隔壁字形的数据（边缘细框）。
 fn apply_layer(
     base: u32,
     band: f32,
     at: vec2<f32>,
     glyph01: vec2<f32>,
     page: vec2<f32>,
+    layer_pass: u32,
+    entry_min: vec2<f32>,
+    entry_max: vec2<f32>,
     out: vec4<f32>,
 ) -> vec4<f32> {
+    let paint = text_layers[base + 1u];
+    let flags = paint.w;
+    let is_above = (flags & 2u) != 0u;
+    if ((layer_pass == 3u) != is_above) {
+        return out;
+    }
     let geom = text_layers[base];
     let off = vec2<f32>(bitcast<f32>(geom.x), bitcast<f32>(geom.y));
     let soft = bitcast<f32>(geom.z);
     let thr = bitcast<f32>(geom.w);
     let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
-    let uv = at + off / dims;
+    let uv = clamp(at + off / dims, entry_min, entry_max);
     let d = decode_sdf(textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x, band);
-    let cov = coverage(d, thr, soft);
-    let paint = text_layers[base + 1u];
+    var cov = coverage(d, thr, soft);
+    if ((flags & 1u) != 0u) {
+        // 区间：再减掉 cutoff 之外的（`paint.z` 存 cutoff 的位模式）
+        let cut = bitcast<f32>(paint.z);
+        cov = cov - coverage(d, cut, soft);
+    }
+    cov = clamp(cov, 0.0, 1.0);
     let col = paint_color(paint.x, text_layers[base + 2u], text_layers[base + 3u], glyph01, page);
     let a = col.a * cov;
     let src = vec4<f32>(col.rgb * cov, a);
@@ -294,42 +315,68 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);
         }
         case 2u: {
-            // 距离场字形：逐层取阈 + 最后 fill。合成全程在**预乘**空间，出口再反预乘
-            // （blend state 是 ALPHA_BLENDING，着色器必须输出直通 alpha）。
-            let sbase = (in_frag.style_index - 1u) * 3u;
+            // 距离场字形：按 pass 分三次绘制（填充之下层 → 填充 → 填充之上层）。
+            // 合成全程在**预乘**空间，出口再反预乘（blend state 是 ALPHA_BLENDING）。
+            let layer_pass = in_frag.style_index >> 24u;
+            let style_id = in_frag.style_index & 0xffffffu;
+            if (style_id == 0u) {
+                return vec4<f32>(0.0);
+            }
+            let sbase = (style_id - 1u) * 3u;
             let style_meta = text_styles[sbase];
             // `style_meta.x` 是**层下标**，而 `text_layers` 按 vec4 寻址（每层 4 个 vec4）
             let layer_base = style_meta.x * 4u;
             let layer_count = min(style_meta.y, 8u);
-            let d0 = decode_sdf(
-                textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x,
-                in_frag.sdf_band,
-            );
+            let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
+            // 本字形在图集里的矩形（采样夹紧用）
+            let entry0 = in_frag.uv - in_frag.local01 * in_frag.glyph_size / dims;
+            let entry_min = entry0 + 0.5 / dims;
+            let entry_max = entry0 + (in_frag.glyph_size - 0.5) / dims;
+
             var out = vec4<f32>(0.0);
-            var i = 0u;
-            loop {
-                if i >= layer_count { break; }
-                out = apply_layer(layer_base + i * 4u, in_frag.sdf_band, in_frag.uv, in_frag.local01, frag_pos.xy, out);
-                i = i + 1u;
+            if (layer_pass == 1u || layer_pass == 3u) {
+                var i = 0u;
+                loop {
+                    if i >= layer_count { break; }
+                    out = apply_layer(
+                        layer_base + i * 4u,
+                        in_frag.sdf_band,
+                        in_frag.uv,
+                        in_frag.local01,
+                        frag_pos.xy,
+                        layer_pass,
+                        entry_min,
+                        entry_max,
+                        out,
+                    );
+                    i = i + 1u;
+                }
+            } else {
+                // fill（style_meta.z: 0 = 用顶点色，1/2/3 = 纯色/渐变/纹理，4 = 不填）
+                let fill_kind = style_meta.z;
+                if (fill_kind != 4u) {
+                    let d0 = decode_sdf(
+                        textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x,
+                        in_frag.sdf_band,
+                    );
+                    let cov = coverage(d0, 0.0, 0.0);
+                    if (fill_kind == 0u) {
+                        let a = in_frag.color.a * cov;
+                        out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
+                    } else {
+                        let painted = paint_color(
+                            fill_kind,
+                            text_styles[sbase + 1u],
+                            text_styles[sbase + 2u],
+                            in_frag.local01,
+                            frag_pos.xy,
+                        );
+                        let a = painted.a * cov;
+                        out = over(out, vec4<f32>(painted.rgb * cov, a));
+                    }
+                }
             }
-            // fill（style_meta.z: 0 = 用顶点色，1/2/3 = 纯色/渐变/纹理，4 = 不填）
-            let fill_kind = style_meta.z;
-            let cov = coverage(d0, 0.0, 0.0);
-            if fill_kind == 0u {
-                let a = in_frag.color.a * cov;
-                out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
-            } else if fill_kind != 4u {
-                let painted = paint_color(
-                    fill_kind,
-                    text_styles[sbase + 1u],
-                    text_styles[sbase + 2u],
-                    in_frag.local01,
-                    frag_pos.xy,
-                );
-                let a = painted.a * cov;
-                out = over(out, vec4<f32>(painted.rgb * cov, a));
-            }
-            if out.a <= 1e-6 {
+            if (out.a <= 1e-6) {
                 return vec4<f32>(0.0);
             }
             return vec4<f32>(out.rgb / out.a, out.a);

@@ -25,13 +25,20 @@
     `with_vector_stroke`。与距离场描边互补 —— 距离场描边天生圆角连接且改宽度免费，
     几何描边用 zeno 的 stroker 生成轮廓再栅格化，尖角精确（SVG 观感），复用覆盖度图集
     （`content_type = Mask`），**不需要新管线也不需要改着色器**；`miter_limit` 超过退化成 bevel。
+  - **图层 = 距离场上的区间**：`TextLayer.cutoff`（上界）+ `TextLayer.above_fill`。内描边是
+    `(−w, 0]` 的**环**、内阴影是字形内的带，都画在填充之上 —— 半空间做不到这两者
+    （会被填充整个盖住）。新增 `TextLayer::band(..)`、`TextStyle::inner_shadow(..)`。
+  - **合成顺序按趟跨字形排序**：填充之下层 → 填充 → 填充之上层。逐字形合成时相邻字形
+    后一个的描边会盖住前一个的字形本体（紧排文字上很明显），拆趟后不再发生。
+  - 层的偏移采样**夹紧在本字形的图集矩形内**，避免带偏移的层读到隔壁字形数据（边缘细框）。
   - **逐段样式**：`TextPart::xxx_def(_, def)` 里的 `def.style` 按段生效（与字号/字体同一套语义）。
   - **可观测**：`GpuContext::text_atlas_stats()` → `TextAtlasStats`（R8 / 彩色图集尺寸与字节数）；
     样式文本不进彩色图集（有不变量用例盯着）。
   - 实测（`tests/gpu_bench.rs`）：3px 描边使覆盖面积 404 → 967 px 且 556 px 为描边色；
     同色描边的 258 个深内部像素与无样式**逐像素一致**；软投影重心在文字右下；
     页面矩形渐变上红下蓝（R/B 1.32 vs 0.56）；纹理填充左红右蓝（89089/24005 vs 0/35868）；
-    emoji 描边 3253 → 4595 px 且 2145 px 为描边色；几何描边 10px 让纵向跨度恰好 +10px。
+    emoji 描边 3253 → 4595 px 且 2145 px 为描边色；几何描边 10px 让纵向跨度恰好 +10px；
+    内描边是环（红环 2816 px + 环内白 1613 px、轮廓不外扩）；紧排 "HH" 白色面积比值 2.00。
   Text styles via a signed-distance-field layer stack: `TextDef.style` + `TextStyle` (outline,
   multi-outline, soft shadow, glow, inner outline, inner shadow, custom fill). Styled glyphs get an
   exact distance field derived from the font outline, sharing the existing R8 atlas; unstyled text

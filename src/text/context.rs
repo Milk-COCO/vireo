@@ -200,6 +200,7 @@ impl TextContext {
                 style_index: 0,
                 style_layers_only: 0,
                 sdf_band: 0.0,
+                style_above: 0,
                 vector_stroke: None,
             }],
             &mut self.swash_cache,

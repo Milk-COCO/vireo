@@ -6067,6 +6067,167 @@ fn text_style_vector_miter_vs_round() {
     );
 }
 
+/// 内描边必须是**字形内的环**：不能把整个字涂满（旧实现是半空间 + 被填充盖住），
+/// 也不能让轮廓扩展到字形外（那是外描边）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_inner_outline_is_ring() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 160;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |style: Option<TextStyle>| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(20.0, 14.0),
+            TextDef {
+                style: style.map(Arc::new),
+                ..TextDef::default().font_size(120.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    let plain = render(None);
+    // 3px 内描边 + 120px 字号：笔画中间要留得下白色核心（7px 环会把细笔画整个吃掉）
+    let inner = render(Some(
+        TextStyle::inner_outline(3.0, red).with_fill(TextPaint::solid(WHITE)),
+    ));
+
+    let lit = |px: &[u8]| -> usize {
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 40)
+            .count()
+    };
+    let reds = inner
+        .chunks(4)
+        .filter(|p| p[0] > 140 && p[1] < 90 && p[2] < 90)
+        .count();
+    let whites_inner = inner
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
+        .count();
+
+    assert!(reds > 400, "内描边应有明显的红环，实际 {reds} px");
+    assert!(
+        whites_inner > 400,
+        "环内仍应是填充白色，实际 {whites_inner} px"
+    );
+    // 内描边不向外扩：覆盖面积应与无样式基本一致（±8%）
+    let (a, b) = (lit(&plain), lit(&inner));
+    let diff = (a as i64 - b as i64).abs() as f64 / a as f64;
+    assert!(
+        diff < 0.08,
+        "内描边不该改变外轮廓：无样式 {a} vs 内描边 {b}（差 {:.1}%）",
+        diff * 100.0
+    );
+    println!("  内描边：红环 {reds} px、环内白 {whites_inner} px，轮廓面积 {a} vs {b}");
+}
+
+/// 内阴影不许漏到字形外面（旧实现会变成"外描边"）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_inner_shadow_stays_inside() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 160;
+    let render = |style: Option<TextStyle>| -> Vec<u8> {
+        let c = OffscreenCanvas::new(&gpu, N, N);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            Pos::new(20.0, 14.0),
+            TextDef {
+                style: style.map(Arc::new),
+                ..TextDef::default().font_size(120.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+    let plain = render(None);
+    let shadow = render(Some(
+        TextStyle::inner_shadow((4.0, 4.0), 3.0, Color::new(0.0, 0.0, 0.0, 0.9))
+            .with_fill(TextPaint::solid(WHITE)),
+    ));
+    let lit = |px: &[u8]| -> usize {
+        px.chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 40)
+            .count()
+    };
+    let (a, b) = (lit(&plain), lit(&shadow));
+    let diff = (a as i64 - b as i64).abs() as f64 / a as f64;
+    assert!(
+        diff < 0.08,
+        "内阴影不该漏到字形外：无样式 {a} vs 内阴影 {b}（差 {:.1}%）",
+        diff * 100.0
+    );
+    let grays = shadow
+        .chunks(4)
+        .filter(|p| {
+            let (r, bl) = (p[0] as i32, p[2] as i32);
+            r > 40 && (r - bl).abs() < 40 && r < 200
+        })
+        .count();
+    assert!(grays > 200, "字形内应出现暗部（阴影），实际 {grays} px");
+    println!("  内阴影：轮廓面积 {a} vs {b}，暗部 {grays} px");
+}
+
+/// 相邻字形互不覆盖：后一个字形的描边**不能**盖住前一个字形的字形本体。
+///
+/// 判据：紧排两个 "H"（8px 描边）的白色填充面积 ≈ 单个的 2 倍（±6%）。
+/// 逐字形合成时，右边字形的描边会压掉左边字形右侧的白色笔画，比例明显偏小。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_adjacent_glyphs_do_not_cover() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    const N: u32 = 320;
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let render = |text: &str| -> usize {
+        let c = OffscreenCanvas::new(&gpu, N, 160);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(30.0, 30.0),
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(8.0, red).with_fill(TextPaint::solid(WHITE)),
+                )),
+                ..TextDef::default().font_size(90.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        px.chunks(4)
+            .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
+            .count()
+    };
+    let one = render("H");
+    let two = render("HH");
+    // 两个 H 之间有字距，白色面积应接近 2 倍但略小；关键是**不能明显缩水**。
+    let ratio = two as f64 / one as f64;
+    assert!(
+        ratio > 1.85,
+        "相邻字形的填充被描边盖掉了：单个 {one} px、两个 {two} px（比值 {ratio:.2}）"
+    );
+    println!("  相邻字形：单个白 {one} px、两个白 {two} px（比值 {ratio:.2}）");
+}
+
 /// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
