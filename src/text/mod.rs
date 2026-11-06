@@ -35,7 +35,7 @@ pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
-pub(crate) use style::{PASS_ABOVE, PASS_BELOW, PASS_FILL, PASS_SHIFT, TextStrokePx};
+pub(crate) use style::{PASS_FILL, PASS_SHIFT, TextStrokePx, pass_above, pass_below};
 pub use style::{
     TextBlend, TextCap, TextGradient, TextJoin, TextLayer, TextPaint, TextStroke, TextStyle,
     TextStyleRef,

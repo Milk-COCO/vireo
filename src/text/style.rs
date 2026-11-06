@@ -132,6 +132,10 @@ pub struct TextLayer {
     pub blend: TextBlend,
     /// 画在**填充之上**（内描边/内阴影必须为 `true`，否则会被填充盖住）。
     pub above_fill: bool,
+    /// 内阴影：用「字形内部 − 偏移后的覆盖率」求值（需要两个采样点）。
+    ///
+    /// 由 [`TextStyle::inner_shadow`] 设置；手写层一般用不到。
+    pub inner_shadow: bool,
 }
 
 impl TextLayer {
@@ -145,6 +149,7 @@ impl TextLayer {
             paint,
             blend: TextBlend::Over,
             above_fill: false,
+            inner_shadow: false,
         }
     }
 
@@ -334,19 +339,17 @@ impl TextStyle {
         )
     }
 
-    /// 内阴影：字形内的 `(−w, 0]` 带，偏移 + 软边（画在填充之上）。
+    /// 内阴影：字形内的暗部（`字形内部 − 偏移后的轮廓`），画在填充之上。
     pub fn inner_shadow(
         offset: (impl Into<Pp>, impl Into<Pp>),
         blur: impl Into<Pp>,
         color: Color,
     ) -> Self {
-        let mut layer = TextLayer::band(
-            crate::dpi::Dp(-1024.0),
-            Pp::Dp(crate::dpi::Dp(0.0)),
-            TextPaint::solid(color),
-        );
+        let mut layer = TextLayer::hard(Pp::Dp(crate::dpi::Dp(0.0)), TextPaint::solid(color));
         layer.softness = blur.into();
         layer.offset = (offset.0.into(), offset.1.into());
+        layer.above_fill = true;
+        layer.inner_shadow = true;
         Self::empty_with(vec![layer], None)
     }
 
@@ -474,12 +477,31 @@ pub(crate) const PAINT_NONE: u32 = 4;
 pub(crate) const LAYER_FLAG_CUTOFF: u32 = 1;
 /// 画在填充之上（内描边/内阴影）。
 pub(crate) const LAYER_FLAG_ABOVE: u32 = 2;
+/// **内阴影**：`cov = 字形内部(未偏移) − 偏移后的覆盖率`（两个采样点相减）。
+///
+/// 只用一个采样点做差是错的：`coverage(d) − coverage(d + w)` 在字形内部恒为 0，
+/// 只剩边缘一条缝 —— 看起来就像发光而不是内阴影。
+pub(crate) const LAYER_FLAG_INNER_SHADOW: u32 = 4;
 
 /// 样式表的 pass 选择（编码进顶点的 `style_index` 高 8 位）。
-pub(crate) const PASS_BELOW: u32 = 1;
-pub(crate) const PASS_FILL: u32 = 2;
-pub(crate) const PASS_ABOVE: u32 = 3;
+///
+/// 关键点：pass 是**按层**而不是"所有下层一起"——只有每层单独一趟，才能让相邻字形
+/// 的同一层先全部铺完（字符串级并集），而不是后一个字的描边盖住前一个字的描边/发光。
+/// - `1..=8`：画**填充之下**的第 `pass-1` 层
+/// - `9`：画填充
+/// - `10..=17`：画**填充之上**的第 `pass-10` 层
+pub(crate) const PASS_FILL: u32 = 9;
 pub(crate) const PASS_SHIFT: u32 = 24;
+
+/// 填充之下的第 `layer` 层。
+pub(crate) fn pass_below(layer: u32) -> u32 {
+    1 + layer
+}
+
+/// 填充之上的第 `layer` 层。
+pub(crate) fn pass_above(layer: u32) -> u32 {
+    10 + layer
+}
 
 /// 样式表：CPU 侧累积、去重，最后整块上传到 `group(1) @binding(1..3)`。
 #[derive(Default)]
@@ -557,6 +579,10 @@ impl StyleTable {
                 0
             }) | (if layer.above_fill {
                 LAYER_FLAG_ABOVE
+            } else {
+                0
+            }) | (if layer.inner_shadow {
+                LAYER_FLAG_INNER_SHADOW
             } else {
                 0
             });

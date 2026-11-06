@@ -73,10 +73,11 @@ async fn main(app: App) {
             (false, true) => 1,
             _ => 0,
         };
-        // 刚按下立刻响应一次；按住之后每 140ms 走一步。
+        // 刚按下立刻响应一次；按住之后每 140ms 走一步。宽度**不设上限**：
+        // 超过 band 档（外扩 > 32px）时内部会钳制并 warn-once，但滑块本身可以一直加。
         let fresh = dir != 0 && (held.0, held.1) != (left, right);
         if dir != 0 && (fresh || repeat_at.elapsed().as_millis() >= 140) {
-            width = (width + 0.5 * dir as f32).clamp(0.5, 8.0);
+            width = (width + 0.5 * dir as f32).max(0.0);
             repeat_at = std::time::Instant::now();
         }
         held = (left, right);

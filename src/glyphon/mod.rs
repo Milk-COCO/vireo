@@ -153,7 +153,9 @@ pub struct TextArea<'a> {
     /// 距离场带宽（设备像素）；`style_index == 0` 时忽略。
     pub sdf_band: f32,
     /// 该样式里「画在填充之上」的层数；`> 0` 才会额外发一趟 above quad。
-    pub style_above: u32,
+    pub style_layers: u32,
+    /// 位图：第 i 位 = 第 i 层画在填充之上。
+    pub style_above_mask: u32,
     /// 几何描边（真 miter/bevel），画在填充与图层之下。`None` = 没有。
     pub(crate) vector_stroke: Option<crate::text::TextStrokePx>,
 }

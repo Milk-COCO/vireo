@@ -274,7 +274,8 @@ impl TextRenderer {
                         text_area.transform_index,
                         text_area.base_uv_rect,
                         text_area.style_index,
-                        text_area.style_above,
+                        text_area.style_layers,
+                        text_area.style_above_mask,
                         text_area.sdf_band,
                         text_area.vector_stroke,
                         &mut metadata_to_depth,
@@ -334,6 +335,7 @@ impl TextRenderer {
                 area.transform_index,
                 area.base_uv_rect,
                 area.style_index,
+                0,
                 0,
                 area.sdf_band,
                 // resolved 路径不支持几何描边（没有 custom-glyph 光栅化器）
@@ -1096,7 +1098,8 @@ fn append_text_glyph<R>(
     transform_index: u32,
     base_uv_rect: [f32; 4],
     style_index: u32,
-    style_above: u32,
+    style_layers: u32,
+    style_above_mask: u32,
     sdf_band: f32,
     vector_stroke: Option<crate::text::TextStrokePx>,
     mut metadata_to_depth: impl FnMut(usize) -> f32,
@@ -1156,7 +1159,8 @@ where
             |_| None,
         )?;
         if let Some(quad) = quad {
-            buckets.below.push(quad);
+            // 几何描边永远是"最底下一层"（层号 0，排在所有样式层之前）
+            buckets.below.push((0, quad));
         }
     }
 
@@ -1197,22 +1201,14 @@ where
         return Ok(());
     }
 
-    // 有样式：同一份距离场分三趟出 quad（填充之下层 / 填充 / 填充之上层）。
-    // 三趟共用同一个缓存键，后两趟必然命中，不会重复栅格化。
+    // 有样式：同一份距离场，**每层一个 quad**。
+    // 为什么要按层拆：所有字形先铺完第 k 层、再铺第 k+1 层，字符串里的描边/发光才是
+    // 「并集」；否则后一个字的同层（甚至更内层）会盖住前一个字的描边。填充单独一趟。
     let key = GlyphonCacheKey::Styled {
         base: physical_glyph.cache_key,
         band_q: quantize_band(sdf_band),
     };
-    let pass_list: [Option<(u32, bool)>; 3] = [
-        Some((crate::text::PASS_BELOW, true)),
-        Some((crate::text::PASS_FILL, true)),
-        Some((crate::text::PASS_ABOVE, style_above > 0)),
-    ];
-    for slot in pass_list.iter() {
-        let Some((pass, want)) = *slot else { continue };
-        if !want {
-            continue;
-        }
+    let mut emit = |pass: u32, sink: PassSink| -> Result<(), PrepareError> {
         let quad = prepare_glyph(
             state,
             system,
@@ -1242,32 +1238,70 @@ where
             &mut metadata_to_depth,
             &mut rasterize_custom_glyph,
         )?;
-        let Some(quad) = quad else { continue };
-        match pass {
-            crate::text::PASS_BELOW => buckets.below.push(quad),
-            crate::text::PASS_ABOVE => buckets.above.push(quad),
-            _ => buckets.fill.push(quad),
+        if let Some(quad) = quad {
+            sink.push(pass, quad, buckets);
         }
+        Ok(())
+    };
+    for layer in 0..style_layers {
+        let above = (style_above_mask >> layer) & 1 == 1;
+        let pass = if above {
+            crate::text::pass_above(layer)
+        } else {
+            crate::text::pass_below(layer)
+        };
+        emit(
+            pass,
+            if above {
+                PassSink::Above
+            } else {
+                PassSink::Below
+            },
+        )?;
     }
+    emit(crate::text::PASS_FILL, PassSink::Fill)?;
     Ok(())
 }
 
-/// 三个合成趟的顶点桶：填充之下的层 → 填充 → 填充之上的层。
+/// 三种落桶方式（配合 `emit` 闭包避免重复代码）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PassSink {
+    Below,
+    Fill,
+    Above,
+}
+
+impl PassSink {
+    fn push(self, layer: u32, quad: GlyphToRender, buckets: &mut QuadBuckets) {
+        match self {
+            Self::Below => buckets.below.push((layer, quad)),
+            Self::Fill => buckets.fill.push(quad),
+            Self::Above => buckets.above.push((layer, quad)),
+        }
+    }
+}
+
+/// 合成趟的顶点桶：填充之下的层（按层号排序）→ 填充 → 填充之上的层（按层号排序）。
 ///
-/// 必须**按趟**排，而不是逐字形：否则相邻字形 B 的描边（和 A 的填充在同一个 quad 里）
-/// 会盖住 A 的字形本体。
+/// 必须**按层**跨字形排序，而不是逐字形：否则相邻字形 B 的同一层（甚至更内层）
+/// 会盖住 A 的描边/发光 —— 字符串级应该看成一个并集。
 #[derive(Default)]
 pub(crate) struct QuadBuckets {
-    below: Vec<GlyphToRender>,
+    /// `(层号, quad)`：flush 时按层号稳定排序
+    below: Vec<(u32, GlyphToRender)>,
     fill: Vec<GlyphToRender>,
-    above: Vec<GlyphToRender>,
+    above: Vec<(u32, GlyphToRender)>,
 }
 
 impl QuadBuckets {
     fn flush_into(self, out: &mut Vec<GlyphToRender>) {
-        out.extend(self.below);
+        let mut below = self.below;
+        below.sort_by_key(|(layer, _)| *layer);
+        out.extend(below.into_iter().map(|(_, quad)| quad));
         out.extend(self.fill);
-        out.extend(self.above);
+        let mut above = self.above;
+        above.sort_by_key(|(layer, _)| *layer);
+        out.extend(above.into_iter().map(|(_, quad)| quad));
     }
 }
 

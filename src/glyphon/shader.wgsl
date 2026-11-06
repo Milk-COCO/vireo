@@ -184,8 +184,9 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
 
 /// 一条样式的某一层：取区间 → 偏移采样 → 合成。
 ///
-/// - `pass`：1 = 填充之下的层、3 = 填充之上的层（层自己带 `above` 标志，不匹配直接跳过）；
-/// - `flags` bit0 = 有 cutoff（区间 `(cutoff, threshold]`），bit1 = 画在填充之上；
+/// - `selected`：本趟只画这一层（层号），`want_above` 表示这一趟画"填充之上"的层；
+/// - `flags` bit0 = 有 cutoff（区间 `(cutoff, threshold]`），bit1 = 画在填充之上，
+///   bit2 = **内阴影**（`字形内部 − 偏移后的覆盖率`，需要两个采样点）；
 /// - 采样 UV **夹紧到本字形的图集矩形内**，否则带偏移的层会读到隔壁字形的数据（边缘细框）。
 fn apply_layer(
     base: u32,
@@ -193,7 +194,7 @@ fn apply_layer(
     at: vec2<f32>,
     glyph01: vec2<f32>,
     page: vec2<f32>,
-    layer_pass: u32,
+    want_above: bool,
     entry_min: vec2<f32>,
     entry_max: vec2<f32>,
     out: vec4<f32>,
@@ -201,7 +202,7 @@ fn apply_layer(
     let paint = text_layers[base + 1u];
     let flags = paint.w;
     let is_above = (flags & 2u) != 0u;
-    if ((layer_pass == 3u) != is_above) {
+    if (is_above != want_above) {
         return out;
     }
     let geom = text_layers[base];
@@ -212,6 +213,14 @@ fn apply_layer(
     let uv = clamp(at + off / dims, entry_min, entry_max);
     let d = decode_sdf(textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x, band);
     var cov = coverage(d, thr, soft);
+    if ((flags & 4u) != 0u) {
+        // 内阴影：字形内部（未偏移）减去偏移后的覆盖率 —— 两个采样点，不是同一采样点的两个阈值
+        let d0 = decode_sdf(
+            textureSampleLevel(mask_atlas_texture, atlas_sampler, at, 0.0).x,
+            band,
+        );
+        cov = clamp(coverage(d0, 0.0, 0.0) - cov, 0.0, 1.0);
+    }
     if ((flags & 1u) != 0u) {
         // 区间：再减掉 cutoff 之外的（`paint.z` 存 cutoff 的位模式）
         let cut = bitcast<f32>(paint.z);
@@ -315,9 +324,9 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);
         }
         case 2u: {
-            // 距离场字形：按 pass 分三次绘制（填充之下层 → 填充 → 填充之上层）。
+            // 距离场字形：每一层一趟 + 填充一趟（跨字形按层排序）。
             // 合成全程在**预乘**空间，出口再反预乘（blend state 是 ALPHA_BLENDING）。
-            let layer_pass = in_frag.style_index >> 24u;
+            let pass_id = in_frag.style_index >> 24u;
             let style_id = in_frag.style_index & 0xffffffu;
             if (style_id == 0u) {
                 return vec4<f32>(0.0);
@@ -334,25 +343,9 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             let entry_max = entry0 + (in_frag.glyph_size - 0.5) / dims;
 
             var out = vec4<f32>(0.0);
-            if (layer_pass == 1u || layer_pass == 3u) {
-                var i = 0u;
-                loop {
-                    if i >= layer_count { break; }
-                    out = apply_layer(
-                        layer_base + i * 4u,
-                        in_frag.sdf_band,
-                        in_frag.uv,
-                        in_frag.local01,
-                        frag_pos.xy,
-                        layer_pass,
-                        entry_min,
-                        entry_max,
-                        out,
-                    );
-                    i = i + 1u;
-                }
-            } else {
-                // fill（style_meta.z: 0 = 用顶点色，1/2/3 = 纯色/渐变/纹理，4 = 不填）
+            if (pass_id == 9u) {
+                // 填充趟
+                var filled = vec4<f32>(0.0);
                 let fill_kind = style_meta.z;
                 if (fill_kind != 4u) {
                     let d0 = decode_sdf(
@@ -362,7 +355,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                     let cov = coverage(d0, 0.0, 0.0);
                     if (fill_kind == 0u) {
                         let a = in_frag.color.a * cov;
-                        out = over(out, vec4<f32>(in_frag.color.rgb * a, a));
+                        filled = vec4<f32>(in_frag.color.rgb * a, a);
                     } else {
                         let painted = paint_color(
                             fill_kind,
@@ -372,8 +365,26 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                             frag_pos.xy,
                         );
                         let a = painted.a * cov;
-                        out = over(out, vec4<f32>(painted.rgb * cov, a));
+                        filled = vec4<f32>(painted.rgb * cov, a);
                     }
+                }
+                out = over(out, filled);
+            } else {
+                // 单层趟：pass_id 1..8 = 填充之下第 pass_id-1 层；10..17 = 填充之上第 pass_id-10 层
+                let want_above = pass_id >= 10u;
+                let selected = select(pass_id - 1u, pass_id - 10u, want_above);
+                if (selected < layer_count) {
+                    out = apply_layer(
+                        layer_base + selected * 4u,
+                        in_frag.sdf_band,
+                        in_frag.uv,
+                        in_frag.local01,
+                        frag_pos.xy,
+                        want_above,
+                        entry_min,
+                        entry_max,
+                        out,
+                    );
                 }
             }
             if (out.a <= 1e-6) {

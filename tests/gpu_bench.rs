@@ -6226,6 +6226,111 @@ fn text_style_adjacent_glyphs_do_not_cover() {
         "相邻字形的填充被描边盖掉了：单个 {one} px、两个 {two} px（比值 {ratio:.2}）"
     );
     println!("  相邻字形：单个白 {one} px、两个白 {two} px（比值 {ratio:.2}）");
+
+    // 同一判据用在**多层描边**（黑 8px + 蓝 4px）上：后一个字形的描边不许吃掉前一个的填充。
+    let render_multi = |text: &str| -> usize {
+        let c = OffscreenCanvas::new(&gpu, N, 160);
+        let mut b = DrawBatch::new();
+        let style = TextStyle::new()
+            .with_layer(TextLayer::hard(
+                8.0,
+                TextPaint::solid(Color::new(0.05, 0.05, 0.05, 1.0)),
+            ))
+            .with_layer(TextLayer::hard(
+                4.0,
+                TextPaint::solid(Color::new(0.1, 0.2, 1.0, 1.0)),
+            ));
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(30.0, 30.0),
+            TextDef {
+                style: Some(Arc::new(style)),
+                ..TextDef::default().font_size(90.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        px.chunks(4)
+            .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
+            .count()
+    };
+    let one_m = render_multi("H");
+    let two_m = render_multi("HH");
+    let ratio_m = two_m as f64 / one_m as f64;
+    println!("  多层描边相邻：单个白 {one_m} px、两个白 {two_m} px（比值 {ratio_m:.2}）");
+    assert!(
+        ratio_m > 1.85,
+        "多层描边下相邻字形的填充被盖掉了：单个 {one_m} px、两个 {two_m} px（比值 {ratio_m:.2}）"
+    );
+
+    // 字符串级**并集**：同层的描边不该被后一个字吃掉。
+    // 蓝层（内层，4px）像素数在两个 H 时应接近单个的 2 倍。
+    let blue = |text: &str| -> usize {
+        let c = OffscreenCanvas::new(&gpu, N, 160);
+        let mut b = DrawBatch::new();
+        let style = TextStyle::new()
+            .with_layer(TextLayer::hard(
+                8.0,
+                TextPaint::solid(Color::new(0.05, 0.05, 0.05, 1.0)),
+            ))
+            .with_layer(TextLayer::hard(
+                4.0,
+                TextPaint::solid(Color::new(0.1, 0.2, 1.0, 1.0)),
+            ));
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(30.0, 30.0),
+            TextDef {
+                style: Some(Arc::new(style)),
+                ..TextDef::default().font_size(90.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        px.chunks(4).filter(|p| p[2] > 140 && p[0] < 90).count()
+    };
+    let (b1, b2) = (blue("H"), blue("HH"));
+    let ratio_b = b2 as f64 / b1 as f64;
+    println!("  多层描边蓝层：单个 {b1} px、两个 {b2} px（比值 {ratio_b:.2}）");
+    assert!(
+        ratio_b > 1.8,
+        "同层描边被相邻字形吃掉了：单个蓝 {b1} px、两个蓝 {b2} px（比值 {ratio_b:.2}）"
+    );
+
+    // 发光同理：光晕像素数应接近 2 倍。
+    let glow = |text: &str| -> usize {
+        let c = OffscreenCanvas::new(&gpu, N, 160);
+        let mut b = DrawBatch::new();
+        let style = TextStyle::glow(10.0, Color::new(0.2, 0.8, 1.0, 0.9)).with_layer(
+            TextLayer::hard(2.0, TextPaint::solid(Color::new(0.05, 0.05, 0.05, 1.0))),
+        );
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(30.0, 30.0),
+            TextDef {
+                style: Some(Arc::new(style)),
+                ..TextDef::default().font_size(90.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        px.chunks(4)
+            .filter(|p| p[2] > 60 && p[2] > p[0] + 30)
+            .count()
+    };
+    let (g1, g2) = (glow("H"), glow("HH"));
+    let ratio_g = g2 as f64 / g1 as f64;
+    println!("  发光：单个 {g1} px、两个 {g2} px（比值 {ratio_g:.2}）");
+    assert!(
+        ratio_g > 1.75,
+        "发光被相邻字形吃掉了：单个 {g1} px、两个 {g2} px（比值 {ratio_g:.2}）"
+    );
 }
 
 /// 样式字形与普通字形**共用**同一张 R8 图集：带样式绘制不该动彩色图集。
@@ -6413,6 +6518,7 @@ fn text_style_diagnose_presets() {
     let red = Color::new(1.0, 0.0, 0.0, 1.0);
     let blue = Color::new(0.1, 0.2, 1.0, 1.0);
     let ink = Color::new(0.05, 0.05, 0.05, 1.0);
+    let whitish = Color::new(0.9, 0.9, 0.9, 1.0);
 
     dump("单层外描边", Some(TextStyle::outline(4.0, red)), "国");
     dump(
@@ -6438,6 +6544,11 @@ fn text_style_diagnose_presets() {
         "国",
     );
     dump("仅发光", Some(TextStyle::glow(8.0, red)), "国");
+    dump(
+        "内阴影（偏移 6,6 / 软边 3）",
+        Some(TextStyle::inner_shadow((6.0, 6.0), 3.0, ink).with_fill(TextPaint::solid(whitish))),
+        "国",
+    );
 }
 
 /// 彩色字形（COLRv1 emoji）加描边：彩色字形保留自己的颜色，描边垫在底下。
