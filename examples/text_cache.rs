@@ -47,18 +47,6 @@ fn cache_file() -> std::path::PathBuf {
 async fn main() {
     let idx = app.window(WindowDesc::new("Text Glyph Cache", 960, 640));
 
-    let scale = 1.0f32;
-    let glyphs = app.gpu.text().glyphs();
-    glyphs.set_budget(Some(1024 * 1024));
-    // 钉住标题：启动时预光栅化并保住，之后既不会被淘汰也不会重光栅化。
-    let hold = glyphs.hold(
-        &app.gpu.device,
-        &app.gpu.queue,
-        TITLE,
-        &TextDef::default().font_size(34.0),
-        scale,
-    );
-
     let mut paused = false;
     let mut budget_label = "1 MiB";
     let mut rolling = 0usize;
@@ -66,6 +54,8 @@ async fn main() {
     let mut redraw_hud = true;
     let mut hud_line = String::new();
     let mut t0 = Instant::now();
+    // 钉住的句柄必须活到进程结束；首帧拿到真实 DPI 后再创建（见下）。
+    let mut hold: Option<GlyphHold> = None;
 
     eprintln!("[text_cache] K 收缩  S 保存  L 装载  空格 暂停");
 
@@ -76,6 +66,24 @@ async fn main() {
         };
         let gpu = &ctx.app().gpu;
         let glyphs = gpu.text().glyphs();
+
+        // 首帧才知道真实 DPI：预光栅化的 `scale` 必须与绘制一致，否则字号键对不上
+        // （`physical` 会把 font_size 乘 scale），一帧之后全部变成 miss。
+        if hold.is_none() {
+            let scale = win.layout_scale() as f32;
+            glyphs.set_budget(Some(1024 * 1024));
+            hold = Some(glyphs.hold(
+                &gpu.device,
+                &gpu.queue,
+                TITLE,
+                &TextDef::default().font_size(34.0),
+                scale,
+            ));
+            eprintln!(
+                "[text_cache] hold {} 条（DPI {scale}）",
+                hold.as_ref().map(|h| h.len()).unwrap_or(0)
+            );
+        }
 
         if win.key_down(KeyCode::Digit1) {
             glyphs.set_budget(Some(256 * 1024));
@@ -209,6 +217,4 @@ async fn main() {
     })
     .await
     .unwrap();
-
-    drop(hold);
 }
