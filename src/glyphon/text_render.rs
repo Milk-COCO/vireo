@@ -700,11 +700,14 @@ where
     // 记录"这次 prepare 碰过哪些字形键"（`hold` / `prewarm` 靠它拿回键集合）。
     system.atlas.note_touched(metadata.cache_key);
 
+    // 热路径用 `peek_mut`：`get_mut` 会把条目提升成 MRU（一次双向链表拼接 = 两处随机
+    // 内存写），而每帧每个字形只看一次；命中率高的场景（整段文案每帧重画）下这次拼接
+    // 是纯开销。淘汰顺序仍由 `last_used`（代数）决定，LRU 链表只用于"同龄条目里挑谁"。
     let details = if let Some(details) = system
         .atlas
         .mask_atlas
         .glyph_cache
-        .get_mut(&metadata.cache_key)
+        .peek_mut(&metadata.cache_key)
     {
         details.last_used = mask_generation;
         details
@@ -712,7 +715,7 @@ where
         .atlas
         .color_atlas
         .glyph_cache
-        .get_mut(&metadata.cache_key)
+        .peek_mut(&metadata.cache_key)
     {
         details.last_used = color_generation;
         details

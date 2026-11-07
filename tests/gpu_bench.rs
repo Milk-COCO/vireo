@@ -8012,6 +8012,163 @@ fn text_path_animated_size_cost() {
     }
 }
 
+/// **12k→24k quad 超线性的归因**：固定/扫 quad 数，分离三个嫌疑——
+/// 条目数（每段文本的固定开销）、字形种类（图集 + LRU 表规模）、纯 quad 数（顶点路径）。
+///
+/// 做法：4096² 画布保证**不裁剪**（裁剪会额外走一套分支，污染测量），
+/// 空 batch 帧做基线，3 轮取最小值。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_path_quad_attribution() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 4096, 4096);
+
+    let empty = DrawBatch::new();
+    for _ in 0..3 {
+        canvas.draw(Some(BLACK), &[&empty]);
+    }
+    let mut base_ms = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..10 {
+            canvas.draw(Some(BLACK), &[&empty]);
+        }
+        base_ms = base_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 10.0);
+    }
+    // 同一个基线，但**等 GPU 完成**：4096²（16 MB）清屏本身的 GPU 成本不算在文本头上。
+    let mut base_gpu_ms = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..10 {
+            canvas.draw(Some(BLACK), &[&empty]);
+            let _ = gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+        }
+        base_gpu_ms = base_gpu_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 10.0);
+    }
+    println!("  基线（空 batch，4096²）：CPU {base_ms:.3} ms / 含 GPU {base_gpu_ms:.3} ms");
+
+    /// 一个测量点：`entries` 段 × `chars` 字，字形取 `pool`（None = 全不重复）。
+    fn measure(
+        device: &wgpu::Device,
+        canvas: &OffscreenCanvas,
+        base_ms: f64,
+        base_gpu_ms: f64,
+        label: &str,
+        entries: usize,
+        chars: usize,
+        pool: Option<usize>,
+    ) {
+        let quads = entries * chars;
+        let texts: Vec<String> = (0..entries)
+            .map(|i| {
+                let start = match pool {
+                    Some(p) => ((i % p) * chars) as u32,
+                    None => (i * chars) as u32,
+                };
+                cjk_text(0x4E00 + start, chars)
+            })
+            .collect();
+        let mut b = DrawBatch::new();
+        // 每行 100 列；行高 = 字符高度的 1.25 倍，保证不重叠也不越界。
+        let cols = 100.min(entries.max(1));
+        for (i, text) in texts.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                Pos::new(
+                    8.0 + (i % cols) as f32 * 20.0,
+                    8.0 + (i / cols) as f32 * 20.0,
+                ),
+                TextDef::default().font_size(16.0),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        for _ in 0..3 {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let mut ms = f64::INFINITY;
+        for _ in 0..3 {
+            let t = Instant::now();
+            for _ in 0..5 {
+                canvas.draw(Some(BLACK), &[&b]);
+            }
+            ms = ms.min(t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+        }
+        // 再来一轮**含 GPU 完成**的计时（每帧后 poll 等 GPU）：只量 CPU 提交会漏掉
+        // "GPU 排队反压"的贡献，而图集变大后的采样成本正好落在这里。
+        let t = Instant::now();
+        for _ in 0..5 {
+            canvas.draw(Some(BLACK), &[&b]);
+            let _ = device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+        }
+        let ms_gpu = t.elapsed().as_secs_f64() * 1000.0 / 5.0;
+        let net = (ms - base_ms).max(0.0);
+        let net_gpu = (ms_gpu - base_gpu_ms).max(0.0);
+        println!(
+            "  {label:<34} {quads:>6} quad / {entries:>4} 条目：CPU 净 {net:>7.3} ms\
+             （{:>5.2} µs/quad）| GPU 净 {net_gpu:>7.3} ms（{:>5.2} µs/quad）",
+            net * 1000.0 / quads as f64,
+            net_gpu * 1000.0 / quads as f64
+        );
+    }
+
+    println!("  ---- 扫 quad 数（每条 12 字，全不重复字形）----");
+    for entries in [500usize, 1000, 1333, 1667, 2000] {
+        measure(
+            &gpu.device,
+            &canvas,
+            base_ms,
+            base_gpu_ms,
+            &format!("{entries} 条目"),
+            entries,
+            12,
+            None,
+        );
+    }
+
+    println!("  ---- 固定 24000 quad：改条目数（每条目固定开销）----");
+    for (entries, chars) in [(2000usize, 12usize), (800, 30), (200, 120)] {
+        measure(
+            &gpu.device,
+            &canvas,
+            base_ms,
+            base_gpu_ms,
+            &format!("{entries} 条目 × {chars} 字"),
+            entries,
+            chars,
+            None,
+        );
+    }
+
+    println!("  ---- 固定 24000 quad / 2000 条目：改字形种类（图集与 LRU 规模）----");
+    for pool in [None, Some(500usize), Some(50), Some(5)] {
+        let label = match pool {
+            None => "全不重复（24000 种）".to_string(),
+            Some(p) => format!("{p} 段复用（{} 种字形）", p * 12),
+        };
+        measure(
+            &gpu.device,
+            &canvas,
+            base_ms,
+            base_gpu_ms,
+            &label,
+            2000,
+            12,
+            pool,
+        );
+    }
+
+    assert!(gpu.text().glyphs().stats().rasterizations > 0);
+}
+
 /// **文本路径的稳态吞吐上限**：缓存全热时，一帧能画多少文本 quad 还保得住 120 fps。
 /// 这是"稳态 120 fps"这个目标的可测定义：`8.33 ms` 预算里能装下多少 quad。
 /// 用**空 batch 帧**做基线，差值就是文本路径的净成本（避免把 acquire/清屏算进去）。
