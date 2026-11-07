@@ -822,6 +822,28 @@ where
 
     let depth = metadata_to_depth(metadata.metadata);
 
+    // 诊断开关：`VIREO_TEXT_DEBUG=1` 打印每个 quad 的关键顶点数据（定位冷/热不一致）。
+    if std::env::var_os("VIREO_TEXT_DEBUG").is_some() {
+        eprintln!(
+            "[glyph] ct={} style=0x{:08x} band={} scale={:.4} dim={}x{} entry={}x{} uv=({},{}) pos=({},{}) atlases=({},{},{})",
+            content_type as u32,
+            metadata.style_index,
+            metadata.sdf_band,
+            metadata.quad_scale,
+            width,
+            height,
+            entry_w,
+            entry_h,
+            atlas_x,
+            atlas_y,
+            x,
+            y,
+            system.atlas.mask_atlas.size,
+            system.atlas.color_atlas.size,
+            system.atlas.msdf_atlas.size,
+        );
+    }
+
     Ok(Some(GlyphToRender {
         pos: [x, y],
         dim: [width as u16, height as u16],

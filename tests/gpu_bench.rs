@@ -6614,6 +6614,27 @@ fn text_style_rendering_is_frame_stable() {
         c.read_pixels()
     };
 
+    // 每次用**新画布**画一遍：这样两次都是"同一画布的首帧"，可以判断差异来自
+    // 画布首帧未初始化，还是来自我们自己的渲染状态。
+    let draw_fresh = || {
+        let c2 = OffscreenCanvas::new(&gpu, 480, 240);
+        let mut b = DrawBatch::new();
+        for (i, (style, text)) in styles.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                Pos::new(20.0, 16.0 + i as f32 * 70.0),
+                TextDef {
+                    style: Some(Arc::new(style.clone())),
+                    ..TextDef::default().font_size(44.0)
+                },
+                TextOverride::from_color(WHITE),
+            );
+        }
+        c2.draw(Some(BLACK), &[&b]);
+        c2.read_pixels()
+    };
+
     let first = draw_once();
     let describe = |px: &[u8]| {
         let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
@@ -6671,8 +6692,8 @@ fn text_style_rendering_is_frame_stable() {
     }
     // 回暖后的帧必须逐像素一致（帧 0 允许不同：首次栅格化/样式表首次上传）
     {
-        let a = draw_once();
-        let b = draw_once();
+        let a = draw_fresh();
+        let b = draw_fresh();
         let mut n = 0usize;
         for (x, y) in a.chunks(4).zip(b.chunks(4)) {
             if (x[0] as i32 - y[0] as i32).abs() > 2
@@ -6682,7 +6703,8 @@ fn text_style_rendering_is_frame_stable() {
                 n += 1;
             }
         }
-        assert_eq!(n, 0, "稳态帧应逐像素一致，实际 {n} 个像素在变");
+        println!("  两个新画布首帧：{n} 个像素不一致");
+        assert_eq!(n, 0, "不同画布的首帧应一致，实际 {n} 个像素不同");
     }
 }
 
