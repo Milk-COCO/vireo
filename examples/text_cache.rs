@@ -43,9 +43,35 @@ fn cache_file() -> std::path::PathBuf {
     std::env::temp_dir().join("vireo_example_text_cache.vrtx")
 }
 
+/// 自动基准场景：60 段互不重复的 12 字文本（24px），每帧全画。
+///
+/// 工作集明显大于小预算，所以能把「预算 < 工作集 ⇒ 每帧重光栅化」在真实窗口里复现出来。
+fn bench_grid() -> Vec<String> {
+    (0..60u32)
+        .map(|i| {
+            (0..12u32)
+                .filter_map(|j| char::from_u32(0x4E00 + i * 12 + j))
+                .collect::<String>()
+        })
+        .collect()
+}
+
 #[vireo::main]
 async fn main() {
     let idx = app.window(WindowDesc::new("Text Glyph Cache", 960, 640));
+    // `VIREO_TEXT_CACHE_BENCH=1`：不等人按键，自动跑预算三档、每档打印一行到 stderr，
+    // 最后一档结束就退出。用来在真实窗口（含 vsync/合成）里复跑无头测出来的结论。
+    let bench = std::env::var("VIREO_TEXT_CACHE_BENCH").is_ok();
+    let bench_texts = bench_grid();
+    const BENCH_WARMUP: u32 = 30;
+    const BENCH_FRAMES: u32 = 120;
+    const BENCH_BUDGETS: [Option<u64>; 3] = [Some(256 * 1024), Some(8 * 1024 * 1024), None];
+    const BENCH_LABELS: [&str; 3] = ["256 KiB（<工作集）", "8 MiB（装得下）", "不限制"];
+    let mut bench_stage = 0usize;
+    let mut bench_frame = 0u32;
+    let mut bench_rasters = 0u64;
+    let mut bench_sum_ms = 0.0f64;
+    let mut bench_frames_done = 0u32;
 
     let mut paused = false;
     let mut budget_label = "1 MiB";
@@ -57,7 +83,14 @@ async fn main() {
     // 钉住的句柄必须活到进程结束；首帧拿到真实 DPI 后再创建（见下）。
     let mut hold: Option<GlyphHold> = None;
 
-    eprintln!("[text_cache] K 收缩  S 保存  L 装载  空格 暂停");
+    if bench {
+        eprintln!(
+            "[bench] 自动基准：{} 段 × 12 字 @24px，每档 {BENCH_WARMUP} 帧预热 + {BENCH_FRAMES} 帧计数",
+            bench_texts.len()
+        );
+    } else {
+        eprintln!("[text_cache] K 收缩  S 保存  L 装载  空格 暂停");
+    }
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -71,7 +104,7 @@ async fn main() {
         // （`physical` 会把 font_size 乘 scale），一帧之后全部变成 miss。
         if hold.is_none() {
             let scale = win.layout_scale() as f32;
-            glyphs.set_budget(Some(1024 * 1024));
+            glyphs.set_budget(if bench { BENCH_BUDGETS[0] } else { Some(1024 * 1024) });
             hold = Some(glyphs.hold(
                 &gpu.device,
                 &gpu.queue,
@@ -146,6 +179,56 @@ async fn main() {
         };
 
         let mut batches: Vec<DrawBatch> = Vec::with_capacity(8);
+
+        // ---- 自动基准分支：只画网格，按三档预算各测一段 ----
+        if bench {
+            if bench_frame == 0 && bench_stage < BENCH_BUDGETS.len() {
+                glyphs.set_budget(BENCH_BUDGETS[bench_stage]);
+                bench_rasters = glyphs.stats().rasterizations;
+                bench_sum_ms = 0.0;
+                bench_frames_done = 0;
+            }
+            let mut grid = DrawBatch::new();
+            for (i, text) in bench_texts.iter().enumerate() {
+                draw_text(
+                    &mut grid.texts,
+                    text,
+                    Pos::new(8.0 + (i % 3) as f32 * 320.0, 8.0 + (i / 3) as f32 * 15.0),
+                    TextDef::default().font_size(24.0),
+                    TextOverride::from_color(WHITE),
+                );
+            }
+            let t = Instant::now();
+            win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &[&grid]);
+            let frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+            bench_frame += 1;
+            if bench_frame > BENCH_WARMUP {
+                bench_sum_ms += frame_ms;
+                bench_frames_done += 1;
+            }
+            if bench_frames_done >= BENCH_FRAMES {
+                let s = glyphs.stats();
+                let rasters = s.rasterizations - bench_rasters;
+                println!(
+                    "[bench] {:<18} {:.2} ms/帧（{:>5.1} fps）光栅化 {:.1} 次/帧 | 条目 {} 占用 {}KiB 淘汰 {}",
+                    BENCH_LABELS[bench_stage],
+                    bench_sum_ms / bench_frames_done as f64,
+                    1000.0 / (bench_sum_ms / bench_frames_done as f64).max(0.001),
+                    rasters as f64 / bench_frames_done as f64,
+                    s.entries(),
+                    s.used_bytes() / 1024,
+                    s.evictions,
+                );
+                bench_stage += 1;
+                bench_frame = 0;
+                if bench_stage >= BENCH_BUDGETS.len() {
+                    println!("[bench] 完毕");
+                    return false;
+                }
+            }
+            return true;
+        }
 
         // 1. 钉住的标题（每个字都是恒等位置 → 与 hold 时的键一致）。
         let mut b = DrawBatch::new();

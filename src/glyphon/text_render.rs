@@ -732,7 +732,7 @@ where
                 }
             };
             let inner = system.atlas.inner_for_content_mut(image.content_type);
-            inner.note_rasterized();
+            inner.note_rasterized(image.width, image.height);
             let atlas_min = allocation.rectangle.min;
 
             state.queue.write_texture(

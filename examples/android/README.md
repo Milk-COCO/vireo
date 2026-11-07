@@ -2,6 +2,24 @@
 
 一个可直接 `cargo ndk build` + `gradlew assembleDebug` 出 APK 的最小工程。
 
+## 字形缓存基准（可选）
+
+同一个 app 里内置了一组字形缓存基准，用来在真机/模拟器上复核
+[`docs/reference/text.md`](../../docs/reference/text.md) §6 的结论（高 DPI 下
+`font_size × scale` 的缓存键是否还对得上、装载后是否真的不重新光栅化）：
+
+```bash
+adb shell setprop debug.vireo.text_bench 1     # 打开基准（默认关，不影响正常演示）
+adb logcat -c
+adb shell am start -n com.example.vireoandroid/.MainActivity
+adb logcat -s vireoandroid | grep text_bench   # 三档预算各一行 + 持久化一行
+adb shell setprop debug.vireo.text_bench 0     # 关掉
+# 报告同时写到 app 私有目录：files/text_bench.txt
+```
+
+场景 = 60 段 × 12 字 @24px 每帧全画，三档预算（256 KiB / 8 MiB / 不限制）各 30 帧预热 +
+120 帧计数，最后做一次 `save` → `clear` → `load` 并验证"装载后绘制 0 次光栅化"。
+
 真机验证环境：小米 `25098RA98C`（HyperOS / Android 16，density 2.8125，2392×1080），
 Vulkan 后端，`minSdk 31` / `targetSdk 35`。
 

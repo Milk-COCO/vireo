@@ -78,6 +78,13 @@ pub(crate) struct InnerAtlas {
     pub evictions: u64,
     /// 累计扩图集次数。
     pub grows: u64,
+    /// 当前条目占用字节（增量维护；见 `live_bytes()` 的注释）。
+    pub live_bytes: u64,
+}
+
+/// 一条图集条目占的字节数（`宽 × 高 × 每像素字节`）。
+fn entry_bytes(width: u16, height: u16, bpp: usize) -> u64 {
+    u64::from(width) * u64::from(height) * bpp as u64
 }
 
 impl InnerAtlas {
@@ -124,22 +131,30 @@ impl InnerAtlas {
             rasterizations: 0,
             evictions: 0,
             grows: 0,
+            live_bytes: 0,
         }
     }
 
-    /// 光栅化出一个新条目时记账。
-    pub(crate) fn note_rasterized(&mut self) {
+    /// 光栅化出一个新条目时记账（条目字节数也在这里累加）。
+    pub(crate) fn note_rasterized(&mut self, width: u16, height: u16) {
         self.rasterizations = self.rasterizations.saturating_add(1);
+        self.note_entry_added(width, height);
+    }
+
+    /// 记录一条新条目占的字节（装载路径用；不增加光栅化计数）。
+    pub(crate) fn note_entry_added(&mut self, width: u16, height: u16) {
+        self.live_bytes =
+            self.live_bytes
+                .saturating_add(entry_bytes(width, height, self.kind.num_channels()));
     }
 
     /// 当前占用（按条目面积累计，不含 packer 空洞）。
+    ///
+    /// **增量维护**（插入时加、淘汰时减）：预算检查每帧都要问一次，而淘汰循环里
+    /// 每扔一条也要问一次 —— 全量扫就成了 O(n²)（732 条 × 每帧 768 次淘汰 ≈ 56 万次
+    /// 迭代/帧，真实窗口里能量出来）。
     pub(crate) fn live_bytes(&self) -> u64 {
-        let bpp = self.kind.num_channels() as u64;
-        self.glyph_cache
-            .iter()
-            .filter(|(_, d)| d.atlas_id.is_some())
-            .map(|(_, d)| u64::from(d.width) * u64::from(d.height) * bpp)
-            .sum()
+        self.live_bytes
     }
 
     /// 图集纹理容量（`size² × 通道数`）。
@@ -169,8 +184,8 @@ impl InnerAtlas {
             })
             .map(|(k, _)| *k)?;
         let details = self.glyph_cache.pop(&key)?;
-        let bytes =
-            u64::from(details.width) * u64::from(details.height) * self.kind.num_channels() as u64;
+        let bytes = entry_bytes(details.width, details.height, self.kind.num_channels());
+        self.live_bytes = self.live_bytes.saturating_sub(bytes);
         if let Some(id) = details.atlas_id {
             self.packer.deallocate(id);
         }
@@ -188,10 +203,15 @@ impl InnerAtlas {
             .map(|(k, _)| *k)
             .collect();
         for key in &keys {
-            if let Some(details) = self.glyph_cache.pop(key)
-                && let Some(id) = details.atlas_id
-            {
-                self.packer.deallocate(id);
+            if let Some(details) = self.glyph_cache.pop(key) {
+                self.live_bytes = self.live_bytes.saturating_sub(entry_bytes(
+                    details.width,
+                    details.height,
+                    self.kind.num_channels(),
+                ));
+                if let Some(id) = details.atlas_id {
+                    self.packer.deallocate(id);
+                }
             }
         }
         self.evictions = self.evictions.saturating_add(keys.len() as u64);
@@ -204,6 +224,7 @@ impl InnerAtlas {
         self.glyph_cache.clear();
         // packer 无法逐块回收，重建一个更省事（下一帧重新分配）。
         self.packer = BucketedAtlasAllocator::new(size2(self.size as i32, self.size as i32));
+        self.live_bytes = 0;
         self.evictions = self.evictions.saturating_add(n as u64);
         n
     }
@@ -260,10 +281,15 @@ impl InnerAtlas {
                 return None;
             };
 
-            if let Some(details) = self.glyph_cache.pop(&key)
-                && let Some(id) = details.atlas_id
-            {
-                self.packer.deallocate(id);
+            if let Some(details) = self.glyph_cache.pop(&key) {
+                self.live_bytes = self.live_bytes.saturating_sub(entry_bytes(
+                    details.width,
+                    details.height,
+                    self.kind.num_channels(),
+                ));
+                if let Some(id) = details.atlas_id {
+                    self.packer.deallocate(id);
+                }
             }
             self.evictions = self.evictions.saturating_add(1);
         }
@@ -537,6 +563,8 @@ impl InnerAtlas {
     }
 
     pub(crate) fn recreate(&mut self, state: &State, size: u32) {
+        // 换纹理 = 旧内容全部作废（装载路径会要求图集为空，然后逐条 note_entry_added）。
+        self.live_bytes = 0;
         self.texture = state.device.create_texture(&TextureDescriptor {
             label: Some("glyphon atlas"),
             size: Extent3d {

@@ -344,11 +344,113 @@ async fn main(app: App) {
     // 随包贴图：证明 assets/logo.png 真的解码成功了（不是 missing 棋盘）。
     let asset_tex = app.load_texture_asset("logo.png");
 
+    // ---- 字形缓存基准（可选，见 TextBench 的文档）----
+    let mut bench_state = if android_bench_requested() {
+        Some(TextBench::new())
+    } else {
+        None
+    };
+    let bench_dir = app.data_dir().ok();
+
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
             Ok(w) => w,
             Err(_) => return true,
         };
+
+        // ---- 基准分支：只画网格，按三档预算各测一段，写完报告就退出 ----
+        if let Some(bench) = bench_state.as_mut() {
+            let glyphs = ctx.app().gpu.text().glyphs();
+            if bench.frame == 0 && bench.stage < TextBench::BUDGETS.len() {
+                glyphs.set_budget(TextBench::BUDGETS[bench.stage]);
+                bench.rasters = glyphs.stats().rasterizations;
+                bench.sum_ms = 0.0;
+                bench.done = 0;
+            }
+            let mut grid = DrawBatch::new();
+            for (i, text) in bench.texts.iter().enumerate() {
+                draw_text(
+                    &mut grid.texts,
+                    text,
+                    Pos::new(8.0 + (i % 3) as f32 * 320.0, 8.0 + (i / 3) as f32 * 15.0),
+                    TextDef::default().font_size(24.0),
+                    TextOverride::from_color(WHITE),
+                );
+            }
+            let t = std::time::Instant::now();
+            win.draw(BLACK, &[&grid]);
+            let frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+            bench.frame += 1;
+            if bench.frame > TextBench::WARMUP {
+                bench.sum_ms += frame_ms;
+                bench.done += 1;
+            }
+            if bench.done >= TextBench::FRAMES {
+                let s = glyphs.stats();
+                let rasters = s.rasterizations - bench.rasters;
+                let avg = bench.sum_ms / bench.done as f64;
+                bench.report.push(format!(
+                    "budget={:<7} {:.2} ms/frame ({:>5.1} fps) rasters/frame={:.1} entries={} used={}KiB evictions={} textures={}KiB",
+                    TextBench::LABELS[bench.stage],
+                    avg,
+                    1000.0 / avg.max(0.001),
+                    rasters as f64 / bench.done as f64,
+                    s.entries(),
+                    s.used_bytes() / 1024,
+                    s.evictions,
+                    s.texture_bytes() / 1024
+                ));
+                bench.stage += 1;
+                bench.frame = 0;
+                if bench.stage >= TextBench::BUDGETS.len() {
+                    // 收尾：验证"装载后绘制不重新光栅化"（真机/模拟器上最容易翻车的一条）。
+                    //
+                    // `rasterizations` 是**累加计数**，必须取差值 —— 直接把累计值写进报告会
+                    // 得到"装载后 7 万次"这种假数字（前面预算抖动阶段已经攒了很多）。
+                    let glyphs = ctx.app().gpu.text().glyphs();
+                    let path = bench_dir
+                        .as_ref()
+                        .map(|d| d.join("glyph_cache.vrtx"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("glyph_cache.vrtx"));
+                    let saved = glyphs.save(&ctx.app().gpu.device, &ctx.app().gpu.queue, &path);
+                    glyphs.clear();
+                    let loaded = glyphs.load(&ctx.app().gpu.device, &ctx.app().gpu.queue, &path);
+                    let base = glyphs.stats().rasterizations;
+                    // 画一帧引用同一批文案，看有没有新增光栅化。
+                    let mut grid = DrawBatch::new();
+                    for (i, text) in bench.texts.iter().enumerate() {
+                        draw_text(
+                            &mut grid.texts,
+                            text,
+                            Pos::new(8.0 + (i % 3) as f32 * 320.0, 8.0 + (i / 3) as f32 * 15.0),
+                            TextDef::default().font_size(24.0),
+                            TextOverride::from_color(WHITE),
+                        );
+                    }
+                    win.draw(BLACK, &[&grid]);
+                    let after = glyphs.stats().rasterizations;
+                    bench.report.push(format!(
+                        "persist: save={saved:?} load={loaded:?} rasters_after_load={} (应为 0)",
+                        after - base
+                    ));
+                    bench.report.push(format!(
+                        "device: dpi={} size={:?}",
+                        win.layout_scale(),
+                        win.layout_size()
+                    ));
+                    if let Some(dir) = bench_dir.as_ref() {
+                        let _ = std::fs::create_dir_all(dir);
+                        let _ = std::fs::write(dir.join("text_bench.txt"), bench.report.join("\n"));
+                    }
+                    // 报告也可能没写成：同时打到 logcat（info 级，`adb logcat -s vireoandroid`）。
+                    for line in &bench.report {
+                        log::info!("[text_bench] {line}");
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
 
         if !theme_registered {
             theme_registered = true;
@@ -995,9 +1097,65 @@ fn probe_assets(app: &vireo::App) -> String {
     s
 }
 
+/// 字形缓存基准：`adb shell setprop debug.vireo.text_bench 1` 后启动应用会自动跑。
+///
+/// 用**系统属性**而不是环境变量，因为 `am start` 传不了 env。跑完把报告写进
+/// app 私有目录（`files/text_bench.txt`），用
+/// `adb shell run-as <包名> cat files/text_bench.txt` 取。
+///
+/// 为什么要在模拟器上跑：真机/模拟器的 DPI 与桌面不同（1.5× / 2.8×），而字形缓存的键
+/// 含 `font_size × scale` —— 这条路径最容易在"桌面调通了、高 DPI 全 miss"上翻车。
+#[derive(Default)]
+struct TextBench {
+    texts: Vec<String>,
+    stage: usize,
+    frame: u32,
+    rasters: u64,
+    sum_ms: f64,
+    done: u32,
+    report: Vec<String>,
+}
+
+impl TextBench {
+    const BUDGETS: [Option<u64>; 3] = [Some(256 * 1024), Some(8 * 1024 * 1024), None];
+    const LABELS: [&'static str; 3] = ["256KiB", "8MiB", "None"];
+    const WARMUP: u32 = 30;
+    const FRAMES: u32 = 120;
+
+    fn new() -> Self {
+        let texts = (0..60u32)
+            .map(|i| {
+                (0..12u32)
+                    .filter_map(|j| char::from_u32(0x4E00 + i * 12 + j))
+                    .collect::<String>()
+            })
+            .collect();
+        Self {
+            texts,
+            ..Default::default()
+        }
+    }
+}
+
+fn android_bench_requested() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        std::process::Command::new("getprop")
+            .arg("debug.vireo.text_bench")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
 /// 探测三个可写目录 + 真写一次再读回。
-fn probe_dirs(app: &vireo::App) -> String {
-    let mut s = format!("dirs   name={:?}\n", app.storage_name());
+fn probe_dirs(app: &vireo::App) -> String {    let mut s = format!("dirs   name={:?}\n", app.storage_name());
     for (label, d) in [("data", app.data_dir()), ("cache", app.cache_dir())] {
         match d {
             Ok(p) => match vireo::storage::ensure_dir(&p) {

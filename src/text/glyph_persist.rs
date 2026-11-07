@@ -865,6 +865,9 @@ pub(crate) fn load(
             (GpuCacheStatus::SkipRasterization, None)
         };
         let last_used = inner.generation;
+        if has_pixels {
+            inner.note_entry_added(rec.w, rec.h);
+        }
         inner.glyph_cache.put(
             rec.key,
             GlyphDetails {

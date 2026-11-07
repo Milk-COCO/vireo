@@ -154,16 +154,20 @@ g.set_budget(None);                  // 不限制（默认）
   （`stats().budget_warnings == 1`），图集继续用它需要的空间；
 - **不会**缩小纹理本身（那是 [`compact`](#64-收缩) 的活）。
 
-> **预算必须 ≥ 单帧工作集的占用**，否则会每帧重光栅化。实测（60 段互不重复的 12 字文本、
-> 24px、每帧全画，工作集 371 KiB）：
+> **预算必须 ≥ 单帧工作集的占用**，否则会每帧重光栅化。同一个场景（60 段互不重复的 12 字
+> 文本、24px、每帧全画）在三处实测：
 >
-> | 预算 | 帧耗时 | 光栅化 | 淘汰 |
-> |---|---|---|---|
-> | 128 KiB（< 工作集） | **15.6 ms/帧** | **479 次/帧** | 4311 次 / 8 帧 |
-> | 8 MiB | 2.4 ms/帧 | 0 | 0 |
-> | 不限制 | 2.4 ms/帧 | 0 | 0 |
+> | 环境 | 工作集 | 预算 < 工作集 | 预算够 | 倍数 |
+> |---|---|---|---|---|
+> | 桌面无头（Win11/DX12, release） | 371 KiB | 8.7–12.3 ms/帧、**479 次/帧**光栅化 | 0.4–0.9 ms/帧、0 次 | ~10–20× |
+> | Windows 真窗口（DPI 2、120 Hz vsync） | 1518 KiB | **18.0–21.1 ms/帧（47–56 fps）**、768 次/帧 | 8.27 ms（120.9 fps）、0 次 | **2.2×** |
+> | Android 模拟器（dpi 1.5、60 Hz） | 828 KiB | **137.7 ms/帧（7.3 fps）**、635 次/帧 | 16.45 ms（60.8 fps）、0 次 | **8.4×** |
 >
-> 也就是 **6.6×** 的帧时间差。留 1.5–2× 余量比较稳（`stats().used_bytes()` 就是工作集占用）。
+> 真窗口的倍数看起来小，是因为基线被 vsync 钉在 8.3 ms（120 fps）——它掉到了 56 fps，
+> 也就是"已经开始掉帧"了。工作集随 `scale²` 长：桌面 200% DPI 下同样文案是 1.5 MiB，
+> 不是 371 KiB。
+>
+> 结论：拿 `stats().used_bytes()` 当工作集，预算留 1.5–2× 余量。
 
 ### 6.3 预光栅化与钉子
 
@@ -226,21 +230,22 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
   一次设备等待（`poll(Wait)`）不可避免，它会把队列里已提交的绘制也排空；
 - 版本/魔数不符、文件截断 → `ErrorKind::InvalidData`，图集保持原样。
 
-**实测**（Win11 / DX12 / release；跑
-`cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_ --nocapture`，
-三次取区间）：
+**实测**（机器空闲时的 release 构建；复跑方式见 §8）：
 
 | 场景 | 结果 |
 |---|---|
-| `prewarm` 冷（105 条 32px） | 0.04–0.07 ms/字 |
-| `prewarm` 命中 | ~0.5–1 µs/字（48 条全命中 0.03–0.08 ms） |
-| 触发扩容的那次 `prewarm` | 5–10 ms（含该次自身 ~60 字的现场光栅化 + 新建纹理 + 拷贝） |
-| `save`（105 条 / 75 KiB） | 23–36 ms |
-| `load`（105 条） | 13–18 ms |
-| `save`/`load`（**1200 条 / 616 KiB 内容，图集 1024²**） | save 19–26 ms（655 KiB）/ load 26–28 ms，0 像素差 |
-| 首帧（装载后 vs 空图集，105 条） | 装载后快 5–15%；**光栅化 0 次**（空图集要 48 次） |
+| `prewarm` 冷（105 条 32px） | 0.025 ms/字 |
+| `prewarm` 命中 | 0.018 ms（48 条全命中） |
+| 触发扩容的那次 `prewarm` | 3.2 ms（含该次自身 ~60 字的现场光栅化 + 新建纹理 + 拷贝） |
+| `save`（105 条 / 75 KiB） | 13.2 ms |
+| `load`（105 条） | 8.8 ms |
+| `save`/`load`（1200 条 / 616 KiB 内容、图集 1024²） | save 18 ms（655 KiB）/ load 19.8 ms，**0 像素差** |
+| `save`/`load`（**Android 模拟器**、720 条 / 828 KiB） | save → 852 KiB 文件 / load 720 条、0 跳过，**装载后绘制 0 次光栅化** |
 | `compact` | 无需收缩时 ~0.01 ms；要搬条目时与条目数成正比 |
-| 稳态帧（105 条已缓存） | 1.8–3.2 ms（900×600 画布，含提交） |
+| 稳态帧（105 条已缓存） | 1.66 ms（900×600 画布，含提交） |
+
+> 这些数字对**机器负载**敏感：同一套用例在机器忙时跑出过 save 23–36 ms、load 13–18 ms、
+> prewarm 0.04–0.07 ms/字。比较时请在同一次空闲窗口里跑完整组。
 
 两条语义层面的结论（都有用例盯着，不是"大概不会"）：
 
@@ -248,9 +253,6 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
   不会被淘汰，所以来回切换不会互相踩。
 - **并发**：4 线程同时对同一 `GpuContext` 做 `prewarm`/`hold`/`trim`/`stats`，
   结束后钉子归零、条目自洽（内部是一把互斥锁，并行度 1，但不会破坏状态）。
-
-> 首帧那 5–15% 是在 PSO 懒编译噪声里测的（两个上下文的首帧都含编译），
-> 装载省下的确定收益是"这几百个字不用重新光栅化"。
 
 ## 7. 性能建议
 
@@ -264,8 +266,15 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
    跑 `--example text_cache` 按空格暂停，`rasterizations` 不动就说明做到了。
 5. **别每帧调 `entries()`**：它是 O(条目数) 的全量快照，`stats()` 才是 O(1) 聚合。
 6. **量一遍再调**：`cargo run --example text_profile` 看排版/光栅化分项；
-   `cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_perf --nocapture`
-   打印本机上的 prewarm / grow / save / load / compact 数字（§6.5 那张表就是它的输出）。
+   `cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_ --nocapture`
+   打印本机上的 prewarm / grow / save / load / 预算抖动 / 大图集 / 并发数字（§6.2、§6.5 的表就是它）。
+7. **真窗口里复核**：`cargo run --release --example text_cache` 手动玩（`1/2/3` 切预算、
+   空格暂停看 `光栅化` 是否不动、`S/L` 存取），或
+   `VIREO_TEXT_CACHE_BENCH=1 cargo run --release --example text_cache`
+   自动跑三档预算、每档打印一行 `ms/帧 + 光栅化次数` 后自行退出。
+   Android 上同一套场景：`adb shell setprop debug.vireo.text_bench 1` 后启动
+   `examples/android` 的 app，结果打到 logcat（`adb logcat -s vireoandroid`）并写进
+   `files/text_bench.txt`。
 
 ## 8. 已知限制
 
