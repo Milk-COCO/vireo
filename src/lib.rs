@@ -228,7 +228,6 @@ pub mod prelude {
     pub use crate::text::TextOverride;
     pub use crate::text::TextPaint;
     pub use crate::text::TextPart;
-    pub use crate::text::TextSdfMode;
     pub use crate::text::TextStroke;
     pub use crate::text::TextStyle;
     pub use crate::text::TextTextureState;

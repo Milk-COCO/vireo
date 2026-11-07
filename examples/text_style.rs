@@ -60,9 +60,6 @@ async fn main(app: App) {
     let mut repeat_at = std::time::Instant::now();
     let mut held = (false, false);
     let mut hold_ms = 0.0f64;
-    // 距离场表示：M 键在 A/B 行上循环切换
-    let mut a_b_mode = TextSdfMode::Auto;
-    let mut held_m = false;
     // 帧耗时统计（HUD 显示；按键后"要等多久"看这个）
     let mut frame_ms = 0.0f64;
     let mut hud_text = String::from("帧 -- ms");
@@ -75,19 +72,6 @@ async fn main(app: App) {
         };
         if win.key_down(KeyCode::Escape) || win.key_down(KeyCode::KeyQ) {
             return false;
-        }
-        // M：切距离场表示（Auto → Msdf → Exact → Auto），用于现场 A/B
-        {
-            let m = win.key_down(KeyCode::KeyM);
-            if m && !held_m {
-                a_b_mode = match a_b_mode {
-                    TextSdfMode::Auto => TextSdfMode::Msdf,
-                    TextSdfMode::Msdf => TextSdfMode::Exact,
-                    TextSdfMode::Exact => TextSdfMode::Auto,
-                };
-                let _ = a_b_mode;
-            }
-            held_m = m;
         }
         let (left, right) = (
             win.key_down(KeyCode::ArrowLeft),
@@ -303,38 +287,6 @@ async fn main(app: App) {
                 TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
             );
         }
-        if show_all {
-            // MSDF：生成 em 固定，改字号/宽度同档都不重栅格化（`sdf_mode` 默认 Auto 已启用）
-            let y_row = next(84.0);
-            draw_text(
-                &mut b.texts,
-                "MSDF（固定生成 em，与字号无关）vs 精确 SDF",
-                Pos::new(28.0, y_row + 10.0),
-                TextDef::default().font_size(12.0),
-                TextOverride::from_color(Color::new(0.62, 0.67, 0.76, 1.0)),
-            );
-            let msdf = TextStyle::outline(width, ink)
-                .with_fill(TextPaint::solid(Color::new(0.55, 0.85, 0.75, 1.0)));
-            let exact = TextStyle::outline(width, ink)
-                .with_fill(TextPaint::solid(Color::new(0.85, 0.65, 0.45, 1.0)));
-            for (i, demo_mode) in [TextSdfMode::Msdf, TextSdfMode::Exact].iter().enumerate() {
-                draw_text(
-                    &mut b.texts,
-                    if i == 0 {
-                        "MSDF 国永光"
-                    } else {
-                        "Exact 国永光"
-                    },
-                    Pos::new(230.0 + i as f32 * 210.0, y_row),
-                    TextDef {
-                        style: Some(Arc::new(if i == 0 { msdf.clone() } else { exact.clone() })),
-                        sdf_mode: if i == 0 { a_b_mode } else { *demo_mode },
-                        ..TextDef::default().font_size(44.0)
-                    },
-                    TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
-                );
-            }
-        }
 
         // 帧耗时（含"这一帧栅格化了多少字形"）——按键后要等多久，看这个数最直接
         frame_ms = frame_ms * 0.85 + ctx.frame_time() * 1000.0 * 0.15; // 指数平滑
@@ -350,18 +302,13 @@ async fn main(app: App) {
             let now = std::time::Instant::now();
             if (now - last_log).as_secs_f64() >= 1.0 {
                 last_log = now;
-                eprintln!(
-                    "[fps] group={group} {fps:.1} fps  {frame_ms:.1} ms/帧  mode={a_b_mode:?}"
-                );
+                eprintln!("[fps] group={group} {fps:.1} fps  {frame_ms:.1} ms/帧");
             }
         }
 
         draw_text(
             &mut b.texts,
-            &format!(
-                "1-9 / 0 切组（当前 {group}，7 = 全部）  ←→ 描边宽度 {width:.1}  M = A/B 行的 SDF 模式（{:?}）  Q 退出",
-                a_b_mode
-            ),
+            &format!("1-9 / 0 切组（当前 {group}，7 = 全部）  ←→ 描边宽度 {width:.1}  Q 退出"),
             Pos::new(28.0, 24.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.72, 0.77, 0.86, 1.0)),

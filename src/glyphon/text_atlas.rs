@@ -244,25 +244,20 @@ impl InnerAtlas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Mask,
-    Color {
-        srgb: bool,
-    },
-    /// 多通道距离场：RGB 各存一组边的距离（线性、可过滤）。
-    Msdf,
+    Color { srgb: bool },
 }
 
 impl Kind {
     fn num_channels(self) -> usize {
         match self {
             Kind::Mask => 1,
-            Kind::Color { .. } | Kind::Msdf => 4,
+            Kind::Color { .. } => 4,
         }
     }
 
     fn texture_format(self) -> wgpu::TextureFormat {
         match self {
             Kind::Mask => TextureFormat::R8Unorm,
-            Kind::Msdf => TextureFormat::Rgba8Unorm,
             Kind::Color { srgb } => {
                 if srgb {
                     TextureFormat::Rgba8UnormSrgb
@@ -277,7 +272,6 @@ impl Kind {
         match self {
             Self::Mask => ContentType::Mask,
             Self::Color { .. } => ContentType::Color,
-            Self::Msdf => ContentType::Msdf,
         }
     }
 }
@@ -312,25 +306,19 @@ pub struct TextAtlasStats {
     pub mask_size: u32,
     /// 彩色图集边长（像素）。
     pub color_size: u32,
-    /// **多通道距离场（MSDF）**图集边长（像素）。
-    pub msdf_size: u32,
     /// R8 图集占用的字节数（`mask_size²`，SDF 与覆盖度共用）。
     pub mask_bytes: u64,
     /// 彩色图集占用的字节数（`color_size² × 4`）。
     pub color_bytes: u64,
-    /// MSDF 图集占用的字节数（`msdf_size² × 4`）。
-    pub msdf_bytes: u64,
     /// R8 图集里的字形条目数（覆盖度 + 精确 SDF）。
     pub mask_entries: u32,
     /// 彩色图集里的字形条目数。
     pub color_entries: u32,
-    /// MSDF 图集里的字形条目数 —— 「改宽度/改字号有没有重新栅格化」看这个。
-    pub msdf_entries: u32,
 }
 
 impl TextAtlasStats {
     pub fn total_bytes(&self) -> u64 {
-        self.mask_bytes + self.color_bytes + self.msdf_bytes
+        self.mask_bytes + self.color_bytes
     }
 }
 
@@ -340,8 +328,6 @@ pub struct TextAtlas {
     pub(crate) bind_group: BindGroup,
     pub(crate) color_atlas: InnerAtlas,
     pub(crate) mask_atlas: InnerAtlas,
-    /// 多通道距离场（一个字形一份数据，服务任意字号）。
-    pub(crate) msdf_atlas: InnerAtlas,
     pub(crate) format: TextureFormat,
     pub(crate) color_mode: ColorMode,
     pub(crate) default_base_texture: TextureView,
@@ -353,17 +339,13 @@ impl TextAtlas {
     pub fn stats(&self) -> TextAtlasStats {
         let mask_size = self.mask_atlas.size;
         let color_size = self.color_atlas.size;
-        let msdf_size = self.msdf_atlas.size;
         TextAtlasStats {
             mask_size,
             color_size,
-            msdf_size,
             mask_bytes: u64::from(mask_size) * u64::from(mask_size),
             color_bytes: u64::from(color_size) * u64::from(color_size) * 4,
-            msdf_bytes: u64::from(msdf_size) * u64::from(msdf_size) * 4,
             mask_entries: self.mask_atlas.glyph_cache.len() as u32,
             color_entries: self.color_atlas.glyph_cache.len() as u32,
-            msdf_entries: self.msdf_atlas.glyph_cache.len() as u32,
         }
     }
     /// Creates a new [`TextAtlas`].
@@ -407,13 +389,11 @@ impl TextAtlas {
             },
         );
         let mask_atlas = InnerAtlas::new(&state, Kind::Mask);
-        let msdf_atlas = InnerAtlas::new(&state, Kind::Msdf);
 
         let bind_group = cache.create_atlas_bind_group(
             device,
             &color_atlas.texture_view,
             &mask_atlas.texture_view,
-            &msdf_atlas.texture_view,
             default_base_texture,
             default_base_sampler,
         );
@@ -423,7 +403,6 @@ impl TextAtlas {
             bind_group,
             color_atlas,
             mask_atlas,
-            msdf_atlas,
             format,
             color_mode,
             default_base_texture: default_base_texture.clone(),
@@ -440,7 +419,6 @@ impl TextAtlas {
             device,
             &self.color_atlas.texture_view,
             &self.mask_atlas.texture_view,
-            &self.msdf_atlas.texture_view,
             base_texture,
             &self.default_base_sampler,
         )
@@ -449,7 +427,6 @@ impl TextAtlas {
     pub fn trim(&mut self) {
         self.mask_atlas.trim();
         self.color_atlas.trim();
-        self.msdf_atlas.trim();
     }
 
     pub(crate) fn grow(
@@ -477,13 +454,6 @@ impl TextAtlas {
                 scale_factor,
                 rasterize_custom_glyph,
             ),
-            ContentType::Msdf => self.msdf_atlas.grow(
-                state,
-                font_system,
-                cache,
-                scale_factor,
-                rasterize_custom_glyph,
-            ),
         };
 
         if did_grow {
@@ -497,7 +467,6 @@ impl TextAtlas {
         match content_type {
             ContentType::Color => &mut self.color_atlas,
             ContentType::Mask | ContentType::Sdf => &mut self.mask_atlas,
-            ContentType::Msdf => &mut self.msdf_atlas,
         }
     }
 
@@ -546,7 +515,6 @@ impl TextAtlas {
             device,
             &self.color_atlas.texture_view,
             &self.mask_atlas.texture_view,
-            &self.msdf_atlas.texture_view,
             &self.default_base_texture,
             &self.default_base_sampler,
         );

@@ -442,37 +442,10 @@ pub(crate) const STYLE_STRIDE_U32: usize = 12;
 /// 单层（4 × vec4 = 64B）。
 pub(crate) const LAYER_STRIDE_U32: usize = 16;
 
-/// 距离场表示方式：**精确按尺寸 SDF** 与 **MSDF** 并存，由这里选择。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TextSdfMode {
-    /// 默认：带样式文字在合适时走 MSDF，否则精确 SDF；无样式文字保持覆盖度。
-    #[default]
-    Auto,
-    /// 尽量用 MSDF（超出 range 阶梯或像素字体时 warn-once 后仍回退精确）；
-    /// 无样式文字也会走 MSDF（顶点色填充）。
-    Msdf,
-    /// 一律用精确按尺寸 SDF（质量保险丝；无样式文字仍是覆盖度）。
-    Exact,
-}
-
-/// 选 MSDF 档位：返回 `(生成 em, range(em 比例))`；`None` = 该字号/外扩不适合 MSDF。
-pub(crate) fn pick_msdf(mode: TextSdfMode, em_px: f32, reach_px: f32) -> Option<(f32, f32)> {
-    // ⚠️ `Auto` **暂时不用 MSDF**：MSDF 条目体积大（每档 4B/px + range padding），
-    // 满屏带样式文字会把图集顶到 `grow()`，而 `grow()` 会重新栅格化**全部**已缓存字形
-    // —— 实测 100 字投影 821ms/帧。等图集生命周期（预分配/不抖动）修好再切回默认。
-    // 现在 MSDF 只能显式开启（`TextSdfMode::Msdf`），用于 A/B 与逐轮回归对比。
-    if mode != TextSdfMode::Msdf || em_px <= 0.0 {
-        return None;
-    }
-    let reach_em = reach_px.max(0.0) / em_px;
-    let range_em = crate::glyphon::msdf_pick_range_em(reach_em)?;
-    Some((crate::glyphon::msdf_pick_em(em_px), range_em))
-}
-
 /// **尺寸阶梯**：精确 SDF 的生成字号档（1.25× 步进，从 12px 到 256px）。
 ///
 /// 为什么要有：精确 SDF 的缓存键含字号，改字号就得重栅格化。按阶梯取「不小于目标字号」
-/// 的一档生成、再双线性缩放到目标字号，就得到和 MSDF 一样的「档内改字号不重建」，
+/// 的一档生成、再双线性缩放到目标字号，就得到「档内改字号不重建」，
 /// 而条目仍是 R8 单通道、无 range padding。
 ///
 /// 生成尺寸 ≥ 目标尺寸 ⇒ 永远是**缩小**采样（清晰度损失小于 1.25× 放大）；

@@ -203,7 +203,6 @@ impl TextContext {
                 style_layers: 0,
                 style_above_mask: 0,
                 style_reach: 0.0,
-                sdf_mode: crate::text::TextSdfMode::Exact,
                 vector_stroke: None,
             }],
             &mut self.swash_cache,

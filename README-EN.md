@@ -131,8 +131,8 @@ Details, verification depth and known issues (emulator compatibility, font sourc
   [gradients](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md).
 - **Text**: whole-run shape cache, HUD parts (monospace stepping), `StableText`, custom fonts and
   attrs, COLRv1 color emoji; **text styles** (outline, multi-outline, soft shadow, glow, inner
-  outline, inner shadow) render from a glyph distance field, with **exact per-size SDF and MSDF
-  coexisting** (`TextDef.sdf_mode`) — MSDF means changing font size or stroke width no longer
+  outline, inner shadow) render from a glyph distance field using **exact per-size SDF with a
+  size ladder** — changing font size or stroke width within a ladder/band step no longer
   re-rasterizes. See
   [text styles](https://github.com/MilkCOCO/vireo/blob/master/docs/reference/text-style.md).
 

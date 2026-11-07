@@ -9,8 +9,6 @@ mod cache;
 mod colr;
 mod custom_glyph;
 mod error;
-mod msdf;
-pub(crate) use msdf::{pick_em as msdf_pick_em, pick_range_em as msdf_pick_range_em};
 mod sdf;
 mod text_atlas;
 mod text_render;
@@ -73,9 +71,9 @@ pub(crate) struct GlyphToRender {
     base_uv_rect: [f32; 4],
     /// 样式表下标 + 1（`0` = 无样式）。
     style_index: u32,
-    /// 该字形的距离场带宽 / MSDF range（**设备或生成像素**，按 content_type 解释）。
+    /// 该字形的距离场带宽（**设备或生成像素**，按 content_type 解释）。
     sdf_band: f32,
-    /// 图集里的 texel 尺寸 `(w<<16)|h`：MSDF 的 quad 与 texel 不是 1:1 时用它算 UV 矩形。
+    /// 图集里的 texel 尺寸 `(w<<16)|h`：尺寸阶梯的 quad 与 texel 不是 1:1 时用它算 UV 矩形。
     entry_dim: u32,
 }
 
@@ -160,10 +158,8 @@ pub struct TextArea<'a> {
     pub style_layers: u32,
     /// 位图：第 i 位 = 第 i 层画在填充之上。
     pub style_above_mask: u32,
-    /// 该样式向字形外侧的最大外扩（设备像素，含 3σ 与偏移）——决定 SDF/MSDF 选型。
+    /// 该样式向字形外侧的最大外扩（设备像素）——决定距离场带宽档。
     pub style_reach: f32,
-    /// 距离场表示方式（`Auto` / `Msdf` / `Exact`）。
-    pub sdf_mode: crate::text::TextSdfMode,
     /// 几何描边（真 miter/bevel），画在填充与图层之下。`None` = 没有。
     pub(crate) vector_stroke: Option<crate::text::TextStrokePx>,
 }
