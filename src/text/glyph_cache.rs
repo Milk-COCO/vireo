@@ -346,4 +346,12 @@ impl GlyphCache<'_> {
         ctx.glyph_evicted = ctx.glyph_evicted.saturating_add(n as u64);
         n
     }
+
+    /// 把图集收缩到刚好装下现有条目（**拷贝搬运，不重新光栅化**）。
+    ///
+    /// 清掉一批字形后图集尺寸不会自己缩回去；这个调用把显存真正还给系统。
+    /// 返回是否发生了收缩。条目在图集里的坐标会变，所以**只在两帧之间调**。
+    pub fn compact(&self, device: &Device, queue: &Queue) -> bool {
+        self.sys.ctx().compact_glyphs(device, queue)
+    }
 }

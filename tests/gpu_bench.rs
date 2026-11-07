@@ -8181,3 +8181,161 @@ fn glyph_cache_entries_match_stats() {
     }
     drop(hold);
 }
+
+/// 扩图集用**纹理拷贝**搬运条目：已缓存的字形像素必须原样保留（不能变空白/错位）。
+///
+/// 回归点：`grow()` 以前是"重建纹理 + 把所有字形重新光栅化一遍"，那是一次可见卡顿；
+/// 改成拷贝后，只要坐标/尺寸搬错一个像素，这里渲染出的字形就会缺一块或整体偏移。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_grow_keeps_pixels() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(48.0);
+
+    // 先把要保住的那行字画出来并记下像素（新画布，避免累积）。
+    let render = || {
+        let c = OffscreenCanvas::new(&gpu, 260, 80);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "参照",
+            Pos::new(8.0, 10.0),
+            def.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+    let before_px = render();
+    let before = glyphs.stats();
+
+    // 灌入大量别的字形，逼图集扩容（初始 256²，很快就装不下）。
+    let canvas = OffscreenCanvas::new(&gpu, 512, 300);
+    let mut grew = false;
+    for i in 0..80u32 {
+        let mut b = DrawBatch::new();
+        let text = format!("{}{}", "扩容测试字符", i);
+        draw_text(
+            &mut b.texts,
+            &text,
+            Pos::new(6.0, 6.0),
+            glyph_test_def(30.0 + (i % 25) as f32),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+        if glyphs.stats().grows > before.grows {
+            grew = true;
+            break;
+        }
+    }
+    assert!(
+        grew,
+        "用例失效：没触发扩容（grows={}，容量 {} 字节）",
+        glyphs.stats().grows,
+        glyphs.stats().texture_bytes()
+    );
+
+    let after_px = render();
+    let stats = glyphs.stats();
+    assert!(stats.texture_bytes() > before.texture_bytes(), "纹理应变大");
+
+    let mut diff = 0usize;
+    for (a, b) in before_px.chunks(4).zip(after_px.chunks(4)) {
+        let d = (a[0] as i32 - b[0] as i32)
+            .abs()
+            .max((a[1] as i32 - b[1] as i32).abs())
+            .max((a[2] as i32 - b[2] as i32).abs());
+        if d > 2 {
+            diff += 1;
+        }
+    }
+    assert_eq!(diff, 0, "扩容后同一批文字的像素变了（{diff} 个像素不同）");
+    println!(
+        "  扩容：{} → {} 字节，纹理不变形（0 像素差）",
+        before.texture_bytes(),
+        stats.texture_bytes()
+    );
+}
+
+/// `compact()` 把图集收回去且条目仍然正确（拷贝重新打包，不重新光栅化）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_compact_shrinks_and_keeps_pixels() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(44.0);
+
+    let render = || {
+        let c = OffscreenCanvas::new(&gpu, 240, 80);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "收图",
+            Pos::new(8.0, 10.0),
+            def.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    // 保住"收图"两个字，然后灌一大批别的字形把图集撑大 → compact 才有收缩空间。
+    let hold = glyphs.hold(&gpu.device, &gpu.queue, "收图", &def, 1.0);
+    let base = glyphs.stats();
+    // 一次 prewarm 里塞满一个 prepare 的工作集：会直接把图集撑到更大的一档。
+    glyphs.prewarm(
+        &gpu.device,
+        &gpu.queue,
+        "很多不该留在图集里的字，撑大再说 ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        &glyph_test_def(64.0),
+        1.0,
+    );
+    let before_px = render();
+    let grown = glyphs.stats();
+    assert!(
+        grown.texture_bytes() > base.texture_bytes(),
+        "用例失效：图集没被撑大（{} → {}）",
+        base.texture_bytes(),
+        grown.texture_bytes()
+    );
+
+    let cleared = glyphs.clear_unpinned();
+    assert!(cleared > 0, "应清掉未钉住的条目");
+    let compacted = glyphs.compact(&gpu.device, &gpu.queue);
+    assert!(compacted, "清掉大部分条目后 compact 应当收缩");
+    let after = glyphs.stats();
+    assert!(
+        after.texture_bytes() < grown.texture_bytes(),
+        "纹理应缩小（{} → {}）",
+        grown.texture_bytes(),
+        after.texture_bytes()
+    );
+
+    let after_px = render();
+    let mut diff = 0usize;
+    for (a, b) in before_px.chunks(4).zip(after_px.chunks(4)) {
+        let d = (a[0] as i32 - b[0] as i32)
+            .abs()
+            .max((a[1] as i32 - b[1] as i32).abs())
+            .max((a[2] as i32 - b[2] as i32).abs());
+        if d > 2 {
+            diff += 1;
+        }
+    }
+    assert_eq!(
+        diff, 0,
+        "compact 后钉住的字应逐像素不变（{diff} 个像素不同）"
+    );
+    println!(
+        "  compact：{} → {} 字节，清掉 {cleared} 条，0 像素差（钉住 {} 条）",
+        grown.texture_bytes(),
+        after.texture_bytes(),
+        hold.len()
+    );
+    drop(hold);
+}

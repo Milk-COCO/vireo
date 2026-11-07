@@ -281,6 +281,13 @@ impl TextContext {
         evicted
     }
 
+    /// 把图集收缩到刚好装下现有条目（拷贝搬运，不重新光栅化）。
+    /// 返回是否有图集被收缩。
+    pub fn compact_glyphs(&mut self, device: &Device, queue: &Queue) -> bool {
+        let state = crate::glyphon::State { device, queue };
+        self.text_atlas.compact(&state)
+    }
+
     /// 把 `text` 用得上的字形光栅化进图集，返回 `(新光栅化条目数, 本次触碰到的键)`。
     ///
     /// 顶点会被丢弃（`prepare_discard`），所以这次调用**不产生可见输出**，

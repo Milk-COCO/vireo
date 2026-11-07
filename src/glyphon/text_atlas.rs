@@ -1,7 +1,6 @@
 use super::{
     Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus, RasterizeCustomGlyphRequest,
-    RasterizedCustomGlyph, State, SwashCache,
-    text_render::{GlyphonCacheKey, rasterize_glyph},
+    RasterizedCustomGlyph, State, SwashCache, text_render::GlyphonCacheKey,
 };
 use etagere::{Allocation, BucketedAtlasAllocator, size2};
 use lru::LruCache;
@@ -10,9 +9,8 @@ use std::hash::BuildHasherDefault;
 use std::sync::{Arc, Mutex};
 use wgpu::{
     BindGroup, BlendState, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
-    RenderPipeline, Sampler, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
-    TextureViewDescriptor,
+    RenderPipeline, Sampler, TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
 type Hasher = BuildHasherDefault<FxHasher>;
@@ -103,7 +101,9 @@ impl InnerAtlas {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: kind.texture_format(),
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
@@ -273,6 +273,15 @@ impl InnerAtlas {
         self.kind.num_channels()
     }
 
+    /// 扩图集：尺寸翻倍，已有条目用**纹理拷贝**搬过去（不再重新光栅化）。
+    ///
+    /// 为什么不再重新光栅化：`grow` 会触发在绘制中途，重新光栅化几十上百个字形是
+    /// 毫秒级的可见卡顿；`etagere::grow` 只扩空闲空间、不动已分配块的坐标，所以
+    /// 同一坐标上的一次 `copy_texture_to_texture` 就搬完了。
+    ///
+    /// 代价：失去"重新光栅化时顺手校验条目是否过期"的自愈能力。`rasterize_glyph`
+    /// 是纯函数（同键同图），条目过期只可能来自"字体被移除 / 自定义光栅化器换实现"，
+    /// 这两种情况由调用方显式 `clear` 处理。
     pub(crate) fn grow(
         &mut self,
         state: &State,
@@ -283,6 +292,12 @@ impl InnerAtlas {
             RasterizeCustomGlyphRequest,
         ) -> Option<RasterizedCustomGlyph>,
     ) -> bool {
+        let _ = (
+            &font_system,
+            &cache,
+            &mut rasterize_custom_glyph,
+            scale_factor,
+        );
         if self.size >= self.max_texture_dimension_2d {
             return false;
         }
@@ -295,7 +310,7 @@ impl InnerAtlas {
         self.packer.grow(size2(new_size as i32, new_size as i32));
 
         // Create a texture to use for our atlas
-        self.texture = state.device.create_texture(&TextureDescriptor {
+        let new_texture = state.device.create_texture(&TextureDescriptor {
             label: Some("glyphon atlas"),
             size: Extent3d {
                 width: new_size,
@@ -306,96 +321,238 @@ impl InnerAtlas {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: self.kind.texture_format(),
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
-        // Re-upload glyphs.
-        //
-        // The texture was just recreated, so every glyph's pixels have to be written
-        // again. This re-rasterizes from the cache key instead of keeping a copy of
-        // the pixels, which is only sound because `rasterize_glyph` is pure — see its
-        // docs.
-        let mut stale: Vec<GlyphonCacheKey> = Vec::new();
-        for (&cache_key, glyph) in &self.glyph_cache {
-            let (x, y) = match glyph.gpu_cache {
-                GpuCacheStatus::InAtlas { x, y, .. } => (x, y),
-                GpuCacheStatus::SkipRasterization => continue,
-            };
-
-            let image = rasterize_glyph(
-                font_system,
-                cache,
-                cache_key,
-                scale_factor,
-                &mut rasterize_custom_glyph,
-            );
-
-            // A glyph that no longer rasterizes (its font left the font system, a
-            // custom rasterizer changed its mind) would leave its atlas region blank.
-            // So would one whose size changed — the write below is sized from the
-            // image, and would spill into whatever is packed next to it. Both mean
-            // the cache entry is now lying about what is in the texture, so drop it
-            // and let the next frame re-rasterize and re-place it.
-            let stale_entry = match &image {
-                None => true,
-                Some(image) => {
-                    image.content_type != self.kind.as_content_type()
-                        || image.width != glyph.width
-                        || image.height != glyph.height
-                }
-            };
-
-            let Some(image) = image.filter(|_| !stale_entry) else {
-                log::warn!(
-                    "glyphon: dropping {:?} from the {:?} atlas: it no longer re-rasterizes \
-                     to the cached glyph; it will be drawn again next frame",
-                    cache_key,
-                    self.kind,
-                );
-                stale.push(cache_key);
+        // 把旧图里的条目原坐标搬过去（packer 增长不移动已分配的块）。
+        let old_texture = std::mem::replace(&mut self.texture, new_texture);
+        let mut encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vireo glyph atlas grow"),
+            });
+        let mut copied = 0u32;
+        for glyph in self.glyph_cache.iter().map(|(_, g)| g) {
+            let GpuCacheStatus::InAtlas { x, y, .. } = glyph.gpu_cache else {
                 continue;
             };
-
-            state.queue.write_texture(
+            let (w, h) = (u32::from(glyph.width), u32::from(glyph.height));
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let size = Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            };
+            encoder.copy_texture_to_texture(
                 TexelCopyTextureInfo {
-                    texture: &self.texture,
+                    texture: &old_texture,
                     mip_level: 0,
                     origin: Origin3d {
-                        x: x as u32,
-                        y: y as u32,
+                        x: u32::from(x),
+                        y: u32::from(y),
                         z: 0,
                     },
                     aspect: TextureAspect::All,
                 },
-                &image.data,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(image.width as u32 * self.kind.num_channels() as u32),
-                    rows_per_image: None,
+                TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: u32::from(x),
+                        y: u32::from(y),
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
                 },
-                Extent3d {
-                    width: image.width as u32,
-                    height: image.height as u32,
-                    depth_or_array_layers: 1,
-                },
+                size,
             );
+            copied += 1;
         }
-
-        // Hand the dropped glyphs' atlas slots back to the packer.
-        for cache_key in stale {
-            if let Some(details) = self.glyph_cache.pop(&cache_key)
-                && let Some(allocation) = details.atlas_id
-            {
-                self.packer.deallocate(allocation);
-            }
+        if copied > 0 {
+            state.queue.submit(Some(encoder.finish()));
         }
+        // 旧纹理在这里 drop：wgpu 会等到提交完成后再真正释放。
 
         self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = new_size;
         self.grows = self.grows.saturating_add(1);
+        log::debug!(
+            "glyphon: {:?} atlas grew to {}²（拷贝 {} 条条目，未重新光栅化）",
+            self.kind,
+            new_size,
+            copied
+        );
 
         true
+    }
+
+    /// 缩图集：把仍然保留的条目重新打包到更小的纹理里（拷贝，不重新光栅化）。
+    ///
+    /// 什么时候用：清掉一批字形（`clear_unpinned` / 句柄释放 + 预算淘汰）之后，
+    /// 图集尺寸不会自己缩回去 —— 显存就一直是历史峰值。`compact` 把它收回来。
+    ///
+    /// 只在这些情况返回 `false`（图集保持原样）：尺寸已经最小、或腾挪空间不够
+    /// （碎片导致重新打包失败）。
+    ///
+    /// 注意：**条目坐标会变**，所以只能在两帧之间调（已经准备好的顶点不保证还有效）。
+    pub(crate) fn compact(&mut self, state: &State) -> bool {
+        const MIN_SIZE: u32 = InnerAtlas::INITIAL_SIZE;
+        let live_area: u64 = self
+            .glyph_cache
+            .iter()
+            .filter_map(|(_, d)| d.atlas_id.map(|_| u64::from(d.width) * u64::from(d.height)))
+            .sum();
+        if live_area == 0 {
+            // 全空：直接回到初始尺寸，连拷贝都省了。
+            if self.size <= MIN_SIZE {
+                return false;
+            }
+            self.recreate(state, MIN_SIZE);
+            self.packer = BucketedAtlasAllocator::new(size2(MIN_SIZE as i32, MIN_SIZE as i32));
+            self.grows = self.grows.saturating_add(1);
+            return true;
+        }
+        // 目标边长 = 2 × sqrt(内容面积)，向上取到 2 的幂；留一倍余量给后续增长。
+        let side = ((live_area as f64).sqrt() * 2.0).ceil() as u32;
+        let mut target = MIN_SIZE;
+        while target < side && target < self.max_texture_dimension_2d {
+            target = (target * 2).min(self.max_texture_dimension_2d);
+        }
+        if target >= self.size {
+            return false;
+        }
+
+        // 先在新 packer 里排好（大的先排，碎片最少）；任何一个排不下就整体放弃。
+        let mut items: Vec<(GlyphonCacheKey, u16, u16)> = self
+            .glyph_cache
+            .iter()
+            .filter(|(_, d)| d.atlas_id.is_some() && d.width > 0 && d.height > 0)
+            .map(|(k, d)| (*k, d.width, d.height))
+            .collect();
+        items.sort_by_key(|(_, w, h)| std::cmp::Reverse(u64::from(*w) * u64::from(*h)));
+
+        let mut new_packer = BucketedAtlasAllocator::new(size2(target as i32, target as i32));
+        let mut placements: Vec<(GlyphonCacheKey, Allocation)> = Vec::with_capacity(items.len());
+        for (key, w, h) in items {
+            let Some(allocation) = new_packer.allocate(size2(i32::from(w), i32::from(h))) else {
+                log::debug!(
+                    "glyphon: compact 放弃（{}² 排不下 {} 条）",
+                    target,
+                    placements.len()
+                );
+                return false;
+            };
+            placements.push((key, allocation));
+        }
+
+        let new_texture = state.device.create_texture(&TextureDescriptor {
+            label: Some("glyphon atlas"),
+            size: Extent3d {
+                width: target,
+                height: target,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: self.kind.texture_format(),
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let old_texture = std::mem::replace(&mut self.texture, new_texture);
+
+        let mut encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vireo glyph atlas compact"),
+            });
+        for (key, allocation) in &placements {
+            let Some(details) = self.glyph_cache.peek(key) else {
+                continue;
+            };
+            let GpuCacheStatus::InAtlas { x, y, content_type } = details.gpu_cache else {
+                continue;
+            };
+            let (w, h) = (u32::from(details.width), u32::from(details.height));
+            let min = allocation.rectangle.min;
+            encoder.copy_texture_to_texture(
+                TexelCopyTextureInfo {
+                    texture: &old_texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: u32::from(x),
+                        y: u32::from(y),
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: Origin3d {
+                        x: min.x as u32,
+                        y: min.y as u32,
+                        z: 0,
+                    },
+                    aspect: TextureAspect::All,
+                },
+                Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            // 拷贝指令已经记下旧坐标，这里就可以把条目改写到新位置。
+            if let Some(details) = self.glyph_cache.get_mut(key) {
+                details.gpu_cache = GpuCacheStatus::InAtlas {
+                    x: min.x as u16,
+                    y: min.y as u16,
+                    content_type,
+                };
+                details.atlas_id = Some(allocation.id);
+            }
+        }
+        state.queue.submit(Some(encoder.finish()));
+
+        self.packer = new_packer;
+        self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
+        self.size = target;
+        self.grows = self.grows.saturating_add(1);
+        log::debug!(
+            "glyphon: {:?} atlas compacted to {}²（搬迁 {} 条条目）",
+            self.kind,
+            target,
+            placements.len()
+        );
+        true
+    }
+
+    fn recreate(&mut self, state: &State, size: u32) {
+        self.texture = state.device.create_texture(&TextureDescriptor {
+            label: Some("glyphon atlas"),
+            size: Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: self.kind.texture_format(),
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
+        self.size = size;
     }
 
     pub(crate) fn trim(&mut self) {
@@ -429,13 +586,6 @@ impl Kind {
                     TextureFormat::Rgba8Unorm
                 }
             }
-        }
-    }
-
-    fn as_content_type(&self) -> ContentType {
-        match self {
-            Self::Mask => ContentType::Mask,
-            Self::Color { .. } => ContentType::Color,
         }
     }
 }
@@ -584,6 +734,17 @@ impl TextAtlas {
     /// 清掉全部字形（含钉住的）。
     pub(crate) fn clear_all(&mut self) -> usize {
         self.mask_atlas.clear_all() + self.color_atlas.clear_all()
+    }
+
+    /// 把两张图都收到"刚好装下现有条目"的尺寸（拷贝，不重新光栅化）。
+    /// 返回是否有图集被收缩。
+    pub(crate) fn compact(&mut self, state: &State) -> bool {
+        let mask = self.mask_atlas.compact(state);
+        let color = self.color_atlas.compact(state);
+        if mask || color {
+            self.rebind(state.device);
+        }
+        mask || color
     }
 
     /// 累计计数 `(rasterizations, evictions, grows)`。
