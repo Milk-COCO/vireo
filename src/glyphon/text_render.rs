@@ -1517,8 +1517,15 @@ impl QuadBuckets {
 }
 
 /// band 量化到 1/8 像素，限制缓存变体数量。
+/// 带宽的量化：`band_q = band * 8`。
+///
+/// 上限必须 ≥ `BAND_MAX * 8`（当前 64 * 8 = 512）。之前钳在 256（= band 32），
+/// 加入 64 档之后就出现"距离场按 32 编码、顶点按 64 解码"→ 距离翻倍 →
+/// 描边视觉厚度变成一半（32px 描边画出来像 16px，看起来像"宽度没区别"）。
 pub(crate) fn quantize_band(band: f32) -> u16 {
-    (band.max(1.0) * 8.0).round().clamp(8.0, 256.0) as u16
+    // 上限跟 `BAND_MAX` 走（64 * 8 = 512），不能再钳在 256。
+    let max = (crate::text::BAND_MAX * 8.0).max(8.0);
+    (band.max(1.0) * 8.0).round().clamp(8.0, max) as u16
 }
 
 fn append_custom_glyph<R>(
