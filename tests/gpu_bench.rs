@@ -6635,6 +6635,30 @@ fn glyph_cache_perf() {
     let shrunk = gpu_b.text().glyphs().compact(&gpu_b.device, &gpu_b.queue);
     let compact_ms = t.elapsed().as_secs_f64() * 1000.0;
 
+    // ---- 5. 观测接口本身的成本：`stats()` 必须 O(1)，`entries()` 是 O(n) 快照 ----
+    //
+    // 预算检查每帧都要问一次占用，所以 `stats()` 一旦退化成全量扫描就会变成每帧 O(n)。
+    let s_b = gpu_b.text().glyphs().stats();
+    let t = Instant::now();
+    for _ in 0..1000 {
+        std::hint::black_box(gpu_b.text().glyphs().stats());
+    }
+    let stats_us = t.elapsed().as_secs_f64() * 1e6 / 1000.0;
+    let t = Instant::now();
+    for _ in 0..10 {
+        std::hint::black_box(gpu_b.text().glyphs().entries());
+    }
+    let entries_us = t.elapsed().as_secs_f64() * 1e6 / 10.0;
+    println!(
+        "  stats() {stats_us:.2} µs/次 | entries() {entries_us:.1} µs/次（{} 条）",
+        s_b.entries()
+    );
+    assert!(
+        stats_us < 50.0,
+        "stats() 应是 O(1) 聚合（实测 {stats_us:.1} µs/次，{} 条）",
+        s_b.entries()
+    );
+
     println!(
         "  save：{saved} 条 → {file_kib} KiB，{save_ms:.2} ms（{:.3} ms/条；另有队列排空参考 {flush_ms:.2} ms）",
         save_ms / saved.max(1) as f64
