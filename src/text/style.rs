@@ -504,8 +504,11 @@ pub(crate) fn sdf_ladder_em(em_px: f32) -> f32 {
 /// padding 也跟着变大（2*band），所以只留 4 档。
 const BAND_TIERS: [f32; 5] = [4.0, 8.0, 16.0, 32.0, 64.0];
 
-/// 带宽上限（像素）：超过它的外扩会被钳制（着色器里饱和区域强制 0 覆盖，
-/// 所以表现是"描边被切掉"，而不是"整块矩形被涂满"）。
+/// 带宽上限（像素）。暂时停在 64：往上扩档（128/256）时会复现「整块 quad 被涂满」
+/// 的问题（离屏实测 w=64 整块 282x227 上色），原因还没定位，所以先不退这个档。
+///
+/// 已知后果：这是**设备像素**，200% 缩放时 64 设备像素 = 32 逻辑像素，
+/// 所以高 DPI + 大描边（>32 逻辑像素）会看起来"再拉宽度没变化"。
 pub(crate) const BAND_MAX: f32 = 64.0;
 
 /// 把「样式外扩」映射到带宽档位（向上取档）。
@@ -843,7 +846,11 @@ mod tests {
         assert_eq!(band_for_reach(4.1), 8.0);
         assert_eq!(band_for_reach(15.9), 16.0);
         assert_eq!(band_for_reach(40.0), 64.0, "32 < reach <= 64 用 64 档");
-        assert_eq!(band_for_reach(100.0), 64.0, "超上限钳到最后一档");
+        assert_eq!(
+            band_for_reach(1000.0),
+            crate::text::BAND_MAX,
+            "超上限钳到最后一档"
+        );
 
         // 描边 0.5..8 + 3σ/偏移余量 ⇒ 只有少数几档，滑块拖动不会每帧重建。
         let mut tiers = std::collections::BTreeSet::new();
