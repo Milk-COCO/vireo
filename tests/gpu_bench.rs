@@ -8783,9 +8783,10 @@ fn glyph_cache_budget_churn_perf() {
         let per_frame = rasters as f64 / FRAMES as f64;
         println!(
             "  {label}：{ms:.2} ms/帧，光栅化 {per_frame:.1} 次/帧（{rasters} / {FRAMES} 帧），\
-             条目 {} / 占用 {} KiB / 淘汰 {}",
+             条目 {} / 占用 {} KiB / 单帧峰值 {} KiB / 淘汰 {}",
             s.entries(),
             s.used_bytes() / 1024,
+            s.peak_used_bytes / 1024,
             s.evictions
         );
         if budget == Some(128 * 1024) {
@@ -8794,10 +8795,21 @@ fn glyph_cache_budget_churn_perf() {
                 "预算远小于工作集时应该每帧重光栅化（实际 {per_frame:.1} 次/帧）——\
                  如果这条不成立，说明淘汰策略变了"
             );
+            assert!(
+                s.peak_used_bytes > 128 * 1024,
+                "单帧峰值应大于这个（过小的）预算（峰值 {} 字节）",
+                s.peak_used_bytes
+            );
         } else {
             assert!(
                 per_frame < 5.0,
                 "预算装得下时稳态不该重光栅化（实际 {per_frame:.1} 次/帧）"
+            );
+            // 预算够时峰值必须落在预算内（否则"够"这个判断本身就有问题）。
+            assert!(
+                s.peak_used_bytes <= budget.unwrap_or(u64::MAX),
+                "峰值 {} 应 ≤ 预算",
+                s.peak_used_bytes
             );
         }
     }

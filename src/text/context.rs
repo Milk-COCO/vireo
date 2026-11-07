@@ -74,6 +74,9 @@ pub struct TextContext {
     /// 用户/预算触发的淘汰次数与条数。
     pub(crate) glyph_trims: u64,
     pub(crate) glyph_evicted: u64,
+    /// 观测到的**单帧占用峰值**（帧首读数取 max）。这是"预算该给多大"的实测依据：
+    /// 预算小于它就会每帧重光栅化（`set_budget` 会据此 warn 一次）。
+    pub(crate) glyph_peak_bytes: u64,
 }
 
 #[doc(hidden)]
@@ -223,6 +226,8 @@ impl TextContext {
         // 图集代数推进：上一帧用过的字形从这一帧起可被淘汰。
         // （此前从没推进过，`try_allocate` 因此永远认为"全都在用" → 只扩不淘。）
         self.text_atlas.trim();
+        // 记下"上一帧结束时图集有多大"—— 这就是单帧工作集的实测值（预算该给多大看它）。
+        self.glyph_peak_bytes = self.glyph_peak_bytes.max(self.text_atlas.live_bytes());
         self.enforce_glyph_budget();
         if self.typeset_ttl.is_none() {
             return;
@@ -241,6 +246,18 @@ impl TextContext {
 
     /// 设置字形缓存预算（两张图集**合计**占用，字节；`None` = 不限制）。
     pub fn set_glyph_budget(&mut self, bytes: Option<u64>) {
+        // 预算小于已观测到的单帧峰值 ⇒ 必然每帧淘汰+重光栅化（真实窗口里 20ms/帧级别）。
+        // 这里只提示，不擅自改用户给的数字：`stats().peak_used_bytes` 是他自己调参的依据。
+        if let Some(budget) = bytes
+            && budget < self.glyph_peak_bytes
+        {
+            log::warn!(
+                "vireo: 字形缓存预算 {} KiB 小于观测到的单帧占用峰值 {} KiB —— \
+                 会每帧淘汰并在下一帧重新光栅化（建议 ≥ 1.5× 峰值）",
+                budget / 1024,
+                self.glyph_peak_bytes / 1024
+            );
+        }
         self.glyph_budget = bytes;
         self.glyph_budget_warnings = 0;
     }
@@ -939,6 +956,7 @@ impl TextContext {
             glyph_budget_warnings: 0,
             glyph_trims: 0,
             glyph_evicted: 0,
+            glyph_peak_bytes: 0,
         }
     }
 }

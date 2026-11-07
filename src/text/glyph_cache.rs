@@ -112,6 +112,11 @@ pub struct GlyphCacheStats {
     pub trims: u64,
     /// 超预算但淘汰不动（全是钉住/在用）的告警次数（0/1，改预算后重置）。
     pub budget_warnings: u64,
+    /// 观测到的**单帧占用峰值**（帧首读数取 max）。
+    ///
+    /// 这是"预算该给多大"的实测依据：预算小于它就会每帧淘汰+重光栅化
+    /// （真实窗口里代价是 20ms/帧级别）。建议 `set_budget` 取 **1.5–2×** 这个值。
+    pub peak_used_bytes: u64,
 }
 
 impl GlyphCacheStats {
@@ -205,6 +210,7 @@ impl GlyphCache<'_> {
             grows,
             trims: ctx.glyph_trims,
             budget_warnings: ctx.glyph_budget_warnings,
+            peak_used_bytes: ctx.glyph_peak_bytes,
         }
     }
 

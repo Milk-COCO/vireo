@@ -58,7 +58,14 @@ fn bench_grid() -> Vec<String> {
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Text Glyph Cache", 960, 640));
+    // `VIREO_TEXT_CACHE_NOVSYNC=1`：关掉垂直同步跑基准 —— 帧耗时才等于**真实 CPU 成本**
+    // （开着 vsync 时 acquire/present 会把数字钳在 8.33 ms 附近，看不出编码成本）。
+    let no_vsync = std::env::var("VIREO_TEXT_CACHE_NOVSYNC").is_ok();
+    let mut desc = WindowDesc::new("Text Glyph Cache", 960, 640);
+    if no_vsync {
+        desc = desc.present_mode(PresentMode::AutoNoVsync).max_fps(None);
+    }
+    let idx = app.window(desc);
     // `VIREO_TEXT_CACHE_BENCH=1`：不等人按键，自动跑预算三档、每档打印一行到 stderr，
     // 最后一档结束就退出。用来在真实窗口（含 vsync/合成）里复跑无头测出来的结论。
     let bench = std::env::var("VIREO_TEXT_CACHE_BENCH").is_ok();
@@ -71,6 +78,8 @@ async fn main() {
     let mut bench_frame = 0u32;
     let mut bench_rasters = 0u64;
     let mut bench_sum_ms = 0.0f64;
+    let mut bench_encode_ms = 0.0f64;
+    let mut bench_wait_ms = 0.0f64;
     let mut bench_frames_done = 0u32;
 
     let mut paused = false;
@@ -104,7 +113,11 @@ async fn main() {
         // （`physical` 会把 font_size 乘 scale），一帧之后全部变成 miss。
         if hold.is_none() {
             let scale = win.layout_scale() as f32;
-            glyphs.set_budget(if bench { BENCH_BUDGETS[0] } else { Some(1024 * 1024) });
+            glyphs.set_budget(if bench {
+                BENCH_BUDGETS[0]
+            } else {
+                Some(1024 * 1024)
+            });
             hold = Some(glyphs.hold(
                 &gpu.device,
                 &gpu.queue,
@@ -186,6 +199,8 @@ async fn main() {
                 glyphs.set_budget(BENCH_BUDGETS[bench_stage]);
                 bench_rasters = glyphs.stats().rasterizations;
                 bench_sum_ms = 0.0;
+                bench_encode_ms = 0.0;
+                bench_wait_ms = 0.0;
                 bench_frames_done = 0;
             }
             let mut grid = DrawBatch::new();
@@ -199,23 +214,33 @@ async fn main() {
                 );
             }
             let t = Instant::now();
-            win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &[&grid]);
+            let report = win.draw(Color::new(0.07, 0.07, 0.10, 1.0), &[&grid]);
             let frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+            // 拆分：`encode` = 记录 + prepare（含字形光栅化）+ 编码 + submit；
+            // `acquire/present` = 等 swapchain / 等 vsync。
+            let encode_ms = report.timings.encode_secs * 1000.0;
+            let wait_ms = (report.timings.acquire_secs + report.timings.present_secs) * 1000.0;
 
             bench_frame += 1;
             if bench_frame > BENCH_WARMUP {
                 bench_sum_ms += frame_ms;
+                bench_encode_ms += encode_ms;
+                bench_wait_ms += wait_ms;
                 bench_frames_done += 1;
             }
             if bench_frames_done >= BENCH_FRAMES {
                 let s = glyphs.stats();
                 let rasters = s.rasterizations - bench_rasters;
+                let n = bench_frames_done as f64;
                 println!(
-                    "[bench] {:<18} {:.2} ms/帧（{:>5.1} fps）光栅化 {:.1} 次/帧 | 条目 {} 占用 {}KiB 淘汰 {}",
+                    "[bench] {:<18} {:>6.2} ms/帧（{:>5.1} fps）= 编码 {:>5.2} + 等待 {:>5.2} | \
+                     光栅化 {:.1} 次/帧 | 条目 {} 占用 {}KiB 淘汰 {}",
                     BENCH_LABELS[bench_stage],
-                    bench_sum_ms / bench_frames_done as f64,
-                    1000.0 / (bench_sum_ms / bench_frames_done as f64).max(0.001),
-                    rasters as f64 / bench_frames_done as f64,
+                    bench_sum_ms / n,
+                    1000.0 / (bench_sum_ms / n).max(0.001),
+                    bench_encode_ms / n,
+                    bench_wait_ms / n,
+                    rasters as f64 / n,
                     s.entries(),
                     s.used_bytes() / 1024,
                     s.evictions,
