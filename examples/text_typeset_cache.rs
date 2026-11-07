@@ -1,6 +1,6 @@
-//! 文字 shape 缓存压力示例 + 动态 transform。
+//! 文字**排版（typeset）缓存**压力示例 + 动态 transform。
 //!
-//! 统计每秒打印到终端（不画动态 HUD 数字，避免污染 shape cache）。
+//! 统计每秒打印到终端（不画动态 HUD 数字，避免污染排版缓存）。
 //!
 //! STATIC：固定文案池（应高 hit，entries 稳定）  
 //! DYNAMIC：每帧 format 新串（应低 hit，entries 涨）  
@@ -13,8 +13,12 @@
 //! - `C`  立即清空缓存
 //! - 空格  STATIC / DYNAMIC
 //!
+//! 术语：文字侧叫 **typeset / 排版**；UI 布局叫 layout，几何叫 shape。
+//! 排版缓存存的是「shape 过的 Buffer」，不管光栅化结果（那个是
+//! `text().glyphs()`，见 `examples/text_cache.rs`）。
+//!
 //! ```bash
-//! cargo run --example text_shape_cache
+//! cargo run --example text_typeset_cache
 //! ```
 
 use std::f32::consts::TAU;
@@ -24,7 +28,7 @@ use vireo::prelude::*;
 
 const STATIC_POOL: &[&str] = &[
     "Vireo",
-    "Shape Cache",
+    "Typeset Cache",
     "你好世界",
     "击杀",
     "金币",
@@ -59,10 +63,10 @@ const FONT_SIZES: &[f32] = &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0];
 
 #[vireo::main]
 async fn main() {
-    let idx = app.window(WindowDesc::new("Text Shape Cache Stress", 960, 640));
+    let idx = app.window(WindowDesc::new("Text Typeset Cache Stress", 960, 640));
 
-    app.gpu.set_shape_cache_ttl(Some(Duration::from_secs(2)));
-    app.gpu.set_shape_cache_max_entries(Some(4096));
+    app.gpu.set_typeset_ttl(Some(Duration::from_secs(2)));
+    app.gpu.set_typeset_max_entries(Some(4096));
 
     let mut dynamic = false;
     let mut frame: u32 = 0;
@@ -74,7 +78,7 @@ async fn main() {
     let mut last_log = Instant::now() - Duration::from_secs(1);
     let t0 = Instant::now();
 
-    eprintln!("[text_shape_cache] logging stats to terminal every 1s");
+    eprintln!("[text_typeset_cache] logging stats to terminal every 1s");
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -84,37 +88,37 @@ async fn main() {
         let t = t0.elapsed().as_secs_f32();
 
         if win.key_down(KeyCode::Digit1) {
-            ctx.app().gpu.set_shape_cache_ttl(Some(Duration::from_secs(2)));
+            ctx.app().gpu.set_typeset_ttl(Some(Duration::from_secs(2)));
             ttl_label = "TTL=2s";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit2) {
-            ctx.app().gpu.set_shape_cache_ttl(None);
+            ctx.app().gpu.set_typeset_ttl(None);
             ttl_label = "TTL=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit3) {
-            ctx.app().gpu.set_shape_cache_max_entries(Some(64));
+            ctx.app().gpu.set_typeset_max_entries(Some(64));
             max_label = "max=64";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit4) {
-            ctx.app().gpu.set_shape_cache_max_entries(None);
+            ctx.app().gpu.set_typeset_max_entries(None);
             max_label = "max=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::KeyC) {
-            ctx.app().gpu.clear_shape_cache();
-            ctx.app().gpu.reset_shape_cache_stats();
-            eprintln!("[text_shape_cache] cache cleared");
+            ctx.app().gpu.clear_typeset_cache();
+            ctx.app().gpu.reset_typeset_stats();
+            eprintln!("[text_typeset_cache] cache cleared");
         }
         if win.key_down(KeyCode::Space) {
             dynamic = !dynamic;
-            ctx.app().gpu.clear_shape_cache();
-            ctx.app().gpu.reset_shape_cache_stats();
+            ctx.app().gpu.clear_typeset_cache();
+            ctx.app().gpu.reset_typeset_stats();
             cfg_dirty = true;
             eprintln!(
-                "[text_shape_cache] mode => {}",
+                "[text_typeset_cache] mode => {}",
                 if dynamic { "DYNAMIC" } else { "STATIC" }
             );
         }
@@ -127,8 +131,8 @@ async fn main() {
 
         // 每秒终端输出（不画动态数字 HUD）
         if last_log.elapsed() >= Duration::from_secs(1) {
-            let n = ctx.app().gpu.shape_cache_len();
-            let stats = ctx.app().gpu.shape_cache_stats();
+            let n = ctx.app().gpu.typeset_len();
+            let stats = ctx.app().gpu.typeset_stats();
             let total = stats.hits + stats.misses;
             let hit_pct = if total > 0 {
                 100.0 * stats.hits as f64 / total as f64
@@ -137,7 +141,7 @@ async fn main() {
             };
             let avg_gc = stats.total_gc_us.checked_div(stats.gc_runs).unwrap_or(0);
             eprintln!(
-                "[text_shape_cache] FPS={:.1} frame={:.2}ms | entries={n} hit={hit_pct:.1}% (h={} m={}) | gc_runs={} last_gc={}us avg_gc={}us | {}",
+                "[text_typeset_cache] FPS={:.1} frame={:.2}ms | entries={n} hit={hit_pct:.1}% (h={} m={}) | gc_runs={} last_gc={}us avg_gc={}us | {}",
                 ctx.fps(),
                 ctx.frame_time() * 1000.0,
                 stats.hits,
@@ -157,7 +161,7 @@ async fn main() {
         let mut hud = DrawBatch::new();
         draw_text(
             &mut hud.texts,
-            "Shape cache stress + transform",
+            "Typeset cache stress + transform",
             Pos::new(16.0, 12.0),
             TextDef::default().font_size(20.0),
             TextOverride::from_color(WHITE),

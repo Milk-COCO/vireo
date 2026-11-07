@@ -139,7 +139,7 @@ async fn main() {
             ov(Color::new(0.7, 0.4, 0.4, 1.0)),
         );
 
-        let st = ctx.app().gpu.shape_cache_stats();
+        let st = ctx.app().gpu.typeset_stats();
         let tot = st.hits + st.misses;
         let hit = if tot > 0 {
             100.0 * st.hits as f64 / tot as f64
@@ -152,7 +152,7 @@ async fn main() {
                 TextPart::normal("shape hit~"),
                 TextPart::glyphs(format!("{hit:.0}")),
                 TextPart::normal("%  entries "),
-                TextPart::glyphs(ctx.app().gpu.shape_cache_len().to_string()),
+                TextPart::glyphs(ctx.app().gpu.typeset_len().to_string()),
             ],
             Pos::new(16.0, 312.0),
             def(13.0),

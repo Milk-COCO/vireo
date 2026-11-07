@@ -68,6 +68,7 @@ That is a verbatim copy of
 red rectangle, a blue circle, a green line and one line of Chinese text on black. Next:
 
 - Text and HUD parts → `cargo run --example text_hud`
+- Glyph cache (budget / pins / persistence) → `cargo run --example text_cache`
 - Custom WGSL materials → `cargo run --example custom_material`
 - Android project → [`examples/android/`](https://github.com/Milk-COCO/vireo/blob/master/examples/android/README.md)
 
@@ -129,11 +130,13 @@ Details, verification depth and known issues (emulator compatibility, font sourc
 - **Gradients**: rect / rounded / circle / line / polyline / polygon — one mechanism, either
   box-axial or along the shape; still 1 instance / 1 draw call — see
   [gradients](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md).
-- **Text**: whole-run shape cache, HUD parts (monospace stepping), `StableText`, custom fonts and
-  attrs, COLRv1 color emoji; **text styles** (outline, multi-outline, soft shadow, glow, inner
-  outline, inner shadow) render from a glyph distance field using **exact per-size SDF with a
-  size ladder** — changing font size or stroke width within a ladder/band step no longer
-  re-rasterizes. See
+- **Text**: whole-run typeset (shaping) cache, HUD parts (monospace stepping), `StableText`,
+  custom fonts and attrs, COLRv1 color emoji; **text styles** (outline, multi-outline, soft
+  shadow, glow, inner outline, inner shadow) render from a glyph distance field using
+  **exact per-size SDF with a size ladder** — changing font size or stroke width within a
+  ladder/band step no longer re-rasterizes. The **glyph cache is user-manageable**
+  (`gpu.text().glyphs()`): budget, prewarm, `hold` pins, `compact`, cross-process `save`/`load`.
+  See [text](https://github.com/MilkCOCO/vireo/blob/master/docs/reference/text.md) /
   [text styles](https://github.com/MilkCOCO/vireo/blob/master/docs/reference/text-style.md).
 
 ## Android: the most distinctive part

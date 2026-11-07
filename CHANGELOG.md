@@ -4,6 +4,14 @@
 
 ### Changed / 变更
 
+- **文字 API 归一到一个门面**：新增 `GpuContext::text() -> &TextSystem` 与
+  `TextSystem`（字体 / 排版缓存 / 字形图集 / 渲染器的统一入口）。`measure_text`、
+  `typeset_*`、`make_stable_text`、`load_font` 等方法在 `GpuContext` 上保留为便捷转发。
+  `GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
+- **「shape 缓存」改名「typeset / 排版缓存」**：文字侧统一用 `typeset`，因为 `shape`
+  在本库里指几何图形、`layout` 指 UI 布局。`set_shape_cache_ttl` / `shape_cache_len` /
+  `clear_shape_cache` / `shape_cache_stats` 等旧名保留一个版本作为兼容壳，下一版删除。
+  示例 `text_shape_cache` 同步改名为 `text_typeset_cache`。
 - **移除 MSDF 可选路径**：只保留「精确按尺寸 SDF + 尺寸阶梯」，`TextSdfMode` /
   `TextDef.sdf_mode` / `ContentType::Msdf` / 独立 MSDF 图集一并删除。评估结论：MSDF 面积比
   精确 SDF 胖 **+1.5%~+4%**，但尖角并不更锐；每像素 4B 再加 range 补边，导致 **10–20×**
@@ -12,6 +20,13 @@
 
 ### Fixed / 修复
 
+- **字形图集从不淘汰**：`InnerAtlas::trim()`（推进帧代数）从来没有被调用过，导致
+  `try_allocate` 永远认为「所有条目本帧都在用」→ 图集只扩不淘，显存一路涨到最大纹理。
+  现在每帧 `advance_frame` 推进会话代数，淘汰分两档：**先扔冷条目**（本帧与上一帧都没用到），
+  不够才扩图集，图集到顶后才动「上一帧还在用」的热条目。
+- **扩图集不再重新光栅化全部字形**：`grow()` 原来重建纹理后把所有字形重光一遍（几十上百个
+  字形，毫秒级可见卡顿）；现在用 `copy_texture_to_texture` 原坐标搬运（`etagere::grow` 不移动
+  已分配的块）。代价是失去「重光栅化时顺手校验条目」的自愈能力，换字体后用 `clear()` 处理。
 - **距离场带宽随字号缩放**：带宽档（4/8/16/32/64）改为按 44px 参考字号解释、再按实际字号换算。
   之前是绝对设备像素，200% 缩放下 32 逻辑像素以上的描边会"再拉粗没变化"。
 - **描边宽度的两处跳变**：`band_q` 量化上限原来钳在 256（= band 32），跨到更大档时距离翻倍、
@@ -28,6 +43,26 @@
 
 ### Added / 新增
 
+- **用户可管的字形缓存**：`gpu.text().glyphs()` 返回 `GlyphCache<'_>`，把「字形画一次就别再画」
+  和「显存别失控」这两件事交给用户：
+  - **预算** `set_budget(Some(bytes))`：帧首检查，超了就淘汰未钉住的 LRU 字形
+    （两档淘汰：先冷后热）；全是钉子时只 `warn` 一次，不硬砸钉子。
+  - **预光栅化** `prewarm(dev, queue, text, &def, scale)`：加载阶段把文案填进图集，
+    不产生可见输出，返回新光栅化的条目数。
+  - **钉子** `hold(..) -> GlyphHold`：先 `prewarm` 再钉住，句柄活着期间不被淘汰；
+    引用计数语义，多个句柄钉同一批字形，最后一个释放才解钉。
+  - **回收** `trim()` / `clear_unpinned()` / `clear()` / `compact()`：`compact` 把条目
+    拷贝重排到更小的纹理（不重新光栅化），把显存真正还回去。
+  - **观测** `stats()`（O(1) 聚合）/ `entries()`（逐条快照，含 `content` 是
+    `Mask`/`Sdf`/`Color`、`pinned`、`in_use`、键摘要）。
+- **字形缓存跨进程持久化**：`glyphs().save(dev, queue, path)` /
+  `glyphs().load(dev, queue, path)`，格式 `VRTX` v1。
+  - 字体身份用「postscript 名 + 字体数据摘要」而不是 `fontdb::ID`（那是进程内 slotmap 键）；
+    认不出的字体整条跳过，不会画错字。
+  - 装载要求图集为空，会按面积重新打包（`etagere` 无法把块固定在指定坐标），
+    顺带得到无碎片图集；坏魔数/坏版本/截断文件返回 `InvalidData`。
+  - GPU 用例验证：A 进程 `save` → **另一个** `GpuContext`（独立 `FontSystem`）`load` 后
+    绘制，`rasterizations == 0` 且像素逐点一致。
 - **文字距离场「尺寸阶梯」**：带样式文字的精确 SDF 现在按 1.25× 阶梯（`12…256`）取
   「不小于目标字号」的一档生成，档内共用一份 R8 距离场并缩放到目标字号。
   于是**同一档内改字号不再重新栅格化**（例如 40↔44px），带宽档继续负责「同档内改宽度

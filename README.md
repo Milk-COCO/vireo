@@ -66,6 +66,7 @@ async fn main(app: App) {
 的逐字副本，跑起来能看到黑底 + 红矩形 + 蓝圆 + 一条绿线 + 一行中文。接着看：
 
 - 文字与 HUD 分段 → `cargo run --example text_hud`
+- 字形缓存（预算 / 钉子 / 持久化）→ `cargo run --example text_cache`
 - 自定义 WGSL 材质 → `cargo run --example custom_material`
 - Android 工程 → [`examples/android/`](https://github.com/Milk-COCO/vireo/blob/master/examples/android/README.md)
 
@@ -119,9 +120,12 @@ async fn main(app: App) {
 - **渐变**：矩形 / 圆角 / 圆 / 线段 / 折线 / 多边形……一个机制全覆盖（轴向或沿走向），
   仍是 1 个实例 1 次 draw，见
   [渐变](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/gradient.md)。
-- **文字**：整段 shape 缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
+- **文字**：排版（typeset）缓存、HUD 分段（等宽步进）、`StableText`、自定义字体与 attrs、
   COLRv1 彩色 emoji；**文本样式**（描边 / 多层描边 / 软投影 / 发光 / 内描边 / 内阴影）走
-  字形距离场：**精确按尺寸 SDF + 尺寸阶梯**，档内改字号/改描边宽度都不重新栅格化。见
+  字形距离场：**精确按尺寸 SDF + 尺寸阶梯**，档内改字号/改描边宽度都不重新栅格化。
+  **字形缓存可由用户管**（`gpu.text().glyphs()`）：预算、预光栅化、`hold` 钉子、
+  `compact` 收缩、跨进程 `save`/`load`。见
+  [文字](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text.md) /
   [文本样式](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)。
 
 ## Android：这里是它最特别的地方
