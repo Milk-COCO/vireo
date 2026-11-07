@@ -36,7 +36,7 @@ pub use entry::{TextEntry, TextEntryList};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
 pub(crate) use style::{
-    BAND_MAX, PASS_FILL, PASS_SHIFT, TextStrokePx, band_for_reach, pass_above, pass_below,
+    BAND_GEN_MAX, PASS_FILL, PASS_SHIFT, TextStrokePx, band_for_reach, pass_above, pass_below,
     pick_msdf, sdf_ladder_em,
 };
 pub use style::{

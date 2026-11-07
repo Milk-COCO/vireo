@@ -1418,13 +1418,20 @@ where
             base.font_size_bits = gen_px.to_bits();
             base.x_bin = SubpixelBin::Zero;
             base.y_bin = SubpixelBin::Zero;
-            // band 以**生成像素**计：外扩在生成空间里也要够长，才能等价覆盖目标空间的外扩
-            let reach_gen = if em_px > 0.0 {
-                style_reach * gen_px / em_px
+            // 带宽档是**相对字号**的：先折算成"44px 参考字号下的设备像素"，取档，再换算回来。
+            //
+            // 为什么必须相对字号：距离场按生成像素编码，band 就是它能表示的最远距离。
+            // 绝对档位（4/8/16/32/64 设备像素）在 200% 缩放下只等效 32 逻辑像素，
+            // 于是"再拉粗没变化"。相对档位让同一样式在任何字号/DPI 下都有同样的相对范围
+            // （44px × 0.73em ≈ 32px 档），而档位本身仍然离散 ⇒ 同档内改宽度不重建。
+            let n = if gen_px > 0.0 {
+                REF_BAND_EM / gen_px
             } else {
-                style_reach
+                1.0
             };
-            let band_gen = crate::text::band_for_reach(reach_gen);
+            let reach_em_px = style_reach * gen_px / em_px * n; // 44px 参考下的外扩
+            let tier = crate::text::band_for_reach(reach_em_px);
+            let band_gen = tier / n;
             (
                 GlyphonCacheKey::Styled {
                     base,
@@ -1538,14 +1545,20 @@ impl QuadBuckets {
 }
 
 /// band 量化到 1/8 像素，限制缓存变体数量。
+/// 带宽档位的**参考字号**：档位表（4/8/16/32/64）按这个字号的设备像素解释，
+/// 实际字号按比例换算（`band_gen = tier * gen_px / REF`）。
+const REF_BAND_EM: f32 = 44.0;
+
 /// 带宽的量化：`band_q = band * 8`。
 ///
 /// 上限必须 ≥ `BAND_MAX * 8`（当前 64 * 8 = 512）。之前钳在 256（= band 32），
 /// 加入 64 档之后就出现"距离场按 32 编码、顶点按 64 解码"→ 距离翻倍 →
 /// 描边视觉厚度变成一半（32px 描边画出来像 16px，看起来像"宽度没区别"）。
 pub(crate) fn quantize_band(band: f32) -> u16 {
-    // 上限跟 `BAND_MAX` 走（64 * 8 = 512），不能再钳在 256。
-    let max = (crate::text::BAND_MAX * 8.0).max(8.0);
+    // 上限放到 512（band_q = 4096）：带宽现在是相对字号的，高 DPI/大字号下
+    // 生成空间的 band 会超过 64（例如 200% 缩放、32 逻辑像素描边 ⇒ band_gen ≈ 129）。
+    // 之前钳在 256（= band 32）导致"距离场按 32 编码、顶点按 129 解码"→ 厚度减半。
+    let max = (crate::text::BAND_GEN_MAX * 8.0).max(8.0);
     (band.max(1.0) * 8.0).round().clamp(8.0, max) as u16
 }
 

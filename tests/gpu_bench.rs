@@ -6124,7 +6124,7 @@ fn text_style_inner_outline_is_ring() {
     let (a, b) = (lit(&plain), lit(&inner));
     let diff = (a as i64 - b as i64).abs() as f64 / a as f64;
     assert!(
-        diff < 0.08,
+        diff < 0.15, // 带宽档改为相对字号后，大字号下 band 略大，AA 边缘约 1px 差
         "内描边不该改变外轮廓：无样式 {a} vs 内描边 {b}（差 {:.1}%）",
         diff * 100.0
     );
@@ -6663,7 +6663,8 @@ fn text_style_multilayer_width_sweep() {
     }
 }
 
-/// 描边宽度 → 实际视觉厚度：逐档打印"亮区外接框 − 填充外接框"，用来发现档位跳变。
+/// 描边宽度 → 实际视觉厚度：逐档断言"厚度 ≈ 宽度"且单调（带宽档是相对字号的，
+/// 44px 下最大可表示 64px 描边）。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn text_style_stroke_width_sweep() {
@@ -6672,13 +6673,14 @@ fn text_style_stroke_width_sweep() {
     let gpu = Arc::new(GpuContext::new(&instance));
     let ink = Color::new(0.10, 0.11, 0.14, 0.92);
 
+    // 返回亮区 (宽, 高)
     let extent = |width: f32, styled: bool| -> (u32, u32) {
-        let c = OffscreenCanvas::new(&gpu, 420, 300);
+        let c = OffscreenCanvas::new(&gpu, 320, 260);
         let mut b = DrawBatch::new();
         draw_text(
             &mut b.texts,
             "国",
-            Pos::new(150.0, 110.0),
+            Pos::new(120.0, 100.0),
             TextDef {
                 style: styled.then(|| Arc::new(TextStyle::outline(width, ink))),
                 ..TextDef::default().font_size(44.0)
@@ -6688,9 +6690,9 @@ fn text_style_stroke_width_sweep() {
         c.draw(Some(BLACK), &[&b]);
         let px = c.read_pixels();
         let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        for y in 0..300u32 {
-            for x in 0..420u32 {
-                let i = ((y * 420 + x) * 4) as usize;
+        for y in 0..260u32 {
+            for x in 0..320u32 {
+                let i = ((y * 320 + x) * 4) as usize;
                 if px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 60 {
                     x0 = x0.min(x);
                     x1 = x1.max(x);
@@ -6699,18 +6701,24 @@ fn text_style_stroke_width_sweep() {
                 }
             }
         }
-        (x1 - x0, y1 - y0)
+        (x1.saturating_sub(x0), y1.saturating_sub(y0))
     };
 
     let (pw, ph) = extent(0.0, false);
+    let mut prev = -1.0f32;
     for width in [
         8.0f32, 12.0, 14.0, 15.0, 15.5, 16.0, 17.0, 20.0, 24.0, 28.0, 30.0, 32.0, 35.0, 40.0, 48.0,
         56.0, 64.0,
     ] {
         let (w, h) = extent(width, true);
-        // 视觉厚度 = （亮区 − 填充区）/ 2
         let t = ((w as i64 - pw as i64) / 2 + ((h as i64 - ph as i64) / 2)) as f32 / 2.0;
-        println!("  w={width:5.1} -> 亮区 {w}x{h}，视觉厚度 ≈ {t:.1}（应 ≈ 宽度）");
+        println!("  w={width:5.1} -> 亮区 {w}x{h}，视觉厚度 ≈ {t:.1}");
+        assert!(
+            (t - width).abs() <= 3.0,
+            "{width}px 描边的视觉厚度应 ≈ 宽度，实际 {t:.1}"
+        );
+        assert!(t > prev, "厚度必须随宽度单调增长（{prev:.1} -> {t:.1}）");
+        prev = t;
     }
 }
 
@@ -6906,7 +6914,7 @@ fn text_style_wide_outline_stays_an_outline() {
         );
         // 字形是空心的"国"：描边 + 填充不该把外接框吃满
         assert!(
-            frac < 0.80,
+            frac < 0.85, // 相对带宽档让厚描边的外缘更实，占比略升
             "w={width} 时红色占外接框 {:.0}%（应明显小于 100%，否则是糊成矩形）",
             frac * 100.0
         );
