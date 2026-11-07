@@ -73,6 +73,11 @@ impl Cache {
                 "const DEBUG_D: bool = false;",
                 "const DEBUG_D: bool = true;",
             )
+        } else if std::env::var_os("VIREO_SHADER_DEBUG_COV").is_some() {
+            glyphon_src.replace(
+                "const DEBUG_COV: bool = false;",
+                "const DEBUG_COV: bool = true;",
+            )
         } else {
             glyphon_src
         };

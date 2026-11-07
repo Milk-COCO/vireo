@@ -6484,15 +6484,28 @@ fn text_sdf_debug_print_d() {
     );
     c.draw(Some(BLACK), &[&b]);
     let px = c.read_pixels();
-    // 沿 x=140 竖直扫描，打印 d = (r/255 - 0.25)/0.02
-    println!("  x=140 竖线：y -> d（绿通道 0..255 给出 band/64）");
-    for y in (0..200).step_by(4) {
+    // 层趟诊断：r → d，g → thr，b → soft（读回是 sRGB 编码，先反解成线性）
+    let lin = |v: u8| {
+        let s = v as f32 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    println!("  x=140 竖线（层趟）：thr / soft / d");
+    for y in (0..200).step_by(8) {
         let i = ((y * 300 + 140) * 4) as usize;
-        let r = px[i] as f32 / 255.0;
-        let g = px[i + 1] as f32 / 255.0;
-        let d = (r - 0.25) / 0.02;
-        if r > 0.01 {
-            println!("  y={y}: d={d:6.1}  band≈{:.1}", g * 64.0);
+        let r = lin(px[i]);
+        let g = lin(px[i + 1]);
+        let b = lin(px[i + 2]);
+        if r > 0.001 || g > 0.001 {
+            println!(
+                "  y={y}: d={:6.1}  thr={:5.1}  soft={:5.1}",
+                (r - 0.25) / 0.02,
+                g * 64.0,
+                b * 64.0
+            );
         }
     }
 }
@@ -6506,72 +6519,59 @@ fn text_style_wide_stroke_string_dump() {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     let ink = Color::new(0.10, 0.11, 0.14, 0.92);
-    let c = OffscreenCanvas::new(&gpu, 640, 140);
-    for width in [2.0f32, 16.0] {
+    let cases: [(&str, Option<TextStyle>); 3] = [
+        ("无文字", None),
+        (
+            "仅填充",
+            Some(TextStyle::new().with_fill(TextPaint::solid(WHITE))),
+        ),
+        ("描边16", Some(TextStyle::outline(16.0, ink))),
+    ];
+    for (label, style) in cases {
+        let c = OffscreenCanvas::new(&gpu, 640, 140);
         let mut b = DrawBatch::new();
-        draw_text(
-            &mut b.texts,
-            "Outline 描边",
-            Pos::new(20.0, 20.0),
-            TextDef {
-                style: Some(Arc::new(TextStyle::outline(width, ink))),
-                ..TextDef::default().font_size(44.0)
-            },
-            TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
-        );
+        if let Some(style) = style {
+            draw_text(
+                &mut b.texts,
+                "Outline 描边",
+                Pos::new(20.0, 20.0),
+                TextDef {
+                    style: Some(Arc::new(style)),
+                    ..TextDef::default().font_size(44.0)
+                },
+                TextOverride::from_color(Color::new(0.96, 0.97, 1.0, 1.0)),
+            );
+        }
         c.draw(Some(Color::new(0.07, 0.075, 0.09, 1.0)), &[&b]);
         let px = c.read_pixels();
         let sum_at = |x: u32, y: u32| {
             let i = ((y * 640 + x) * 4) as usize;
             px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32
         };
-        // 背景（左上角）
         let bg = sum_at(2, 2);
-        // 文字墨迹的外接框
-        let (mut y0, mut x0, mut x1) = (u32::MAX, u32::MAX, 0u32);
+        // 统计"比背景略亮一点"的像素（整块淡色的特征）
+        let (mut washed, mut wash_sum) = (0usize, 0u64);
+        let mut lit = 0usize;
         for y in 0..140u32 {
             for x in 0..640u32 {
-                if sum_at(x, y) > bg + 120 {
-                    y0 = y0.min(y);
-                    x0 = x0.min(x);
-                    x1 = x1.max(x);
+                let s = sum_at(x, y);
+                if s > bg + 4 && s < bg + 40 {
+                    washed += 1;
+                    wash_sum += s as u64;
+                }
+                if s > bg + 120 {
+                    lit += 1;
                 }
             }
         }
-        // 墨迹上方 4..12px 的条带：真正的 padding，应该等于背景
-        let strip_y0 = y0.saturating_sub(12);
-        let strip_y1 = y0.saturating_sub(4);
-        let (mut strip_sum, mut n) = (0u64, 0u64);
-        for y in strip_y0..strip_y1 {
-            for x in x0..x1 {
-                strip_sum += sum_at(x, y) as u64;
-                n += 1;
-            }
-        }
-        let strip = if n > 0 {
-            strip_sum as f64 / n as f64
-        } else {
-            0.0
-        };
-        // 墨迹内部（平均）
-        let (mut ink_sum, mut m) = (0u64, 0u64);
-        for y in y0..y0 + 30 {
-            for x in x0..x1 {
-                ink_sum += sum_at(x, y) as u64;
-                m += 1;
-            }
-        }
-        let ink = if m > 0 {
-            ink_sum as f64 / m as f64
-        } else {
-            0.0
-        };
         println!(
-            "  w={width}: 背景 {bg}，墨迹上方 padding 条带均值 {strip:.1}（差 {:+.1}），墨迹区均值 {ink:.1}",
-            strip - bg as f64
+            "  [{label}] 背景 {bg}，墨迹 {lit} px，淡色像素 {washed} 个（均值差 {:+.1}）",
+            if washed > 0 {
+                wash_sum as f64 / washed as f64 - bg as f64
+            } else {
+                0.0
+            }
         );
-        // 已知问题（未修）：w=16 时 padding 条带比背景亮 ~11，说明整块 quad 被涂了一层淡色。
-        // 这里只记录数值，等定位后把阈值收紧到 bg + 6 并改成 assert。
     }
 }
 

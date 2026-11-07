@@ -213,6 +213,8 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
 /// （内部同样成立；用 min 会被更远的通道拉走，内描边的环会整条消失）。
 /// 诊断开关：`VIREO_SHADER_DEBUG_D=1` 时把解码出的距离画到红通道（d * 0.02，0.5 对应 25px）。
 const DEBUG_D: bool = false;
+/// 诊断开关：`VIREO_SHADER_DEBUG_COV=1` 时把最终覆盖率画到红通道（绿=层趟/填充趟标记）。
+const DEBUG_COV: bool = false;
 
 fn median3(v: vec3<f32>) -> f32 {
     return max(min(v.x, v.y), min(max(v.x, v.y), v.z));
@@ -275,6 +277,21 @@ fn apply_layer(
     let off_uv = off / (max(msdf_scale, 1e-3) * dims);
     let uv = clamp(at + off_uv, entry_min, entry_max);
     let d = sample_d(uv, content_type, d_range);
+    // 距离场在条目边缘是**饱和值**（= d_range）。饱和区必须当作"远处"处理：
+    // 否则当样式的阈值恰好 ≥ d_range（大描边 / 高 DPI 把外扩顶到带宽上限）时，
+    // 整块 padding 会解出 d ≈ thr → 覆盖率 ≈ 0.5，肉眼就是"文字后面一个半透明矩形"。
+    if (d >= d_range - 0.5) {
+        return out;
+    }
+    if (DEBUG_D) {
+        // 层趟诊断：红 = clamp(d*0.02+0.25)，绿 = thr/64，蓝 = soft/64
+        return vec4<f32>(
+            clamp(d * 0.02 + 0.25, 0.0, 1.0),
+            clamp(thr / 64.0, 0.0, 1.0),
+            clamp(soft / 64.0, 0.0, 1.0),
+            1.0,
+        );
+    }
     var cov = coverage(d, thr, soft);
     if ((flags & 4u) != 0u) {
         // 内阴影：字形内部（未偏移）减去偏移后的覆盖率 —— 两个采样点，不是同一采样点的两个阈值
@@ -287,6 +304,10 @@ fn apply_layer(
         cov = cov - coverage(d, cut, soft);
     }
     cov = clamp(cov, 0.0, 1.0);
+    if (DEBUG_COV) {
+        // 层趟：红 = 覆盖率，绿 = thr/64
+        return vec4<f32>(cov, clamp(thr / 64.0, 0.0, 1.0), 0.0, 1.0);
+    }
     let col = paint_color(paint.x, text_layers[base + 2u], text_layers[base + 3u], glyph01, page);
     let a = col.a * cov;
     let src = vec4<f32>(col.rgb * cov, a);
@@ -428,15 +449,14 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 if (fill_kind != 4u) {
                     let d0 = sample_d(at, in_frag.content_type, in_frag.sdf_band);
                     if (DEBUG_D) {
-                        // 红 = clamp(d*0.02)，绿 = band/64，蓝 = 0
-                        return vec4<f32>(
-                            clamp(d0 * 0.02 + 0.25, 0.0, 1.0),
-                            clamp(in_frag.sdf_band / 64.0, 0.0, 1.0),
-                            0.25,
-                            1.0,
-                        );
+                        // 填充趟在诊断时**不画**，这样读回的就是层趟的数据
+                        return vec4<f32>(0.0);
                     }
-                    let cov = coverage(d0, 0.0, 0.0);
+                    let cov = select(
+                        coverage(d0, 0.0, 0.0),
+                        0.0,
+                        d0 >= in_frag.sdf_band - 0.5,
+                    );
                     if (fill_kind == 0u) {
                         let a = in_frag.color.a * cov;
                         filled = vec4<f32>(in_frag.color.rgb * a, a);
@@ -450,6 +470,10 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                         );
                         let a = painted.a * cov;
                         filled = vec4<f32>(painted.rgb * cov, a);
+                    }
+                    if (DEBUG_COV) {
+                        // 填充趟：红 = 覆盖率，蓝 = 0.5 标记
+                        return vec4<f32>(clamp(cov, 0.0, 1.0), 0.0, 0.5, 1.0);
                     }
                 }
                 out = over(out, filled);
