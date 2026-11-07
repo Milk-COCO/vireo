@@ -6465,6 +6465,203 @@ fn text_style_steady_state_throughput() {
     }
 }
 
+/// 字形缓存的**性能画像**（打印数字，不做严格的计时断言 —— 阈值依机器而异）。
+///
+/// 覆盖本轮新增的四条成本：
+/// 1. `prewarm` 冷（要光栅化）vs 热（全命中）；
+/// 2. 扩图集的**搬运成本** vs "重新光栅化同样多条"的等价成本（就是 `grow` 改拷贝省下的）；
+/// 3. `save`（读回 + 写盘）/ `load`（读盘 + 上传），以及装载后首帧相比空图集首帧省了多少；
+/// 4. `compact`（重排 + 拷贝）.
+///
+/// 计时都是**CPU 侧提交耗时**（不含 GPU 实际完成），因为这几条路径的成本都在 CPU。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_perf() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = TextDef::default().font_size(32.0);
+    let long = "字形缓存性能画像 Vireo 0123456789 abcdefghijklmnopqrstuvwxyz";
+
+    // 第一次 prewarm 带字体系统/swash 的一次性初始化，不计入每字成本。
+    glyphs.prewarm(
+        &gpu.device,
+        &gpu.queue,
+        "预热",
+        &TextDef::default().font_size(32.0),
+        1.0,
+    );
+
+    // ---- 1. prewarm 冷 / 热 ----
+    let t = Instant::now();
+    let cold_n = glyphs.prewarm(&gpu.device, &gpu.queue, long, &def, 1.0);
+    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let warm_n = glyphs.prewarm(&gpu.device, &gpu.queue, long, &def, 1.0);
+    let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
+    assert!(cold_n > 0);
+    assert_eq!(warm_n, 0, "第二遍应全命中");
+    println!(
+        "  prewarm：冷 {cold_n} 条 {cold_ms:.2} ms（{:.3} ms/字） | 热 0 条 {warm_ms:.3} ms",
+        cold_ms / cold_n.max(1) as f64
+    );
+    let _per_glyph_ms = cold_ms / cold_n.max(1) as f64;
+
+    // ---- 2. 扩图集：触发扩容的那次 prewarm vs 「重光栅化同样多条」 ----
+    //
+    // 图集里已有 `copied` 条时触发一次扩容：旧实现要把它们全部重新光栅化，
+    // 新实现只做纹理拷贝。拷贝的纯成本用 `compact`（同样的逐条拷贝 + 重排）单独量一次。
+    let canvas = OffscreenCanvas::new(&gpu, 900, 600);
+    let mut before_grows = glyphs.stats().grows;
+    let mut entries_before = glyphs.stats().entries();
+    let mut grow_ms = f64::NAN;
+    let mut copied = 0u32;
+    for i in 0..20u32 {
+        let filler: String = "扩容搬运测试ABCDEFG".chars().cycle().take(60).collect();
+        let size = 40.0 + i as f32 * 2.0;
+        let t = Instant::now();
+        glyphs.prewarm(
+            &gpu.device,
+            &gpu.queue,
+            &format!("{filler}{i}"),
+            &TextDef::default().font_size(size),
+            1.0,
+        );
+        let dt = t.elapsed().as_secs_f64() * 1000.0;
+        let s = glyphs.stats();
+        if s.grows > before_grows {
+            grow_ms = dt;
+            copied = entries_before;
+            break;
+        }
+        before_grows = s.grows;
+        entries_before = s.entries();
+    }
+    assert!(!grow_ms.is_nan(), "用例失效：20 轮都没有触发扩图集");
+
+    let t = Instant::now();
+    let shrunk_here = glyphs.compact(&gpu.device, &gpu.queue);
+    let copy_ms = t.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "  grow：触发扩容的那次 prewarm {grow_ms:.2} ms（当时图集里 {copied} 条）| \
+         纯拷贝参考 compact {copy_ms:.2} ms（{}）",
+        if shrunk_here {
+            "收缩了"
+        } else {
+            "无需收缩"
+        }
+    );
+
+    // ---- 3. save / load ----
+    let path = std::env::temp_dir().join("vireo_glyph_cache_perf.vrtx");
+    let _ = std::fs::remove_file(&path);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        long,
+        Pos::new(12.0, 20.0),
+        def.clone(),
+        TextOverride::from_color(WHITE),
+    );
+    let t = Instant::now();
+    canvas.draw(Some(BLACK), &[&b]);
+    let warm_frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let saved_entries = glyphs.stats().entries();
+    // `save` 内部要读回纹理，`poll(Wait)` 会顺带把队列里已提交的工作排空 —— 单独量一次，
+    // 免得把"排空前面的绘制"算成 save 的开销。
+    let t = Instant::now();
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let flush_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let saved = glyphs
+        .save(&gpu.device, &gpu.queue, &path)
+        .expect("save 应成功");
+    let save_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let file_kib = std::fs::metadata(&path)
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+
+    // 上下文 B：空图集 → 装载 → 首帧（省掉光栅化）。
+    let gpu_b = Arc::new(GpuContext::new(&instance));
+    let canvas_b = OffscreenCanvas::new(&gpu_b, 900, 600);
+    let draw_b = || {
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            long,
+            Pos::new(12.0, 20.0),
+            def.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        canvas_b.draw(Some(BLACK), &[&b]);
+    };
+    let t = Instant::now();
+    let loaded = gpu_b
+        .text()
+        .glyphs()
+        .load(&gpu_b.device, &gpu_b.queue, &path)
+        .expect("load 应成功");
+    let load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    draw_b();
+    let loaded_first_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let after_rasters = gpu_b.text().glyphs().stats().rasterizations;
+    assert_eq!(loaded, saved, "装载条数应等于保存条数");
+    assert_eq!(after_rasters, 0, "装载后绘制不该重新光栅化");
+
+    // 上下文 C：对照 —— 同样的首帧，但图集是空的（必须现场光栅化）。
+    let gpu_c = Arc::new(GpuContext::new(&instance));
+    let canvas_c = OffscreenCanvas::new(&gpu_c, 900, 600);
+    let t = Instant::now();
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        long,
+        Pos::new(12.0, 20.0),
+        def.clone(),
+        TextOverride::from_color(WHITE),
+    );
+    canvas_c.draw(Some(BLACK), &[&b]);
+    let empty_first_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let cold_rasters = gpu_c.text().glyphs().stats().rasterizations;
+
+    // ---- 4. compact（上下文 B，装载之后）----
+    let t = Instant::now();
+    let shrunk = gpu_b.text().glyphs().compact(&gpu_b.device, &gpu_b.queue);
+    let compact_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "  save：{saved} 条 → {file_kib} KiB，{save_ms:.2} ms（{:.3} ms/条；另有队列排空参考 {flush_ms:.2} ms）",
+        save_ms / saved.max(1) as f64
+    );
+    println!(
+        "  load：{loaded} 条 {load_ms:.2} ms（{:.3} ms/条） | 首帧 空图集 {empty_first_ms:.2} ms \
+         vs 装载后 {loaded_first_ms:.2} ms（省 {:.0}%，空图集光栅化 {cold_rasters} 条）",
+        load_ms / loaded.max(1) as f64,
+        (1.0 - loaded_first_ms / empty_first_ms.max(0.001)) * 100.0
+    );
+    println!(
+        "  compact：{} {compact_ms:.2} ms | 稳态帧（{saved_entries} 条已缓存）{warm_frame_ms:.2} ms",
+        if shrunk { "收缩了" } else { "无需收缩" }
+    );
+
+    // 只做"不明显劣化"的宽松兜底，避免把机器差异写成 flaky 用例。
+    assert!(
+        load_ms < 2000.0,
+        "装载不该慢到 2 秒（{load_ms:.1} ms / {loaded} 条）"
+    );
+    assert!(
+        loaded_first_ms <= empty_first_ms + 5.0,
+        "装载后首帧不该比空图集首帧更慢（{loaded_first_ms:.2} vs {empty_first_ms:.2} ms）"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 /// **宽描边不能给整块 quad 上色**（回归用例）。
 ///
 /// 曾经的现象：`thr >= 带宽` 时距离场饱和值 ≈ 阈值 → `coverage = 0.5` → 每个字形后面

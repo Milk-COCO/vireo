@@ -204,12 +204,28 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
   `(键, 尺寸, bearing, 像素)`；
 - **字体靠摘要认**：`fontdb::ID` 是进程内的 slotmap 键，跨启动必然不同，所以不能存 ID。
   装载时按名字找候选面、再验摘要，认不出的条目**跳过**（`Ok(条数)`，不是错误）；
+  摘要对字体数据做**采样**（长度 + 头尾各 64KiB + 中间等距 64KiB）—— 整份哈希在中文
+  字体上要 20ms/个，采样后约 0.2ms；
 - **装载要求图集为空**（`glyphs().clear()` 之后，或刚启动还没画字），否则返回
   `ErrorKind::InvalidInput`；
 - 装载会按面积重新打包（`etagere` 无法把块固定在指定坐标），顺带得到无碎片图集；
-- 文件体积 ≈ 所有条目像素之和（R8 条目 `w×h`，彩色条目 `w×h×4`）；没有压缩。
-  `save` 期间会读回整个纹理（`size² × 通道数` 字节），大图集下是毫秒级操作。
+- 文件体积 ≈ 所有条目像素之和（R8 条目 `w×h`，彩色条目 `w×h×4`）；没有压缩；
+- 两端都**批量提交**：保存只读回"用到的矩形"（2 的幂图集里通常只有几十 KB），
+  装载走一个 staging buffer + 一次 `submit`（逐条 `write_texture` 会反复等暂存带）。
+  一次设备等待（`poll(Wait)`）不可避免，它会把队列里已提交的绘制也排空；
 - 版本/魔数不符、文件截断 → `ErrorKind::InvalidData`，图集保持原样。
+
+**实测**（Win11 / DX12 / release，105 条 32px 字形；跑
+`cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_perf --nocapture`）：
+
+| 操作 | 耗时 | 备注 |
+|---|---|---|
+| `prewarm` 冷 | 0.03–0.05 ms/字 | 32px 拉丁+中文混排 |
+| `prewarm` 命中 | ~1 µs/字 | 48 条全命中 0.03–0.05 ms |
+| `save` | 29 ms（0.28 ms/条，75 KiB） | 含一次设备排空（参考 11 ms） |
+| `load` | 13–14 ms（0.13 ms/条） | 读盘 + 上传 |
+| 首帧（装载后 vs 空图集） | 30 ms vs 38–54 ms | 省 20–40%，空图集要现场光栅化 48 条 |
+| `compact` | ~0.01 ms（无需收缩时） | 有条目要搬时与条目数成正比 |
 
 ## 7. 性能建议
 
@@ -221,6 +237,9 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
 4. **想要跨帧零重光栅化**：用固定字号 + 整数坐标 + `StableText`/`prewarm`；
    跑 `--example text_cache` 按空格暂停，`rasterizations` 不动就说明做到了。
 5. **别每帧调 `entries()`**：它是 O(条目数) 的全量快照，`stats()` 才是 O(1) 聚合。
+6. **量一遍再调**：`cargo run --example text_profile` 看排版/光栅化分项；
+   `cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_perf --nocapture`
+   打印本机上的 prewarm / grow / save / load / compact 数字（§6.5 那张表就是它的输出）。
 
 ## 8. 已知限制
 

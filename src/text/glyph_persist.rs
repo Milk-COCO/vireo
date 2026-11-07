@@ -167,15 +167,42 @@ fn u8_to_bin(v: u8) -> SubpixelBin {
     }
 }
 
-/// 字体数据摘要（FNV-1a + 面下标）。**唯一**的字体身份判据。
+/// 字体数据摘要（采样 FNV-1a + 面下标）。**唯一**的字体身份判据。
+///
+/// 为什么采样而不是整份哈希：中文系统字体动辄 10–25MB，release 下逐字节 FNV 也要
+/// ~1GB/s ⇒ 每个字体 20ms 量级，而 `save`/`load` 每次都要算一遍（性能用例实测
+/// save 105 条要 60ms，几乎全是这里）。取「长度 + 面下标 + 头 64KiB + 尾 64KiB +
+/// 中间等距采样 64KiB」，约 0.2ms/字体。
+///
+/// 碰撞风险：同名、同长度、且头尾与等距采样完全一致、只在未采样区段不同的两份字体
+/// 才会误判 —— 对"复用已光栅化的字形"这个用途可以接受（装载还要求 postscript 名一致）。
 fn font_digest(data: &[u8], index: u32) -> u64 {
+    const SAMPLE: usize = 64 * 1024;
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in data {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100_0000_01b3);
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    mix(&(data.len() as u64).to_le_bytes());
+    mix(&index.to_le_bytes());
+    let head = data.len().min(SAMPLE);
+    mix(&data[..head]);
+    if data.len() > SAMPLE {
+        let tail_start = data.len().saturating_sub(SAMPLE).max(head);
+        mix(&data[tail_start..]);
+        let mid = &data[head..tail_start];
+        if !mid.is_empty() {
+            let step = (mid.len() / SAMPLE).max(1);
+            let mut i = 0;
+            while i < mid.len() {
+                mix(&mid[i..i + 1]);
+                i += step;
+            }
+        }
     }
-    h ^= u64::from(index);
-    h.wrapping_mul(0x100_0000_01b3)
+    h
 }
 
 /// `CacheKey` 里除字体 ID 之外的部分（字体 ID 要按文件内下标换成当前进程的 ID）。
@@ -346,63 +373,119 @@ fn read_key(
 // GPU 读回
 // ---------------------------------------------------------------------------
 
-/// 把整张图集读回 CPU（去行对齐填充）。
-fn read_back(device: &Device, queue: &Queue, atlas: &InnerAtlas) -> Vec<u8> {
-    let size = atlas.size;
-    let bpp = atlas.num_channels() as u32;
-    let row = size * bpp;
-    let padded =
-        (row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1) & !(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1);
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("vireo glyph atlas readback"),
-        size: u64::from(padded) * u64::from(size),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
+/// 把两张图集一起读回 CPU（去行对齐填充）。
+///
+/// **一次 encoder、一次 submit、一次 poll**：`device.poll(Wait)` 会等到队列里所有已提交
+/// 的工作都完成，逐张图各 poll 一次等于把等待时间翻倍（性能用例实测过：两次 79ms、
+/// 一张图集的读回结果：`data` 每行只有前 `row` 字节有效（行距 `stride` 是 256 对齐）。
+struct ReadBack {
+    data: Vec<u8>,
+    stride: u32,
+}
+
+/// 图集里**真正用到**的右下角（图集是 2 的幂，字形通常只占左上角一小块）。
+fn used_extent(atlas: &InnerAtlas) -> (u32, u32) {
+    let mut w = 0u32;
+    let mut h = 0u32;
+    for (_, d) in atlas.glyph_cache.iter() {
+        if let GpuCacheStatus::InAtlas { x, y, .. } = d.gpu_cache {
+            w = w.max(u32::from(x) + u32::from(d.width));
+            h = h.max(u32::from(y) + u32::from(d.height));
+        }
+    }
+    (w.max(1).min(atlas.size), h.max(1).min(atlas.size))
+}
+
+/// 把两张图集一起读回 CPU。
+///
+/// - **只读用到的矩形**：2048² 图集里只有十几个字时，从 4MB 降到几十 KB；
+/// - **一次 encoder / 一次 submit / 一次 poll**：`device.poll(Wait)` 会等队列里所有已提交
+///   的工作完成，逐张图各 poll 一次等于把等待时间翻倍。
+fn read_back_both(
+    device: &Device,
+    queue: &Queue,
+    mask: &InnerAtlas,
+    color: &InnerAtlas,
+) -> (ReadBack, ReadBack) {
+    struct Job {
+        w: u32,
+        h: u32,
+        stride: u32,
+    }
+    let jobs: Vec<Job> = [mask, color]
+        .iter()
+        .map(|atlas| {
+            let (w, h) = used_extent(atlas);
+            let row = w * atlas.num_channels() as u32;
+            let stride = (row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+                & !(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+            Job { w, h, stride }
+        })
+        .collect();
+    let textures = [&mask.texture, &color.texture];
+    let buffers: Vec<wgpu::Buffer> = jobs
+        .iter()
+        .map(|job| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vireo glyph atlas readback"),
+                size: u64::from(job.stride) * u64::from(job.h),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        })
+        .collect();
+
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("vireo glyph atlas readback encoder"),
     });
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture: &atlas.texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: None,
+    for i in 0..jobs.len() {
+        let job = &jobs[i];
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: textures[i],
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
-        },
-        wgpu::Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 1,
-        },
-    );
+            TexelCopyBufferInfo {
+                buffer: &buffers[i],
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(job.stride),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: job.w,
+                height: job.h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     queue.submit(Some(encoder.finish()));
 
-    let slice = buffer.slice(..);
-    let (tx, _rx) = std::sync::mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
+    let slices: Vec<wgpu::BufferSlice<'_>> = buffers.iter().map(|b| b.slice(..)).collect();
+    for slice in &slices {
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+    }
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
-    let mapped = slice.get_mapped_range().expect("glyph atlas readback");
-    let mut out = Vec::with_capacity((row * size) as usize);
-    for y in 0..size as usize {
-        let start = y * padded as usize;
-        out.extend_from_slice(&mapped[start..start + row as usize]);
+
+    let collect = |slice: &wgpu::BufferSlice<'_>, job: &Job| -> ReadBack {
+        let mapped = slice.get_mapped_range().expect("glyph atlas readback");
+        ReadBack {
+            data: mapped.to_vec(),
+            stride: job.stride,
+        }
+    };
+    let mask_rb = collect(&slices[0], &jobs[0]);
+    let color_rb = collect(&slices[1], &jobs[1]);
+    for buffer in &buffers {
+        buffer.unmap();
     }
-    drop(mapped);
-    buffer.unmap();
-    out
+    (mask_rb, color_rb)
 }
 
 // ---------------------------------------------------------------------------
@@ -459,8 +542,12 @@ pub(crate) fn save(
         font_records.push((digest, name));
     }
 
-    let mask_px = read_back(device, queue, &ctx.text_atlas.mask_atlas);
-    let color_px = read_back(device, queue, &ctx.text_atlas.color_atlas);
+    let (mask_px, color_px) = read_back_both(
+        device,
+        queue,
+        &ctx.text_atlas.mask_atlas,
+        &ctx.text_atlas.color_atlas,
+    );
 
     let entry_count = ctx.text_atlas.mask_atlas.glyph_cache.len() as u32
         + ctx.text_atlas.color_atlas.glyph_cache.len() as u32;
@@ -478,12 +565,12 @@ pub(crate) fn save(
     let mut written = 0usize;
     let mut lookup = |id: fontdb::ID| font_slot.get(&id).copied();
     let atlas = &ctx.text_atlas;
-    for (atlas_kind, inner, pixels) in [
-        (0u8, &atlas.mask_atlas, &mask_px),
-        (1u8, &atlas.color_atlas, &color_px),
+    for (atlas_kind, inner, rb) in [
+        (0u8, &atlas.mask_atlas, mask_px),
+        (1u8, &atlas.color_atlas, color_px),
     ] {
         let bpp = inner.num_channels();
-        let stride = inner.size as usize * bpp;
+        let stride = rb.stride as usize;
         for (key, details) in inner.glyph_cache.iter() {
             let (x, y, content) = match details.gpu_cache {
                 GpuCacheStatus::InAtlas { x, y, content_type } => {
@@ -508,11 +595,18 @@ pub(crate) fn save(
             w.i16(details.left);
             write_key(&mut w, key, &mut lookup)?;
 
-            // 像素（按行从读回的密集缓冲里切；`SkipRasterization` 没有像素）。
+            // 像素（按行从读回的缓冲里切；`SkipRasterization` 没有像素）。
+            // 读回只覆盖用到的矩形，越界的条目（不该出现）就跳过像素而不是 panic。
             if w_px > 0 && h_px > 0 {
-                for row in 0..h_px {
-                    let start = (y + row) * stride + x * bpp;
-                    w.bytes(&pixels[start..start + w_px * bpp]);
+                // 末行的行首 + 末行的 x 宽度（不能按整行 stride 加，会多算一行的尾部）。
+                let need = (y + h_px - 1) * stride + (x + w_px) * bpp;
+                if need <= rb.data.len() {
+                    for row in 0..h_px {
+                        let start = (y + row) * stride + x * bpp;
+                        w.bytes(&rb.data[start..start + w_px * bpp]);
+                    }
+                } else {
+                    log::warn!("vireo: 保存字形缓存时条目越出读回范围，已跳过该条像素");
                 }
             }
             written += 1;
@@ -695,7 +789,26 @@ pub(crate) fn load(
         ));
     }
 
+    // 一条待落地的条目（先排好位置，最后一次性提交 GPU 拷贝）。
+    struct Placed {
+        buffer_offset: u64,
+        padded_row: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        is_color: bool,
+    }
+
+    let mut staged: Vec<u8> = Vec::new();
+    // 行对齐到 256：`copy_buffer_to_texture` 的 `bytes_per_row` 必须是 256 的倍数。
+    // 窄字形会浪费一些暂存空间（几十条加起来也就 MB 级），换来**一次**提交。
+    let align_row = |row: u32| {
+        (row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1) & !(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+    };
+
     let mut placed = 0usize;
+    let mut placed_items: Vec<Placed> = Vec::with_capacity(recs.len());
     for idx in order {
         let rec = &recs[idx];
         let is_color = rec.atlas == 1;
@@ -704,6 +817,7 @@ pub(crate) fn load(
         } else {
             &mut ctx.text_atlas.mask_atlas
         };
+        let bpp = inner.num_channels() as u32;
         let w_px = u32::from(rec.w);
         let h_px = u32::from(rec.h);
         let has_pixels = w_px > 0 && h_px > 0;
@@ -716,29 +830,25 @@ pub(crate) fn load(
                 continue;
             };
             let min = allocation.rectangle.min;
-            queue.write_texture(
-                TexelCopyTextureInfo {
-                    texture: &inner.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: min.x as u32,
-                        y: min.y as u32,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &rec.pixels,
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(w_px * inner.num_channels() as u32),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: w_px,
-                    height: h_px,
-                    depth_or_array_layers: 1,
-                },
-            );
+            let row = w_px * bpp;
+            let padded_row = align_row(row);
+            let buffer_offset = staged.len() as u64;
+            staged.resize(staged.len() + padded_row as usize * h_px as usize, 0u8);
+            for y in 0..h_px as usize {
+                let src = y * row as usize;
+                let dst = buffer_offset as usize + y * padded_row as usize;
+                staged[dst..dst + row as usize]
+                    .copy_from_slice(&rec.pixels[src..src + row as usize]);
+            }
+            placed_items.push(Placed {
+                buffer_offset,
+                padded_row,
+                x: min.x as u32,
+                y: min.y as u32,
+                w: w_px,
+                h: h_px,
+                is_color,
+            });
             (
                 GpuCacheStatus::InAtlas {
                     x: min.x as u16,
@@ -764,6 +874,60 @@ pub(crate) fn load(
             },
         );
         placed += 1;
+    }
+
+    // 一次性上传：一个 staging buffer + 一次 submit（逐条 `write_texture` 会让 wgpu 的
+    // 暂存带反复等待，性能用例里实测 0.5 ms/条）。
+    if !placed_items.is_empty() {
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vireo glyph cache load staging"),
+            size: staged.len() as u64,
+            usage: wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        staging
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("staging map")
+            .copy_from_slice(&staged);
+        staging.unmap();
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("vireo glyph cache load"),
+        });
+        for item in &placed_items {
+            let atlas = if item.is_color {
+                &ctx.text_atlas.color_atlas
+            } else {
+                &ctx.text_atlas.mask_atlas
+            };
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: TexelCopyBufferLayout {
+                        offset: item.buffer_offset,
+                        bytes_per_row: Some(item.padded_row),
+                        rows_per_image: None,
+                    },
+                },
+                TexelCopyTextureInfo {
+                    texture: &atlas.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: item.x,
+                        y: item.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: item.w,
+                    height: item.h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        queue.submit(Some(encoder.finish()));
     }
 
     ctx.text_atlas.rebind(device);
