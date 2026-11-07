@@ -64,6 +64,7 @@ async fn main(app: App) {
     let mut held_m = false;
     // 帧耗时统计（HUD 显示；按键后"要等多久"看这个）
     let mut frame_ms = 0.0f64;
+    let mut hud_text = String::from("帧 -- ms");
     let mut last_log = std::time::Instant::now();
 
     app.run(move |ctx| {
@@ -323,6 +324,12 @@ async fn main(app: App) {
         // 帧耗时（含"这一帧栅格化了多少字形"）——按键后要等多久，看这个数最直接
         frame_ms = frame_ms * 0.85 + ctx.frame_time() * 1000.0 * 0.15; // 指数平滑
         let fps = ctx.fps();
+        // HUD 字符串只在数值**变化到可读粒度**时更新：每帧换字符串会让排版缓存每帧失效，
+        // 既费 CPU 又可能让整批文字的 slot 抖动。
+        let want = format!("帧 {:.0} ms（{:.0} fps）", frame_ms, fps);
+        if want != hud_text {
+            hud_text = want;
+        }
         // 需要命令行看帧率时：`VIREO_FPS_LOG=1 cargo run --release --example text_style`
         if std::env::var("VIREO_FPS_LOG").is_ok() {
             let now = std::time::Instant::now();
@@ -346,7 +353,7 @@ async fn main(app: App) {
         );
         draw_text(
             &mut b.texts,
-            &format!("帧 {frame_ms:.1} ms（{fps:.0} fps）"),
+            &hud_text,
             Pos::new(28.0, 42.0),
             TextDef::default().font_size(12.0),
             TextOverride::from_color(Color::new(0.5, 0.56, 0.66, 1.0)),

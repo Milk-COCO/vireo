@@ -6457,6 +6457,125 @@ fn text_style_steady_state_throughput() {
     }
 }
 
+/// 稳态**确定性**：同一批内容连续帧必须逐像素一致（抖动/闪烁的底线检查）。
+///
+/// 抖动通常来自「字形位置或图集条目取整在不同帧不一样」。这里用带样式文字 + 多行内容，
+/// 连续 4 帧比较像素缓冲。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_rendering_is_frame_stable() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let c = OffscreenCanvas::new(&gpu, 480, 240);
+    let ink = Color::new(0.05, 0.06, 0.09, 1.0);
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+
+    let styles = [
+        (
+            TextStyle::outline(2.0, ink).with_fill(TextPaint::solid(WHITE)),
+            "国永光明",
+        ),
+        (
+            TextStyle::shadow((4.0, 4.0), 3.0, ink).with_fill(TextPaint::solid(WHITE)),
+            "多层 描边",
+        ),
+        (
+            TextStyle::inner_outline(3.0, red).with_fill(TextPaint::solid(WHITE)),
+            "内描边 环",
+        ),
+    ];
+
+    let mut draw_once = || {
+        let mut b = DrawBatch::new();
+        for (i, (style, text)) in styles.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                Pos::new(20.0, 16.0 + i as f32 * 70.0),
+                TextDef {
+                    style: Some(Arc::new(style.clone())),
+                    ..TextDef::default().font_size(44.0)
+                },
+                TextOverride::from_color(WHITE),
+            );
+        }
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+
+    let first = draw_once();
+    let describe = |px: &[u8]| {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        let mut lit = 0usize;
+        let mut strong = 0usize;
+        let mut faint = 0usize;
+        for y in 0..240 {
+            for x in 0..480 {
+                let i = ((y * 480 + x) * 4) as usize;
+                let sum = px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32;
+                if sum > 60 {
+                    lit += 1;
+                    if sum > 400 {
+                        strong += 1;
+                    } else {
+                        faint += 1;
+                    }
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (lit, x0, y0, x1, y1, strong, faint)
+    };
+    println!("  帧0: {:?}", describe(&first));
+    let mut warm: Option<Vec<u8>> = None;
+    for frame in 1..4 {
+        let next = draw_once();
+        if warm.is_none() {
+            warm = Some(next.clone());
+        }
+        let diff = |a: &[u8], b: &[u8]| -> (usize, i32) {
+            let mut n = 0usize;
+            let mut worst = 0i32;
+            for (x, y) in a.chunks(4).zip(b.chunks(4)) {
+                let d = (x[0] as i32 - y[0] as i32)
+                    .abs()
+                    .max((x[1] as i32 - y[1] as i32).abs())
+                    .max((x[2] as i32 - y[2] as i32).abs());
+                if d > 2 {
+                    n += 1;
+                    worst = worst.max(d);
+                }
+            }
+            (n, worst)
+        };
+        let (dc, _) = diff(&first, &next);
+        let (dw, _) = diff(warm.as_ref().unwrap(), &next);
+        println!(
+            "  帧{frame}: {:?}  与帧0差 {dc}  与帧1差 {dw}",
+            describe(&next)
+        );
+    }
+    // 回暖后的帧必须逐像素一致（帧 0 允许不同：首次栅格化/样式表首次上传）
+    {
+        let a = draw_once();
+        let b = draw_once();
+        let mut n = 0usize;
+        for (x, y) in a.chunks(4).zip(b.chunks(4)) {
+            if (x[0] as i32 - y[0] as i32).abs() > 2
+                || (x[1] as i32 - y[1] as i32).abs() > 2
+                || (x[2] as i32 - y[2] as i32).abs() > 2
+            {
+                n += 1;
+            }
+        }
+        assert_eq!(n, 0, "稳态帧应逐像素一致，实际 {n} 个像素在变");
+    }
+}
+
 /// 之前 `apply_layer` 用错图集尺寸算偏移，投影右下方被 clamp 成一条直线。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
