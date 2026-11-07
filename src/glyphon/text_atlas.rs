@@ -534,7 +534,7 @@ impl InnerAtlas {
         true
     }
 
-    fn recreate(&mut self, state: &State, size: u32) {
+    pub(crate) fn recreate(&mut self, state: &State, size: u32) {
         self.texture = state.device.create_texture(&TextureDescriptor {
             label: Some("glyphon atlas"),
             size: Extent3d {
@@ -576,7 +576,7 @@ impl Kind {
         }
     }
 
-    fn texture_format(self) -> wgpu::TextureFormat {
+    pub(crate) fn texture_format(self) -> wgpu::TextureFormat {
         match self {
             Kind::Mask => TextureFormat::R8Unorm,
             Kind::Color { srgb } => {
@@ -921,7 +921,7 @@ impl TextAtlas {
         )
     }
 
-    fn rebind(&mut self, device: &wgpu::Device) {
+    pub(crate) fn rebind(&mut self, device: &wgpu::Device) {
         self.bind_group = self.cache.create_atlas_bind_group(
             device,
             &self.color_atlas.texture_view,

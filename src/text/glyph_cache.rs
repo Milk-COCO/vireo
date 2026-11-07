@@ -354,4 +354,36 @@ impl GlyphCache<'_> {
     pub fn compact(&self, device: &Device, queue: &Queue) -> bool {
         self.sys.ctx().compact_glyphs(device, queue)
     }
+
+    // ---- 跨进程持久化 ----
+
+    /// 把图集（字形位图 + 缓存键）存到文件，下次启动用 [`Self::load`] 直接接着用。
+    ///
+    /// 返回写出的条目数。字体靠 `postscript 名 + 字体数据摘要` 认，所以换机器 /
+    /// 换字体版本后认不出的条目会在装载时被跳过，不会画出错字。
+    ///
+    /// 开销：两张图集各读回一次（`size² × 通道数` 字节），再按条目切片写文件。
+    pub fn save(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<usize> {
+        super::glyph_persist::save(&mut self.sys.ctx(), device, queue, path.as_ref())
+    }
+
+    /// 从文件装载字形缓存，返回成功装上的条目数。
+    ///
+    /// 约束：
+    /// - 图集必须是空的（先 [`Self::clear`]，或在刚启动、还没画过字的时候调用）；
+    /// - 字体认不出的条目、排不下的条目会被跳过（`Ok(装上的条数)`，不是错误）；
+    /// - 装载后条目坐标是新打包的（不会沿用文件里的布局）。
+    pub fn load(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<usize> {
+        super::glyph_persist::load(&mut self.sys.ctx(), device, queue, path.as_ref())
+    }
 }

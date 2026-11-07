@@ -16,11 +16,12 @@ mod viewport;
 
 pub use cache::Cache;
 pub use custom_glyph::{
-    ContentType, CustomGlyph, CustomGlyphId, RasterizeCustomGlyphRequest, RasterizedCustomGlyph,
+    ContentType, CustomGlyph, CustomGlyphCacheKey, CustomGlyphId, RasterizeCustomGlyphRequest,
+    RasterizedCustomGlyph,
 };
 pub use error::{PrepareError, RenderError};
-pub(crate) use text_atlas::PinRegistry;
 pub use text_atlas::{ColorMode, TextAtlas, TextAtlasStats};
+pub(crate) use text_atlas::{InnerAtlas, PinRegistry};
 pub(crate) use text_render::GlyphonCacheKey;
 pub use text_render::TextRenderer;
 pub use viewport::Viewport;

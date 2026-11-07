@@ -27,6 +27,7 @@ pub(crate) use cache::{GlyphKey, TypesetKey, TypesetSlot};
 mod context;
 mod entry;
 mod glyph_cache;
+mod glyph_persist;
 mod hud;
 mod prepare;
 mod stencil;

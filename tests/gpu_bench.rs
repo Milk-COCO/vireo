@@ -8339,3 +8339,160 @@ fn glyph_cache_compact_shrinks_and_keeps_pixels() {
     );
     drop(hold);
 }
+
+/// 跨进程持久化：一个上下文 `save`，**另一个**上下文 `load` 后直接画出同样的像素，
+/// 且不重新光栅化（`rasterizations` 不涨）。
+///
+/// 两个上下文各有自己的 `FontSystem`，所以 `fontdb::ID` 必然不同 —— 这条用例同时验证
+/// "字体靠摘要认"是真的在起作用。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_save_load_roundtrip() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let path = std::env::temp_dir().join("vireo_glyph_cache_roundtrip.vrtx");
+    let _ = std::fs::remove_file(&path);
+
+    let plain = TextDef::default().font_size(34.0);
+    let styled = TextDef {
+        style: Some(Arc::new(
+            TextStyle::outline(3.0, Color::new(0.0, 0.0, 0.0, 1.0))
+                .with_fill(TextPaint::solid(WHITE)),
+        )),
+        ..TextDef::default().font_size(44.0)
+    };
+
+    // ---- 上下文 A：画一遍（顺带填充图集）并保存 ----
+    let gpu_a = Arc::new(GpuContext::new(&instance));
+    let render = |gpu: &Arc<GpuContext>| {
+        let c = OffscreenCanvas::new(gpu, 360, 160);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "持久化 Persist",
+            Pos::new(12.0, 16.0),
+            plain.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        draw_text(
+            &mut b.texts,
+            "描边",
+            Pos::new(12.0, 70.0),
+            styled.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+    let px_a = render(&gpu_a);
+    let saved = gpu_a
+        .text()
+        .glyphs()
+        .save(&gpu_a.device, &gpu_a.queue, &path)
+        .expect("save 应成功");
+    let stats_a = gpu_a.text().glyphs().stats();
+    assert!(saved > 0, "应写出条目");
+    assert_eq!(
+        saved as u32,
+        stats_a.entries(),
+        "写出的条数应等于图集条目数"
+    );
+    let file_len = std::fs::metadata(&path).expect("文件应存在").len();
+    assert!(file_len > 0);
+
+    // ---- 上下文 B：全新字体系统 + 空图集，装载后直接画 ----
+    let gpu_b = Arc::new(GpuContext::new(&instance));
+    let before = gpu_b.text().glyphs().stats();
+    assert_eq!(before.entries(), 0);
+    let loaded = gpu_b
+        .text()
+        .glyphs()
+        .load(&gpu_b.device, &gpu_b.queue, &path)
+        .expect("load 应成功");
+    let after_load = gpu_b.text().glyphs().stats();
+    assert_eq!(loaded, saved, "装载条数应等于保存条数");
+    assert_eq!(after_load.entries() as usize, loaded);
+    assert_eq!(
+        after_load.rasterizations, 0,
+        "装载不经过光栅化（应为 0，实际 {}）",
+        after_load.rasterizations
+    );
+
+    let px_b = render(&gpu_b);
+    let after_draw = gpu_b.text().glyphs().stats();
+    assert_eq!(
+        after_draw.rasterizations, 0,
+        "装载后绘制不该重新光栅化（新增 {}）",
+        after_draw.rasterizations
+    );
+
+    let mut diff = 0usize;
+    for (a, b) in px_a.chunks(4).zip(px_b.chunks(4)) {
+        let d = (a[0] as i32 - b[0] as i32)
+            .abs()
+            .max((a[1] as i32 - b[1] as i32).abs())
+            .max((a[2] as i32 - b[2] as i32).abs());
+        if d > 2 {
+            diff += 1;
+        }
+    }
+    assert_eq!(
+        diff, 0,
+        "装载后渲染应与原进程逐像素一致（{diff} 个像素不同）"
+    );
+    println!(
+        "  持久化：{} 条 / {} KiB → 新上下文装载 {} 条，0 次光栅化，0 像素差",
+        saved,
+        file_len / 1024,
+        loaded
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `load` 要求图集为空；坏文件/版本不符要报错而不是崩。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_load_rejects_bad_input() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let dir = std::env::temp_dir();
+    let bad_magic = dir.join("vireo_glyph_cache_bad_magic.vrtx");
+    let bad_version = dir.join("vireo_glyph_cache_bad_version.vrtx");
+    let truncated = dir.join("vireo_glyph_cache_truncated.vrtx");
+    std::fs::write(&bad_magic, b"NOPE0000").unwrap();
+    std::fs::write(&bad_version, b"VRTX\xff\x00\x00\x00").unwrap();
+    std::fs::write(&truncated, b"VRTX\x01\x00\x00\x00\x05\x00\x00\x00").unwrap();
+
+    let glyphs = gpu.text().glyphs();
+    assert!(glyphs.load(&gpu.device, &gpu.queue, &bad_magic).is_err());
+    assert!(
+        glyphs.load(&gpu.device, &gpu.queue, &bad_version).is_err(),
+        "版本不符应报错"
+    );
+    assert!(
+        glyphs.load(&gpu.device, &gpu.queue, &truncated).is_err(),
+        "截断文件应报错"
+    );
+    assert_eq!(glyphs.stats().entries(), 0, "报错不该留下半个图集");
+
+    // 非空图集：必须拒绝装载。
+    glyphs.prewarm(
+        &gpu.device,
+        &gpu.queue,
+        "占用",
+        &TextDef::default().font_size(30.0),
+        1.0,
+    );
+    let ok_path = dir.join("vireo_glyph_cache_dummy.vrtx");
+    glyphs
+        .save(&gpu.device, &gpu.queue, &ok_path)
+        .expect("save 应成功");
+    let err = glyphs
+        .load(&gpu.device, &gpu.queue, &ok_path)
+        .expect_err("非空图集应拒绝装载");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    for p in [bad_magic, bad_version, truncated, ok_path] {
+        let _ = std::fs::remove_file(p);
+    }
+}
