@@ -60,6 +60,9 @@ fn bench_grid() -> Vec<String> {
 
 #[vireo::main]
 async fn main() {
+    // 引擎的诊断（预算不足、性能哨兵、带宽钳制……）都走 `log::warn!`，**不装 logger 就看不到**。
+    // 用法：`RUST_LOG=warn cargo run --example text_cache`。
+    vireo::init_logger();
     // `VIREO_TEXT_CACHE_NOVSYNC=1`：关掉垂直同步跑基准 —— 帧耗时才等于**真实 CPU 成本**
     // （开着 vsync 时 acquire/present 会把数字钳在 8.33 ms 附近，看不出编码成本）。
     let no_vsync = std::env::var("VIREO_TEXT_CACHE_NOVSYNC").is_ok();
