@@ -232,6 +232,7 @@ fn apply_layer(
     want_above: bool,
     entry_min: vec2<f32>,
     entry_max: vec2<f32>,
+    texel_scale: f32,
     out: vec4<f32>,
 ) -> vec4<f32> {
     let paint = text_layers[base + 1u];
@@ -244,12 +245,16 @@ fn apply_layer(
     let off = vec2<f32>(bitcast<f32>(geom.x), bitcast<f32>(geom.y));
     let soft = bitcast<f32>(geom.z);
     let thr = bitcast<f32>(geom.w);
-    // 偏移量是**目标设备像素**，要换算成条目 texel：off / dims。
+    // 偏移量是**目标设备像素**，要换算成条目 texel：`off / (quad 缩放 × dims)`。
+    //
+    // 为什么除以 `texel_scale`：尺寸阶梯下 quad 是条目的 `quad_scale` 倍（44px 目标 →
+    // 46px 生成，约 0.9565），不折算的话层偏移会小 4% —— 投影/发光的位置和尺寸会偏。
+    //
     // dims 必须取**当前字形所在的图集**（SDF 与覆盖度共用 R8 图集，彩色字形另有图集）——
     // 用错图集的尺寸会让偏移被放大/缩小，层带偏移的采样在条目边界被 clamp 成一条直线
     // （投影/发光看起来像"被矩形裁掉"）。
     let dims = vec2<f32>(textureDimensions(mask_atlas_texture));
-    let off_uv = off / dims;
+    let off_uv = off / (max(texel_scale, 1e-3) * dims);
     let uv = clamp(at + off_uv, entry_min, entry_max);
     let d = sample_d(uv, d_range);
     // 距离场在条目边缘是**饱和值**（= d_range）。饱和区必须当作"远处"处理：
@@ -443,6 +448,8 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 let want_above = pass_id >= 10u;
                 let selected = select(pass_id - 1u, pass_id - 10u, want_above);
                 if (selected < layer_count) {
+                    // quad 与条目的比例（尺寸阶梯下不等于 1）
+                    let texel_scale = in_frag.glyph_size.x / max(in_frag.entry_texels.x, 1.0);
                     out = apply_layer(
                         layer_base + selected * 4u,
                         in_frag.sdf_band,
@@ -452,6 +459,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                         want_above,
                         entry_min,
                         entry_max,
+                        texel_scale,
                         out,
                     );
                 }

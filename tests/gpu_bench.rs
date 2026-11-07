@@ -10,6 +10,70 @@ use std::time::Instant;
 
 use vireo::prelude::*;
 
+/// **层偏移不能被条目边界截断**（回归）：`shadow((4,4), 3)` 与 `shadow((0,0), 3)` 的
+/// 亮区尺寸必须一致（偏移只是平移，不该让投影变小）；曾经 UV 越界被 clamp 成直线，
+/// 偏移版的投影会明显变窄/变短。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_shadow_offset_is_not_truncated() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    // 返回 (亮区宽, 亮区高, 亮像素数)
+    let measure = |offset: (f32, f32)| -> (u32, u32, usize) {
+        let c = OffscreenCanvas::new(&gpu, 360, 240);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "H",
+            Pos::new(120.0, 70.0),
+            TextDef {
+                style: Some(Arc::new(
+                    // 阴影用红色：暗色阴影在纯黑背景上几乎不可见，量尺寸会失真
+                    TextStyle::shadow(offset, 3.0, Color::new(1.0, 0.0, 0.0, 1.0))
+                        .with_fill(TextPaint::solid(WHITE)),
+                )),
+                ..TextDef::default().font_size(60.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        let mut n = 0usize;
+        for y in 0..240u32 {
+            for x in 0..360u32 {
+                let i = ((y * 360 + x) * 4) as usize;
+                if px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 30 {
+                    n += 1;
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x1.saturating_sub(x0), y1.saturating_sub(y0), n)
+    };
+
+    let (w0, h0, n0) = measure((0.0, 0.0));
+    let (w4, h4, n4) = measure((4.0, 4.0));
+    println!("  offset 0: {w0}x{h0}（{n0} px），offset 4,4: {w4}x{h4}（{n4} px）");
+    assert!(
+        (w4 as i64 - w0 as i64).abs() <= 2,
+        "带偏移的投影宽度不该变（{w0} vs {w4}）—— 变小说明被条目边界截断"
+    );
+    assert!(
+        (h4 as i64 - h0 as i64).abs() <= 2,
+        "带偏移的投影高度不该变（{h0} vs {h4}）—— 变小说明被条目边界截断"
+    );
+    assert!(
+        n4 as f64 >= n0 as f64 * 0.85,
+        "带偏移的投影面积不该明显变小（{n0} vs {n4}）"
+    );
+}
+
 fn time_ms(f: impl FnOnce()) -> f64 {
     let start = Instant::now();
     f();
@@ -7124,6 +7188,7 @@ fn text_style_rendering_is_frame_stable() {
 
 /// **同一带宽档内改描边宽度不重建**：尺寸阶梯 + 相对带宽档的核心收益。
 ///
+
 /// 60px 字号下 w=2.0 与 w=3.5 的外扩（含 1px 兜底）都落在 44px 参考字号的 4 档里，
 /// 所以图集条目应当完全复用；同时两者都必须真的画出像素（防止"不重建"其实是因为没画）。
 #[test]
