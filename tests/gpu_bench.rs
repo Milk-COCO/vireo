@@ -9035,6 +9035,75 @@ fn glyph_cache_budget_churn_perf() {
             );
         }
     }
+
+    // ---- 真实规模的例子：一个普通 HUD（20 条标签 + 数字，20–28px）----
+    //
+    // 这一组不做断言，只打印"工作集多大、预算设成 1/4 会怎样"，用来给"预算该给多少"一个
+    // 可以对照的量级（很多人以为 HUD 就几条字、随便给 64 KiB 够用）。
+    println!("  ---- 普通 HUD（20 条标签 20–28px）----");
+    let labels = [
+        "生命", "魔法", "护甲", "暴击", "闪避", "攻击", "防御", "速度", "体力", "经验", "金币",
+        "钻石", "任务", "队伍", "地图", "设置", "背包", "技能", "成就", "退出",
+    ];
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 640, 560);
+    let glyphs = gpu.text().glyphs();
+    // 先不限预算跑 30 帧，量出真实工作集。
+    let draw_hud = |frame: u32| {
+        let mut b = DrawBatch::new();
+        for (i, label) in labels.iter().enumerate() {
+            let size = 20.0 + (i % 3) as f32 * 4.0;
+            draw_text(
+                &mut b.texts,
+                label,
+                Pos::new(8.0 + (i % 2) as f32 * 300.0, 8.0 + (i / 2) as f32 * 26.0),
+                TextDef::default().font_size(size),
+                TextOverride::from_color(WHITE),
+            );
+            // 每条标签跟一个会变的数字（`Glyphs` 窄路径的典型用法）。
+            draw_text_parts(
+                &mut b.texts,
+                &[
+                    TextPart::normal(": "),
+                    TextPart::glyphs((frame + i as u32).to_string()),
+                ],
+                Pos::new(120.0 + (i % 2) as f32 * 300.0, 8.0 + (i / 2) as f32 * 26.0),
+                TextDef::default().font_size(size),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        canvas.draw(Some(BLACK), &[&b]);
+    };
+    for f in 0..30 {
+        draw_hud(f);
+    }
+    let peak = glyphs.stats().peak_used_bytes;
+    println!(
+        "   工作集（单帧峰值）：{} KiB，条目 {}",
+        peak / 1024,
+        glyphs.stats().entries()
+    );
+    for budget in [peak / 4, peak * 2] {
+        glyphs.clear();
+        glyphs.set_budget(Some(budget));
+        for f in 0..5 {
+            draw_hud(f);
+        }
+        let r0 = glyphs.stats().rasterizations;
+        let t = Instant::now();
+        const FRAMES: u32 = 15;
+        for f in 0..FRAMES {
+            draw_hud(5 + f);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        let rasters = glyphs.stats().rasterizations - r0;
+        println!(
+            "   预算 {:>5} KiB（{:>4.0}% 工作集）：{ms:>6.2} ms/帧，光栅化 {:>5.1} 次/帧",
+            budget / 1024,
+            budget as f64 / peak as f64 * 100.0,
+            rasters as f64 / FRAMES as f64
+        );
+    }
 }
 
 /// **A/B 交替不抖动**：两套互不重复的文案隔帧切换，热条目（上一帧还在用）不该被淘汰。
