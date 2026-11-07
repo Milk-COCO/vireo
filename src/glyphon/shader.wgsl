@@ -211,6 +211,9 @@ fn decode_sdf(q: f32, band: f32) -> f32 {
 /// 三通道取**中位数**：每个通道存的是「该色边子集」的有符号距离，两条最近的边由两位
 /// 掩码保证落在两个通道里，第三个通道更远 —— 有符号值的中位数就是真实距离
 /// （内部同样成立；用 min 会被更远的通道拉走，内描边的环会整条消失）。
+/// 诊断开关：`VIREO_SHADER_DEBUG_D=1` 时把解码出的距离画到红通道（d * 0.02，0.5 对应 25px）。
+const DEBUG_D: bool = false;
+
 fn median3(v: vec3<f32>) -> f32 {
     return max(min(v.x, v.y), min(max(v.x, v.y), v.z));
 }
@@ -424,6 +427,15 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 let fill_kind = style_meta.z;
                 if (fill_kind != 4u) {
                     let d0 = sample_d(at, in_frag.content_type, in_frag.sdf_band);
+                    if (DEBUG_D) {
+                        // 红 = clamp(d*0.02)，绿 = band/64，蓝 = 0
+                        return vec4<f32>(
+                            clamp(d0 * 0.02 + 0.25, 0.0, 1.0),
+                            clamp(in_frag.sdf_band / 64.0, 0.0, 1.0),
+                            0.25,
+                            1.0,
+                        );
+                    }
                     let cov = coverage(d0, 0.0, 0.0);
                     if (fill_kind == 0u) {
                         let a = in_frag.color.a * cov;

@@ -66,6 +66,16 @@ impl Cache {
         } else {
             glyphon_src.to_owned()
         };
+        // 诊断：`VIREO_SHADER_DEBUG_D=1` 时把片元输出的红通道换成解码出的距离，
+        // 用来定位"整块 quad 被涂色"这类问题（padding 里的 d 到底是 0、band 还是别的）。
+        let glyphon_src = if std::env::var_os("VIREO_SHADER_DEBUG_D").is_some() {
+            glyphon_src.replace(
+                "const DEBUG_D: bool = false;",
+                "const DEBUG_D: bool = true;",
+            )
+        } else {
+            glyphon_src
+        };
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("glyphon shader"),
             source: ShaderSource::Wgsl(Cow::Borrowed(glyphon_src.as_str())),

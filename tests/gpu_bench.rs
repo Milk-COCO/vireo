@@ -6457,6 +6457,46 @@ fn text_style_steady_state_throughput() {
     }
 }
 
+/// 诊断（配合 `VIREO_SHADER_DEBUG_D=1`）：把填充趟解码出的距离画到红通道，
+/// 沿一条竖线读回 d 的值，判断 padding 里到底解出了多少。
+#[test]
+#[ignore = "需 GPU + VIREO_SHADER_DEBUG_D=1；--ignored --nocapture"]
+fn text_sdf_debug_print_d() {
+    if std::env::var_os("VIREO_SHADER_DEBUG_D").is_none() {
+        println!("  跳过：需要 VIREO_SHADER_DEBUG_D=1（着色器才会输出 d）");
+        return;
+    }
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let ink = Color::new(0.10, 0.11, 0.14, 0.92);
+    let c = OffscreenCanvas::new(&gpu, 300, 200);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "国",
+        Pos::new(80.0, 40.0),
+        TextDef {
+            style: Some(Arc::new(TextStyle::outline(16.0, ink))),
+            ..TextDef::default().font_size(44.0)
+        },
+        TextOverride::from_color(WHITE),
+    );
+    c.draw(Some(BLACK), &[&b]);
+    let px = c.read_pixels();
+    // 沿 x=140 竖直扫描，打印 d = (r/255 - 0.25)/0.02
+    println!("  x=140 竖线：y -> d（绿通道 0..255 给出 band/64）");
+    for y in (0..200).step_by(4) {
+        let i = ((y * 300 + 140) * 4) as usize;
+        let r = px[i] as f32 / 255.0;
+        let g = px[i + 1] as f32 / 255.0;
+        let d = (r - 0.25) / 0.02;
+        if r > 0.01 {
+            println!("  y={y}: d={d:6.1}  band≈{:.1}", g * 64.0);
+        }
+    }
+}
+
 /// 复现示例第 1 组：整串 "Outline 描边"、宽度 16、ink 近黑、fill 用顶点色。
 /// 打印 ASCII 分类图，确认「字形外的 padding 区域」是否被涂亮（= 半透明盒子）。
 #[test]
