@@ -66,6 +66,14 @@ pub struct TextContext {
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
     stats: TypesetCacheStats,
+    /// 字形缓存预算（两张图集的**合计**占用，字节；`None` = 不限制）。
+    /// 超出时在帧首淘汰未钉住的 LRU 字形。
+    pub(crate) glyph_budget: Option<u64>,
+    /// 超预算但淘汰不动（全是钉住/本帧在用）时只 warn 一次。
+    pub(crate) glyph_budget_warnings: u64,
+    /// 用户/预算触发的淘汰次数与条数。
+    pub(crate) glyph_trims: u64,
+    pub(crate) glyph_evicted: u64,
 }
 
 #[doc(hidden)]
@@ -212,6 +220,10 @@ impl TextContext {
     /// 每帧绘制前调用一次（多 batch 共享）。
     /// TTL/GC 用真实时间，与 FPS 无关；`typeset_ttl == None` 时不做自动回收。
     pub fn advance_frame(&mut self) {
+        // 图集代数推进：上一帧用过的字形从这一帧起可被淘汰。
+        // （此前从没推进过，`try_allocate` 因此永远认为"全都在用" → 只扩不淘。）
+        self.text_atlas.trim();
+        self.enforce_glyph_budget();
         if self.typeset_ttl.is_none() {
             return;
         }
@@ -225,6 +237,151 @@ impl TextContext {
             self.stats.total_gc_us = self.stats.total_gc_us.saturating_add(us);
             self.last_gc = now;
         }
+    }
+
+    /// 设置字形缓存预算（两张图集**合计**占用，字节；`None` = 不限制）。
+    pub fn set_glyph_budget(&mut self, bytes: Option<u64>) {
+        self.glyph_budget = bytes;
+        self.glyph_budget_warnings = 0;
+    }
+
+    pub fn glyph_budget(&self) -> Option<u64> {
+        self.glyph_budget
+    }
+
+    /// 按预算淘汰未钉住的字形（帧首调用；没设预算就是空操作）。
+    fn enforce_glyph_budget(&mut self) {
+        let Some(budget) = self.glyph_budget else {
+            return;
+        };
+        if self.text_atlas.live_bytes() <= budget {
+            return;
+        }
+        let evicted = self.text_atlas.trim_to_budget(budget) as u64;
+        self.glyph_evicted = self.glyph_evicted.saturating_add(evicted);
+        self.glyph_trims = self.glyph_trims.saturating_add(1);
+        if self.text_atlas.live_bytes() > budget && self.glyph_budget_warnings == 0 {
+            self.glyph_budget_warnings = 1;
+            log::warn!(
+                "vireo: 字形缓存超出预算（{} 字节），剩下的都是被 hold 住或本帧在用的字形；\
+                 图集只会继续扩，释放句柄后才会回落",
+                budget
+            );
+        }
+    }
+
+    /// 手动按预算淘汰一次，返回淘汰条数（不受帧首自动回收影响）。
+    pub fn trim_glyphs_to_budget(&mut self) -> usize {
+        let Some(budget) = self.glyph_budget else {
+            return 0;
+        };
+        let evicted = self.text_atlas.trim_to_budget(budget);
+        self.glyph_evicted = self.glyph_evicted.saturating_add(evicted as u64);
+        self.glyph_trims = self.glyph_trims.saturating_add(1);
+        evicted
+    }
+
+    /// 把 `text` 用得上的字形光栅化进图集，返回 `(新光栅化条目数, 本次触碰到的键)`。
+    ///
+    /// 顶点会被丢弃（`prepare_discard`），所以这次调用**不产生可见输出**，
+    /// 只负责把图集填好并记录键集合 —— `prewarm` / `hold` 共用这条路径。
+    pub(crate) fn prewarm_text(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        text: &str,
+        def: &TextDef,
+        scale: f32,
+    ) -> (usize, Vec<crate::glyphon::GlyphonCacheKey>) {
+        use crate::glyphon::TextArea;
+
+        let before = self.text_atlas.counters().0;
+        let slot = self.get_or_shape_text(text, def);
+        let buffer = self.typeset_slots[slot as usize].buffer.clone();
+
+        // 还没建过视口（首帧之前就 prewarm）时给一个安全的占位分辨率：
+        // prepare 只用它算顶点（这里会丢弃），但 0 会让 Params 显示成空窗口。
+        let res = self.viewport.resolution();
+        if res.width == 0 || res.height == 0 {
+            self.viewport.update(
+                queue,
+                crate::glyphon::Resolution {
+                    width: 1024,
+                    height: 1024,
+                },
+                scale,
+            );
+        }
+
+        // 样式只影响"会创建哪些图集条目"（band / 层数 / above 位图 / 外扩 / 几何描边），
+        // 而键本身只由 (字形, 尺寸, band_q) 决定，所以这里按绘制时的算法复算一遍；
+        // 样式表下标随便给非零值 —— 顶点随即丢弃，不会进 shader。
+        // **无样式时必须给 0**：`style_index == 0` 才是「覆盖度掩码」那条路径，
+        // 给了非零值会生成 SDF 条目，跟真正绘制（`Text` 键）对不上。
+        let dpi = scale as f64;
+        let styled = def.style.as_ref().is_some_and(|s| s.needs_style());
+        let (
+            style_index,
+            style_layers_only,
+            sdf_band,
+            style_layers,
+            style_above_mask,
+            style_reach,
+            vector_stroke,
+        ) = match def.style.as_ref() {
+            Some(style) if styled => (
+                1,
+                2,
+                crate::text::band_for_reach(style.reach_px(dpi)),
+                style.layers.len().min(8) as u32,
+                super::prepare::above_mask(style),
+                style.reach_px(dpi),
+                super::prepare::stroke_px(style, dpi),
+            ),
+            _ => (0, 0, 0.0, 0, 0, 0.0, None),
+        };
+
+        self.text_atlas.start_collect();
+        let area = TextArea {
+            buffer: &buffer,
+            left: 0.0,
+            top: 0.0,
+            scale,
+            // 预光栅化不裁剪：越界字形也要进图集（prepare 会先光栅化再判边界）。
+            bounds: crate::glyphon::TextBounds {
+                left: i32::MIN / 2,
+                top: i32::MIN / 2,
+                right: i32::MAX / 2,
+                bottom: i32::MAX / 2,
+            },
+            default_color: crate::glyphon::Color::rgb(255, 255, 255),
+            custom_glyphs: &[],
+            transform_index: 0,
+            base_uv_rect: [0.0, 0.0, 1.0, 1.0],
+            style_index,
+            style_layers_only,
+            sdf_band,
+            style_layers,
+            style_above_mask,
+            style_reach,
+            vector_stroke,
+        };
+
+        let result = self.text_renderer.prepare_discard(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.viewport,
+            [area],
+            &mut self.swash_cache,
+        );
+        let keys = self.text_atlas.take_collect();
+        if let Err(err) = result {
+            log::warn!("vireo: 预光栅化失败（{:?}），图集可能已满", err);
+        }
+        let new = self.text_atlas.counters().0.saturating_sub(before) as usize;
+        (new, keys)
     }
 
     /// 设置 shape 缓存 TTL。
@@ -771,6 +928,10 @@ impl TextContext {
             glyph_cache: FxHashMap::default(),
             frame_pinned: Vec::with_capacity(32),
             stats: TypesetCacheStats::default(),
+            glyph_budget: None,
+            glyph_budget_warnings: 0,
+            glyph_trims: 0,
+            glyph_evicted: 0,
         }
     }
 }

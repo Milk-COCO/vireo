@@ -213,6 +213,12 @@ pub mod prelude {
     pub use crate::text::ColorMode;
     pub use crate::text::Family;
     pub use crate::text::FeatureTag;
+    pub use crate::text::GlyphAtlasKind;
+    pub use crate::text::GlyphCache;
+    pub use crate::text::GlyphCacheStats;
+    pub use crate::text::GlyphContentType;
+    pub use crate::text::GlyphEntryInfo;
+    pub use crate::text::GlyphHold;
     pub use crate::text::HudLine;
     pub use crate::text::StableText;
     pub use crate::text::Style;

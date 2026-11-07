@@ -79,6 +79,32 @@ impl TextRenderer {
         )
     }
 
+    /// 只为「把字形光栅化进图集」跑一次 prepare：产生的顶点随即丢弃，
+    /// 不影响本帧已经准备好的顶点（`prewarm` / `hold` 用）。
+    pub(crate) fn prepare_discard<'a>(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        atlas: &mut TextAtlas,
+        viewport: &Viewport,
+        text_areas: impl IntoIterator<Item = TextArea<'a>>,
+        cache: &mut SwashCache,
+    ) -> Result<(), PrepareError> {
+        let mark = self.glyph_vertices.len();
+        let result = self.prepare(
+            device,
+            queue,
+            font_system,
+            atlas,
+            viewport,
+            text_areas,
+            cache,
+        );
+        self.glyph_vertices.truncate(mark);
+        result
+    }
+
     /// Prepares all of the provided text areas for rendering.
     pub fn prepare_with_depth<'a>(
         &mut self,
@@ -646,6 +672,9 @@ where
     let mask_generation = system.atlas.mask_atlas.generation;
     let color_generation = system.atlas.color_atlas.generation;
 
+    // 记录"这次 prepare 碰过哪些字形键"（`hold` / `prewarm` 靠它拿回键集合）。
+    system.atlas.note_touched(metadata.cache_key);
+
     let details = if let Some(details) = system
         .atlas
         .mask_atlas
@@ -670,28 +699,40 @@ where
         let should_rasterize = image.width > 0 && image.height > 0;
 
         let (gpu_cache, atlas_id, inner) = if should_rasterize {
-            let mut inner = system.atlas.inner_for_content_mut(image.content_type);
-
             // Find a position in the packer
+            //
+            // 淘汰顺序：先只扔冷条目（上一帧也没用到）→ 不行就扩图集 →
+            // 图集到顶了才动"上一帧在用的"热条目 → 还是不行才报 AtlasFull。
             let allocation = loop {
-                match inner.try_allocate(image.width as usize, image.height as usize) {
+                let attempt = system
+                    .atlas
+                    .inner_for_content_mut(image.content_type)
+                    .try_allocate(image.width as usize, image.height as usize, true);
+                if let Some(a) = attempt {
+                    break a;
+                }
+                let grew = system.atlas.grow(
+                    state,
+                    system.font_system,
+                    system.cache,
+                    image.content_type,
+                    metadata.scale_factor,
+                    &mut rasterize_custom_glyph,
+                );
+                if grew {
+                    continue;
+                }
+                match system
+                    .atlas
+                    .inner_for_content_mut(image.content_type)
+                    .try_allocate(image.width as usize, image.height as usize, false)
+                {
                     Some(a) => break a,
-                    None => {
-                        if !system.atlas.grow(
-                            state,
-                            system.font_system,
-                            system.cache,
-                            image.content_type,
-                            metadata.scale_factor,
-                            &mut rasterize_custom_glyph,
-                        ) {
-                            return Err(PrepareError::AtlasFull);
-                        }
-
-                        inner = system.atlas.inner_for_content_mut(image.content_type);
-                    }
+                    None => return Err(PrepareError::AtlasFull),
                 }
             };
+            let inner = system.atlas.inner_for_content_mut(image.content_type);
+            inner.note_rasterized();
             let atlas_min = allocation.rectangle.min;
 
             state.queue.write_texture(

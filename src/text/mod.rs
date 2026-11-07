@@ -26,6 +26,7 @@ pub mod android_fonts;
 pub(crate) use cache::{GlyphKey, TypesetKey, TypesetSlot};
 mod context;
 mod entry;
+mod glyph_cache;
 mod hud;
 mod prepare;
 mod stencil;
@@ -34,6 +35,9 @@ mod system;
 pub(crate) use context::ResolvedTextGlyph;
 pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
+pub use glyph_cache::{
+    GlyphAtlasKind, GlyphCache, GlyphCacheStats, GlyphContentType, GlyphEntryInfo, GlyphHold,
+};
 pub use hud::{HudLine, StableText, TextPart, draw_hud_line, split_hud};
 pub(crate) use stencil::{TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
 pub(crate) use style::{

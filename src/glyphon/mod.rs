@@ -19,7 +19,9 @@ pub use custom_glyph::{
     ContentType, CustomGlyph, CustomGlyphId, RasterizeCustomGlyphRequest, RasterizedCustomGlyph,
 };
 pub use error::{PrepareError, RenderError};
+pub(crate) use text_atlas::PinRegistry;
 pub use text_atlas::{ColorMode, TextAtlas, TextAtlasStats};
+pub(crate) use text_render::GlyphonCacheKey;
 pub use text_render::TextRenderer;
 pub use viewport::Viewport;
 
@@ -46,16 +48,16 @@ pub(crate) enum GpuCacheStatus {
 }
 
 pub(crate) struct GlyphDetails {
-    width: u16,
-    height: u16,
-    gpu_cache: GpuCacheStatus,
-    atlas_id: Option<AllocId>,
-    top: i16,
-    left: i16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) gpu_cache: GpuCacheStatus,
+    pub(crate) atlas_id: Option<AllocId>,
+    pub(crate) top: i16,
+    pub(crate) left: i16,
     /// The atlas `generation` in which this glyph was last touched by `prepare`. A glyph is
     /// considered in use for the current frame (and not evictable) while this equals the atlas's
     /// current `generation`.
-    last_used: usize,
+    pub(crate) last_used: usize,
 }
 
 #[repr(C)]

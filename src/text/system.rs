@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::glyphon::{Attrs, Buffer, Metrics, Shaping, TextAtlasStats};
 use wgpu::{Device, Queue};
 
-use super::{StableText, TextContext, TextDef, TypesetCacheStats};
+use super::{GlyphCache, StableText, TextContext, TextDef, TypesetCacheStats};
 
 /// 文字系统（字体、排版缓存、字形图集、渲染器的统一入口）。
 ///
@@ -88,6 +88,20 @@ impl TextSystem {
     /// 文本图集的当前占用（覆盖度 / 距离场共用 R8 图 + 彩色图）。
     pub fn atlas_stats(&self) -> TextAtlasStats {
         self.ctx().text_atlas.stats()
+    }
+
+    /// 字形缓存视图：预算 / 预光栅化 / 钉子 / 回收 / 观测。
+    ///
+    /// ```text
+    /// let glyphs = gpu.text().glyphs();
+    /// glyphs.set_budget(Some(8 * 1024 * 1024));          // 8 MiB 上限
+    /// let hold = glyphs.hold(dev, queue, "标题", &def, scale); // 钉住常用字形
+    /// let stats = glyphs.stats();
+    /// println!("{} 条 / {} 字节", stats.entries(), stats.used_bytes());
+    /// drop(hold);                                         // 解钉
+    /// ```
+    pub fn glyphs(&self) -> GlyphCache<'_> {
+        GlyphCache::new(self)
     }
 
     // ---- 排版（typeset）缓存 ----

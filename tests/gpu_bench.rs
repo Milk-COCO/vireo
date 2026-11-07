@@ -7707,3 +7707,477 @@ fn text_style_gradient_fill() {
     assert!(tr > tb * 5 / 4, "上三分之一应偏红：R={tr} B={tb}");
     assert!(bb > br * 5 / 4, "下三分之一应偏蓝：R={br} B={bb}");
 }
+
+// ===========================================================================
+// 字形缓存（`gpu.text().glyphs()`）：预光栅化 / 钉子 / 预算 / 回收 / 统计
+// ===========================================================================
+
+fn glyph_test_def(size: f32) -> TextDef {
+    TextDef::default().font_size(size)
+}
+
+/// `prewarm` 把字形填进图集；同一批文案再来一遍应全命中（`rasterizations` 不涨）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_prewarm_then_hit() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(32.0);
+
+    let before = glyphs.stats();
+    assert_eq!(before.entries(), 0, "新上下文图集应为空");
+
+    // 首帧之前就该能用（视口还没建）：这是"加载阶段预光栅化"的正常用法。
+    let n1 = glyphs.prewarm(&gpu.device, &gpu.queue, "Hello 世界", &def, 1.0);
+    let s1 = glyphs.stats();
+    assert!(n1 > 0, "prewarm 应至少光栅化一条（实际 {n1}）");
+    assert_eq!(
+        s1.rasterizations - before.rasterizations,
+        n1 as u64,
+        "返回的新光栅化条数应与计数器一致"
+    );
+    assert!(s1.entries() > 0, "图集里应出现条目");
+
+    let n2 = glyphs.prewarm(&gpu.device, &gpu.queue, "Hello 世界", &def, 1.0);
+    let s2 = glyphs.stats();
+    assert_eq!(n2, 0, "第二遍应全部命中（实际新增 {n2}）");
+    assert_eq!(s2.rasterizations, s1.rasterizations, "命中不该重光栅化");
+
+    // 关键：prewarm 造出的必须是**绘制时真正会用到**的那批键。画一遍，若键对不上
+    // （例如把无样式文字预填成 SDF 条目），这里会多出 N 条新光栅化。
+    let canvas = OffscreenCanvas::new(&gpu, 320, 120);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "Hello 世界",
+        Pos::new(10.0, 20.0),
+        def.clone(),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    let s3 = glyphs.stats();
+    assert_eq!(
+        s3.rasterizations,
+        s2.rasterizations,
+        "prewarm 之后绘制不该重光栅化（新增 {} 条）",
+        s3.rasterizations - s2.rasterizations
+    );
+    println!(
+        "  prewarm：首次 {n1} 条，图集 R8 {}² / {} 条 / {} 字节",
+        gpu.text_atlas_stats().mask_size,
+        s3.entries(),
+        s3.used_bytes()
+    );
+}
+
+/// `hold` 把字形钉住；统计里的 pinned 条目与句柄长度一致，解钉后归零。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_hold_pins_and_releases() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(40.0);
+
+    let hold = glyphs.hold(&gpu.device, &gpu.queue, "AB", &def, 1.0);
+    assert!(!hold.is_empty(), "hold 应钉住至少一条");
+
+    let stats = glyphs.stats();
+    assert_eq!(
+        stats.pinned_entries as usize,
+        hold.len(),
+        "统计里的钉住数应与句柄一致"
+    );
+    let pinned_in_entries = glyphs.entries().iter().filter(|e| e.pinned).count();
+    assert_eq!(
+        pinned_in_entries,
+        hold.len(),
+        "entries() 里被钉住的条目数应与句柄一致"
+    );
+
+    // 第二次 hold 同一批：引用计数语义，解一个还剩一个。
+    let hold2 = glyphs.hold(&gpu.device, &gpu.queue, "AB", &def, 1.0);
+    assert_eq!(glyphs.pinned_count(), hold.len());
+    drop(hold2);
+    assert_eq!(glyphs.pinned_count(), hold.len(), "还有一个句柄在钉");
+    drop(hold);
+    assert_eq!(glyphs.pinned_count(), 0, "全部解钉后应归零");
+    println!("  hold：钉住 {} 条，解钉后归零", stats.pinned_entries);
+}
+
+/// 钉住期间狂画别的字（图集反复收放），钉住的条目不能被淘汰；
+/// `clear_unpinned` 也不会动它们。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_pinned_survive_eviction() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let hold = glyphs.hold(&gpu.device, &gpu.queue, "固", &glyph_test_def(48.0), 1.0);
+    let held = hold.len();
+    assert!(held > 0);
+
+    let canvas = OffscreenCanvas::new(&gpu, 640, 400);
+    for i in 0..40 {
+        let mut b = DrawBatch::new();
+        let text = format!("{}{}", "kwyz", i);
+        draw_text(
+            &mut b.texts,
+            &text,
+            Pos::new(10.0, 10.0),
+            glyph_test_def(20.0 + (i % 17) as f32),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+    }
+
+    let pinned_now = glyphs.entries().iter().filter(|e| e.pinned).count();
+    assert_eq!(
+        pinned_now, held,
+        "钉住的字形被淘汰了（{pinned_now}/{held} 还在）"
+    );
+
+    let cleared = glyphs.clear_unpinned();
+    assert!(cleared > 0, "应该有未钉住的条目被清掉");
+    let after = glyphs.entries().iter().filter(|e| e.pinned).count();
+    assert_eq!(after, held, "clear_unpinned 不该清钉住的条目");
+    drop(hold);
+    println!("  pinned：清理前钉住 {held} 条，清掉 {cleared} 条未钉住的");
+}
+
+/// 预算：设了上限后，帧首自动淘汰未钉住的字形，占用回落到预算内。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_budget_trims_unpinned() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    const BUDGET: u64 = 32 * 1024;
+    glyphs.set_budget(Some(BUDGET));
+    assert_eq!(glyphs.budget(), Some(BUDGET));
+
+    let canvas = OffscreenCanvas::new(&gpu, 640, 400);
+    let mut b = DrawBatch::new();
+    // 20 条不同字号 × 十几个字，肯定超过 32 KiB。
+    for i in 0..20 {
+        draw_text(
+            &mut b.texts,
+            "Vireo 字形缓存预算",
+            Pos::new(10.0, 10.0 + i as f32 * 18.0),
+            glyph_test_def(16.0 + i as f32),
+            TextOverride::from_color(WHITE),
+        );
+    }
+    canvas.draw(Some(BLACK), &[&b]);
+    let over = glyphs.stats();
+    assert!(
+        over.used_bytes() > BUDGET,
+        "用例失效：占用应超过预算（{} ≤ {BUDGET}）",
+        over.used_bytes()
+    );
+
+    // 再画一帧（不画字）推进代数：帧首会自动按预算回收。
+    let empty = DrawBatch::new();
+    canvas.draw(Some(BLACK), &[&empty]);
+    let auto = glyphs.stats();
+    assert!(
+        auto.evictions > over.evictions,
+        "帧首应自动淘汰（evictions {} → {}）",
+        over.evictions,
+        auto.evictions
+    );
+    assert!(
+        auto.used_bytes() <= BUDGET,
+        "自动回收后占用应回到预算内（{} > {BUDGET}）",
+        auto.used_bytes()
+    );
+
+    // 事后调低预算 → 手动 trim 必须立刻把它压进去。
+    glyphs.set_budget(Some(BUDGET / 4));
+    let evicted = glyphs.trim();
+    let after = glyphs.stats();
+    assert!(evicted > 0, "调低预算后 trim 应淘汰一些字形");
+    assert!(
+        after.used_bytes() <= BUDGET / 4,
+        "淘汰后占用应回到新预算内（{} > {}）",
+        after.used_bytes(),
+        BUDGET / 4
+    );
+    println!(
+        "  budget：{} → {} → {} 字节（预算 {BUDGET} → {}），trim 淘汰 {evicted} 条",
+        over.used_bytes(),
+        auto.used_bytes(),
+        after.used_bytes(),
+        BUDGET / 4
+    );
+}
+
+/// 钉住的东西占满预算时淘汰不动：只 warn 一次，不 panic、也不反复重光栅化。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_budget_keeps_pinned() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let hold = glyphs.hold(
+        &gpu.device,
+        &gpu.queue,
+        "钉住不动",
+        &glyph_test_def(64.0),
+        1.0,
+    );
+    glyphs.set_budget(Some(1)); // 比一条字形还小
+    let before = glyphs.stats();
+    let evicted = glyphs.trim();
+    let after = glyphs.stats();
+    assert_eq!(evicted, 0, "全被钉住时淘汰不动");
+    assert_eq!(after.entries(), before.entries(), "条目应保持不动");
+    assert_eq!(after.pinned_entries, before.pinned_entries);
+    drop(hold);
+    println!("  budget+pinned：淘汰 {evicted} 条，条目数不变");
+}
+
+/// `clear` 清空全部（含钉住的），句柄随后 drop 不 panic，画新字能重新光栅化。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_clear_all_then_refill() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let hold = glyphs.hold(&gpu.device, &gpu.queue, "Clear", &glyph_test_def(30.0), 1.0);
+    glyphs.prewarm(&gpu.device, &gpu.queue, "Other", &glyph_test_def(30.0), 1.0);
+    let n = glyphs.clear();
+    assert!(n > 0, "clear 应清掉条目");
+    let s = glyphs.stats();
+    assert_eq!(s.entries(), 0, "清空后图集条目应为 0");
+
+    drop(hold); // 条目已不存在：解钉必须是 no-op
+    assert_eq!(glyphs.pinned_count(), 0);
+
+    // 重新画：能再次分配、重新光栅化。
+    let canvas = OffscreenCanvas::new(&gpu, 200, 120);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "Clear",
+        Pos::new(10.0, 20.0),
+        glyph_test_def(30.0),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    let lit = px
+        .chunks(4)
+        .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 120)
+        .count();
+    assert!(lit > 50, "清空后重新绘制应还能出字（亮像素 {lit}）");
+    let s2 = glyphs.stats();
+    assert!(s2.rasterizations >= s.rasterizations + 1);
+    println!(
+        "  clear：清掉 {n} 条，重画后重新光栅化到 {} 条",
+        s2.entries()
+    );
+}
+
+/// `prewarm` 不产生可见输出：空的绘制批次仍是一片黑。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_prewarm_is_invisible() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let n = glyphs.prewarm(&gpu.device, &gpu.queue, "WWWW", &glyph_test_def(60.0), 1.0);
+    assert!(n > 0);
+
+    let canvas = OffscreenCanvas::new(&gpu, 200, 200);
+    let empty = DrawBatch::new();
+    canvas.draw(Some(BLACK), &[&empty]);
+    let px = canvas.read_pixels();
+    let lit = px
+        .chunks(4)
+        .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 40)
+        .count();
+    assert_eq!(lit, 0, "预光栅化不该画出任何像素（亮了 {lit} 个）");
+}
+
+/// 带样式的文字在 `prewarm` 之后绘制**不需要重新光栅化**（说明预光栅化复算的
+/// band/图层参数与绘制时一致 — 这是"预填 SDF 条目"能生效的前提）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_prewarm_matches_styled_draw() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let style =
+        TextStyle::outline(3.0, Color::new(0.0, 0.0, 0.0, 1.0)).with_fill(TextPaint::solid(WHITE));
+    let def = TextDef {
+        style: Some(Arc::new(style)),
+        ..glyph_test_def(44.0)
+    };
+
+    let n = glyphs.prewarm(&gpu.device, &gpu.queue, "国永", &def, 1.0);
+    assert!(n > 0, "带样式预光栅化应产生条目");
+    let sdf = glyphs
+        .entries()
+        .into_iter()
+        .filter(|e| e.content == GlyphContentType::Sdf)
+        .count();
+    assert!(sdf > 0, "带样式的条目应是 SDF 表示");
+
+    let before = glyphs.stats().rasterizations;
+    let canvas = OffscreenCanvas::new(&gpu, 240, 120);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "国永",
+        Pos::new(20.0, 20.0),
+        def.clone(),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    let after = glyphs.stats().rasterizations;
+    assert_eq!(
+        after,
+        before,
+        "prewarm 之后绘制不该重光栅化（新增 {} 条）",
+        after - before
+    );
+    println!("  styled prewarm：{n} 条新光栅化，SDF 条目 {sdf} 条，绘制零新增");
+}
+
+/// 跨帧不重光栅化：同一批文字连续 5 帧，`rasterizations` 只应在首帧涨。
+///
+/// 这是"用户可管字形缓存"的核心诉求：字形不该每帧重新光栅化。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_no_rerasterize_across_frames() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 320, 160);
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        "Steady 稳态 123",
+        Pos::new(10.0, 20.0),
+        glyph_test_def(28.0),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    let s1 = gpu.text().glyphs().stats();
+    for _ in 0..4 {
+        canvas.draw(Some(BLACK), &[&b]);
+    }
+    let s2 = gpu.text().glyphs().stats();
+    assert_eq!(
+        s2.rasterizations, s1.rasterizations,
+        "稳态帧不该重新光栅化（{} → {}）",
+        s1.rasterizations, s2.rasterizations
+    );
+    assert_eq!(s2.entries(), s1.entries(), "稳态帧图集条目数不该变");
+    assert!(
+        s2.evictions == s1.evictions,
+        "稳态帧不该淘汰（{} → {}）",
+        s1.evictions,
+        s2.evictions
+    );
+    println!(
+        "  5 帧：光栅化 {} 次 / {} 条 / {} 字节",
+        s2.rasterizations,
+        s2.entries(),
+        s2.used_bytes()
+    );
+}
+
+/// 图集真装不下时要按 LRU 淘汰（回归：`trim()` 从没被调用 → 代数永远 0 →
+/// 所有条目都被当成"本帧在用" → 只扩不淘，显存一路涨到最大纹理）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_atlas_evicts_when_full() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 400, 200);
+    let glyphs = gpu.text().glyphs();
+
+    // 每帧换一批字号/字形：跨帧的旧字形逐渐变冷，最终必须被淘汰掉。
+    for i in 0..60u32 {
+        let mut b = DrawBatch::new();
+        let text = format!("{:04}", i * 7919 % 10000);
+        draw_text(
+            &mut b.texts,
+            &text,
+            Pos::new(10.0, 10.0),
+            glyph_test_def(24.0 + (i % 40) as f32),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+    }
+
+    let s = glyphs.stats();
+    assert!(
+        s.evictions > 0,
+        "图集反复收放却不淘汰（evictions=0，grows={}，容量 {} 字节）",
+        s.grows,
+        s.texture_bytes()
+    );
+    assert!(
+        s.used_bytes() <= s.texture_bytes(),
+        "条目占用不该超过纹理容量（{} > {}）",
+        s.used_bytes(),
+        s.texture_bytes()
+    );
+    assert!(
+        s.texture_bytes() < 16 * 1024 * 1024,
+        "淘汰生效时不该把图集扩到 16 MiB 以上（实际 {}）",
+        s.texture_bytes()
+    );
+    println!(
+        "  淘汰：{} 次，扩图 {} 次，条目 {} 条 / {} 字节，纹理 {} 字节",
+        s.evictions,
+        s.grows,
+        s.entries(),
+        s.used_bytes(),
+        s.texture_bytes()
+    );
+}
+
+/// `entries()` 与 `stats()` 必须自洽（字节数、条目数、SDF 表示）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_entries_match_stats() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let hold = glyphs.hold(&gpu.device, &gpu.queue, "统计", &glyph_test_def(36.0), 1.0);
+    glyphs.prewarm(&gpu.device, &gpu.queue, "Plain", &glyph_test_def(36.0), 1.0);
+
+    let stats = glyphs.stats();
+    let entries = glyphs.entries();
+    assert_eq!(entries.len() as u32, stats.entries(), "条目数应一致");
+    let sum: u64 = entries.iter().map(|e| e.bytes).sum();
+    assert_eq!(sum, stats.used_bytes(), "字节数应一致");
+    let pinned = entries.iter().filter(|e| e.pinned).count();
+    assert_eq!(pinned as u32, stats.pinned_entries, "钉住数应一致");
+    assert!(
+        entries.iter().all(|e| !e.key.is_empty()),
+        "每条都该有键摘要"
+    );
+    for e in entries.iter().take(4) {
+        println!(
+            "  {:?}/{:?} {}×{} @({},{}) {}B pinned={} in_use={} {}",
+            e.atlas, e.content, e.width, e.height, e.x, e.y, e.bytes, e.pinned, e.in_use, e.key
+        );
+    }
+    drop(hold);
+}

@@ -41,7 +41,7 @@ pub(super) struct AreaMeta {
 }
 
 /// 位图：第 i 位 = 第 i 层画在填充之上（最多 8 层）。
-fn above_mask(style: &std::sync::Arc<crate::text::TextStyle>) -> u32 {
+pub(super) fn above_mask(style: &std::sync::Arc<crate::text::TextStyle>) -> u32 {
     let mut mask = 0u32;
     for (i, layer) in style.layers.iter().take(8).enumerate() {
         if layer.above_fill {
@@ -57,7 +57,10 @@ fn layer_count_of(style: &std::sync::Arc<crate::text::TextStyle>) -> u32 {
 }
 
 /// 几何描边：折算成设备像素（`None` = 该样式没有几何描边）。
-fn stroke_px(style: &crate::text::TextStyle, dpi: f64) -> Option<crate::text::TextStrokePx> {
+pub(super) fn stroke_px(
+    style: &crate::text::TextStyle,
+    dpi: f64,
+) -> Option<crate::text::TextStrokePx> {
     use crate::dpi::ToPx;
     style
         .vector_stroke
