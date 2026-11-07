@@ -1520,7 +1520,7 @@ impl Renderer {
         }
         let mut text_ctx = self.gpu.text_ctx();
         text_ctx.text_renderer.begin_frame();
-        text_ctx.advance_frame();
+        text_ctx.advance_frame(&self.gpu.device, &self.gpu.queue);
         drop(text_ctx);
         for (ei, event) in events.iter().enumerate() {
             if let DrawEvent::Batch(batch) = event

@@ -8,16 +8,18 @@
 //! 不会污染统计）：
 //!
 //! 1. 上：被 `hold` 钉住的标题（永远不会被淘汰，也不会重光栅化）；
-//! 2. 中：每帧换新字号的滚动文本（故意制造 miss，靠预算回收）；
-//! 3. 下：说明 + 当前预算 / 占用 / 条目 / 命中数。
+//! 2. 中：每帧换新字号的滚动文本（故意制造 miss，靠保留预算回收）；
+//! 3. 下：说明 + 当前预算模式 / 占用 / 纹理 / 条目 / 光栅化 / 压缩次数。
 //!
 //! 操作：
-//! - `1` 预算 = 256 KiB
-//! - `2` 预算 = 1 MiB
-//! - `3` 预算 = None（不限制）
+//! - `1` 保留预算 = 256 KiB（**不抖**，只清历史积压）
+//! - `2` 保留预算 = 1 MiB
+//! - `3` 无预算
+//! - `H` 硬预算 = 256 KiB（<工作集，**会抖** —— 用来对比两种语义）
+//! - `A` 自动压缩开关（默认开）
 //! - `T` 手动按预算淘汰一次
 //! - `C` 清掉未钉住的字形
-//! - `K` 收缩图集（把显存还回去）
+//! - `K` 手动收缩图集
 //! - `S` 把图集存到临时文件
 //! - `L` 从临时文件装载（会先清空）
 //! - 空格 暂停/继续滚动（暂停后统计应完全不动 = 跨帧零重光栅化）
@@ -33,9 +35,9 @@ use vireo::prelude::*;
 const TITLE: &str = "Hold 钉住：字形缓存";
 const ROLLING: &[&str] = &[
     "prewarm 一次，之后每帧都是命中",
-    "预算到了就按 LRU 淘汰未钉住的字形",
-    "钉住的字形不参与淘汰，超预算只 warn 一次",
-    "compact 把图集收缩回去，显存不再按峰值常驻",
+    "保留预算只清 1 秒没用的冷字形，永不掉帧",
+    "hard 预算低于工作集才会每帧重光栅化（掉帧）",
+    "compact 把图集收缩回去，利用率低时还会自动做",
     "save/load 跨进程复用已光栅化的图集",
 ];
 
@@ -72,8 +74,37 @@ async fn main() {
     let bench_texts = bench_grid();
     const BENCH_WARMUP: u32 = 30;
     const BENCH_FRAMES: u32 = 120;
-    const BENCH_BUDGETS: [Option<u64>; 3] = [Some(256 * 1024), Some(8 * 1024 * 1024), None];
-    const BENCH_LABELS: [&str; 3] = ["256 KiB（<工作集）", "8 MiB（装得下）", "不限制"];
+    /// 基准三档：软预算（不抖）/ 硬预算（会抖）/ 不限制 —— 直接对比两种语义。
+    #[derive(Clone, Copy)]
+    enum BenchMode {
+        Soft(u64),
+        Hard(u64),
+        Off,
+    }
+    const BENCH_MODES: [BenchMode; 3] = [
+        BenchMode::Soft(256 * 1024),
+        BenchMode::Hard(256 * 1024),
+        BenchMode::Off,
+    ];
+    const BENCH_LABELS: [&str; 3] = [
+        "软预算 256 KiB（<工作集）",
+        "硬预算 256 KiB（会抖）",
+        "不限制",
+    ];
+    let apply_mode = |glyphs: &GlyphCache<'_>, mode: BenchMode| match mode {
+        BenchMode::Soft(b) => {
+            glyphs.set_retention_budget(Some(b));
+            glyphs.set_hard_budget(None);
+        }
+        BenchMode::Hard(b) => {
+            glyphs.set_hard_budget(Some(b));
+            glyphs.set_retention_budget(None);
+        }
+        BenchMode::Off => {
+            glyphs.set_retention_budget(None);
+            glyphs.set_hard_budget(None);
+        }
+    };
     let mut bench_stage = 0usize;
     let mut bench_frame = 0u32;
     let mut bench_rasters = 0u64;
@@ -83,7 +114,7 @@ async fn main() {
     let mut bench_frames_done = 0u32;
 
     let mut paused = false;
-    let mut budget_label = "1 MiB";
+    let mut budget_label = "软 1 MiB（默认）";
     let mut rolling = 0usize;
     let mut last_log = Instant::now() - Duration::from_secs(1);
     let mut redraw_hud = true;
@@ -113,11 +144,7 @@ async fn main() {
         // （`physical` 会把 font_size 乘 scale），一帧之后全部变成 miss。
         if hold.is_none() {
             let scale = win.layout_scale() as f32;
-            glyphs.set_budget(if bench {
-                BENCH_BUDGETS[0]
-            } else {
-                Some(1024 * 1024)
-            });
+            apply_mode(&glyphs, if bench { BENCH_MODES[0] } else { BenchMode::Soft(1024 * 1024) });
             hold = Some(glyphs.hold(
                 &gpu.device,
                 &gpu.queue,
@@ -132,18 +159,30 @@ async fn main() {
         }
 
         if win.key_down(KeyCode::Digit1) {
-            glyphs.set_budget(Some(256 * 1024));
-            budget_label = "256 KiB";
+            apply_mode(&glyphs, BenchMode::Soft(256 * 1024));
+            budget_label = "软 256 KiB";
             redraw_hud = true;
         }
         if win.key_down(KeyCode::Digit2) {
-            glyphs.set_budget(Some(1024 * 1024));
-            budget_label = "1 MiB";
+            apply_mode(&glyphs, BenchMode::Soft(1024 * 1024));
+            budget_label = "软 1 MiB";
             redraw_hud = true;
         }
         if win.key_down(KeyCode::Digit3) {
-            glyphs.set_budget(None);
-            budget_label = "无限制";
+            apply_mode(&glyphs, BenchMode::Off);
+            budget_label = "无预算";
+            redraw_hud = true;
+        }
+        if win.key_down(KeyCode::KeyH) {
+            // 硬预算：故意小于工作集，演示"每帧重光栅化"的代价。
+            apply_mode(&glyphs, BenchMode::Hard(256 * 1024));
+            budget_label = "硬 256 KiB（会抖）";
+            redraw_hud = true;
+        }
+        if win.key_down(KeyCode::KeyA) {
+            let on = !glyphs.auto_compact();
+            glyphs.set_auto_compact(on);
+            eprintln!("[text_cache] auto_compact => {on}");
             redraw_hud = true;
         }
         if win.key_down(KeyCode::KeyT) {
@@ -193,10 +232,10 @@ async fn main() {
 
         let mut batches: Vec<DrawBatch> = Vec::with_capacity(8);
 
-        // ---- 自动基准分支：只画网格，按三档预算各测一段 ----
+        // ---- 自动基准分支：只画网格，按三档预算语义各测一段 ----
         if bench {
-            if bench_frame == 0 && bench_stage < BENCH_BUDGETS.len() {
-                glyphs.set_budget(BENCH_BUDGETS[bench_stage]);
+            if bench_frame == 0 && bench_stage < BENCH_MODES.len() {
+                apply_mode(&glyphs, BENCH_MODES[bench_stage]);
                 bench_rasters = glyphs.stats().rasterizations;
                 bench_sum_ms = 0.0;
                 bench_encode_ms = 0.0;
@@ -247,7 +286,7 @@ async fn main() {
                 );
                 bench_stage += 1;
                 bench_frame = 0;
-                if bench_stage >= BENCH_BUDGETS.len() {
+                if bench_stage >= BENCH_MODES.len() {
                     println!("[bench] 完毕");
                     return false;
                 }
@@ -283,13 +322,15 @@ async fn main() {
         if last_log.elapsed() >= Duration::from_millis(250) || redraw_hud {
             let s = glyphs.stats();
             hud_line = format!(
-                "预算 {} | 占用 {} KiB | 条目 {} | 光栅化 {} | 淘汰 {} | 扩图 {} | 钉住 {}",
+                "预算 {} | 占用 {} KiB / 纹理 {} KiB | 条目 {} | 光栅化 {} | 淘汰 {} | 扩图 {} | 压缩 {} | 钉住 {}",
                 budget_label,
                 s.used_bytes() / 1024,
+                s.texture_bytes() / 1024,
                 s.entries(),
                 s.rasterizations,
                 s.evictions,
                 s.grows,
+                s.compacts,
                 s.pinned_entries,
             );
             last_log = Instant::now();
@@ -319,14 +360,14 @@ async fn main() {
         );
         draw_text(
             &mut hud.texts,
-            "1/2/3 预算   T trim   C 清未钉住   K 收缩   S 保存   L 装载   空格 暂停",
+            "1/2/3 软预算   H 硬预算（会抖）   A 自动压缩开关   T trim   C 清未钉住   K 收缩   S/L 存取   空格 暂停",
             Pos::new(24.0, 178.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.55, 0.55, 0.6, 1.0)),
         );
         draw_text(
             &mut hud.texts,
-            "暂停后 rasterizations 应完全不动（= 跨帧零重光栅化）",
+            "软预算永不抖；硬预算 < 工作集才会让 rasterizations 每帧涨。暂停后应完全不动",
             Pos::new(24.0, 202.0),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.55, 0.7, 0.55, 1.0)),

@@ -4,6 +4,15 @@
 
 ### Changed / 变更
 
+- **字形缓存的预算拆成两个旋钮**（原来是 `set_budget` 一个，语义含混）：
+  - `set_retention_budget(..)`（**保留预算**，推荐）：只淘汰「≥120 帧没用到」的条目，
+    当前工作集与间歇使用的字形都不动 ⇒ **永不掉帧**；它限制的是"历史积压"
+    （换场景/改字号留下的冷字形），不是显存上限；
+  - `set_hard_budget(..)`：严格上限，低于单帧工作集时会每帧重光栅化（掉帧），
+    设置时会 `log::warn!` 一次；两个 setter 互斥，后设置者生效。
+- **`GlyphCacheStats` 字段同步调整**：`budget_bytes` → `retention_budget_bytes`，新增
+  `hard_budget_bytes` / `effective_budget_bytes` / `compacts` / `auto_compact`；
+  `grows` 现在只统计扩容（之前 `compact` 会误加）。
 - **文字 API 归一到一个门面**：新增 `GpuContext::text() -> &TextSystem` 与
   `TextSystem`（字体 / 排版缓存 / 字形图集 / 渲染器的统一入口）。`measure_text`、
   `typeset_*`、`make_stable_text`、`load_font` 等方法在 `GpuContext` 上保留为便捷转发。
@@ -45,16 +54,21 @@
 
 - **用户可管的字形缓存**：`gpu.text().glyphs()` 返回 `GlyphCache<'_>`，把「字形画一次就别再画」
   和「显存别失控」这两件事交给用户：
-  - **预算** `set_budget(Some(bytes))`：帧首检查，超了就淘汰未钉住的 LRU 字形
-    （两档淘汰：先冷后热）；全是钉子时只 `warn` 一次，不硬砸钉子。
+  - **保留预算** `set_retention_budget(Some(bytes))`：只淘汰「≥120 帧没用到」的条目，
+    永不掉帧；**硬预算** `set_hard_budget(Some(bytes))`：严格上限，可能掉帧（会 warn）。
+  - **自动压缩**（默认开，`set_auto_compact`）：图集利用率持续 <25% 达 60 帧就自动缩到
+    「刚好装下」（拷贝搬运、不重新光栅化、像素不变）；只搬 ≤512 KiB（实测 371 KiB → 1.3 ms），
+    更大的缓存用 `compact()` 手动做。
   - **预光栅化** `prewarm(dev, queue, text, &def, scale)`：加载阶段把文案填进图集，
     不产生可见输出，返回新光栅化的条目数。
   - **钉子** `hold(..) -> GlyphHold`：先 `prewarm` 再钉住，句柄活着期间不被淘汰；
     引用计数语义，多个句柄钉同一批字形，最后一个释放才解钉。
   - **回收** `trim()` / `clear_unpinned()` / `clear()` / `compact()`：`compact` 把条目
     拷贝重排到更小的纹理（不重新光栅化），把显存真正还回去。
-  - **观测** `stats()`（O(1) 聚合）/ `entries()`（逐条快照，含 `content` 是
+  - **观测** `stats()`（O(1) 聚合，0.05–0.10 µs）/ `entries()`（逐条快照，含 `content` 是
     `Mask`/`Sdf`/`Color`、`pinned`、`in_use`、键摘要）。
+  - **性能哨兵**：稳态仍在每帧重光栅化时（连续 30 帧），debug 构建或 `VIREO_TEXT_STRICT=1`
+    下 `warn` 一次，并给出三条排查方向（硬预算过小 / 字号连续动画 / 动态文案整串 format）。
 - **字形缓存跨进程持久化**：`glyphs().save(dev, queue, path)` /
   `glyphs().load(dev, queue, path)`，格式 `VRTX` v1。
   - 字体身份用「postscript 名 + 字体数据摘要」而不是 `fontdb::ID`（那是进程内 slotmap 键）；

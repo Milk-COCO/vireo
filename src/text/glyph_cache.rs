@@ -1,9 +1,12 @@
 //! 用户可管的字形缓存（`gpu.text().glyphs()`）。
 //!
-//! 默认行为不变：字形画到哪、光栅化到哪，图集按 LRU 自己扩。这一层给需要
-//! "别每帧重新光栅化"和"显存别失控"的场景提供**完整**的控制面：
+//! 默认行为：字形画到哪、光栅化到哪；图集按需扩容，**利用率长期偏低时自动缩回**
+//! （拷贝搬运，不重新光栅化）。这一层给需要"别每帧重新光栅化"和"显存别失控"的场景
+//! 提供**完整**的控制面：
 //!
-//! - **预算**：[`GlyphCache::set_budget`] 定一个字节上限，帧首超了就淘汰未钉住的 LRU；
+//! - **预算**（两种语义）：[`GlyphCache::set_retention_budget`] 只清"历史积压"、永不掉帧；
+//!   [`GlyphCache::set_hard_budget`] 是严格上限，可低于工作集但会掉帧；
+//! - **自动压缩**：[`GlyphCache::set_auto_compact`]（默认开），低利用率时缩图集；
 //! - **预光栅化**：[`GlyphCache::prewarm`] 在加载阶段把字填进图集（不产生可见输出）；
 //! - **钉子**：[`GlyphCache::hold`] 返回 [`GlyphHold`]，活着的期间这些字形不会被淘汰；
 //!   `hold` 内部先 `prewarm` 再钉，所以"钉住的键一定已经在图集里"（否则钉住没意义）；
@@ -83,7 +86,7 @@ pub struct GlyphEntryInfo {
     pub key: String,
 }
 
-/// 字形缓存的累计统计。计数是**自本次进程启动**累计的（`set_budget` 只重置告警计数）。
+/// 字形缓存的累计统计。计数是**自本次进程启动**累计的（改预算只重置告警计数）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GlyphCacheStats {
     /// R8 图里的条目数（覆盖度 + SDF）。
@@ -100,22 +103,30 @@ pub struct GlyphCacheStats {
     pub mask_texture_bytes: u64,
     /// 彩色图纹理容量（字节，`边长² × 4`）。
     pub color_texture_bytes: u64,
-    /// 当前预算（`None` = 不限制）。
-    pub budget_bytes: Option<u64>,
+    /// 保留预算（请求值；`None` = 不淘汰）。
+    pub retention_budget_bytes: Option<u64>,
+    /// 硬预算（请求值；`None` = 未启用）。
+    pub hard_budget_bytes: Option<u64>,
+    /// 实际执行的淘汰上限（软模式 = `max(请求值, 峰值×3/2)`；硬模式 = 请求值）。
+    pub effective_budget_bytes: Option<u64>,
+    /// 自动压缩是否开启。
+    pub auto_compact: bool,
     /// 累计光栅化次数（新造图集条目；命中不计数）。
     pub rasterizations: u64,
     /// 累计淘汰次数（LRU / 预算 / 清空 / 扩图集时丢条目）。
     pub evictions: u64,
     /// 累计扩图集次数。
     pub grows: u64,
+    /// 累计缩图集次数（自动 + 手动 `compact`）。
+    pub compacts: u64,
     /// 累计触发淘汰的次数（预算回收 + 手动 `trim`）。
     pub trims: u64,
     /// 超预算但淘汰不动（全是钉住/在用）的告警次数（0/1，改预算后重置）。
     pub budget_warnings: u64,
     /// 观测到的**单帧占用峰值**（帧首读数取 max）。
     ///
-    /// 这是"预算该给多大"的实测依据：预算小于它就会每帧淘汰+重光栅化
-    /// （真实窗口里代价是 20ms/帧级别）。建议 `set_budget` 取 **1.5–2×** 这个值。
+    /// 这是"工作集"的实测值：保留预算的下限就是它的 1.5 倍，硬预算低于它必然抖动
+    /// （真实窗口里代价是 20ms/帧级别）。
     pub peak_used_bytes: u64,
 }
 
@@ -204,10 +215,14 @@ impl GlyphCache<'_> {
             color_used_bytes: color_used,
             mask_texture_bytes: ctx.text_atlas.mask_atlas.capacity_bytes(),
             color_texture_bytes: ctx.text_atlas.color_atlas.capacity_bytes(),
-            budget_bytes: ctx.glyph_budget,
+            retention_budget_bytes: ctx.glyph_budget,
+            hard_budget_bytes: ctx.glyph_hard_budget,
+            effective_budget_bytes: ctx.glyph_effective_budget(),
+            auto_compact: ctx.glyph_auto_compact,
             rasterizations,
             evictions,
             grows,
+            compacts: ctx.text_atlas.compact_count(),
             trims: ctx.glyph_trims,
             budget_warnings: ctx.glyph_budget_warnings,
             peak_used_bytes: ctx.glyph_peak_bytes,
@@ -269,21 +284,58 @@ impl GlyphCache<'_> {
 
     // ---- 预算 ----
 
-    /// 设置字形缓存预算（两张图**合计**的条目占用，字节）。
+    /// 设置**保留预算**（软上限，两张图合计的条目占用，字节）。
     ///
-    /// - `Some(bytes)`：帧首检查，超了就淘汰未钉住的 LRU 字形；
-    /// - `None`（默认）：不限制。
+    /// 实际执行的上限是 `max(这个值, 单帧占用峰值 × 3/2)`：它只淘汰「历史积压」
+    /// （换场景/改字号留下的冷条目），**当前帧在用的字形永远不动**，
+    /// 所以**不会造成每帧重光栅化**。
     ///
-    /// 预算按"条目面积累计"算，不含图集里 packer 的空洞 —— 所以纹理容量可能比预算大
-    /// 一圈（图集是 2 的幂逐步翻倍的）。被 [`Self::hold`] 钉住的字形不与预算竞争：
-    /// 全是钉住的条目时只会 warn 一次然后继续用现有的图。
-    pub fn set_budget(&self, bytes: Option<u64>) {
-        self.sys.ctx().set_glyph_budget(bytes);
+    /// 注意两件事：
+    /// - 它**不是显存上限**：淘汰只释放条目，纹理要靠自动压缩才会缩（默认开着）；
+    /// - 想把显存钉死请用 [`Self::set_hard_budget`]，代价见那里的说明。
+    ///
+    /// 预算按"条目面积累计"算，不含图集里 packer 的空洞。
+    pub fn set_retention_budget(&self, bytes: Option<u64>) {
+        self.sys.ctx().set_glyph_retention_budget(bytes);
     }
 
-    /// 当前预算（`None` = 不限制）。
-    pub fn budget(&self) -> Option<u64> {
-        self.sys.ctx().glyph_budget()
+    /// 设置**硬预算**（严格上限，字节）。
+    ///
+    /// 低于单帧工作集时**必然**每帧淘汰 + 重光栅化：实测 200% DPI、768 字形的场景
+    /// 会从 121 fps 掉到 ~50 fps。库会在设置时 `log::warn!` 一次。
+    ///
+    /// 两个预算互斥：后设置的那个生效。
+    pub fn set_hard_budget(&self, bytes: Option<u64>) {
+        self.sys.ctx().set_glyph_hard_budget(bytes);
+    }
+
+    /// 当前保留预算（`None` = 不淘汰）。
+    pub fn retention_budget(&self) -> Option<u64> {
+        self.sys.ctx().glyph_retention_budget()
+    }
+
+    /// 当前硬预算（`None` = 未启用）。
+    pub fn hard_budget(&self) -> Option<u64> {
+        self.sys.ctx().glyph_hard_budget()
+    }
+
+    /// 当前**实际执行**的淘汰上限（软模式会随单帧峰值浮动）。
+    pub fn effective_budget_bytes(&self) -> Option<u64> {
+        self.sys.ctx().glyph_effective_budget()
+    }
+
+    /// 自动压缩开关（默认开）。
+    ///
+    /// 开着时，图集**持续**低利用率（<25% 达 60 帧、且距上次变动 ≥120 帧）会自动缩到
+    /// 刚好装下现有条目 —— 拷贝搬运，不重新光栅化，像素不变。关掉后图集只涨不缩，
+    /// 需要自己调 [`Self::compact`]。
+    pub fn set_auto_compact(&self, on: bool) {
+        self.sys.ctx().set_glyph_auto_compact(on);
+    }
+
+    /// 自动压缩是否开启。
+    pub fn auto_compact(&self) -> bool {
+        self.sys.ctx().glyph_auto_compact()
     }
 
     // ---- 预光栅化 / 钉住 ----

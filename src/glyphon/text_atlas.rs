@@ -78,6 +78,10 @@ pub(crate) struct InnerAtlas {
     pub evictions: u64,
     /// 累计扩图集次数。
     pub grows: u64,
+    /// 累计缩图集次数（`compact`）。
+    ///
+    /// 和 `grows` 分开：否则"扩容检测"的用例/日志会被压缩误触发。
+    pub compacts: u64,
     /// 当前条目占用字节（增量维护；见 `live_bytes()` 的注释）。
     pub live_bytes: u64,
 }
@@ -131,6 +135,7 @@ impl InnerAtlas {
             rasterizations: 0,
             evictions: 0,
             grows: 0,
+            compacts: 0,
             live_bytes: 0,
         }
     }
@@ -165,11 +170,14 @@ impl InnerAtlas {
 
     /// 淘汰一条「不钉住」的图集条目，返回释放的字节数。
     ///
-    /// `cold_only = true` 时只动「本帧与上一帧都没用到」的条目 —— 上一帧还在用的字形
-    /// 是热内容，图集还能扩时宁可扩也不扔（否则「隔帧切换两套文案」会来回重光栅化）。
+    /// `min_age_frames`：条目至少「这么多帧没被用到」才允许淘汰（`0` = 连本帧的也动，
+    /// 实际不会传 0）。两处调用方的取值：
+    /// - `try_allocate` / 硬预算：`2`（本帧与上一帧都在用的不动）；
+    /// - 保留预算：`RETENTION_MIN_AGE_FRAMES`（1 秒级没用过才算"历史积压"），
+    ///   这样间歇使用的字形（比如只在某些帧出现的数字）不会被反复扔掉重画。
     ///
     /// 只淘汰真正占图集的条目；只占缓存表的元数据条目由 [`Self::try_allocate`] 清理。
-    pub(crate) fn evict_one_unpinned(&mut self, cold_only: bool) -> Option<u64> {
+    pub(crate) fn evict_one_unpinned(&mut self, min_age_frames: usize) -> Option<u64> {
         let pinned = self.pins.snapshot();
         let generation = self.generation;
         let key = self
@@ -177,10 +185,11 @@ impl InnerAtlas {
             .iter()
             .rev()
             .find(|(k, d)| {
-                if d.atlas_id.is_none() || pinned.contains(*k) || d.last_used == generation {
+                if d.atlas_id.is_none() || pinned.contains(*k) {
                     return false;
                 }
-                !cold_only || d.last_used + 1 < generation
+                let age = generation.saturating_sub(d.last_used);
+                age >= min_age_frames.max(1)
             })
             .map(|(k, _)| *k)?;
         let details = self.glyph_cache.pop(&key)?;
@@ -428,11 +437,9 @@ impl InnerAtlas {
     /// 注意：**条目坐标会变**，所以只能在两帧之间调（已经准备好的顶点不保证还有效）。
     pub(crate) fn compact(&mut self, state: &State) -> bool {
         const MIN_SIZE: u32 = InnerAtlas::INITIAL_SIZE;
-        let live_area: u64 = self
-            .glyph_cache
-            .iter()
-            .filter_map(|(_, d)| d.atlas_id.map(|_| u64::from(d.width) * u64::from(d.height)))
-            .sum();
+        // 条目面积（不含每像素字节数）：用增量维护的 `live_bytes` 换算，O(1)。
+        // 和 `try_allocate` 的占用统计同一个来源，避免两套账。
+        let live_area: u64 = self.live_bytes / self.kind.num_channels() as u64;
         if live_area == 0 {
             // 全空：直接回到初始尺寸，连拷贝都省了。
             if self.size <= MIN_SIZE {
@@ -440,7 +447,7 @@ impl InnerAtlas {
             }
             self.recreate(state, MIN_SIZE);
             self.packer = BucketedAtlasAllocator::new(size2(MIN_SIZE as i32, MIN_SIZE as i32));
-            self.grows = self.grows.saturating_add(1);
+            self.compacts = self.compacts.saturating_add(1);
             return true;
         }
         // 目标边长 = 1.2 × sqrt(内容面积)，向上取到 2 的幂。
@@ -538,7 +545,11 @@ impl InnerAtlas {
                 },
             );
             // 拷贝指令已经记下旧坐标，这里就可以把条目改写到新位置。
-            if let Some(details) = self.glyph_cache.get_mut(key) {
+            //
+            // 用 `peek_mut` 而不是 `get_mut`：后者会把条目提升成 MRU，而 placements 是按
+            // 面积从大到小排的 ⇒ 搬完之后「最大的字形最不容易被淘汰、最小的最容易被淘汰」，
+            // LRU 顺序被压缩本身改写了。`peek_mut` 只改值不动链表。
+            if let Some(details) = self.glyph_cache.peek_mut(key) {
                 details.gpu_cache = GpuCacheStatus::InAtlas {
                     x: min.x as u16,
                     y: min.y as u16,
@@ -552,7 +563,7 @@ impl InnerAtlas {
         self.packer = new_packer;
         self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = target;
-        self.grows = self.grows.saturating_add(1);
+        self.compacts = self.compacts.saturating_add(1);
         log::debug!(
             "glyphon: {:?} atlas compacted to {}²（搬迁 {} 条条目）",
             self.kind,
@@ -727,30 +738,73 @@ impl TextAtlas {
         self.mask_atlas.live_bytes() + self.color_atlas.live_bytes()
     }
 
+    /// 两张图的纹理容量合计（字节）。
+    pub(crate) fn capacity_bytes(&self) -> u64 {
+        self.mask_atlas.capacity_bytes() + self.color_atlas.capacity_bytes()
+    }
+
+    /// 任一张图「利用率偏低」吗（`live×4 < capacity`，即 < 25%）。
+    ///
+    /// 逐图判断而不是看合计：mask 图巨大、color 图空着时，合计利用率可能仍不算低，
+    /// 但真正该缩的是 mask。
+    pub(crate) fn any_atlas_underutilized(&self) -> bool {
+        [&self.mask_atlas, &self.color_atlas].iter().any(|a| {
+            let capacity = a.capacity_bytes();
+            capacity > 0 && a.live_bytes().saturating_mul(4) < capacity
+        })
+    }
+
+    /// 累计缩图集次数（两张图求和）。
+    pub(crate) fn compact_count(&self) -> u64 {
+        self.mask_atlas.compacts + self.color_atlas.compacts
+    }
+
+    /// 保留预算淘汰「历史积压」时要求的**最小未使用帧数**。
+    ///
+    /// 只淘汰"这么久都没被用到"的条目，而不是"上一帧没用到的"：后者会把间歇使用的字形
+    /// （只在某些帧出现的数字、只在某个页面出现的标签）反复扔掉再重画 —— 实测软预算
+    /// 128 KiB + 27 KiB 工作集的 HUD 场景还有 8.2 次/帧的残余光栅化，就是这个原因。
+    /// 120 帧 ≈ 60fps 下 2 秒、120fps 下 1 秒。
+    pub(crate) const RETENTION_MIN_AGE_FRAMES: usize = 120;
+
     /// 按**总预算**淘汰未钉住的 LRU 条目，直到两图合计占用 ≤ `budget`。
     ///
-    /// 先只扔冷条目（上一帧也没用到）；还不够再动热条目 —— 设了预算就是明确要求
-    /// "占用别涨"，这时热条目也得让位。返回淘汰条数。
-    pub(crate) fn trim_to_budget(&mut self, budget: u64) -> usize {
+    /// - `min_age_frames = RETENTION_MIN_AGE_FRAMES`（保留预算）：只扔"历史积压"，
+    ///   当前工作集与间歇使用的字形都不动 ⇒ 实际使用中不会造成重光栅化；
+    /// - `min_age_frames = 2`（硬预算）：冷条目扔完还不够就动热条目（第二遍 `1`）——
+    ///   这是明确的"占用必须降下来"的请求，代价是下一帧要重新光栅化。
+    pub(crate) fn trim_to_budget(&mut self, budget: u64, min_age_frames: usize) -> usize {
         let mut evicted = 0;
-        for cold_only in [true, false] {
+        // 硬预算两遍（先 2 帧、再 1 帧）；保留预算一遍（120 帧）。
+        let passes: [usize; 2] = if min_age_frames <= 1 {
+            [1, 1]
+        } else if min_age_frames == 2 {
+            [2, 1]
+        } else {
+            [min_age_frames, min_age_frames]
+        };
+        let single_pass = min_age_frames != 2;
+        for age in passes {
             while self.live_bytes() > budget {
                 let mask_live = self.mask_atlas.live_bytes();
                 let color_live = self.color_atlas.live_bytes();
                 // 先从占得多的那张图里淘汰，避免只清一侧。
                 let freed = if mask_live >= color_live {
                     self.mask_atlas
-                        .evict_one_unpinned(cold_only)
-                        .or_else(|| self.color_atlas.evict_one_unpinned(cold_only))
+                        .evict_one_unpinned(age)
+                        .or_else(|| self.color_atlas.evict_one_unpinned(age))
                 } else {
                     self.color_atlas
-                        .evict_one_unpinned(cold_only)
-                        .or_else(|| self.mask_atlas.evict_one_unpinned(cold_only))
+                        .evict_one_unpinned(age)
+                        .or_else(|| self.mask_atlas.evict_one_unpinned(age))
                 };
                 match freed {
                     Some(_) => evicted += 1,
                     None => break,
                 }
+            }
+            if single_pass {
+                break;
             }
         }
         evicted

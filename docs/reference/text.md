@@ -134,48 +134,63 @@ for e in g.entries() {                 // 逐条快照，O(n)，别每帧调
 
 `GlyphCacheStats` 字段：`mask_entries` / `color_entries` / `pinned_entries` /
 `mask_used_bytes` / `color_used_bytes` / `mask_texture_bytes` / `color_texture_bytes` /
-`budget_bytes` / `rasterizations` / `evictions` / `grows` / `trims` / `budget_warnings`，
-另有便捷方法 `entries()` / `used_bytes()` / `texture_bytes()`。
+`retention_budget_bytes` / `hard_budget_bytes` / `effective_budget_bytes` / `auto_compact` /
+`rasterizations` / `evictions` / `grows` / `compacts` / `trims` / `budget_warnings` /
+`peak_used_bytes`，另有便捷方法 `entries()` / `used_bytes()` / `texture_bytes()`。
 
 约定：`*_used_bytes` 是**条目面积累计**（不含图集里的空洞）；`*_texture_bytes` 是
 **纹理容量**（`边长² × 通道数`，图集按 2 的幂翻倍，所以通常比占用大一圈）。
 
-### 6.2 预算
+### 6.2 预算：保留 vs 硬
+
+两个旋钮，语义完全不同 —— 选之前先看这张表：
+
+| 模式 | 入口 | 淘汰谁 | 会掉帧？ | 用途 |
+|---|---|---|---|---|
+| 无预算（默认） | 两个都 `None` | 不淘汰 | 否 | 简单场景 |
+| **保留预算** | `set_retention_budget(Some(x))` | 只淘汰「**≥120 帧没用到**」的条目 | **否** | 限制"历史积压"（换场景/改字号留下的冷字形） |
+| **硬预算** | `set_hard_budget(Some(x))` | 冷条目扔完再动热条目，直到占用 ≤ x | **可能** | 真正钉死内存上限 |
 
 ```rust
-g.set_budget(Some(8 * 1024 * 1024)); // 两张图合计 8 MiB
-g.set_budget(None);                  // 不限制（默认）
+let g = gpu.text().glyphs();
+g.set_retention_budget(Some(4 * 1024 * 1024)); // 推荐：只清历史积压，永不掉帧
+g.set_hard_budget(Some(2 * 1024 * 1024));      // 真上限：低于工作集会掉帧（会 warn）
 ```
 
-帧首检查（`advance_frame` 内）：超预算就淘汰**未钉住**的 LRU 字形，直到回到预算内。
-两条它不会做的事：
+两个 setter 互斥，后设置的那个生效。
 
-- **不会**为满足预算而丢弃 `hold` 住的字形 —— 全是钉子时只 `log::warn!` 一次
-  （`stats().budget_warnings == 1`），图集继续用它需要的空间；
-- **不会**缩小纹理本身（那是 [`compact`](#64-收缩) 的活）。
+**为什么保留预算不会掉帧**：它只淘汰「≥120 帧（120 fps 下 1 秒）没被用到」的条目，
+当前工作集与间歇使用的字形（只在某些帧出现的数字）都不动。实测同一个 HUD 场景
+（20 条标签 20–28px，工作集 27 KiB）：
 
-> **预算必须 ≥ 单帧工作集的占用**，否则会每帧重光栅化。同一个场景（60 段互不重复的 12 字
-> 文本、24px、每帧全画）在三处实测：
->
-> | 环境 | 工作集 | 预算 < 工作集 | 预算够 | 倍数 |
-> |---|---|---|---|---|
-> | 桌面无头（Win11/DX12, release） | 371 KiB | 8.7–12.3 ms/帧、**479 次/帧**光栅化 | 0.4–0.9 ms/帧、0 次 | ~10–20× |
-> | Windows 真窗口（DPI 2、120 Hz vsync） | 1518 KiB | **18.5–20.0 ms/帧（50–54 fps）**、768 次/帧 | 8.27 ms（120.8 fps）、0 次 | **2.2–2.4×** |
-> | Android 模拟器（dpi 1.5、60 Hz） | 828 KiB | **134.6–137.7 ms/帧（7.3–7.4 fps）**、635 次/帧 | 16.45–16.50 ms（60.7 fps）、0 次 | **8.1–8.4×** |
->
-> 真窗口的倍数看起来小，是因为基线被 vsync 钉在 8.3 ms（120 fps）——它掉到了 56 fps，
+| 配置 | 帧耗时 | 光栅化 |
+|---|---|---|
+| 硬 6 KiB（25% 工作集） | 2.18 ms | **50 次/帧** |
+| **软 6 KiB（同一个数）** | **0.75 ms** | **0 次/帧** |
+| 软 54 KiB（200%） | 0.70 ms | 0 次/帧 |
+
+**硬预算必须 ≥ 单帧工作集**，否则每帧重光栅化。同一个场景（60 段互不重复的 12 字
+文本、24px、每帧全画、工作集 371 KiB）在三处实测：
+
+| 环境 | 工作集 | 硬预算 < 工作集 | 预算够 | 倍数 |
+|---|---|---|---|---|
+| 桌面无头（Win11/DX12, release） | 371 KiB | 8.7–13.8 ms/帧、**479 次/帧**光栅化 | 0.4–0.9 ms/帧、0 次 | ~10–20× |
+| Windows 真窗口（DPI 2、120 Hz vsync） | 1518 KiB | **18.5–20.0 ms/帧（50–54 fps）**、768 次/帧 | 8.27 ms（120.8 fps）、0 次 | **2.2–2.4×** |
+| Android 模拟器（dpi 1.5、60 Hz） | 828 KiB | **134.6–137.7 ms/帧（7.3–7.4 fps）**、635 次/帧 | 16.45–16.50 ms（60.7 fps）、0 次 | **8.1–8.4×** |
+
+> 真窗口的倍数看起来小，是因为基线被 vsync 钉在 8.3 ms（120 fps）——它掉到了 50 fps，
 > 也就是"已经开始掉帧"了。工作集随 `scale²` 长：桌面 200% DPI 下同样文案是 1.5 MiB，
 > 不是 371 KiB。
 >
-> 结论：拿 `stats().peak_used_bytes`（**单帧占用峰值**，帧首读数取 max）当工作集，
-> 预算留 1.5–2× 余量。预算小于它时 `set_budget` 会 `log::warn!` 一次。
+> `stats().peak_used_bytes` 是**单帧占用峰值**（工作集的实测值）。硬预算低于它时
+> `set_hard_budget` 会 `log::warn!` 一次。
 >
 > **"掉到 50 fps"到底是什么**（Windows 真窗口、DPI 2、120 Hz，用
 > `DrawReport::timings` 拆成 `编码` 与 `等待`）：
 >
 > | 预算 | 帧耗时 | = 编码（记录+prepare+提交） | + 等 vsync | 光栅化 |
 > |---|---|---|---|---|
-> | 256 KiB（< 峰值 1518 KiB） | 20.20 ms（49.5 fps） | **20.06 ms** | 0.11 ms | **768 次/帧** |
+> | 硬 256 KiB（< 峰值 1518 KiB） | 20.20 ms（49.5 fps） | **20.06 ms** | 0.11 ms | **768 次/帧** |
 > | 8 MiB | 8.29 ms（120.6 fps） | 0.74 ms | 7.53 ms | 0 |
 >
 > 同一场景关掉垂直同步（`VIREO_TEXT_CACHE_NOVSYNC=1`）：抖动态 18.01 ms（编码 17.90）、
@@ -212,16 +227,27 @@ drop(hold); // 解钉
 天然落在 `Zero` 档，和 `prewarm` 的坐标一致；把文字放在 `x = 12.37` 这类位置会产生
 另外的档位（最多 4×4 种/字号），需要就多画几个位置或干脆先画一帧。
 
-### 6.4 收缩
+### 6.4 收缩（默认自动）
 
 ```rust
+g.set_auto_compact(true);                  // 默认就是 true
 g.clear_unpinned();                        // 清掉未钉住的条目，返回条数
 g.clear();                                 // 全清（含钉住的）
-let shrunk = g.compact(&gpu.device, &gpu.queue); // 图集收到刚好装下现有条目
+let shrunk = g.compact(&gpu.device, &gpu.queue); // 手动：图集收到刚好装下现有条目
 ```
 
-清掉一批字形后图集尺寸**不会自己缩回去**；`compact` 把条目拷贝重排到更小的纹理
-（不重新光栅化），把显存真正还回去。它会改变条目在图集里的坐标，所以**只在两帧之间调**。
+**淘汰只释放条目，纹理尺寸只由扩容抬升、从不回落** —— 换过场景/试过大字号之后，
+纹理就停在历史峰值（最大 8192² = 64 MB）。所以默认开启自动压缩：
+
+- 触发：任一张图**利用率 < 25% 持续 60 帧**，且距上次压缩/扩容 ≥120 帧；
+- 动作：按面积重排到「刚好装下」的 2 的幂纹理，**拷贝搬运，不重新光栅化**；
+- 成本：实测 **371 KiB / 720 条 → 1.3 ms**（先排空 GPU 队列再计时；4096² → 1024² 的搬运）；
+  所以自动模式只搬 `live ≤ 512 KiB`（最坏约 2 ms，远在 8.33 ms 预算内），更大的缓存
+  留给手动 `compact()`（放在加载界面）。
+- 失败（打包排不下）会退避 600 帧再试；`stats().compacts` 可以确认它真的发生了。
+
+它会改变条目在图集里的坐标，所以引擎在**帧首、prepare 之前**做（这一帧的顶点会用新坐标
+重建）。手动调用请放在两帧之间。
 
 ### 6.5 跨进程持久化
 
@@ -277,19 +303,18 @@ g.load(&gpu.device, &gpu.queue, "cache/glyphs.vrtx")?;
 1. **加载阶段预光栅化**：`prewarm` 一遍加载界面/主菜单会出现的文案，之后每帧纯命中。
    放在 `app.run` 之前或首个 `prewarm` 调用里都可以（视口没建时会自动用占位分辨率）。
 2. **钉住骨架字形**：标题、固定标签用 `hold`，它们既不重光栅化也不挤占预算。
-3. **给个预算，但别小于工作集**：UI 文案会变的场景（数字、玩家名）设个 4–16 MiB 预算，
-   图集就不会按历史峰值常驻；但预算 **< 单帧工作集**会退化成每帧重光栅化
-   （实测 6.6× 帧时间，见 §6.2）。拿 `stats().used_bytes()` 当工作集，留 1.5–2× 余量。
+3. **用保留预算，别用硬预算**：`set_retention_budget(Some(4 MiB))` 只清「历史积压」、
+   永不掉帧；硬预算低于单帧工作集会退化成每帧重光栅化（实测 10–20× 帧时间，见 §6.2）。
 4. **想要跨帧零重光栅化**：用固定字号 + 整数坐标 + `StableText`/`prewarm`；
    跑 `--example text_cache` 按空格暂停，`rasterizations` 不动就说明做到了。
 5. **别每帧调 `entries()`**：它是 O(条目数) 的全量快照，`stats()` 才是 O(1) 聚合。
 6. **量一遍再调**：`cargo run --example text_profile` 看排版/光栅化分项；
    `cargo test --release --test gpu_bench -- --ignored --test-threads=1 glyph_cache_ --nocapture`
    打印本机上的 prewarm / grow / save / load / 预算抖动 / 大图集 / 并发数字（§6.2、§6.5 的表就是它）。
-7. **真窗口里复核**：`cargo run --release --example text_cache` 手动玩（`1/2/3` 切预算、
-   空格暂停看 `光栅化` 是否不动、`S/L` 存取），或
+7. **真窗口里复核**：`cargo run --release --example text_cache` 手动玩（`1/2/3` 保留预算、
+   `H` 硬预算（会抖）、`A` 开关自动压缩、空格暂停看 `光栅化` 是否不动、`S/L` 存取），或
    `VIREO_TEXT_CACHE_BENCH=1 cargo run --release --example text_cache`
-   自动跑三档预算、每档打印一行 `ms/帧 + 光栅化次数` 后自行退出。
+   自动跑三档预算语义（软 / 硬 / 无）、每档打印一行 `ms/帧 + 光栅化次数` 后自行退出。
    Android 上同一套场景：`adb shell setprop debug.vireo.text_bench 1` 后启动
    `examples/android` 的 app，结果打到 logcat（`adb logcat -s vireoandroid`）并写进
    `files/text_bench.txt`。

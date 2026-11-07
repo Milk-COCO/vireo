@@ -94,10 +94,13 @@ impl TextSystem {
     ///
     /// ```text
     /// let glyphs = gpu.text().glyphs();
-    /// glyphs.set_budget(Some(8 * 1024 * 1024));          // 8 MiB 上限
+    /// glyphs.set_retention_budget(Some(4 << 20));        // 保留 4 MiB（永不掉帧）
+    /// glyphs.set_hard_budget(Some(2 << 20));             // 或：硬上限（可能掉帧）
+    /// glyphs.set_auto_compact(true);                     // 默认就是 true
     /// let hold = glyphs.hold(dev, queue, "标题", &def, scale); // 钉住常用字形
     /// let stats = glyphs.stats();
-    /// println!("{} 条 / {} 字节", stats.entries(), stats.used_bytes());
+    /// println!("{} 条 / {} 字节 / 峰值 {} 字节",
+    ///     stats.entries(), stats.used_bytes(), stats.peak_used_bytes);
     /// drop(hold);                                         // 解钉
     /// ```
     pub fn glyphs(&self) -> GlyphCache<'_> {

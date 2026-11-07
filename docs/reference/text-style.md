@@ -190,7 +190,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
   （`mask_size` / `color_size` / `mask_bytes` / `color_bytes` / `total_bytes()`）——
   样式文本不会进彩色图集（有 GPU 用例盯着这条不变量）。
 - **可管理**：样式条目和普通字形同住一张图集，所以 [`text().glyphs()`](text.md#6-字形缓存glyph-cache)
-  的预算 / `prewarm` / `hold` / `compact` / `save` 对它们一视同仁。
+  的保留/硬预算、`prewarm`、`hold`、自动压缩与 `save` 对它们一视同仁。
 - 片元：每层一次采样（层数 ≤ 8），只在 `content_type == 2` 的分支里。
 - 生成成本：从轮廓算精确距离（线/二次/三次贝塞尔 Newton + 按段 bbox 剪枝），
   首次绘制该字形时一次性支付。

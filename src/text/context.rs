@@ -25,6 +25,15 @@ const SHAPE_GC_INTERVAL: Duration = Duration::from_millis(250);
 /// 空闲 Buffer 池上限。
 const BUFFER_POOL_CAP: usize = 128;
 
+/// 性能哨兵是否开启：debug 构建恒开；release 里用 `VIREO_TEXT_STRICT=1` 打开。
+///
+/// 环境变量只查一次（`OnceLock`）—— 每帧查 env 会拿锁 + 平台查询，本轮刚为此修过一个
+/// 每字形级别的性能缺陷。
+fn text_strict_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("VIREO_TEXT_STRICT").is_some())
+}
+
 /// 样式表缓冲的容量记录（缓冲本体在 `Viewport` 里）。
 struct StyleBuffers {
     styles_cap: u64,
@@ -66,17 +75,34 @@ pub struct TextContext {
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
     stats: TypesetCacheStats,
-    /// 字形缓存预算（两张图集的**合计**占用，字节；`None` = 不限制）。
-    /// 超出时在帧首淘汰未钉住的 LRU 字形。
+    /// 字形缓存的**保留预算**（两张图集的**合计**占用，字节；`None` = 不淘汰）。
+    ///
+    /// 软语义：实际执行的上限是 `max(保留预算, 单帧峰值 × 3/2)` —— 即"历史积压"可以被
+    /// 淘汰，但**当前帧在用的字形**永远不动，所以它不会造成每帧重光栅化。
     pub(crate) glyph_budget: Option<u64>,
+    /// 硬预算（`Some` 时**严格**按它淘汰，可能低于单帧工作集 ⇒ 会每帧重光栅化）。
+    pub(crate) glyph_hard_budget: Option<u64>,
     /// 超预算但淘汰不动（全是钉住/本帧在用）时只 warn 一次。
     pub(crate) glyph_budget_warnings: u64,
     /// 用户/预算触发的淘汰次数与条数。
     pub(crate) glyph_trims: u64,
     pub(crate) glyph_evicted: u64,
-    /// 观测到的**单帧占用峰值**（帧首读数取 max）。这是"预算该给多大"的实测依据：
-    /// 预算小于它就会每帧重光栅化（`set_budget` 会据此 warn 一次）。
+    /// 观测到的**单帧占用峰值**（帧首读数取 max）。保留预算的下限就取它的 1.5 倍。
     pub(crate) glyph_peak_bytes: u64,
+    /// 自动压缩开关（默认开）。
+    pub(crate) glyph_auto_compact: bool,
+    /// 低利用率连续帧数（达到阈值才压缩，防切场景瞬间误判）。
+    pub(crate) auto_compact_low_streak: u32,
+    /// 上次压缩/扩容时的图集代数（帧计数），用于冷却。
+    pub(crate) auto_compact_last_gen: usize,
+    /// 压缩失败后的退避截止代数（别每帧重试）。
+    pub(crate) auto_compact_backoff_until: usize,
+    /// 累计压缩次数。
+    pub(crate) glyph_compacts: u64,
+    /// 哨兵：上一帧看到的光栅化累计值 / 连续增长帧数 / 是否已警告。
+    sentinel_last_rasters: u64,
+    sentinel_streak: u32,
+    sentinel_warned: bool,
 }
 
 #[doc(hidden)]
@@ -221,14 +247,19 @@ impl TextContext {
     }
 
     /// 每帧绘制前调用一次（多 batch 共享）。
-    /// TTL/GC 用真实时间，与 FPS 无关；`typeset_ttl == None` 时不做自动回收。
-    pub fn advance_frame(&mut self) {
+    ///
+    /// 顺序有讲究：推进代数（让上一帧的字形可淘汰）→ 记录单帧峰值 → 按预算淘汰 →
+    /// 自动压缩 → 排版缓存 GC → 性能哨兵。压缩必须在 `prepare` 之前（条目坐标会变），
+    /// 预算淘汰必须在压缩之前（淘汰出来的空洞才值得回收）。
+    pub fn advance_frame(&mut self, device: &Device, queue: &Queue) {
         // 图集代数推进：上一帧用过的字形从这一帧起可被淘汰。
         // （此前从没推进过，`try_allocate` 因此永远认为"全都在用" → 只扩不淘。）
         self.text_atlas.trim();
-        // 记下"上一帧结束时图集有多大"—— 这就是单帧工作集的实测值（预算该给多大看它）。
+        // 记下"上一帧结束时图集有多大"—— 这就是单帧工作集的实测值（保留预算的下限看它）。
         self.glyph_peak_bytes = self.glyph_peak_bytes.max(self.text_atlas.live_bytes());
         self.enforce_glyph_budget();
+        self.maybe_auto_compact(device, queue);
+        self.sentinel_tick();
         if self.typeset_ttl.is_none() {
             return;
         }
@@ -244,65 +275,221 @@ impl TextContext {
         }
     }
 
-    /// 设置字形缓存预算（两张图集**合计**占用，字节；`None` = 不限制）。
-    pub fn set_glyph_budget(&mut self, bytes: Option<u64>) {
-        // 预算小于已观测到的单帧峰值 ⇒ 必然每帧淘汰+重光栅化（真实窗口里 20ms/帧级别）。
-        // 这里只提示，不擅自改用户给的数字：`stats().peak_used_bytes` 是他自己调参的依据。
-        if let Some(budget) = bytes
-            && budget < self.glyph_peak_bytes
-        {
-            log::warn!(
-                "vireo: 字形缓存预算 {} KiB 小于观测到的单帧占用峰值 {} KiB —— \
-                 会每帧淘汰并在下一帧重新光栅化（建议 ≥ 1.5× 峰值）",
-                budget / 1024,
-                self.glyph_peak_bytes / 1024
-            );
+    /// 设置字形缓存的**保留预算**（软上限，字节；`None` = 不淘汰）。
+    ///
+    /// 实际执行上限 = `max(这个值, 单帧峰值 × 3/2)`：只淘汰"历史积压"，
+    /// 不动当前帧在用的字形，所以**永远不会造成每帧重光栅化**。
+    pub fn set_glyph_retention_budget(&mut self, bytes: Option<u64>) {
+        if bytes.is_some() {
+            self.glyph_hard_budget = None;
         }
         self.glyph_budget = bytes;
         self.glyph_budget_warnings = 0;
     }
 
-    pub fn glyph_budget(&self) -> Option<u64> {
+    /// 设置字形缓存的**硬预算**（严格上限，字节；`None` = 关闭）。
+    ///
+    /// 低于单帧工作集时**必然**每帧淘汰 + 重光栅化（真窗口里 20ms/帧、50fps 量级），
+    /// 这里 warn 一次说清楚；要行为安全请用 [`Self::set_glyph_retention_budget`]。
+    pub fn set_glyph_hard_budget(&mut self, bytes: Option<u64>) {
+        if let Some(budget) = bytes
+            && budget < self.glyph_peak_bytes
+        {
+            log::warn!(
+                "vireo: 字形缓存**硬**预算 {} KiB 小于观测到的单帧占用峰值 {} KiB —— \
+                 会每帧淘汰并在下一帧重新光栅化（掉帧）；要安全请用保留预算（≥1.5× 峰值）",
+                budget / 1024,
+                self.glyph_peak_bytes / 1024
+            );
+        }
+        if bytes.is_some() {
+            self.glyph_budget = None;
+        }
+        self.glyph_hard_budget = bytes;
+        self.glyph_budget_warnings = 0;
+    }
+
+    pub fn glyph_retention_budget(&self) -> Option<u64> {
         self.glyph_budget
     }
 
-    /// 按预算淘汰未钉住的字形（帧首调用；没设预算就是空操作）。
+    pub fn glyph_hard_budget(&self) -> Option<u64> {
+        self.glyph_hard_budget
+    }
+
+    /// 当前**实际执行**的淘汰上限（`None` = 不淘汰）。
+    ///
+    /// 硬预算优先；否则就是保留预算的本值 —— 保留预算**没有隐藏下限**，它的安全性来自
+    /// "只淘汰冷条目"（见 [`Self::enforce_glyph_budget`]）而不是来自抬高上限。
+    pub fn glyph_effective_budget(&self) -> Option<u64> {
+        self.glyph_hard_budget.or(self.glyph_budget)
+    }
+
+    /// 当前是否处于硬预算模式。
+    fn glyph_budget_is_hard(&self) -> bool {
+        self.glyph_hard_budget.is_some()
+    }
+
+    /// 自动压缩开关（默认开）。关掉后图集只涨不缩，需要自己调 `compact_glyphs`。
+    pub fn set_glyph_auto_compact(&mut self, on: bool) {
+        self.glyph_auto_compact = on;
+        if on {
+            self.auto_compact_low_streak = 0;
+        }
+    }
+
+    pub fn glyph_auto_compact(&self) -> bool {
+        self.glyph_auto_compact
+    }
+
+    /// 按 effective 预算淘汰未钉住的字形（帧首调用；没设预算就是空操作）。
+    ///
+    /// 保留预算只淘汰**冷条目**（本帧与上一帧都没用到）：当前工作集永远不动，
+    /// 所以它不可能造成每帧重光栅化；追不上工作集时只 warn 一次。
     fn enforce_glyph_budget(&mut self) {
-        let Some(budget) = self.glyph_budget else {
+        let Some(budget) = self.glyph_effective_budget() else {
             return;
         };
         if self.text_atlas.live_bytes() <= budget {
             return;
         }
-        let evicted = self.text_atlas.trim_to_budget(budget) as u64;
+        let hard = self.glyph_budget_is_hard();
+        let min_age = if hard {
+            2
+        } else {
+            crate::glyphon::TextAtlas::RETENTION_MIN_AGE_FRAMES
+        };
+        let evicted = self.text_atlas.trim_to_budget(budget, min_age) as u64;
         self.glyph_evicted = self.glyph_evicted.saturating_add(evicted);
         self.glyph_trims = self.glyph_trims.saturating_add(1);
         if self.text_atlas.live_bytes() > budget && self.glyph_budget_warnings == 0 {
             self.glyph_budget_warnings = 1;
-            log::warn!(
-                "vireo: 字形缓存超出预算（{} 字节），剩下的都是被 hold 住或本帧在用的字形；\
-                 图集只会继续扩，释放句柄后才会回落",
-                budget
-            );
+            if hard {
+                log::warn!(
+                    "vireo: 字形缓存超出**硬**预算（{} 字节），剩下的都是被 hold 住或本帧在用的 \
+                     字形；下一帧它们会被重新光栅化（掉帧）",
+                    budget
+                );
+            } else {
+                log::warn!(
+                    "vireo: 单帧工作集（{} 字节）本身超过保留预算（{} 字节）—— 这些字每帧都要用，\
+                     不会被淘汰；预算只限制「历史积压」。要提高上限或减小内容",
+                    self.text_atlas.live_bytes(),
+                    budget
+                );
+            }
         }
     }
 
-    /// 手动按预算淘汰一次，返回淘汰条数（不受帧首自动回收影响）。
+    /// 手动按 effective 预算淘汰一次，返回淘汰条数。
     pub fn trim_glyphs_to_budget(&mut self) -> usize {
-        let Some(budget) = self.glyph_budget else {
+        let Some(budget) = self.glyph_effective_budget() else {
             return 0;
         };
-        let evicted = self.text_atlas.trim_to_budget(budget);
+        let hard = self.glyph_budget_is_hard();
+        let min_age = if hard {
+            2
+        } else {
+            crate::glyphon::TextAtlas::RETENTION_MIN_AGE_FRAMES
+        };
+        let evicted = self.text_atlas.trim_to_budget(budget, min_age);
         self.glyph_evicted = self.glyph_evicted.saturating_add(evicted as u64);
         self.glyph_trims = self.glyph_trims.saturating_add(1);
         evicted
+    }
+
+    /// 图集利用率低时自动缩图集（帧首调用）。
+    ///
+    /// 为什么需要它：淘汰只释放条目，**纹理尺寸只由 grow 抬升、从不回落** —— 换过场景/
+    /// 试过大字号之后，纹理就停在历史峰值（最大 64 MB）。这里在"持续低利用率"时回收。
+    ///
+    /// 触发条件见 `AUTO_COMPACT_*` 常量；任何一条不满足就什么都不做。
+    fn maybe_auto_compact(&mut self, device: &Device, queue: &Queue) {
+        if !self.glyph_auto_compact {
+            return;
+        }
+        const AUTO_COMPACT_LOW_FRAMES: u32 = 60;
+        const AUTO_COMPACT_COOLDOWN_FRAMES: usize = 120;
+        const AUTO_COMPACT_BACKOFF_FRAMES: usize = 600;
+        /// 自动搬运的成本上限：实测 **371 KiB / 720 条 → 1.3 ms**（先排空队列再计时，
+        /// 见 `glyph_cache_compact_cost`）。取 512 KiB ⇒ 最坏约 2 ms，远在 8.33 ms 的
+        /// 120 fps 预算内；再大的缓存交给手动 `compact()`（可以放在加载界面）。
+        const AUTO_COMPACT_MAX_LIVE_BYTES: u64 = 512 * 1024;
+
+        let generation = self.text_atlas.mask_atlas.generation;
+        if generation < self.auto_compact_backoff_until
+            || generation
+                < self
+                    .auto_compact_last_gen
+                    .saturating_add(AUTO_COMPACT_COOLDOWN_FRAMES)
+        {
+            return;
+        }
+        let live = self.text_atlas.live_bytes();
+        if live > AUTO_COMPACT_MAX_LIVE_BYTES || !self.text_atlas.any_atlas_underutilized() {
+            self.auto_compact_low_streak = 0;
+            return;
+        }
+        self.auto_compact_low_streak = self.auto_compact_low_streak.saturating_add(1);
+        if self.auto_compact_low_streak < AUTO_COMPACT_LOW_FRAMES {
+            return;
+        }
+        self.auto_compact_low_streak = 0;
+
+        let before = self.text_atlas.capacity_bytes();
+        let state = crate::glyphon::State { device, queue };
+        if self.text_atlas.compact(&state) {
+            self.glyph_compacts = self.glyph_compacts.saturating_add(1);
+            self.auto_compact_last_gen = generation;
+            log::debug!(
+                "vireo: 自动压缩图集 {} KiB → {} KiB（live {} KiB）",
+                before / 1024,
+                self.text_atlas.capacity_bytes() / 1024,
+                live / 1024
+            );
+        } else {
+            self.auto_compact_backoff_until =
+                generation.saturating_add(AUTO_COMPACT_BACKOFF_FRAMES);
+        }
+    }
+
+    /// 性能哨兵：稳态还在每帧重光栅化时，debug 或 `VIREO_TEXT_STRICT=1` 下 warn 一次。
+    ///
+    /// 覆盖所有"配置错了"的场景（硬预算过小 / 字号连续动画 / 未 prewarm 的动态文案），
+    /// 而不只是预算。成本是每帧两次 u64 比较。
+    fn sentinel_tick(&mut self) {
+        let now = self.text_atlas.counters().0;
+        if now > self.sentinel_last_rasters {
+            self.sentinel_streak = self.sentinel_streak.saturating_add(1);
+        } else {
+            self.sentinel_streak = 0;
+        }
+        self.sentinel_last_rasters = now;
+        if self.sentinel_warned || self.sentinel_streak < 30 || !text_strict_enabled() {
+            return;
+        }
+        self.sentinel_warned = true;
+        log::warn!(
+            "vireo: 文本在稳态下仍在每帧重新光栅化（连续 {} 帧）—— 检查：\
+             (1) 是否设了 set_hard_budget 且小于单帧峰值 {} KiB；\
+             (2) 是否在连续动画字号（应量化到 ≥0.125px）；\
+             (3) 动态文案是否每帧整串 format（HUD 数字用 TextPart::glyphs）",
+            self.sentinel_streak,
+            self.glyph_peak_bytes / 1024
+        );
     }
 
     /// 把图集收缩到刚好装下现有条目（拷贝搬运，不重新光栅化）。
     /// 返回是否有图集被收缩。
     pub fn compact_glyphs(&mut self, device: &Device, queue: &Queue) -> bool {
         let state = crate::glyphon::State { device, queue };
-        self.text_atlas.compact(&state)
+        let changed = self.text_atlas.compact(&state);
+        if changed {
+            self.glyph_compacts = self.glyph_compacts.saturating_add(1);
+            self.auto_compact_low_streak = 0;
+            self.auto_compact_last_gen = self.text_atlas.mask_atlas.generation;
+        }
+        changed
     }
 
     /// 把 `text` 用得上的字形光栅化进图集，返回 `(新光栅化条目数, 本次触碰到的键)`。
@@ -953,10 +1140,19 @@ impl TextContext {
             frame_pinned: Vec::with_capacity(32),
             stats: TypesetCacheStats::default(),
             glyph_budget: None,
+            glyph_hard_budget: None,
             glyph_budget_warnings: 0,
             glyph_trims: 0,
             glyph_evicted: 0,
             glyph_peak_bytes: 0,
+            glyph_auto_compact: true,
+            auto_compact_low_streak: 0,
+            auto_compact_last_gen: 0,
+            auto_compact_backoff_until: 0,
+            glyph_compacts: 0,
+            sentinel_last_rasters: 0,
+            sentinel_streak: 0,
+            sentinel_warned: false,
         }
     }
 }

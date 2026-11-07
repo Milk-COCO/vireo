@@ -8311,8 +8311,8 @@ fn glyph_cache_budget_trims_unpinned() {
     let gpu = Arc::new(GpuContext::new(&instance));
     let glyphs = gpu.text().glyphs();
     const BUDGET: u64 = 32 * 1024;
-    glyphs.set_budget(Some(BUDGET));
-    assert_eq!(glyphs.budget(), Some(BUDGET));
+    glyphs.set_hard_budget(Some(BUDGET));
+    assert_eq!(glyphs.hard_budget(), Some(BUDGET));
 
     let canvas = OffscreenCanvas::new(&gpu, 640, 400);
     let mut b = DrawBatch::new();
@@ -8351,7 +8351,7 @@ fn glyph_cache_budget_trims_unpinned() {
     );
 
     // 事后调低预算 → 手动 trim 必须立刻把它压进去。
-    glyphs.set_budget(Some(BUDGET / 4));
+    glyphs.set_hard_budget(Some(BUDGET / 4));
     let evicted = glyphs.trim();
     let after = glyphs.stats();
     assert!(evicted > 0, "调低预算后 trim 应淘汰一些字形");
@@ -8385,7 +8385,7 @@ fn glyph_cache_budget_keeps_pinned() {
         &glyph_test_def(64.0),
         1.0,
     );
-    glyphs.set_budget(Some(1)); // 比一条字形还小
+    glyphs.set_hard_budget(Some(1)); // 比一条字形还小
     let before = glyphs.stats();
     let evicted = glyphs.trim();
     let after = glyphs.stats();
@@ -8793,6 +8793,265 @@ fn glyph_cache_compact_shrinks_and_keeps_pixels() {
     drop(hold);
 }
 
+/// 准备一个"图集被撑大、然后内容只剩一点点"的场景。返回 (上下文, 画布, 要保留的那行字)。
+fn auto_compact_scene(instance: &wgpu::Instance) -> (Arc<GpuContext>, OffscreenCanvas, String) {
+    let gpu = Arc::new(GpuContext::new(instance));
+    let canvas = OffscreenCanvas::new(&gpu, 640, 480);
+    let keep = cjk_text(0x4E00, 12);
+    // 阶段 A：灌满内容，把图集撑到 ≥1024²。
+    let texts: Vec<String> = (0..80u32)
+        .map(|i| cjk_text(0x4E00 + (i + 1) * 12, 12))
+        .collect();
+    for _ in 0..3 {
+        let mut b = DrawBatch::new();
+        for (i, text) in texts.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                Pos::new(8.0 + (i % 4) as f32 * 155.0, 8.0 + (i / 4) as f32 * 22.0),
+                glyph_test_def(24.0),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        canvas.draw(Some(BLACK), &[&b]);
+    }
+    (gpu, canvas, keep)
+}
+
+/// 画只有一行字的"小内容"帧（让图集进入低利用率）。
+fn draw_small_frame(canvas: &OffscreenCanvas, text: &str) {
+    let mut b = DrawBatch::new();
+    draw_text(
+        &mut b.texts,
+        text,
+        Pos::new(8.0, 20.0),
+        glyph_test_def(24.0),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+}
+
+/// **compact 的成本**：校准"自动压缩最多搬多少"。
+///
+/// 构造"纹理被历史撑得很大、内容已经不多"的形态（自动压缩真正会遇到的形态）：
+/// 先灌到 4096²，再钉住 60 段（~370 KiB live）、清掉其余，然后手动 compact 计时。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_compact_cost() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(24.0);
+    // 灌到图集被撑大：600 段 × 12 字 = 7200 个不同字形（≈6 MB 内容）⇒ 必然到 4096²。
+    for i in 0..600u32 {
+        glyphs.prewarm(
+            &gpu.device,
+            &gpu.queue,
+            &cjk_text(0x4E00 + i * 12, 12),
+            &def,
+            1.0,
+        );
+    }
+    let mut holds = Vec::new();
+    for i in 0..60u32 {
+        holds.push(glyphs.hold(
+            &gpu.device,
+            &gpu.queue,
+            &cjk_text(0x4E00 + i * 12, 12),
+            &def,
+            1.0,
+        ));
+    }
+    glyphs.clear_unpinned();
+    let before = glyphs.stats();
+    assert!(
+        before.texture_bytes() >= 2 * 1024 * 1024,
+        "用例失效：图集没被撑大（{} KiB）",
+        before.texture_bytes() / 1024
+    );
+    assert!(
+        before.used_bytes() > 256 * 1024,
+        "用例失效：留下的内容太少（{} KiB）",
+        before.used_bytes() / 1024
+    );
+    let t0 = Instant::now();
+    // 先把队列排空，否则计时会把"等前面 400 次 prewarm 的 GPU 工作"算进 compact。
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let flush_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let shrunk = glyphs.compact(&gpu.device, &gpu.queue);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let after = glyphs.stats();
+    assert!(shrunk, "低利用率时 compact 应能收缩");
+    assert_eq!(after.used_bytes(), before.used_bytes(), "搬动不该改变占用");
+    println!(
+        "  compact 成本：{} 条 / live {} KiB，纹理 {} → {} KiB，用时 {ms:.2} ms（排空参考 {flush_ms:.2} ms）",
+        after.entries(),
+        after.used_bytes() / 1024,
+        before.texture_bytes() / 1024,
+        after.texture_bytes() / 1024
+    );
+    drop(holds);
+}
+
+/// **自动压缩**：内容缩到只剩一点之后，图集纹理应自己缩回去，且渲染像素不变。
+///
+/// 触发需要「低利用率持续 60 帧 + 距上次变动 120 帧」，所以这里最多跑 300 帧。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_auto_compact_reclaims_texture() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    // 阶段 B 的起点：设一个小于"历史积压"的保留预算 —— 冷条目会被淘汰，
+    // 图集随即进入低利用率（这也正是现实里"换场景 + 设了预算"的形态）。
+    let (gpu, canvas, keep) = {
+        let (gpu, canvas, keep) = auto_compact_scene(&instance);
+        gpu.text().glyphs().set_retention_budget(Some(64 * 1024));
+        (gpu, canvas, keep)
+    };
+    let glyphs = gpu.text().glyphs();
+    assert!(glyphs.auto_compact(), "自动压缩默认应开启");
+
+    let grown = glyphs.stats();
+    assert!(
+        grown.texture_bytes() >= 1024 * 1024,
+        "用例失效：阶段 A 没把图集撑大（{} 字节）",
+        grown.texture_bytes()
+    );
+
+    // 先渲染一次小内容作为参照像素。
+    draw_small_frame(&canvas, &keep);
+    let before_px = canvas.read_pixels();
+    let before = glyphs.stats();
+
+    // 跑到触发为止，并记录"触发那一帧"的耗时（= 搬运成本）。
+    let mut compact_ms = f64::NAN;
+    let compacts_seen = before.compacts;
+    for _ in 0..300 {
+        let t = Instant::now();
+        draw_small_frame(&canvas, &keep);
+        let s = glyphs.stats();
+        if s.compacts > compacts_seen {
+            compact_ms = t.elapsed().as_secs_f64() * 1000.0;
+            break;
+        }
+    }
+    let after = glyphs.stats();
+    assert!(
+        after.compacts > before.compacts,
+        "300 帧内应发生自动压缩（compacts {} → {}）",
+        before.compacts,
+        after.compacts
+    );
+    assert!(
+        after.texture_bytes() < before.texture_bytes(),
+        "自动压缩后纹理应变小（{} → {} 字节）",
+        before.texture_bytes(),
+        after.texture_bytes()
+    );
+    // 像素必须不变（压缩只搬位图，不动内容）。
+    let after_px = canvas.read_pixels();
+    let mut diff = 0usize;
+    for (a, b) in before_px.chunks(4).zip(after_px.chunks(4)) {
+        let d = (a[0] as i32 - b[0] as i32)
+            .abs()
+            .max((a[1] as i32 - b[1] as i32).abs())
+            .max((a[2] as i32 - b[2] as i32).abs());
+        if d > 2 {
+            diff += 1;
+        }
+    }
+    assert_eq!(diff, 0, "自动压缩不该改变渲染像素（{diff} 个像素不同）");
+    println!(
+        "  自动压缩：纹理 {} → {} KiB（触发帧 {compact_ms:.2} ms），live {} KiB，0 像素差",
+        before.texture_bytes() / 1024,
+        after.texture_bytes() / 1024,
+        after.used_bytes() / 1024
+    );
+}
+
+/// **自动压缩有滞后**：不会一低就缩、也不会反复缩。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_auto_compact_is_hysteretic() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let (gpu, canvas, keep) = auto_compact_scene(&instance);
+    let glyphs = gpu.text().glyphs();
+    glyphs.set_retention_budget(Some(64 * 1024));
+    let start = glyphs.stats().compacts;
+
+    // 前 100 帧（< 120 帧冷却）不该有任何压缩。
+    for _ in 0..100 {
+        draw_small_frame(&canvas, &keep);
+    }
+    assert_eq!(
+        glyphs.stats().compacts,
+        start,
+        "冷却期内不该压缩（低利用率还没持续够）"
+    );
+
+    // 继续到 300 帧：应恰好压一次。
+    for _ in 0..200 {
+        draw_small_frame(&canvas, &keep);
+    }
+    let one = glyphs.stats().compacts;
+    assert_eq!(one, start + 1, "应只压缩一次（实际 +{}）", one - start);
+
+    // 再跑 200 帧：利用率已经回到 ~70%，不该再压。
+    for _ in 0..200 {
+        draw_small_frame(&canvas, &keep);
+    }
+    assert_eq!(
+        glyphs.stats().compacts,
+        one,
+        "压缩后利用率已高，不该反复压缩"
+    );
+    println!("  滞后：0–100 帧不压，300 帧压一次，之后 200 帧不再压 ✓");
+}
+
+/// **关掉自动压缩**：同一场景纹理不回落（开关真的生效），手动 `compact` 仍可用。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_auto_compact_off() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let (gpu, canvas, keep) = auto_compact_scene(&instance);
+    let glyphs = gpu.text().glyphs();
+    glyphs.set_retention_budget(Some(64 * 1024));
+    glyphs.set_auto_compact(false);
+    assert!(!glyphs.auto_compact());
+
+    let before = glyphs.stats();
+    for _ in 0..300 {
+        draw_small_frame(&canvas, &keep);
+    }
+    let after = glyphs.stats();
+    assert_eq!(after.compacts, before.compacts, "关掉后不该压缩");
+    assert_eq!(
+        after.texture_bytes(),
+        before.texture_bytes(),
+        "关掉后纹理不回落（只涨不缩）"
+    );
+    println!(
+        "  自动压缩关闭：300 帧后纹理仍是 {} KiB（compacts={}）",
+        after.texture_bytes() / 1024,
+        after.compacts
+    );
+
+    // 手动压缩仍然可用。
+    let shrunk = glyphs.compact(&gpu.device, &gpu.queue);
+    assert!(shrunk, "手动 compact 应仍然生效");
+    println!(
+        "  手动 compact 之后：{} KiB",
+        glyphs.stats().texture_bytes() / 1024
+    );
+}
+
 /// 跨进程持久化：一个上下文 `save`，**另一个**上下文 `load` 后直接画出同样的像素，
 /// 且不重新光栅化（`rasterizations` 不涨）。
 ///
@@ -8950,10 +9209,11 @@ fn glyph_cache_load_rejects_bad_input() {
     }
 }
 
-/// **预算的代价**：预算小于「单帧工作集」时会每帧重光栅化 —— 这条用例把它量化出来。
+/// **预算的代价**：只有**硬**预算小于「单帧工作集」时才会每帧重光栅化 —— 这条用例
+/// 同时钉住两种语义：保留预算不会抖、硬预算必然抖。
 ///
-/// 三个独立上下文跑同一个场景（60 段互不重复的 12 字文本、24px、每帧全画）：
-/// 预算 128 KiB（远小于工作集）/ 8 MiB（装得下）/ 不限制。
+/// 场景：60 段互不重复的 12 字文本、24px、每帧全画。四档独立上下文：
+/// 硬 128 KiB（< 工作集）/ 软 128 KiB（同一个数，但不抖）/ 硬 8 MiB / 不限制。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
 fn glyph_cache_budget_churn_perf() {
@@ -8967,15 +9227,30 @@ fn glyph_cache_budget_churn_perf() {
         .map(|i| cjk_text(0x4E00 + i * CHARS as u32, CHARS))
         .collect();
 
-    for (label, budget) in [
-        ("128 KiB（<工作集）", Some(128 * 1024u64)),
-        ("8 MiB（装得下）", Some(8 * 1024 * 1024)),
-        ("不限制", None),
+    /// 一档预算语义。
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Hard(u64),
+        Soft(u64),
+        Off,
+    }
+    for (label, mode) in [
+        ("硬 128 KiB（<工作集，会抖）", Mode::Hard(128 * 1024)),
+        ("软 128 KiB（同一个数，不抖）", Mode::Soft(128 * 1024)),
+        ("硬 8 MiB（装得下）", Mode::Hard(8 * 1024 * 1024)),
+        ("不限制", Mode::Off),
     ] {
         let gpu = Arc::new(GpuContext::new(&instance));
         let canvas = OffscreenCanvas::new(&gpu, 640, 480);
         let glyphs = gpu.text().glyphs();
-        glyphs.set_budget(budget);
+        match mode {
+            Mode::Hard(b) => glyphs.set_hard_budget(Some(b)),
+            Mode::Soft(b) => glyphs.set_retention_budget(Some(b)),
+            Mode::Off => {
+                glyphs.set_retention_budget(None);
+                glyphs.set_hard_budget(None);
+            }
+        }
 
         let draw = || {
             let mut b = DrawBatch::new();
@@ -9005,34 +9280,51 @@ fn glyph_cache_budget_churn_perf() {
         let per_frame = rasters as f64 / FRAMES as f64;
         println!(
             "  {label}：{ms:.2} ms/帧，光栅化 {per_frame:.1} 次/帧（{rasters} / {FRAMES} 帧），\
-             条目 {} / 占用 {} KiB / 单帧峰值 {} KiB / 淘汰 {}",
+             条目 {} / 占用 {} KiB / 单帧峰值 {} KiB / 有效上限 {} KiB / 淘汰 {}",
             s.entries(),
             s.used_bytes() / 1024,
             s.peak_used_bytes / 1024,
+            s.effective_budget_bytes.map(|b| b / 1024).unwrap_or(0),
             s.evictions
         );
-        if budget == Some(128 * 1024) {
-            assert!(
-                per_frame > 50.0,
-                "预算远小于工作集时应该每帧重光栅化（实际 {per_frame:.1} 次/帧）——\
-                 如果这条不成立，说明淘汰策略变了"
-            );
-            assert!(
-                s.peak_used_bytes > 128 * 1024,
-                "单帧峰值应大于这个（过小的）预算（峰值 {} 字节）",
-                s.peak_used_bytes
-            );
-        } else {
-            assert!(
-                per_frame < 5.0,
-                "预算装得下时稳态不该重光栅化（实际 {per_frame:.1} 次/帧）"
-            );
-            // 预算够时峰值必须落在预算内（否则"够"这个判断本身就有问题）。
-            assert!(
-                s.peak_used_bytes <= budget.unwrap_or(u64::MAX),
-                "峰值 {} 应 ≤ 预算",
-                s.peak_used_bytes
-            );
+        match mode {
+            // 硬预算 < 工作集：必然每帧重光栅化。
+            Mode::Hard(b) if b == 128 * 1024 => {
+                assert!(
+                    per_frame > 50.0,
+                    "硬预算远小于工作集时应该每帧重光栅化（实际 {per_frame:.1} 次/帧）——\
+                     如果这条不成立，说明淘汰策略变了"
+                );
+                assert!(
+                    s.peak_used_bytes > 128 * 1024,
+                    "单帧峰值应大于这个（过小的）硬预算（峰值 {} 字节）",
+                    s.peak_used_bytes
+                );
+            }
+            // 软预算给同一个数：只淘汰「≥120 帧没用过」的条目 ⇒ 这个场景一条都不动。
+            Mode::Soft(b) if b == 128 * 1024 => {
+                assert!(
+                    per_frame < 5.0,
+                    "**保留预算不应造成任何重光栅化**（实际 {per_frame:.1} 次/帧）—— \
+                     淘汰年龄门槛没生效"
+                );
+                assert_eq!(
+                    s.evictions, 0,
+                    "同样的字每帧都用 ⇒ 没有任何条目超过 120 帧没用到 ⇒ 一条也不该淘汰（实际 {}）",
+                    s.evictions
+                );
+                assert!(
+                    s.used_bytes() > b,
+                    "工作集本身（{}）大于保留预算（{b}）时应保持不变",
+                    s.used_bytes()
+                );
+            }
+            Mode::Hard(_) | Mode::Soft(_) | Mode::Off => {
+                assert!(
+                    per_frame < 5.0,
+                    "预算装得下时稳态不该重光栅化（实际 {per_frame:.1} 次/帧）"
+                );
+            }
         }
     }
 
@@ -9083,9 +9375,19 @@ fn glyph_cache_budget_churn_perf() {
         peak / 1024,
         glyphs.stats().entries()
     );
-    for budget in [peak / 4, peak * 2] {
+    for (mode_label, hard, budget) in [
+        ("硬 25%", true, peak / 4),
+        ("软 25%", false, peak / 4),
+        ("软 200%", false, peak * 2),
+    ] {
         glyphs.clear();
-        glyphs.set_budget(Some(budget));
+        if hard {
+            glyphs.set_hard_budget(Some(budget));
+            glyphs.set_retention_budget(None);
+        } else {
+            glyphs.set_retention_budget(Some(budget));
+            glyphs.set_hard_budget(None);
+        }
         for f in 0..5 {
             draw_hud(f);
         }
@@ -9098,7 +9400,7 @@ fn glyph_cache_budget_churn_perf() {
         let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
         let rasters = glyphs.stats().rasterizations - r0;
         println!(
-            "   预算 {:>5} KiB（{:>4.0}% 工作集）：{ms:>6.2} ms/帧，光栅化 {:>5.1} 次/帧",
+            "   {mode_label} {:>5} KiB（占工作集 {:>4.0}%）：{ms:>6.2} ms/帧，光栅化 {:>5.1} 次/帧",
             budget / 1024,
             budget as f64 / peak as f64 * 100.0,
             rasters as f64 / FRAMES as f64
@@ -9287,7 +9589,7 @@ fn glyph_cache_concurrent_access() {
                     drop(hold);
                     // 一半线程顺手压一下预算淘汰。
                     if i % 2 == 0 {
-                        glyphs.set_budget(Some(256 * 1024));
+                        glyphs.set_retention_budget(Some(256 * 1024));
                         let _ = glyphs.trim();
                     }
                 }
