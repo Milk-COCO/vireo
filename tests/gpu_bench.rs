@@ -6486,7 +6486,7 @@ fn text_style_rendering_is_frame_stable() {
         ),
     ];
 
-    let mut draw_once = || {
+    let draw_once = || {
         let mut b = DrawBatch::new();
         for (i, (style, text)) in styles.iter().enumerate() {
             draw_text(
