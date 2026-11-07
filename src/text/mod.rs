@@ -8,9 +8,9 @@
 //! `PreparedTextSegment` 供 Renderer 分段绑定。
 //!
 //! 缓存策略（均可配置，经 `GpuContext`）：
-//! - TTL：`set_shape_cache_ttl(Some(d) | None)`，`None` = 不按时间回收
-//! - 条数：`set_shape_cache_max_entries(Some(n) | None)`，`None` = 不限制
-//! - 立即清空：`clear_shape_cache`
+//! - TTL：`set_typeset_ttl(Some(d) | None)`，`None` = 不按时间回收
+//! - 条数：`set_typeset_max_entries(Some(n) | None)`，`None` = 不限制
+//! - 立即清空：`clear_typeset_cache`
 
 pub use cosmic_text::{AttrsOwned, Family, FamilyOwned, FeatureTag, Style, Weight};
 
@@ -18,18 +18,19 @@ use crate::color::Color;
 use crate::render::Pos;
 
 mod cache;
-pub use cache::ShapeCacheStats;
+pub use cache::TypesetCacheStats;
 
 // 模块本身无条件编译（白名单逻辑是纯函数，桌面也要能跑单测）；
 // 只有 `install` 及其 Android 专有依赖按 `target_os = "android"` 门控。
 pub mod android_fonts;
-pub(crate) use cache::{GlyphKey, ShapeCacheSlot, ShapeKey};
+pub(crate) use cache::{GlyphKey, TypesetKey, TypesetSlot};
 mod context;
 mod entry;
 mod hud;
 mod prepare;
 mod stencil;
 mod style;
+mod system;
 pub(crate) use context::ResolvedTextGlyph;
 pub use context::{Attrs, ColorMode, TextContext};
 pub use entry::{TextEntry, TextEntryList};
@@ -43,6 +44,7 @@ pub use style::{
     TextBlend, TextCap, TextGradient, TextJoin, TextLayer, TextPaint, TextStroke, TextStyle,
     TextStyleRef,
 };
+pub use system::TextSystem;
 
 /// 文本水平对齐
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -369,9 +371,9 @@ mod tests {
         }
     }
 
-    fn shape_key_from_entry(entry: &TextEntry) -> ShapeKey {
+    fn shape_key_from_entry(entry: &TextEntry) -> TypesetKey {
         match entry {
-            TextEntry::Normal { text, def, .. } => ShapeKey::from_text(text, def),
+            TextEntry::Normal { text, def, .. } => TypesetKey::from_text(text, def),
             _ => panic!("from_entry called on non-Normal TextEntry"),
         }
     }
@@ -608,21 +610,21 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn make_stable_liveness_drop_clears_held() {
         let gpu = make_test_gpu();
-        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.typeset_held_count(), 0);
         let h = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.shape_cache_held_count(), 1);
-        assert_eq!(gpu.shape_cache_len(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.typeset_len(), 1);
         drop(h);
         // GC scavenge 后 held_count 应归 0
-        assert_eq!(gpu.shape_cache_held_count(), 0);
-        assert_eq!(gpu.shape_cache_len(), 1); // 槽仍在，只是不再 held
+        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.typeset_len(), 1); // 槽仍在，只是不再 held
     }
 
     #[test]
     #[ignore = "requires GPU; run with --ignored"]
     fn glyph_cache_resolves_arbitrary_chars_on_demand() {
         let gpu = make_test_gpu();
-        let mut ctx = gpu.text_ctx.lock().unwrap();
+        let mut ctx = gpu.text_ctx();
         let def = TextDef::default().font_size(20.0);
         for ch in ['7', '中', '±', 'A', ' '] {
             let cluster = ctx.resolve_glyph(ch, &def);
@@ -630,11 +632,11 @@ mod tests {
         }
         assert_eq!(ctx.glyph_cache.len(), 5);
 
-        let slots_before = ctx.shape_slots.len();
+        let slots_before = ctx.typeset_slots.len();
         let cached = ctx.resolve_glyph('中', &def);
         assert!(cached.advance >= 0.0);
         assert_eq!(ctx.glyph_cache.len(), 5);
-        assert_eq!(ctx.shape_slots.len(), slots_before);
+        assert_eq!(ctx.typeset_slots.len(), slots_before);
 
         ctx.resolve_glyph('中', &def.clone().font_size(24.0));
         assert_eq!(ctx.glyph_cache.len(), 6);
@@ -693,29 +695,29 @@ mod tests {
     fn make_stable_cache_hit_shares_liveness() {
         let gpu = make_test_gpu();
         let h1 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
         let h2 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
         // 同文案 cache hit → count 仍为 1
-        assert_eq!(gpu.shape_cache_held_count(), 1);
-        assert_eq!(gpu.shape_cache_len(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.typeset_len(), 1);
         // 共享 liveness arc
         assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
         drop(h1);
         // 仍有 h2 存活 → count 保持 1
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
         drop(h2);
         // 全 drop → count 归 0
-        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.typeset_held_count(), 0);
     }
 
     #[test]
     #[ignore = "requires GPU; run with --ignored"]
-    fn clear_shape_cache_preserves_held_slots() {
+    fn clear_typeset_preserves_held_slots() {
         let gpu = make_test_gpu();
         let h1 = gpu.make_stable_text("keep", &TextDef::default().font_size(20.0));
         let h2 = gpu.make_stable_text("drop", &TextDef::default().font_size(20.0));
         drop(h2); // "drop" is now dead
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
 
         // 加一个非 held 槽（用 draw_text 路径制造）
         let mut list = TextEntryList::new();
@@ -735,15 +737,15 @@ mod tests {
             None,
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
-        assert_eq!(gpu.shape_cache_len(), 3);
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_len(), 3);
+        assert_eq!(gpu.typeset_held_count(), 1);
 
         // clear → 只清非 held + 死标记
-        gpu.clear_shape_cache();
-        assert_eq!(gpu.shape_cache_len(), 1);
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        gpu.clear_typeset_cache();
+        assert_eq!(gpu.typeset_len(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
         drop(h1);
-        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.typeset_held_count(), 0);
     }
 
     #[test]
@@ -769,20 +771,20 @@ mod tests {
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
         // 此时 cache 已有 "shared"，无 liveness
-        assert_eq!(gpu.shape_cache_held_count(), 0);
-        assert_eq!(gpu.shape_cache_len(), 1);
+        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.typeset_len(), 1);
 
         // make_stable → 命中已有 slot，liveness = Some
         let h1 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
         let h2 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.shape_cache_held_count(), 1);
+        assert_eq!(gpu.typeset_held_count(), 1);
         // 共享 Arc
         assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
         assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
         drop(h1);
         drop(h2);
         // 全 drop → held_count 归 0
-        assert_eq!(gpu.shape_cache_held_count(), 0);
+        assert_eq!(gpu.typeset_held_count(), 0);
     }
 }

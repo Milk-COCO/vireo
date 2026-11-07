@@ -230,6 +230,7 @@ pub mod prelude {
     pub use crate::text::TextPart;
     pub use crate::text::TextStroke;
     pub use crate::text::TextStyle;
+    pub use crate::text::TextSystem;
     pub use crate::text::TextTextureState;
     pub use crate::text::Weight;
     pub use crate::text::draw_hud_line;

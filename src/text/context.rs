@@ -11,10 +11,10 @@ use crate::glyphon::{
 };
 use wgpu::{Device, MultisampleState, Queue, Sampler, TextureFormat, TextureView};
 
-use super::{GlyphKey, ShapeCacheSlot, ShapeCacheStats, ShapeKey};
+use super::{GlyphKey, TypesetCacheStats, TypesetKey, TypesetSlot};
 use super::{TextAlign, TextDef, TextStencilMode, stencil_text_ds_pass, stencil_text_ds_test};
 
-/// 默认硬顶（可 `set_shape_cache_max_entries` 修改；`None` = 不限制条数）。
+/// 默认硬顶（可 `set_typeset_max_entries` 修改；`None` = 不限制条数）。
 const DEFAULT_SHAPE_MAX_ENTRIES: usize = 4096;
 /// 默认软目标：超过后优先清过期项（仅 TTL 启用时；随 hard 缩放）。
 const DEFAULT_SHAPE_SOFT_CAP: usize = 512;
@@ -49,23 +49,23 @@ pub struct TextContext {
     style_buffers: Option<StyleBuffers>,
     sample_count: u32,
     /// 已 shape 的 Buffer 槽位
-    pub(crate) shape_slots: Vec<ShapeCacheSlot>,
-    /// ShapeKey → slot 下标
-    shape_map: FxHashMap<ShapeKey, u32>,
+    pub(crate) typeset_slots: Vec<TypesetSlot>,
+    /// TypesetKey → slot 下标
+    typeset_map: FxHashMap<TypesetKey, u32>,
     /// 可复用的空 Buffer
     buffer_pool: Vec<Buffer>,
     /// 上次 GC 时刻（真实时间，与 FPS 无关）
     last_gc: Instant,
     /// `None` = 永不按时间自动回收；`Some(d)` = 超过 d 未使用则过期。
-    shape_ttl: Option<Duration>,
+    typeset_ttl: Option<Duration>,
     /// `None` = 不限制缓存条数；`Some(n)` = 最多 n 条，满则 LRU 换槽。
-    shape_max_entries: Option<usize>,
+    typeset_max_entries: Option<usize>,
     /// 按字符和完整 shape 样式缓存 resolved glyph 元数据。
     /// 不缓存位图；光栅结果仍由 glyph atlas 管理。默认无 cap/TTL/LRU。
     pub(crate) glyph_cache: FxHashMap<GlyphKey, Arc<ResolvedGlyphCluster>>,
     /// 本帧 prepare 中引用的 slot，禁止淘汰
     frame_pinned: Vec<u32>,
-    stats: ShapeCacheStats,
+    stats: TypesetCacheStats,
 }
 
 #[doc(hidden)]
@@ -210,9 +210,9 @@ impl TextContext {
     }
 
     /// 每帧绘制前调用一次（多 batch 共享）。
-    /// TTL/GC 用真实时间，与 FPS 无关；`shape_ttl == None` 时不做自动回收。
+    /// TTL/GC 用真实时间，与 FPS 无关；`typeset_ttl == None` 时不做自动回收。
     pub fn advance_frame(&mut self) {
-        if self.shape_ttl.is_none() {
+        if self.typeset_ttl.is_none() {
             return;
         }
         let now = Instant::now();
@@ -228,23 +228,23 @@ impl TextContext {
     }
 
     /// 设置 shape 缓存 TTL。
-    pub fn set_shape_cache_ttl(&mut self, ttl: Option<Duration>) {
-        self.shape_ttl = ttl;
+    pub fn set_typeset_ttl(&mut self, ttl: Option<Duration>) {
+        self.typeset_ttl = ttl;
     }
 
     /// 当前 shape 缓存 TTL（`None` = 不自动按时间回收）。
-    pub fn shape_cache_ttl(&self) -> Option<Duration> {
-        self.shape_ttl
+    pub fn typeset_ttl(&self) -> Option<Duration> {
+        self.typeset_ttl
     }
 
     /// 设置 shape 缓存最大条数。
-    pub fn set_shape_cache_max_entries(&mut self, max: Option<usize>) {
-        self.shape_max_entries = max;
+    pub fn set_typeset_max_entries(&mut self, max: Option<usize>) {
+        self.typeset_max_entries = max;
         if let Some(cap) = max {
             loop {
                 self.scavenge_dead_liveness();
                 let non_held = self
-                    .shape_slots
+                    .typeset_slots
                     .iter()
                     .filter(|s| s.liveness.is_none())
                     .count();
@@ -260,7 +260,7 @@ impl TextContext {
     }
 
     fn remove_slot(&mut self, slot_i: usize) {
-        let removed = self.shape_slots.swap_remove(slot_i);
+        let removed = self.typeset_slots.swap_remove(slot_i);
         debug_assert!(
             removed
                 .liveness
@@ -268,26 +268,26 @@ impl TextContext {
                 .is_none_or(|a| Arc::strong_count(a) <= 1),
             "remove_slot called on actively held slot"
         );
-        self.shape_map.remove(&removed.key);
+        self.typeset_map.remove(&removed.key);
         if let Ok(inner) = Arc::try_unwrap(removed.buffer) {
             self.recycle_buffer(inner);
         }
-        if slot_i < self.shape_slots.len() {
-            let moved_key = self.shape_slots[slot_i].key.clone();
-            self.shape_map.insert(moved_key, slot_i as u32);
+        if slot_i < self.typeset_slots.len() {
+            let moved_key = self.typeset_slots[slot_i].key.clone();
+            self.typeset_map.insert(moved_key, slot_i as u32);
         }
     }
 
     /// 当前 shape 缓存最大条数（`None` = 不限制）。
-    pub fn shape_cache_max_entries(&self) -> Option<usize> {
-        self.shape_max_entries
+    pub fn typeset_max_entries(&self) -> Option<usize> {
+        self.typeset_max_entries
     }
 
     /// 立即清空全部 shape 缓存，Buffer 尽量回池。
-    pub fn clear_shape_cache(&mut self) {
+    pub fn clear_typeset_cache(&mut self) {
         self.scavenge_dead_liveness();
-        let old_slots = std::mem::take(&mut self.shape_slots);
-        let mut new_slots: Vec<ShapeCacheSlot> = Vec::with_capacity(old_slots.len());
+        let old_slots = std::mem::take(&mut self.typeset_slots);
+        let mut new_slots: Vec<TypesetSlot> = Vec::with_capacity(old_slots.len());
         for slot in old_slots {
             if slot.liveness.is_some() {
                 new_slots.push(slot);
@@ -295,14 +295,14 @@ impl TextContext {
                 self.recycle_buffer(inner);
             }
         }
-        self.shape_map.clear();
+        self.typeset_map.clear();
         for (new_i, slot) in new_slots.iter().enumerate() {
-            self.shape_map.insert(slot.key.clone(), new_i as u32);
+            self.typeset_map.insert(slot.key.clone(), new_i as u32);
         }
-        self.shape_slots = new_slots;
+        self.typeset_slots = new_slots;
         self.glyph_cache.clear();
         self.frame_pinned.clear();
-        self.stats = ShapeCacheStats::default();
+        self.stats = TypesetCacheStats::default();
     }
 
     /// 清空 `Glyphs` 的 resolved glyph 元数据缓存。
@@ -322,7 +322,7 @@ impl TextContext {
     }
 
     pub(crate) fn touch_slot(&mut self, slot: u32) {
-        self.shape_slots[slot as usize].last_used = Instant::now();
+        self.typeset_slots[slot as usize].last_used = Instant::now();
         self.pin_slot(slot);
     }
 
@@ -331,24 +331,24 @@ impl TextContext {
     }
 
     fn soft_cap(&self) -> usize {
-        match self.shape_max_entries {
+        match self.typeset_max_entries {
             Some(hard) => hard.clamp(1, DEFAULT_SHAPE_SOFT_CAP),
             None => DEFAULT_SHAPE_SOFT_CAP,
         }
     }
 
     /// 缓存命中统计（调试/测试）。
-    pub fn shape_cache_stats(&self) -> ShapeCacheStats {
+    pub fn typeset_stats(&self) -> TypesetCacheStats {
         self.stats
     }
 
-    pub fn reset_shape_cache_stats(&mut self) {
-        self.stats = ShapeCacheStats::default();
+    pub fn reset_typeset_stats(&mut self) {
+        self.stats = TypesetCacheStats::default();
     }
 
     /// 当前缓存条目数（调试）。
-    pub fn shape_cache_len(&self) -> usize {
-        self.shape_slots.len()
+    pub fn typeset_len(&self) -> usize {
+        self.typeset_slots.len()
     }
 
     pub(crate) fn take_buffer(&mut self, metrics: Metrics) -> Buffer {
@@ -368,7 +368,7 @@ impl TextContext {
 
     /// 生效的过期阈值：未超软目标时更宽松（ttl×4）。
     fn effective_ttl(&self, now_len: usize) -> Option<Duration> {
-        let base = self.shape_ttl?;
+        let base = self.typeset_ttl?;
         if now_len > self.soft_cap() {
             Some(base)
         } else {
@@ -378,20 +378,20 @@ impl TextContext {
 
     /// 回收「超过 TTL 未使用」的条目。
     fn gc_stale_shapes(&mut self, now: Instant) {
-        let Some(ttl) = self.effective_ttl(self.shape_slots.len()) else {
+        let Some(ttl) = self.effective_ttl(self.typeset_slots.len()) else {
             return;
         };
-        if self.shape_slots.is_empty() {
+        if self.typeset_slots.is_empty() {
             return;
         }
         self.scavenge_dead_liveness();
         let mut i = 0usize;
-        while i < self.shape_slots.len() {
-            if self.shape_slots[i].liveness.is_some() {
+        while i < self.typeset_slots.len() {
+            if self.typeset_slots[i].liveness.is_some() {
                 i += 1;
                 continue;
             }
-            let age = now.saturating_duration_since(self.shape_slots[i].last_used);
+            let age = now.saturating_duration_since(self.typeset_slots[i].last_used);
             if age > ttl {
                 self.remove_slot(i);
             } else {
@@ -404,9 +404,9 @@ impl TextContext {
     fn evict_one_slot(&mut self, now: Instant) -> Option<usize> {
         self.scavenge_dead_liveness();
         let pinned = |i: usize| self.frame_pinned.iter().any(|&p| p as usize == i);
-        let held = |i: usize| self.shape_slots[i].liveness.is_some();
-        if let Some(ttl) = self.shape_ttl
-            && let Some(i) = self.shape_slots.iter().enumerate().position(|(i, s)| {
+        let held = |i: usize| self.typeset_slots[i].liveness.is_some();
+        if let Some(ttl) = self.typeset_ttl
+            && let Some(i) = self.typeset_slots.iter().enumerate().position(|(i, s)| {
                 !pinned(i) && !held(i) && now.saturating_duration_since(s.last_used) > ttl
             })
         {
@@ -414,7 +414,7 @@ impl TextContext {
         }
         let mut oldest_i = None;
         let mut oldest_t = Instant::now();
-        for (i, slot) in self.shape_slots.iter().enumerate() {
+        for (i, slot) in self.typeset_slots.iter().enumerate() {
             if pinned(i) || held(i) {
                 continue;
             }
@@ -429,30 +429,30 @@ impl TextContext {
     fn replace_slot_rc(
         &mut self,
         slot_i: usize,
-        key: ShapeKey,
+        key: TypesetKey,
         buffer: Arc<Buffer>,
         line_width: f32,
         now: Instant,
     ) -> u32 {
-        let old_key = self.shape_slots[slot_i].key.clone();
-        self.shape_map.remove(&old_key);
-        let old_buf = std::mem::replace(&mut self.shape_slots[slot_i].buffer, buffer);
+        let old_key = self.typeset_slots[slot_i].key.clone();
+        self.typeset_map.remove(&old_key);
+        let old_buf = std::mem::replace(&mut self.typeset_slots[slot_i].buffer, buffer);
         if let Ok(inner) = Arc::try_unwrap(old_buf) {
             self.recycle_buffer(inner);
         }
-        self.shape_slots[slot_i].key = key.clone();
-        self.shape_slots[slot_i].line_width = line_width;
-        self.shape_slots[slot_i].last_used = now;
+        self.typeset_slots[slot_i].key = key.clone();
+        self.typeset_slots[slot_i].line_width = line_width;
+        self.typeset_slots[slot_i].last_used = now;
         let idx = slot_i as u32;
-        self.shape_map.insert(key, idx);
+        self.typeset_map.insert(key, idx);
         idx
     }
 
     /// 获取或创建已 shape 的 buffer，返回 slot 下标。
-    pub(crate) fn get_or_shape(&mut self, key: ShapeKey, options: &TextDef) -> u32 {
+    pub(crate) fn get_or_shape(&mut self, key: TypesetKey, options: &TextDef) -> u32 {
         let now = Instant::now();
-        if let Some(&idx) = self.shape_map.get(&key) {
-            self.shape_slots[idx as usize].last_used = now;
+        if let Some(&idx) = self.typeset_map.get(&key) {
+            self.typeset_slots[idx as usize].last_used = now;
             self.stats.hits += 1;
             self.pin_slot(idx);
             return idx;
@@ -484,12 +484,12 @@ impl TextContext {
             .unwrap_or(0.0);
 
         let buffer = Arc::new(buffer);
-        let under_cap = match self.shape_max_entries {
+        let under_cap = match self.typeset_max_entries {
             None => true,
             Some(cap) => {
                 self.scavenge_dead_liveness();
                 let non_held = self
-                    .shape_slots
+                    .typeset_slots
                     .iter()
                     .filter(|s| s.liveness.is_none())
                     .count();
@@ -497,15 +497,15 @@ impl TextContext {
             }
         };
         if under_cap {
-            let idx = self.shape_slots.len() as u32;
-            self.shape_slots.push(ShapeCacheSlot {
+            let idx = self.typeset_slots.len() as u32;
+            self.typeset_slots.push(TypesetSlot {
                 key: key.clone(),
                 buffer,
                 line_width,
                 liveness: None,
                 last_used: now,
             });
-            self.shape_map.insert(key, idx);
+            self.typeset_map.insert(key, idx);
             self.pin_slot(idx);
             return idx;
         }
@@ -516,15 +516,15 @@ impl TextContext {
             return idx;
         }
 
-        let idx = self.shape_slots.len() as u32;
-        self.shape_slots.push(ShapeCacheSlot {
+        let idx = self.typeset_slots.len() as u32;
+        self.typeset_slots.push(TypesetSlot {
             key: key.clone(),
             buffer,
             line_width,
             liveness: None,
             last_used: now,
         });
-        self.shape_map.insert(key, idx);
+        self.typeset_map.insert(key, idx);
         self.pin_slot(idx);
         idx
     }
@@ -533,13 +533,13 @@ impl TextContext {
         let mut opts = options.clone();
         opts.max_width = None;
         opts.align = TextAlign::Left;
-        let key = ShapeKey::from_text(text, &opts);
+        let key = TypesetKey::from_text(text, &opts);
         self.get_or_shape(key, &opts)
     }
 
     /// 扫描全槽，清理已死的 liveness 标记。
     pub(crate) fn scavenge_dead_liveness(&mut self) {
-        for slot in &mut self.shape_slots {
+        for slot in &mut self.typeset_slots {
             if let Some(arc) = &slot.liveness
                 && Arc::strong_count(arc) <= 1
             {
@@ -550,14 +550,14 @@ impl TextContext {
 
     /// 将槽标为 live，返回供 [`StableText`] 持有的 `Arc<()>`。
     pub(crate) fn mark_slot_live(&mut self, slot: u32) -> Arc<()> {
-        let s = &mut self.shape_slots[slot as usize];
+        let s = &mut self.typeset_slots[slot as usize];
         s.liveness.get_or_insert_with(|| Arc::new(())).clone()
     }
 
     /// 当前活跃 held 槽数。
-    pub fn shape_cache_held_count(&mut self) -> usize {
+    pub fn typeset_held_count(&mut self) -> usize {
         self.scavenge_dead_liveness();
-        self.shape_slots
+        self.typeset_slots
             .iter()
             .filter(|s| s.liveness.is_some())
             .count()
@@ -569,11 +569,11 @@ impl TextContext {
         if opts.max_width.is_none() {
             opts.align = TextAlign::Left;
         }
-        let key = ShapeKey::from_text(text, &opts);
+        let key = TypesetKey::from_text(text, &opts);
         let slot = self.get_or_shape(key, &opts);
         let liveness = self.mark_slot_live(slot);
         let line_width = self.slot_line_width(slot);
-        let buffer = self.shape_slots[slot as usize].buffer.clone();
+        let buffer = self.typeset_slots[slot as usize].buffer.clone();
         let mut line_count = 0u32;
         let mut resolved_glyphs = Vec::new();
         for run in buffer.layout_runs() {
@@ -598,16 +598,16 @@ impl TextContext {
         }
     }
 
-    pub(crate) fn peek_shape_slot(&self, key: &ShapeKey) -> Option<u32> {
-        self.shape_map.get(key).copied()
+    pub(crate) fn peek_shape_slot(&self, key: &TypesetKey) -> Option<u32> {
+        self.typeset_map.get(key).copied()
     }
 
     pub(crate) fn slot_line_width(&self, slot: u32) -> f32 {
         let i = slot as usize;
-        if i >= self.shape_slots.len() {
+        if i >= self.typeset_slots.len() {
             return 0.0;
         }
-        self.shape_slots[i].line_width
+        self.typeset_slots[i].line_width
     }
 
     /// 按需 shape 单个字符并缓存完整 resolved glyph cluster。
@@ -626,7 +626,7 @@ impl TextContext {
         let text = ch.to_string();
         let idx = self.get_or_shape_text(&text, &opts);
         let advance = self.slot_line_width(idx);
-        let buffer = &self.shape_slots[idx as usize].buffer;
+        let buffer = &self.typeset_slots[idx as usize].buffer;
         let mut glyphs = Vec::new();
         for run in buffer.layout_runs() {
             glyphs.extend(run.glyphs.iter().cloned().map(|glyph| {
@@ -762,15 +762,15 @@ impl TextContext {
             last_dpi: None,
             style_buffers: None,
             sample_count: 1,
-            shape_slots: Vec::with_capacity(64),
-            shape_map: FxHashMap::default(),
+            typeset_slots: Vec::with_capacity(64),
+            typeset_map: FxHashMap::default(),
             buffer_pool: Vec::with_capacity(16),
             last_gc: Instant::now(),
-            shape_ttl: Some(DEFAULT_SHAPE_TTL),
-            shape_max_entries: Some(DEFAULT_SHAPE_MAX_ENTRIES),
+            typeset_ttl: Some(DEFAULT_SHAPE_TTL),
+            typeset_max_entries: Some(DEFAULT_SHAPE_MAX_ENTRIES),
             glyph_cache: FxHashMap::default(),
             frame_pinned: Vec::with_capacity(32),
-            stats: ShapeCacheStats::default(),
+            stats: TypesetCacheStats::default(),
         }
     }
 }

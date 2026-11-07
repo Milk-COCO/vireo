@@ -1190,7 +1190,7 @@ impl Renderer {
     pub fn preheat(&self, target: &RenderTarget, clear_color: crate::color::Color) {
         // 1. 文字预热：cosmic_text shape + swash 光栅化 + atlas GPU 上传。
         // 首帧 ~33ms 的 text prepare 在这里完成。
-        self.gpu.text_ctx.lock().unwrap().preheat(
+        self.gpu.text_ctx().preheat(
             &self.gpu.device,
             &self.gpu.queue,
             self.physical_width,

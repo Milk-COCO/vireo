@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::glyphon::ColorMode;
 use crate::material::Material;
-use crate::text::TextContext;
+use crate::text::{TextContext, TextSystem};
 
 /// 共享 GPU 资源 —— 多个窗口/离屏纹理共用同一套 device/queue/pipeline
 pub struct GpuContext {
@@ -42,7 +42,8 @@ pub struct GpuContext {
     /// 每帧由 draw 阶段重写上传。
     pub(crate) instance_storage_buf: Mutex<Option<(wgpu::Buffer, u64)>>,
     pub surface_format: Mutex<wgpu::TextureFormat>,
-    pub text_ctx: Mutex<TextContext>,
+    /// 文字系统（字体 / 排版缓存 / 字形图集 / 渲染器）。用户侧走 [`Self::text`]。
+    pub(crate) text_system: TextSystem,
     /// wgpu adapter（pub(crate) 用于 surface 能力查询，例如选择 alpha 模式）
     pub(crate) adapter: wgpu::Adapter,
     /// device 对 surface_format 支持的 MSAA sample_count 列表（升序，如 [1, 2, 4]）。
@@ -833,7 +834,7 @@ impl GpuContext {
             cache: None,
         });
 
-        let text_ctx = Mutex::new(TextContext::new(
+        let text_system = TextSystem::new(TextContext::new(
             &device,
             &queue,
             surface_format,
@@ -905,7 +906,7 @@ impl GpuContext {
             instance_quad_index_buf,
             instance_storage_buf: Mutex::new(None),
             surface_format: Mutex::new(surface_format),
-            text_ctx,
+            text_system,
             adapter,
             supported_sample_counts,
             pipelines: Mutex::new(pipelines),
@@ -1080,35 +1081,22 @@ impl GpuContext {
             .unwrap_or(1)
     }
 
+    /// 文字系统入口（字体、排版缓存、字形图集、渲染器）。
+    ///
+    /// 需要 device/queue 的操作（`preheat`）仍走 `GpuContext` 上的同名便捷方法；
+    /// 其余（度量、缓存策略、句柄、字体加载）都从这里调。
+    pub fn text(&self) -> &TextSystem {
+        &self.text_system
+    }
+
+    /// crate 内部：拿文字运行时的互斥锁守卫（prepare / draw / pipeline 用）。
+    pub(crate) fn text_ctx(&self) -> std::sync::MutexGuard<'_, TextContext> {
+        self.text_system.ctx()
+    }
+
     /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。
     pub fn measure_text(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
-        use crate::glyphon::{Attrs, Buffer, Metrics, Shaping};
-
-        let mut text_ctx = self.text_ctx.lock().unwrap();
-        let line_height = options.font_size * 1.2;
-        let metrics = Metrics::new(options.font_size, line_height);
-        let mut buffer = Buffer::new(&mut text_ctx.font_system, metrics);
-        buffer.set_size(options.max_width, None);
-
-        let attrs = options
-            .attrs
-            .as_ref()
-            .map(|a| a.as_attrs())
-            .unwrap_or_else(Attrs::new);
-
-        buffer.set_text(text, &attrs, Shaping::Advanced, Some(options.align.into()));
-        buffer.shape_until_scroll(&mut text_ctx.font_system, false);
-
-        let num_lines = buffer.lines.len() as f32;
-        let max_w = (0..buffer.lines.len()).fold(0.0f32, |max, i| {
-            let line_w = buffer
-                .line_layout(&mut text_ctx.font_system, i)
-                .map(|layout| layout.iter().map(|run| run.w).sum())
-                .unwrap_or(0.0);
-            max.max(line_w)
-        });
-
-        (max_w, line_height * num_lines)
+        self.text_system.measure(text, options)
     }
 
     /// 文本图集的当前占用（覆盖度 / 距离场共用 R8 图 + 彩色图）。
@@ -1116,8 +1104,7 @@ impl GpuContext {
     /// 带样式的字形把距离场存在同一张 R8 图集里，所以这个数字同时反映了样式文本的
     /// 显存开销（32px 字形 + band 4 ≈ 1.6KB/字形）。
     pub fn text_atlas_stats(&self) -> crate::glyphon::TextAtlasStats {
-        let text_ctx = self.text_ctx.lock().unwrap();
-        text_ctx.text_atlas.stats()
+        self.text_system.atlas_stats()
     }
 
     /// 文本的**视觉**包围盒（逻辑像素）：在 [`Self::measure_text`] 之上加上样式的溢出
@@ -1126,13 +1113,7 @@ impl GpuContext {
     /// 排版仍然用 `measure_text` —— 这个只用于裁剪/居中这类"视觉外框"需求。
     /// 注意：`Px` 意图在这里按 1:1 处理（没有 dpi 上下文），需要精确设备像素时自己换算。
     pub fn measure_text_visual(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
-        let (w, h) = self.measure_text(text, options);
-        let pad = options
-            .style
-            .as_ref()
-            .map(|s| s.reach_px(1.0))
-            .unwrap_or(0.0);
-        (w + pad * 2.0, h + pad * 2.0)
+        self.text_system.measure_visual(text, options)
     }
 
     /// 从文件加载字体（TTF/OTF），使该字体可用于 TextOptions::with_family
@@ -1145,18 +1126,9 @@ impl GpuContext {
 
     /// 加载自定义字体（TTF/OTF 字节数据），使该字体可用于 TextOptions::with_family
     pub fn load_font(&self, data: &[u8]) {
-        let mut text_ctx = self.text_ctx.lock().unwrap();
-        text_ctx.font_system.db_mut().load_font_data(data.to_vec());
-        // Font fallback may change, so cached shaping and resolved glyphs
-        // must be rebuilt. Active StableText handles intentionally keep their
-        // already-shaped buffers.
-        text_ctx.clear_shape_cache();
+        self.text_system.load_font(data);
     }
 
-    /// 设置文字 shape 缓存 TTL（真实时间，与 FPS 无关）。
-    /// - `Some(d)`：超过 d 未使用则过期
-    /// - `None`：永不按时间自动回收
-    ///
     /// 清空共享管线缓存表。`surface_format` 从默认值同步为窗口真实格式时调用，
     /// 丢弃同步前预置的默认格式管线（键含格式位，正常不会命中；清表是兜底）。
     pub(crate) fn clear_pipelines(&self) {
@@ -1173,67 +1145,112 @@ impl GpuContext {
         *self.surface_format.lock().unwrap() = fmt;
     }
 
-    /// 设置 shape 缓存的 TTL（`None` = 不自动按时间回收）。
-    pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
-        self.text_ctx.lock().unwrap().set_shape_cache_ttl(ttl);
+    /// 设置排版缓存 TTL（`None` = 不自动按时间回收）。
+    pub fn set_typeset_ttl(&self, ttl: Option<std::time::Duration>) {
+        self.text_system.set_typeset_ttl(ttl);
     }
 
-    /// 当前 shape 缓存 TTL（`None` = 不自动按时间回收）。
-    pub fn shape_cache_ttl(&self) -> Option<std::time::Duration> {
-        self.text_ctx.lock().unwrap().shape_cache_ttl()
+    /// 当前排版缓存 TTL（`None` = 不自动按时间回收）。
+    pub fn typeset_ttl(&self) -> Option<std::time::Duration> {
+        self.text_system.typeset_ttl()
     }
 
-    /// 设置 shape 缓存最大条数。
+    /// 设置排版缓存最大条数。
     /// - `Some(n)`：最多 n 条不同文案键，满则 LRU
     /// - `None`：不限制条数
-    pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
-        self.text_ctx
-            .lock()
-            .unwrap()
-            .set_shape_cache_max_entries(max);
+    pub fn set_typeset_max_entries(&self, max: Option<usize>) {
+        self.text_system.set_typeset_max_entries(max);
     }
 
-    /// 当前 shape 缓存最大条数（`None` = 不限制）。
-    pub fn shape_cache_max_entries(&self) -> Option<usize> {
-        self.text_ctx.lock().unwrap().shape_cache_max_entries()
+    /// 当前排版缓存最大条数（`None` = 不限制）。
+    pub fn typeset_max_entries(&self) -> Option<usize> {
+        self.text_system.typeset_max_entries()
     }
 
-    /// 立即清空文字 shape 缓存。
-    pub fn clear_shape_cache(&self) {
-        self.text_ctx.lock().unwrap().clear_shape_cache();
+    /// 立即清空文字排版缓存。
+    pub fn clear_typeset_cache(&self) {
+        self.text_system.clear_typeset_cache();
     }
 
     /// 清空 `TextPart::Glyphs` 的 resolved glyph 元数据缓存。
     /// 不清空 glyph atlas 中已经光栅化的位图。
     pub fn clear_glyph_cache(&self) {
-        self.text_ctx.lock().unwrap().clear_glyph_cache();
+        self.text_system.clear_resolved_glyph_cache();
     }
 
     /// 当前 `TextPart::Glyphs` resolved glyph 元数据缓存条目数。
     pub fn glyph_cache_len(&self) -> usize {
-        self.text_ctx.lock().unwrap().glyph_cache_len()
+        self.text_system.resolved_glyph_cache_len()
     }
 
-    /// 当前 shape 缓存条目数。
-    pub fn shape_cache_len(&self) -> usize {
-        self.text_ctx.lock().unwrap().shape_cache_len()
+    /// 当前排版缓存条目数。
+    pub fn typeset_len(&self) -> usize {
+        self.text_system.typeset_len()
     }
 
     /// 缓存中由 [`crate::text::StableText`] 活跃持有的条目数。
-    /// 这些槽不会被 TTL/LRU/`clear_shape_cache` 回收。
-    /// O(n) 扫描（n = shape_slots.len()）。
+    /// 这些槽不会被 TTL/LRU/`clear_typeset_cache` 回收。
+    pub fn typeset_held_count(&self) -> usize {
+        self.text_system.typeset_held_count()
+    }
+
+    /// 排版缓存命中统计。
+    pub fn typeset_stats(&self) -> crate::text::TypesetCacheStats {
+        self.text_system.typeset_stats()
+    }
+
+    /// 重置排版缓存命中统计。
+    pub fn reset_typeset_stats(&self) {
+        self.text_system.reset_typeset_stats();
+    }
+
+    // ---- 兼容旧名（`shape_*` → `typeset_*`）：保留一个版本，之后删除 ----
+    //
+    // 术语：文字侧统一叫 typeset/排版；几何的 shape 与本组 API 无关。
+
+    /// 旧名，等价于 [`Self::set_typeset_ttl`]。
+    pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
+        self.set_typeset_ttl(ttl);
+    }
+
+    /// 旧名，等价于 [`Self::typeset_ttl`]。
+    pub fn shape_cache_ttl(&self) -> Option<std::time::Duration> {
+        self.typeset_ttl()
+    }
+
+    /// 旧名，等价于 [`Self::set_typeset_max_entries`]。
+    pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
+        self.set_typeset_max_entries(max);
+    }
+
+    /// 旧名，等价于 [`Self::typeset_max_entries`]。
+    pub fn shape_cache_max_entries(&self) -> Option<usize> {
+        self.typeset_max_entries()
+    }
+
+    /// 旧名，等价于 [`Self::clear_typeset_cache`]。
+    pub fn clear_shape_cache(&self) {
+        self.clear_typeset_cache();
+    }
+
+    /// 旧名，等价于 [`Self::typeset_len`]。
+    pub fn shape_cache_len(&self) -> usize {
+        self.typeset_len()
+    }
+
+    /// 旧名，等价于 [`Self::typeset_held_count`]。
     pub fn shape_cache_held_count(&self) -> usize {
-        self.text_ctx.lock().unwrap().shape_cache_held_count()
+        self.typeset_held_count()
     }
 
-    /// shape 缓存命中统计。
-    pub fn shape_cache_stats(&self) -> crate::text::ShapeCacheStats {
-        self.text_ctx.lock().unwrap().shape_cache_stats()
+    /// 旧名，等价于 [`Self::typeset_stats`]。
+    pub fn shape_cache_stats(&self) -> crate::text::TypesetCacheStats {
+        self.typeset_stats()
     }
 
-    /// 重置 shape 缓存命中统计。
+    /// 旧名，等价于 [`Self::reset_typeset_stats`]。
     pub fn reset_shape_cache_stats(&self) {
-        self.text_ctx.lock().unwrap().reset_shape_cache_stats();
+        self.reset_typeset_stats();
     }
 
     /// 从文本创建 [`crate::text::StableText`]（预 shape，跨帧复用）。
@@ -1247,7 +1264,7 @@ impl GpuContext {
         text: &str,
         options: &crate::text::TextDef,
     ) -> crate::text::StableText {
-        self.text_ctx.lock().unwrap().make_stable(text, options)
+        self.text_system.stable(text, options)
     }
 
     /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
@@ -1260,9 +1277,7 @@ impl GpuContext {
         physical_width: u32,
         physical_height: u32,
     ) {
-        self.text_ctx
-            .lock()
-            .unwrap()
+        self.text_system
             .preheat(device, queue, physical_width, physical_height);
     }
 

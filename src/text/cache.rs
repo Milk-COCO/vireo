@@ -6,7 +6,7 @@ use cosmic_text::{AttrsOwned, Buffer};
 use super::{TextAlign, TextDef};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ShapeKey {
+pub(crate) struct TypesetKey {
     pub(crate) text: String,
     font_size_bits: u32,
     max_width_bits: u32,
@@ -14,7 +14,7 @@ pub(crate) struct ShapeKey {
     attrs: Option<AttrsOwned>,
 }
 
-impl ShapeKey {
+impl TypesetKey {
     pub(crate) fn from_text(text: &str, options: &TextDef) -> Self {
         let max_width_bits = options.max_width.map(|w| w.to_bits()).unwrap_or(u32::MAX);
         Self {
@@ -49,8 +49,8 @@ impl GlyphKey {
     }
 }
 
-pub(crate) struct ShapeCacheSlot {
-    pub(crate) key: ShapeKey,
+pub(crate) struct TypesetSlot {
+    pub(crate) key: TypesetKey,
     pub(crate) buffer: Arc<Buffer>,
     pub(crate) line_width: f32,
     pub(crate) liveness: Option<Arc<()>>,
@@ -58,7 +58,7 @@ pub(crate) struct ShapeCacheSlot {
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-pub struct ShapeCacheStats {
+pub struct TypesetCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub gc_runs: u64,

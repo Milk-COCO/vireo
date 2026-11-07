@@ -399,9 +399,7 @@ impl Runner {
             self.gpu.set_surface_format(fmt);
             self.gpu.clear_pipelines();
             self.gpu
-                .text_ctx
-                .lock()
-                .unwrap()
+                .text_ctx()
                 .ensure_text_format(&self.gpu.device, fmt);
         }
         let surface_config = wgpu::SurfaceConfiguration {

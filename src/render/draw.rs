@@ -1507,7 +1507,7 @@ impl Renderer {
 
         // ---- 准备所有文本（DS 与本帧 attachment 一致）----
         {
-            let mut tc = self.gpu.text_ctx.lock().unwrap();
+            let mut tc = self.gpu.text_ctx();
             tc.ensure_sample_count(&self.gpu.device, target.aa.samples);
             tc.ensure_text_stencil_mode(
                 &self.gpu.device,
@@ -1518,7 +1518,7 @@ impl Renderer {
                 },
             );
         }
-        let mut text_ctx = self.gpu.text_ctx.lock().unwrap();
+        let mut text_ctx = self.gpu.text_ctx();
         text_ctx.text_renderer.begin_frame();
         text_ctx.advance_frame();
         drop(text_ctx);
@@ -1551,7 +1551,7 @@ impl Renderer {
                     batch.color,
                 );
                 drop(view_table);
-                let text_ctx = self.gpu.text_ctx.lock().unwrap();
+                let text_ctx = self.gpu.text_ctx();
                 event_infos[ei].text = prepared
                     .into_iter()
                     .map(|segment| {
@@ -1577,9 +1577,7 @@ impl Renderer {
             }
         }
         self.gpu
-            .text_ctx
-            .lock()
-            .unwrap()
+            .text_ctx()
             .text_renderer
             .finish_frame(&self.gpu.device, &self.gpu.queue);
 
@@ -1922,7 +1920,7 @@ impl PreparedFrame<'_> {
                                 }
                             }
                         });
-                        r.gpu.text_ctx.lock().unwrap().ensure_text_pipeline(
+                        r.gpu.text_ctx().ensure_text_pipeline(
                             &r.gpu.device,
                             text_mode,
                             segment.blend,
@@ -1931,7 +1929,7 @@ impl PreparedFrame<'_> {
                         last_text_key = Some(key);
                     }
                     sync_blend_constant(&mut *pass, segment.blend, segment.blend_constant);
-                    let text_ctx = r.gpu.text_ctx.lock().unwrap();
+                    let text_ctx = r.gpu.text_ctx();
                     if let Err(e) = text_ctx.text_renderer.render_range_with_material(
                         &text_ctx.text_atlas,
                         &text_ctx.viewport,

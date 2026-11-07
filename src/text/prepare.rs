@@ -225,7 +225,7 @@ impl TextEntryList {
             return Vec::new();
         }
 
-        let mut text_ctx = gpu.text_ctx.lock().unwrap();
+        let mut text_ctx = gpu.text_ctx();
         text_ctx.begin_prepare_pins();
 
         text_ctx.ensure_viewport(&gpu.queue, physical_width, physical_height, scale);
@@ -455,7 +455,7 @@ impl TextEntryList {
                                     align: TextAlign::Left,
                                     ..pdef.clone()
                                 };
-                                let key = ShapeKey::from_text(s, &opts);
+                                let key = TypesetKey::from_text(s, &opts);
                                 let (area_meta, w) = match text_ctx.peek_shape_slot(&key) {
                                     Some(si) => {
                                         text_ctx.touch_slot(si);
@@ -606,7 +606,7 @@ impl TextEntryList {
                     }
                 }
                 TextEntry::Normal { pos, text, def, .. } => {
-                    let key = ShapeKey::from_text(text, def);
+                    let key = TypesetKey::from_text(text, def);
                     let slot = text_ctx.get_or_shape(key, def);
                     metas.push(AreaMeta {
                         buf: MetaBuf::Slot(slot),
@@ -643,7 +643,7 @@ impl TextEntryList {
                 ref mut text_atlas,
                 ref mut text_renderer,
                 ref viewport,
-                ref shape_slots,
+                ref typeset_slots,
                 ref cache,
                 ref base_texture,
                 ref base_sampler,
@@ -733,8 +733,8 @@ impl TextEntryList {
                                 let buf: &Buffer = match &meta.buf {
                                     MetaBuf::Stable(arc) => arc,
                                     MetaBuf::Slot(si) => {
-                                        debug_assert!((*si as usize) < shape_slots.len());
-                                        &shape_slots[*si as usize].buffer
+                                        debug_assert!((*si as usize) < typeset_slots.len());
+                                        &typeset_slots[*si as usize].buffer
                                     }
                                     MetaBuf::Resolved(_) => return None,
                                 };

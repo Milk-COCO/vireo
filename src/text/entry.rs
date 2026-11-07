@@ -434,7 +434,7 @@ impl TextEntryList {
             .first()
             .map(|e| e.blend())
             .unwrap_or(wgpu::BlendState::ALPHA_BLENDING);
-        let mut text_ctx = gpu.text_ctx.lock().unwrap();
+        let mut text_ctx = gpu.text_ctx();
         text_ctx.ensure_text_pipeline(
             &gpu.device,
             crate::text::TextStencilMode::None,

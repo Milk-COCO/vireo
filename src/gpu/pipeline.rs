@@ -1363,20 +1363,15 @@ impl GpuContext {
                     blends,
                 )
             }
-            MaterialTarget::Text => self
-                .text_ctx
-                .lock()
-                .unwrap()
-                .text_atlas
-                .create_material_pipeline(
-                    &self.device,
-                    material_bgl_entries.first().map(|(_, b)| *b),
-                    &fragment_source_str,
-                    multisample,
-                    depth_stencil,
-                    blends[0].unwrap_or(wgpu::BlendState::ALPHA_BLENDING),
-                    blends.len().max(1) as u32,
-                ),
+            MaterialTarget::Text => self.text_ctx().text_atlas.create_material_pipeline(
+                &self.device,
+                material_bgl_entries.first().map(|(_, b)| *b),
+                &fragment_source_str,
+                multisample,
+                depth_stencil,
+                blends[0].unwrap_or(wgpu::BlendState::ALPHA_BLENDING),
+                blends.len().max(1) as u32,
+            ),
         };
 
         let err = pollster::block_on(_scope.pop());
