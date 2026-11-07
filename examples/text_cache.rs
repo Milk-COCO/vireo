@@ -188,6 +188,20 @@ async fn main() {
             redraw_hud = false;
         }
         let mut hud = DrawBatch::new();
+        // 帧率用小数字段拼（`TextPart::glyphs`），否则每帧一个整串会把缓存统计搅浑。
+        draw_text_parts(
+            &mut hud.texts,
+            &[
+                TextPart::normal("FPS "),
+                TextPart::glyphs(format!("{:.0}", ctx.fps())),
+                TextPart::normal("  "),
+                TextPart::glyphs(format!("{:.2}", ctx.frame_time() * 1000.0)),
+                TextPart::normal(" ms"),
+            ],
+            Pos::new(24.0, 126.0),
+            TextDef::default().font_size(20.0),
+            TextOverride::from_color(Color::new(0.95, 0.95, 0.8, 1.0)),
+        );
         draw_text(
             &mut hud.texts,
             &hud_line,
