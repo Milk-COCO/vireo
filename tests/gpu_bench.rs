@@ -6389,7 +6389,74 @@ fn text_msdf_opt_in_renders() {
     );
 }
 
-/// 投影在 MSDF 下**不能被条目边界裁掉**：有内容区域的外接矩形应与精确 SDF 一致（±2px）。
+/// 稳态吞吐：N 个带样式字形、重复 20 帧，报告每帧耗时。
+/// 用来回答「为什么示例只有几帧」——如果这里很快，说明瓶颈不在引擎的 prepare/draw。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_steady_state_throughput() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let ink = Color::new(0.05, 0.06, 0.09, 1.0);
+    let red = Color::new(1.0, 0.0, 0.0, 1.0);
+    let c = OffscreenCanvas::new(&gpu, 900, 900);
+
+    for (label, glyphs, style) in [
+        ("2 字/单层描边", 2usize, TextStyle::outline(2.0, red)),
+        ("12 字/单层描边", 12, TextStyle::outline(2.0, red)),
+        (
+            "100 字/多层+发光",
+            100,
+            TextStyle::outline(3.0, ink)
+                .with_layer(TextLayer::hard(6.0, TextPaint::solid(red)))
+                .with_layer(TextLayer::soft(2.0, 8.0, TextPaint::solid(red)))
+                .with_fill(TextPaint::solid(WHITE)),
+        ),
+        (
+            "100 字/投影",
+            100,
+            TextStyle::shadow((4.0, 4.0), 3.0, ink).with_fill(TextPaint::solid(WHITE)),
+        ),
+    ] {
+        let text: String = "国永光明".chars().cycle().take(glyphs).collect();
+        let style = Arc::new(style);
+        // 预热（栅格化 + 图集分配只发生在这里）
+        for _ in 0..2 {
+            let mut b = DrawBatch::new();
+            draw_text(
+                &mut b.texts,
+                &text,
+                Pos::new(20.0, 30.0),
+                TextDef {
+                    style: Some(style.clone()),
+                    ..TextDef::default().font_size(44.0).max_width(860.0)
+                },
+                TextOverride::from_color(WHITE),
+            );
+            c.draw(Some(BLACK), &[&b]);
+        }
+        let frames = 20;
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            let mut b = DrawBatch::new();
+            draw_text(
+                &mut b.texts,
+                &text,
+                Pos::new(20.0, 30.0),
+                TextDef {
+                    style: Some(style.clone()),
+                    ..TextDef::default().font_size(44.0).max_width(860.0)
+                },
+                TextOverride::from_color(WHITE),
+            );
+            c.draw(Some(BLACK), &[&b]);
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        println!("  {label}: {ms:.2} ms/帧（{:.0} fps 上限）", 1000.0 / ms);
+        assert!(ms < 33.0, "{label} 稳态应 ≥30fps，实际 {ms:.1} ms/帧");
+    }
+}
+
 /// 之前 `apply_layer` 用错图集尺寸算偏移，投影右下方被 clamp 成一条直线。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
@@ -6556,6 +6623,11 @@ fn text_msdf_scale_invariance() {
                     style: styled.then(|| {
                         Arc::new(TextStyle::outline(2.0, red).with_fill(TextPaint::solid(WHITE)))
                     }),
+                    sdf_mode: if styled {
+                        TextSdfMode::Msdf
+                    } else {
+                        TextSdfMode::Auto
+                    },
                     ..TextDef::default().font_size(font_size)
                 },
                 TextOverride::from_color(WHITE),
@@ -6606,6 +6678,8 @@ fn text_msdf_no_rebuild_within_range() {
                     style: Some(Arc::new(
                         TextStyle::outline(width, red).with_fill(TextPaint::solid(WHITE)),
                     )),
+                    // Auto 暂不默认 MSDF（见 pick_msdf 注释），这里显式开启
+                    sdf_mode: TextSdfMode::Msdf,
                     ..TextDef::default().font_size(60.0)
                 },
                 TextOverride::from_color(WHITE),

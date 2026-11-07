@@ -51,7 +51,10 @@ async fn main(app: App) {
     let mut width = 2.0f32;
     // 默认只画一组：一次上 100+ 个带样式字形在 debug 下要几百毫秒（每个字形都要算距离场）。
     // 想看全部按 7。
-    let mut group = 1u32;
+    let mut group = std::env::var("VIREO_DEMO_GROUP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1u32);
     // 描边宽度按"重复延迟"步进，而不是每帧步进：
     // 每帧步进 = 60 次/秒，会把 band 档位一路撞过去，每次都触发重新栅格化（看着就像卡死）。
     let mut repeat_at = std::time::Instant::now();
@@ -61,6 +64,7 @@ async fn main(app: App) {
     let mut held_m = false;
     // 帧耗时统计（HUD 显示；按键后"要等多久"看这个）
     let mut frame_ms = 0.0f64;
+    let mut last_log = std::time::Instant::now();
 
     app.run(move |ctx| {
         let win = match ctx.app().window_ref(&idx) {
@@ -319,6 +323,16 @@ async fn main(app: App) {
         // 帧耗时（含"这一帧栅格化了多少字形"）——按键后要等多久，看这个数最直接
         frame_ms = frame_ms * 0.85 + ctx.frame_time() * 1000.0 * 0.15; // 指数平滑
         let fps = ctx.fps();
+        // 需要命令行看帧率时：`VIREO_FPS_LOG=1 cargo run --release --example text_style`
+        if std::env::var("VIREO_FPS_LOG").is_ok() {
+            let now = std::time::Instant::now();
+            if (now - last_log).as_secs_f64() >= 1.0 {
+                last_log = now;
+                eprintln!(
+                    "[fps] group={group} {fps:.1} fps  {frame_ms:.1} ms/帧  mode={a_b_mode:?}"
+                );
+            }
+        }
 
         draw_text(
             &mut b.texts,

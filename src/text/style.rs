@@ -457,11 +457,11 @@ pub enum TextSdfMode {
 
 /// 选 MSDF 档位：返回 `(生成 em, range(em 比例))`；`None` = 该字号/外扩不适合 MSDF。
 pub(crate) fn pick_msdf(mode: TextSdfMode, em_px: f32, reach_px: f32) -> Option<(f32, f32)> {
-    if mode == TextSdfMode::Exact || em_px <= 0.0 {
-        return None;
-    }
-    // 小字号下 MSDF 是降采样（更糊），保留精确 SDF 的清晰度
-    if mode == TextSdfMode::Auto && em_px < 18.0 {
+    // ⚠️ `Auto` **暂时不用 MSDF**：MSDF 条目体积大（每档 4B/px + range padding），
+    // 满屏带样式文字会把图集顶到 `grow()`，而 `grow()` 会重新栅格化**全部**已缓存字形
+    // —— 实测 100 字投影 821ms/帧。等图集生命周期（预分配/不抖动）修好再切回默认。
+    // 现在 MSDF 只能显式开启（`TextSdfMode::Msdf`），用于 A/B 与逐轮回归对比。
+    if mode != TextSdfMode::Msdf || em_px <= 0.0 {
         return None;
     }
     let reach_em = reach_px.max(0.0) / em_px;
