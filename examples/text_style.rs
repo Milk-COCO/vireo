@@ -6,7 +6,7 @@
 //! 按键：
 //! - `1`..`9` / `0` 切换示例组（描边 / 多层 / 投影 / 发光 / 内描边 / 内阴影 / 全部 / 渐变字 /
 //!   emoji / 几何描边）；默认第 1 组，按 `7` 看全部
-//! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变；按住每 140ms 走 0.5）
+//! - `←→` 描边宽度（逻辑像素，DPI 变化时视觉宽度不变；按住会加速 0.5→1→2 px/步）
 //! - `Q` / `ESC` 退出
 //!
 //! **性能提示**：带样式的字形要现场算距离场（约 0.25–1.8 ms/字形，见
@@ -59,6 +59,7 @@ async fn main(app: App) {
     // 每帧步进 = 60 次/秒，会把 band 档位一路撞过去，每次都触发重新栅格化（看着就像卡死）。
     let mut repeat_at = std::time::Instant::now();
     let mut held = (false, false);
+    let mut hold_ms = 0.0f64;
     // 距离场表示：M 键在 A/B 行上循环切换
     let mut a_b_mode = TextSdfMode::Auto;
     let mut held_m = false;
@@ -97,11 +98,25 @@ async fn main(app: App) {
             (false, true) => 1,
             _ => 0,
         };
-        // 刚按下立刻响应一次；按住之后每 140ms 走一步。宽度**不设上限**：
-        // 超过 band 档（外扩 > 32px）时内部会钳制并 warn-once，但滑块本身可以一直加。
+        // 刚按下立刻响应一次；按住之后按**加速度**推进（越按越快）：
+        //   0~0.6s：每 120ms 走 0.5；0.6~1.4s：每 60ms 走 1.0；之后每 30ms 走 2.0。
+        // 为什么要限速而不是每帧走：每帧改宽度会让样式表每帧重登记、跨 band 档（4/8/16/32/64）
+        // 时还要把全屏带样式字形重新栅格化一次，看起来像卡死。加速后从 2 拉到 30 约 1 秒。
+        if dir != 0 {
+            hold_ms += ctx.frame_time() * 1000.0;
+        } else {
+            hold_ms = 0.0;
+        }
+        let (interval_ms, step) = if hold_ms < 600.0 {
+            (120.0, 0.5)
+        } else if hold_ms < 1400.0 {
+            (60.0, 1.0)
+        } else {
+            (30.0, 2.0)
+        };
         let fresh = dir != 0 && (held.0, held.1) != (left, right);
-        if dir != 0 && (fresh || repeat_at.elapsed().as_millis() >= 140) {
-            width = (width + 0.5 * dir as f32).max(0.0);
+        if dir != 0 && (fresh || repeat_at.elapsed().as_secs_f64() * 1000.0 >= interval_ms) {
+            width = (width + step * dir as f32).max(0.0);
             repeat_at = std::time::Instant::now();
         }
         held = (left, right);
