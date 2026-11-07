@@ -6501,7 +6501,9 @@ fn text_style_wide_stroke_leaves_no_wash() {
         let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
         for y in 0..260u32 {
             for x in 0..640u32 {
-                if sum_at(x, y) > bg + 120 {
+                // 同一个阈值（+20）既用于外接框也用于亮像素计数：
+                // `ink` 合成到深背景上其实比背景**亮**（约 +44），所以不能用 +120 找外接框。
+                if sum_at(x, y) > bg + 20 {
                     x0 = x0.min(x);
                     x1 = x1.max(x);
                     y0 = y0.min(y);
@@ -6518,30 +6520,42 @@ fn text_style_wide_stroke_leaves_no_wash() {
             (x0.saturating_sub(6), cy),
             ((x1 + 6).min(639), cy),
         ];
-        // 中灰像素（比背景亮、但不是墨迹也不是纯白）：整块 quad 被上色时这个数≈quad 面积
-        let mut mid = 0usize;
-        for y in 0..260u32 {
-            for x in 0..640u32 {
-                let s = sum_at(x, y);
-                if s > bg + 12 && s < bg + 200 {
-                    mid += 1;
-                }
-            }
-        }
+        // 说明：这里**不断言**颜色分桶。踩过的坑：`ink` 是 (0.10,0.11,0.14)，
+        // 合成到深色背景上后 sRGB 反而**比背景更亮**（+44），按"比背景亮"分桶会把
+        // 描边本体当成淡色矩形。真正能判断的图形证据是分布图（见
+        // `text_style_wide_stroke_string_dump` 的输出）：被涂色的区域必须是**描边形状**，
+        // 而不是矩形。整块 quad 被涂色的回归由 `text_style_size_ladder_*` 一组用例的
+        // 外接框/四角断言兜住。
         let diffs: Vec<i32> = probes
             .iter()
             .map(|(x, y)| sum_at(*x, *y) as i32 - bg as i32)
             .collect();
+        let lit = {
+            let mut n = 0usize;
+            for y in 0..260u32 {
+                for x in 0..640u32 {
+                    if sum_at(x, y) > bg + 20 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let bbox = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f64;
+        let fill_ratio = lit as f64 / bbox;
         println!(
-            "  {font_size}px / w={width}: 墨迹框 {}x{}，中灰 {mid} px，探针 {diffs:?}",
+            "  {font_size}px / w={width}: 墨迹框 {}x{}，亮像素 {lit}（占外接框 {:.0}%），探针 {diffs:?}",
             x1 - x0,
-            y1 - y0
+            y1 - y0,
+            fill_ratio * 100.0
         );
-        let max_diff = diffs.iter().copied().max().unwrap_or(0);
-        // 已知残留（未定位）：宽度 ≥16 时中灰像素随宽度增长（w=16: 10k，w=24: 19k），
-        // 用户侧肉眼已看不到整块矩形，但离屏仍能量到一片比背景亮的区域。
-        // 这里先只记录 + 宽松上界（整块 quad 被上色时≈27k+），定位后收紧到几千以内。
-        let _ = (max_diff, mid);
+        // 真正要防的回归：整块 padded quad 被涂满 → 亮像素几乎铺满外接框。
+        // 正常描边是"字形 + 一圈带"，中间是空的（CJK 的国/口类字形有大量内部空隙）。
+        assert!(
+            fill_ratio < 0.95,
+            "{font_size}px / w={width} 时亮像素占外接框 {:.0}%（≥95% 说明整块矩形被上色）",
+            fill_ratio * 100.0
+        );
     }
 }
 
