@@ -6563,6 +6563,63 @@ fn text_style_wide_stroke_leaves_no_wash() {
     }
 }
 
+/// **窗口边缘被裁剪的字不能"被压扁"**：只裁掉一部分，未裁掉方向的尺寸必须保持不变。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_clipped_glyph_is_not_squashed() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let ink = Color::new(0.10, 0.11, 0.14, 0.92);
+
+    // 返回亮区 (宽, 高)
+    let extent = |pos: Pos| -> (u32, u32) {
+        let c = OffscreenCanvas::new(&gpu, 300, 200);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            "国",
+            pos,
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(4.0, ink).with_fill(TextPaint::solid(WHITE)),
+                )),
+                ..TextDef::default().font_size(44.0)
+            },
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for y in 0..200u32 {
+            for x in 0..300u32 {
+                let i = ((y * 300 + x) * 4) as usize;
+                if px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 60 {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x1.saturating_sub(x0), y1.saturating_sub(y0))
+    };
+
+    let (cw, ch) = extent(Pos::new(120.0, 60.0)); // 完整
+    let (lw, lh) = extent(Pos::new(-10.0, 60.0)); // 左侧被裁（仍有一半可见）
+    let (tw, th) = extent(Pos::new(120.0, -10.0)); // 顶部被裁（仍有一半可见）
+    println!("  完整 {cw}x{ch}，左裁 {lw}x{lh}，上裁 {tw}x{th}（被裁方向应变小，另一方向应不变）");
+    assert!(
+        (lh as i64 - ch as i64).abs() <= 2,
+        "左侧被裁后高度应保持（{ch} vs {lh}）—— 变小说明整条条目被压扁了"
+    );
+    assert!(
+        (tw as i64 - cw as i64).abs() <= 2,
+        "顶部被裁后宽度应保持（{cw} vs {tw}）—— 变小说明整条条目被压扁了"
+    );
+    assert!(lw < cw && th < ch, "被裁方向确实应该变小");
+}
+
 /// 多层描边：蓝色层宽度逐 0.5 步进，蓝色像素面积必须单调、无跳变。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

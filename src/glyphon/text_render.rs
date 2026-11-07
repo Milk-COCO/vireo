@@ -793,17 +793,21 @@ where
     }
 
     // Clip left ege
+    let mut clipped_x = false;
+    let mut clipped_y = false;
     if x < bounds.x.min {
         let right_shift = bounds.x.min - x;
 
         x = bounds.x.min;
         width = max_x - bounds.x.min;
         atlas_x += (right_shift as f32 * inv_scale) as u16;
+        clipped_x = true;
     }
 
     // Clip right edge
     if x + width > bounds.x.max {
         width = bounds.x.max - x;
+        clipped_x = true;
     }
 
     // Clip top edge
@@ -813,12 +817,29 @@ where
         y = bounds.y.min;
         height = max_y - bounds.y.min;
         atlas_y += (bottom_shift as f32 * inv_scale) as u16;
+        clipped_y = true;
     }
 
     // Clip bottom edge
     if y + height > bounds.y.max {
         height = bounds.y.max - y;
+        clipped_y = true;
     }
+
+    // **被裁剪时，UV 的推进量必须跟着缩小**：否则整条条目会被压进更小的 quad，
+    // 文字在窗口边缘会"被压扁"。这里把 entry_dim 换成"quad 实际覆盖的 texel 数"。
+    let (ew, eh) = (
+        if clipped_x {
+            (width as f32 * inv_scale).round().max(1.0) as u32
+        } else {
+            entry_w as u32
+        },
+        if clipped_y {
+            (height as f32 * inv_scale).round().max(1.0) as u32
+        } else {
+            entry_h as u32
+        },
+    );
 
     let depth = metadata_to_depth(metadata.metadata);
 
@@ -861,7 +882,7 @@ where
         base_uv_rect: metadata.base_uv_rect,
         style_index: metadata.style_index,
         sdf_band: metadata.sdf_band,
-        entry_dim: ((entry_w as u32) << 16) | entry_h as u32,
+        entry_dim: (ew.min(0xffff) << 16) | eh.min(0xffff),
     }))
 }
 
