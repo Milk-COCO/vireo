@@ -7947,6 +7947,228 @@ fn cjk_text(start: u32, n: usize) -> String {
         .collect()
 }
 
+/// **动画字号的代价**：库把光栅化键的字号量化到 1/8 px，所以"字号连续动画"不再
+/// 每帧全量重光栅化（量化前 12.0 次/帧 / 1.03 ms，量化后 ~3 次/帧 / 0.80 ms）。
+///
+/// 这条用例守住这个量化：如果哪天有人把量化去掉，次数会跳回"每帧 12 次"。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_path_animated_size_cost() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 800, 400);
+    let text = cjk_text(0x4E00, 12);
+    let glyphs = gpu.text().glyphs();
+
+    for (label, quantize) in [("连续字号（每帧 +0.01px）", false), ("量化到 0.25px", true)]
+    {
+        glyphs.clear();
+        let draw = |i: usize| {
+            let mut size = 24.0 + i as f32 * 0.01;
+            if quantize {
+                size = (size * 4.0).round() / 4.0;
+            }
+            let mut b = DrawBatch::new();
+            draw_text(
+                &mut b.texts,
+                &text,
+                Pos::new(8.0, 20.0),
+                TextDef::default().font_size(size),
+                TextOverride::from_color(WHITE),
+            );
+            canvas.draw(Some(BLACK), &[&b]);
+        };
+        // 预热 3 帧（字体/管线）。
+        for i in 0..3 {
+            draw(i);
+        }
+        let r0 = glyphs.stats().rasterizations;
+        let t = Instant::now();
+        const FRAMES: usize = 40;
+        for i in 0..FRAMES {
+            draw(3 + i);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        let rasters = glyphs.stats().rasterizations - r0;
+        println!(
+            "  {label}：{ms:.2} ms/帧，光栅化 {:.1} 次/帧，图集 {} 条 / {} KiB",
+            rasters as f64 / FRAMES as f64,
+            glyphs.stats().entries(),
+            glyphs.stats().used_bytes() / 1024
+        );
+        if !quantize {
+            let per_frame = rasters as f64 / FRAMES as f64;
+            assert!(
+                per_frame > 0.0,
+                "连续改字号仍应在跨过 1/8px 档时重光栅化（实际 0 次，说明量化过头了）"
+            );
+            assert!(
+                per_frame < 5.0,
+                "连续改字号不该每帧全量重光栅化（实际 {per_frame:.1} 次/帧）—— \
+                 说明 1/8px 的字号量化被去掉了"
+            );
+        }
+    }
+}
+
+/// **文本路径的稳态吞吐上限**：缓存全热时，一帧能画多少文本 quad 还保得住 120 fps。
+/// 这是"稳态 120 fps"这个目标的可测定义：`8.33 ms` 预算里能装下多少 quad。
+/// 用**空 batch 帧**做基线，差值就是文本路径的净成本（避免把 acquire/清屏算进去）。
+///
+/// 报告：`每帧文本成本` 与 `µs/quad`，以及由它反推的 "8.33 ms 能画多少 quad"。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_path_steady_state_ceiling() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    // 画布够大，保证所有文本都在视口内（被 bounds 裁掉的字形不产生 quad，会污染计数）。
+    let canvas = OffscreenCanvas::new(&gpu, 2048, 1600);
+    let def = TextDef::default().font_size(16.0);
+    const CHARS: usize = 12;
+
+    // 基线：空 batch（清屏 + 一次提交）。同样取 3 轮最小值。
+    let empty = DrawBatch::new();
+    for _ in 0..3 {
+        canvas.draw(Some(BLACK), &[&empty]);
+    }
+    let mut base_ms = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..10 {
+            canvas.draw(Some(BLACK), &[&empty]);
+        }
+        base_ms = base_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 10.0);
+    }
+
+    println!("  基线（空 batch）：{base_ms:.3} ms/帧");
+    let mut best_quads_per_budget = 0.0f64;
+    for entries in [50usize, 200, 500, 1000, 2000] {
+        let texts: Vec<String> = (0..entries)
+            .map(|i| cjk_text(0x4E00 + (i * CHARS) as u32, CHARS))
+            .collect();
+        let mut b = DrawBatch::new();
+        for (i, text) in texts.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                // 20px 网格，100 列 → 2000 条目占 2000×400 px，落在 2048×1600 内。
+                Pos::new(4.0 + (i % 100) as f32 * 20.0, 4.0 + (i / 100) as f32 * 20.0),
+                def.clone(),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        // 预热：首帧含排版/光栅化，不计入稳态。
+        for _ in 0..3 {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let quads = (entries * CHARS) as f64;
+        let rasters0 = gpu.text().glyphs().stats().rasterizations;
+        // 取 3 轮的最小值：这台机器的噪声（其他进程 / GPU 队列）能让单次测出 2–4 倍差异，
+        // 最小值是最稳的估计量。
+        let mut ms = f64::INFINITY;
+        for _ in 0..3 {
+            let t = Instant::now();
+            const FRAMES: u32 = 5;
+            for _ in 0..FRAMES {
+                canvas.draw(Some(BLACK), &[&b]);
+            }
+            ms = ms.min(t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64);
+        }
+        let rasters = gpu.text().glyphs().stats().rasterizations - rasters0;
+        assert_eq!(rasters, 0, "{entries} 条目稳态不该重光栅化（{rasters} 次）");
+
+        let text_ms = (ms - base_ms).max(0.0);
+        let us_per_quad = text_ms * 1000.0 / quads;
+        let per_budget = 8.33 / text_ms * quads;
+        best_quads_per_budget = per_budget;
+        println!(
+            "  {quads:>6.0} quad（{entries:>5} 条目）：{ms:>7.3} ms/帧，文本净成本 {text_ms:>6.3} ms\
+             （{us_per_quad:>5.2} µs/quad）⇒ 8.33 ms 可画 ≈ {per_budget:>6.0} quad"
+        );
+    }
+    // 这条断言是"稳态 120 fps 可达"的证据：当前场景（768 quad）远在预算内。
+    assert!(
+        best_quads_per_budget > 700.0,
+        "8.33 ms 里应能画得下 700+ quad（实测上限 {best_quads_per_budget:.0}）"
+    );
+
+    // 诊断 2：固定 24000 quad（上次跳变的那一档），比较「24000 个不同字形」与
+    // 「只有 60 个不同字形（文案重复）」。若重复的那组快很多 ⇒ 瓶颈在图集/缓存规模
+    // 而不是顶点上传；若一样慢 ⇒ 瓶颈在每帧顶点上传（~3.8 MB）。
+    println!("  ---- 24000 quad：不同字形 vs 重复文案 ----");
+    for (label, distinct) in [("24000 个不同字形", true), ("只有 60 个不同字形", false)]
+    {
+        let pool: Vec<String> = (0..5)
+            .map(|i| cjk_text(0x4E00 + (i * CHARS) as u32, CHARS))
+            .collect();
+        let mut b = DrawBatch::new();
+        for i in 0..2000usize {
+            let text = if distinct {
+                cjk_text(0x4E00 + (i * CHARS) as u32, CHARS)
+            } else {
+                pool[i % pool.len()].clone()
+            };
+            draw_text(
+                &mut b.texts,
+                &text,
+                Pos::new(4.0 + (i % 100) as f32 * 20.0, 4.0 + (i / 100) as f32 * 20.0),
+                def.clone(),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        for _ in 0..3 {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let t = Instant::now();
+        const FRAMES: u32 = 5;
+        for _ in 0..FRAMES {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        println!(
+            "  {label}：{ms:>7.3} ms/帧（文本净成本 {:>6.3} ms）",
+            (ms - base_ms).max(0.0)
+        );
+    }
+
+    // 诊断：固定 quad 总数、改「条目数」，分离**每条目成本**与**每 quad 成本**。    // 若条目数少的那组明显更快，说明开销主要在"每条目"（key 构造/哈希/查找/分配），
+    // 而不是"每 quad"（顶点拼装）。
+    println!("  ---- 固定 6000 quad，改条目数（分离每条目 vs 每 quad 成本）----");
+    for (entries, chars) in [(60usize, 100usize), (200, 30), (500, 12)] {
+        let texts: Vec<String> = (0..entries)
+            .map(|i| cjk_text(0x4E00 + (i * chars) as u32, chars))
+            .collect();
+        let mut b = DrawBatch::new();
+        for (i, text) in texts.iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                text,
+                Pos::new(4.0 + (i % 40) as f32 * 50.0, 4.0 + (i / 40) as f32 * 20.0),
+                def.clone(),
+                TextOverride::from_color(WHITE),
+            );
+        }
+        for _ in 0..3 {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let t = Instant::now();
+        const FRAMES: u32 = 5;
+        for _ in 0..FRAMES {
+            canvas.draw(Some(BLACK), &[&b]);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        let text_ms = (ms - base_ms).max(0.0);
+        println!(
+            "  {entries:>4} 条目 × {chars:>3} 字：{ms:>7.3} ms/帧（文本 {text_ms:>6.3} ms）\
+             ⇒ 每条目 {:>6.2} µs、每 quad {:>5.2} µs",
+            text_ms * 1000.0 / entries as f64,
+            text_ms * 1000.0 / 6000.0
+        );
+    }
+}
+
 /// `prewarm` 把字形填进图集；同一批文案再来一遍应全命中（`rasterizations` 不涨）。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]

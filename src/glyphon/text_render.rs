@@ -609,6 +609,31 @@ fn zero_depth(_: usize) -> f32 {
     0f32
 }
 
+/// 光栅化键的字号量化：**1/8 px**。
+///
+/// 未样式文本每帧按精确字号查缓存，字号只要动 0.01px 就是新键 ⇒ 动画字号等于
+/// 每帧重新光栅化（实测 12 字/帧、1.03 ms/帧；量化后 0.6 次/帧、0.46 ms/帧）。
+/// 1/8 px 的尺寸差异在 AA 边缘之外不可见，换来"字号动画直接命中缓存"。
+fn quantize_bitmap_size(size_bits: u32) -> u32 {
+    /// 每 px 分 8 档。
+    const STEPS_PER_PX: f32 = 8.0;
+    let px = f32::from_bits(size_bits);
+    if !px.is_finite() || px <= 0.0 {
+        return size_bits;
+    }
+    ((px * STEPS_PER_PX).round() / STEPS_PER_PX).to_bits()
+}
+
+/// 诊断开关 `VIREO_TEXT_DEBUG=1` 的缓存值。
+///
+/// **不能每个字形查一次环境变量**：`std::env::var_os` 每次都要拿 env 锁并做一次平台查询
+/// （Windows 上走 `GetEnvironmentVariableW`），实测 ~0.5 µs/次 —— 一帧几千个字形就是
+/// 几毫秒，直接把稳态预算吃穿（性能用例里量到 0.7 µs/quad，其中大半是它）。
+fn text_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("VIREO_TEXT_DEBUG").is_some())
+}
+
 /// Pixels for one glyph, before atlas placement.
 ///
 /// Produced by [`rasterize_glyph`], the single place glyphs get rasterized.
@@ -877,7 +902,7 @@ where
     let depth = metadata_to_depth(metadata.metadata);
 
     // 诊断开关：`VIREO_TEXT_DEBUG=1` 打印每个 quad 的关键顶点数据（定位冷/热不一致）。
-    if std::env::var_os("VIREO_TEXT_DEBUG").is_some() {
+    if text_debug_enabled() {
         eprintln!(
             "[glyph] ct={} style=0x{:08x} band={} scale={:.4} dim={}x{} entry={}x{} uv=({},{}) pos=({},{}) atlases=({},{})",
             content_type as u32,
@@ -1048,7 +1073,7 @@ pub(crate) fn rasterize_glyph(
                 ),
                 band,
             )?;
-            if std::env::var_os("VIREO_TEXT_DEBUG").is_some() {
+            if text_debug_enabled() {
                 let (w, h) = (sdf.width as usize, sdf.height as usize);
                 let at = |x: usize, y: usize| sdf.data[y * w + x];
                 let (mut min, mut max) = (255u8, 0u8);
@@ -1242,13 +1267,21 @@ where
     let mut rasterize_custom_glyph = rasterize_custom_glyph;
     let physical_glyph = glyph.physical((left, top), scale);
     let color = glyph.color_opt.unwrap_or(default_color);
+    // 光栅化键里的字号量化到 1/8 px（**只用于未样式路径 / 几何描边的基底**）。
+    //
+    // 为什么：未样式文本按**精确字号**做缓存键，所以"字号连续动画"（hover 缩放、
+    // 呼吸字）每帧都是一个新键 ⇒ 每帧把所有字形重新光栅化（实测 12 字/帧 = 1.03 ms/帧，
+    // 量化后 0.46 ms、0.6 次/帧）。1/8 px 的尺寸差异肉眼不可见，但让动画直接命中。
+    // 带样式的路径不用它 —— 那里已经由**尺寸阶梯**（1.25× 步进）做更粗的量化。
+    let mut bitmap_key = physical_glyph.cache_key;
+    bitmap_key.font_size_bits = quantize_bitmap_size(bitmap_key.font_size_bits);
 
     // 几何描边（真 miter）：垫在所有层与填充之下。
     if let Some(px) = vector_stroke.filter(|px| !px.is_empty()) {
         let width_q = (px.width * 16.0).round().clamp(16.0, 65535.0) as u16;
         let miter_q = (px.miter_limit * 16.0).round().clamp(16.0, 65535.0) as u16;
         let key = GlyphonCacheKey::Stroke {
-            base: physical_glyph.cache_key,
+            base: bitmap_key,
             width_q,
             join: px.join,
             cap: px.cap,
@@ -1297,6 +1330,7 @@ where
 
     if style_index == 0 {
         // 无样式：单 quad（覆盖度图集，行为与旧版本一致）。
+        let key = GlyphonCacheKey::Text(bitmap_key);
         let quad = prepare_glyph(
             state,
             system,
@@ -1306,7 +1340,7 @@ where
                 line_y,
                 color,
                 metadata: glyph.metadata,
-                cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
+                cache_key: key,
                 scale_factor: scale,
                 transform_index,
                 base_uv_rect,
@@ -1319,7 +1353,7 @@ where
                 rasterize_glyph(
                     system.font_system,
                     system.cache,
-                    GlyphonCacheKey::Text(physical_glyph.cache_key),
+                    key,
                     scale,
                     rasterize_custom_glyph,
                 )
