@@ -1392,6 +1392,10 @@ where
             )
         }
     };
+    // 顶点里的 `sdf_band` 一律是**目标设备像素**下的距离范围：生成空间的距离场要乘
+    // `quad_scale` 才换算得回来。着色器不再自己推比例 —— 用 `glyph_size / entry_texels`
+    // 推是错的（quad 被 bounds 裁剪后会算小，描边会整块糊成矩形）。
+    let band_target = sdf_band * quad_scale;
     let mut emit = |pass: u32, sink: PassSink| -> Result<(), PrepareError> {
         let quad = prepare_glyph(
             state,
@@ -1407,7 +1411,7 @@ where
                 transform_index,
                 base_uv_rect,
                 style_index: style_index | (pass << crate::text::PASS_SHIFT),
-                sdf_band,
+                sdf_band: band_target,
                 quad_scale,
             },
             bounds,

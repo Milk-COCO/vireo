@@ -217,23 +217,18 @@ fn median3(v: vec3<f32>) -> f32 {
 
 /// 采样一个有符号距离（单位统一为**目标设备像素**）。
 ///
-/// - `content_type == 2`：单通道精确 SDF，`d_range` 是带宽；
-/// - `content_type == 3`：MSDF，`d_range` 是生成 em 下的 range，乘 `msdf_scale` 换算到目标像素。
-fn sample_d(
-    uv: vec2<f32>,
-    content_type: u32,
-    d_range: f32,
-    msdf_scale: f32,
-) -> f32 {
+/// `d_range` 已由 CPU 换算到目标设备像素（`band_gen * quad_scale` / `range_gen * scale`），
+/// 所以这里只做解码，不再乘任何比例 —— 用 `glyph_size / entry_texels` 推比例是错的：
+/// quad 被 bounds 裁剪后会算小，描边会整块糊成矩形。
+fn sample_d(uv: vec2<f32>, content_type: u32, d_range: f32) -> f32 {
     if (content_type == 3u) {
         let rgb = textureSampleLevel(msdf_atlas_texture, atlas_sampler, uv, 0.0).rgb;
-        let d_gen = (median3(rgb) * 2.0 - 1.0) * d_range;
-        return d_gen * msdf_scale;
+        return (median3(rgb) * 2.0 - 1.0) * d_range;
     }
     return decode_sdf(
         textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x,
         d_range,
-    ) * msdf_scale;
+    );
 }
 
 /// 一条样式的某一层：取区间 → 偏移采样 → 合成。
@@ -276,11 +271,11 @@ fn apply_layer(
     );
     let off_uv = off / (max(msdf_scale, 1e-3) * dims);
     let uv = clamp(at + off_uv, entry_min, entry_max);
-    let d = sample_d(uv, content_type, d_range, msdf_scale);
+    let d = sample_d(uv, content_type, d_range);
     var cov = coverage(d, thr, soft);
     if ((flags & 4u) != 0u) {
         // 内阴影：字形内部（未偏移）减去偏移后的覆盖率 —— 两个采样点，不是同一采样点的两个阈值
-        let d0 = sample_d(at, content_type, d_range, msdf_scale);
+        let d0 = sample_d(at, content_type, d_range);
         cov = clamp(coverage(d0, 0.0, 0.0) - cov, 0.0, 1.0);
     }
     if ((flags & 1u) != 0u) {
@@ -408,7 +403,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
 
             // 无样式（`style_id == 0`）：纯顶点色覆盖 —— 无样式文字也可以走 MSDF。
             if (style_id == 0u) {
-                let d = sample_d(at, in_frag.content_type, in_frag.sdf_band, msdf_scale);
+                let d = sample_d(at, in_frag.content_type, in_frag.sdf_band);
                 let cov = coverage(d, 0.0, 0.0);
                 if (in_frag.content_type == 3u) {
                     return vec4<f32>(in_frag.color.rgb, in_frag.color.a * cov);
@@ -428,7 +423,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 var filled = vec4<f32>(0.0);
                 let fill_kind = style_meta.z;
                 if (fill_kind != 4u) {
-                    let d0 = sample_d(at, in_frag.content_type, in_frag.sdf_band, msdf_scale);
+                    let d0 = sample_d(at, in_frag.content_type, in_frag.sdf_band);
                     let cov = coverage(d0, 0.0, 0.0);
                     if (fill_kind == 0u) {
                         let a = in_frag.color.a * cov;
