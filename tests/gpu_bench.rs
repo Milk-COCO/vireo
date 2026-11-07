@@ -6641,7 +6641,8 @@ fn glyph_cache_perf() {
     );
     println!(
         "  load：{loaded} 条 {load_ms:.2} ms（{:.3} ms/条） | 首帧 空图集 {empty_first_ms:.2} ms \
-         vs 装载后 {loaded_first_ms:.2} ms（省 {:.0}%，空图集光栅化 {cold_rasters} 条）",
+         vs 装载后 {loaded_first_ms:.2} ms（差 {:.0}%，空图集光栅化 {cold_rasters} 条）\
+         ｜首帧两次都含 PSO 编译，看【光栅化 0 次】才是硬指标",
         load_ms / loaded.max(1) as f64,
         (1.0 - loaded_first_ms / empty_first_ms.max(0.001)) * 100.0
     );
@@ -6655,9 +6656,11 @@ fn glyph_cache_perf() {
         load_ms < 2000.0,
         "装载不该慢到 2 秒（{load_ms:.1} ms / {loaded} 条）"
     );
+    // 首帧都含 PSO 懒编译（几十 ms 的噪声），所以这里只兜底"没有灾难性退化"；
+    // 真正的语义保证是上面那条 `rasterizations == 0`。
     assert!(
-        loaded_first_ms <= empty_first_ms + 5.0,
-        "装载后首帧不该比空图集首帧更慢（{loaded_first_ms:.2} vs {empty_first_ms:.2} ms）"
+        loaded_first_ms < empty_first_ms * 2.0 + 20.0,
+        "装载后首帧不该比空图集首帧慢一倍以上（{loaded_first_ms:.2} vs {empty_first_ms:.2} ms）"
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -7913,6 +7916,13 @@ fn glyph_test_def(size: f32) -> TextDef {
     TextDef::default().font_size(size)
 }
 
+/// 一段互不重复的 CJK 文本（用码点顺序生成，保证每个字形都不重样）。
+fn cjk_text(start: u32, n: usize) -> String {
+    (0..n as u32)
+        .filter_map(|i| char::from_u32(start + i))
+        .collect()
+}
+
 /// `prewarm` 把字形填进图集；同一批文案再来一遍应全命中（`rasterizations` 不涨）。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
@@ -8692,4 +8702,288 @@ fn glyph_cache_load_rejects_bad_input() {
     for p in [bad_magic, bad_version, truncated, ok_path] {
         let _ = std::fs::remove_file(p);
     }
+}
+
+/// **预算的代价**：预算小于「单帧工作集」时会每帧重光栅化 —— 这条用例把它量化出来。
+///
+/// 三个独立上下文跑同一个场景（60 段互不重复的 12 字文本、24px、每帧全画）：
+/// 预算 128 KiB（远小于工作集）/ 8 MiB（装得下）/ 不限制。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_budget_churn_perf() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    const STRINGS: u32 = 60;
+    const CHARS: usize = 12;
+    const SIZE: f32 = 24.0;
+    const FRAMES: u32 = 8;
+    let texts: Vec<String> = (0..STRINGS)
+        .map(|i| cjk_text(0x4E00 + i * CHARS as u32, CHARS))
+        .collect();
+
+    for (label, budget) in [
+        ("128 KiB（<工作集）", Some(128 * 1024u64)),
+        ("8 MiB（装得下）", Some(8 * 1024 * 1024)),
+        ("不限制", None),
+    ] {
+        let gpu = Arc::new(GpuContext::new(&instance));
+        let canvas = OffscreenCanvas::new(&gpu, 640, 480);
+        let glyphs = gpu.text().glyphs();
+        glyphs.set_budget(budget);
+
+        let draw = || {
+            let mut b = DrawBatch::new();
+            for (i, text) in texts.iter().enumerate() {
+                draw_text(
+                    &mut b.texts,
+                    text,
+                    Pos::new(8.0, 8.0 + (i % 30) as f32 * 15.0),
+                    glyph_test_def(SIZE),
+                    TextOverride::from_color(WHITE),
+                );
+            }
+            canvas.draw(Some(BLACK), &[&b]);
+        };
+
+        // 前两帧预热（字体/管线/首轮光栅化）。
+        draw();
+        draw();
+        let r0 = glyphs.stats().rasterizations;
+        let t = Instant::now();
+        for _ in 0..FRAMES {
+            draw();
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        let s = glyphs.stats();
+        let rasters = s.rasterizations - r0;
+        let per_frame = rasters as f64 / FRAMES as f64;
+        println!(
+            "  {label}：{ms:.2} ms/帧，光栅化 {per_frame:.1} 次/帧（{rasters} / {FRAMES} 帧），\
+             条目 {} / 占用 {} KiB / 淘汰 {}",
+            s.entries(),
+            s.used_bytes() / 1024,
+            s.evictions
+        );
+        if budget == Some(128 * 1024) {
+            assert!(
+                per_frame > 50.0,
+                "预算远小于工作集时应该每帧重光栅化（实际 {per_frame:.1} 次/帧）——\
+                 如果这条不成立，说明淘汰策略变了"
+            );
+        } else {
+            assert!(
+                per_frame < 5.0,
+                "预算装得下时稳态不该重光栅化（实际 {per_frame:.1} 次/帧）"
+            );
+        }
+    }
+}
+
+/// **A/B 交替不抖动**：两套互不重复的文案隔帧切换，热条目（上一帧还在用）不该被淘汰。
+///
+/// 回归点：淘汰分「冷 / 热」两档，热条目只在图集到顶时才动 —— 否则 A↔B 来回切换会
+/// 每帧把对方整套字重新光栅化（图集永远在 90% 上下反复收放）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_alternating_sets_perf() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 640, 480);
+    let glyphs = gpu.text().glyphs();
+    const CHARS: usize = 60;
+    const SIZE: f32 = 40.0;
+    let set_a = cjk_text(0x4E00, CHARS);
+    let set_b = cjk_text(0x5E00, CHARS);
+
+    let draw = |text: &str| {
+        let mut b = DrawBatch::new();
+        // 分两行画，避免超过画布宽度被裁（裁了也还是会被光栅化，但不影响计数）。
+        draw_text(
+            &mut b.texts,
+            text,
+            Pos::new(8.0, 12.0),
+            glyph_test_def(SIZE),
+            TextOverride::from_color(WHITE),
+        );
+        canvas.draw(Some(BLACK), &[&b]);
+    };
+
+    // 预热：两套各画两遍（图集会长到装得下两套）。
+    for _ in 0..2 {
+        draw(&set_a);
+        draw(&set_b);
+    }
+    let before = glyphs.stats();
+    const ROUNDS: u32 = 6;
+    let t = Instant::now();
+    for _ in 0..ROUNDS {
+        draw(&set_a);
+        draw(&set_b);
+    }
+    let ms = t.elapsed().as_secs_f64() * 1000.0 / (ROUNDS * 2) as f64;
+    let after = glyphs.stats();
+    let rasters = after.rasterizations - before.rasterizations;
+    println!(
+        "  A/B 交替：{ms:.2} ms/帧，稳态光栅化 {rasters} 次（{} 帧），扩图 {} 次，容量 {} KiB",
+        ROUNDS * 2,
+        after.grows - before.grows,
+        after.texture_bytes() / 1024
+    );
+    assert_eq!(
+        rasters, 0,
+        "A/B 交替不该重光栅化（热条目被淘汰了：{rasters} 次）"
+    );
+}
+
+/// **大图集下的持久化**：图集用到 1024²/2048² 时 `save`/`load` 的耗时、文件体积与正确性。
+///
+/// 顺带验证"只读用到的矩形"确实生效：图集纹理远大于内容时，读回量应该跟内容走。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_persist_large() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let path = std::env::temp_dir().join("vireo_glyph_cache_large.vrtx");
+    let _ = std::fs::remove_file(&path);
+
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let glyphs = gpu.text().glyphs();
+    let def = glyph_test_def(24.0);
+    // 100 段 × 12 字 = 1200 个互不重复的字形 ⇒ 内容 > 1MB，图集会扩到 2048²。
+    const STRINGS: u32 = 100;
+    const CHARS: usize = 12;
+    let t = Instant::now();
+    for i in 0..STRINGS {
+        let text = cjk_text(0x4E00 + i * CHARS as u32, CHARS);
+        glyphs.prewarm(&gpu.device, &gpu.queue, &text, &def, 1.0);
+    }
+    let prewarm_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let before = glyphs.stats();
+    assert!(
+        before.texture_bytes() >= 1024 * 1024,
+        "用例失效：图集没变大（{} 字节）",
+        before.texture_bytes()
+    );
+
+    // 参照帧：保存前画一次，装载后要逐像素一致。
+    let reference_text = cjk_text(0x4E00, CHARS);
+    let render = |gpu: &Arc<GpuContext>| {
+        let c = OffscreenCanvas::new(gpu, 400, 120);
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            &reference_text,
+            Pos::new(8.0, 20.0),
+            def.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        c.draw(Some(BLACK), &[&b]);
+        c.read_pixels()
+    };
+    let px_a = render(&gpu);
+
+    let t = Instant::now();
+    let saved = glyphs.save(&gpu.device, &gpu.queue, &path).expect("save");
+    let save_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let file_kib = std::fs::metadata(&path)
+        .map(|m| m.len() / 1024)
+        .unwrap_or(0);
+
+    let gpu_b = Arc::new(GpuContext::new(&instance));
+    let t = Instant::now();
+    let loaded = gpu_b
+        .text()
+        .glyphs()
+        .load(&gpu_b.device, &gpu_b.queue, &path)
+        .expect("load");
+    let load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let after = gpu_b.text().glyphs().stats();
+    assert_eq!(loaded, saved, "装载条数应等于保存条数");
+    assert!(loaded >= 1200, "用例失效：装载条数太少（{loaded}）");
+
+    let px_b = render(&gpu_b);
+    let rasters = gpu_b.text().glyphs().stats().rasterizations;
+    assert_eq!(rasters, 0, "装载后绘制不该重光栅化（{rasters} 次）");
+    let mut diff = 0usize;
+    for (a, b) in px_a.chunks(4).zip(px_b.chunks(4)) {
+        let d = (a[0] as i32 - b[0] as i32)
+            .abs()
+            .max((a[1] as i32 - b[1] as i32).abs())
+            .max((a[2] as i32 - b[2] as i32).abs());
+        if d > 2 {
+            diff += 1;
+        }
+    }
+    assert_eq!(diff, 0, "装载后渲染应与原进程逐像素一致（{diff} 不同）");
+    println!(
+        "  大图集持久化：{} 条，prewarm {prewarm_ms:.0} ms | 纹理 {} KiB / 占用 {} KiB | \
+         save {save_ms:.1} ms（{file_kib} KiB）| load {load_ms:.1} ms | 0 像素差",
+        saved,
+        before.texture_bytes() / 1024,
+        before.used_bytes() / 1024
+    );
+    println!(
+        "  装载后：纹理 {} KiB（按内容重排）/ 占用 {} KiB",
+        after.texture_bytes() / 1024,
+        after.used_bytes() / 1024
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **多线程并发压缓存**：4 个线程同时对同一个 `GpuContext` 做 prewarm / hold / trim / stats。
+///
+/// 只验证"不崩、不死锁、计数自洽"（`TextSystem` 里是一把互斥锁，所以并行度是 1；
+/// 这条用例保证的是**不会因为并发调用而破坏内部状态**）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn glyph_cache_concurrent_access() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let def = glyph_test_def(28.0);
+
+    let t = Instant::now();
+    let handles: Vec<_> = (0..4u32)
+        .map(|tid| {
+            let gpu = gpu.clone();
+            let def = def.clone();
+            std::thread::spawn(move || {
+                let mut pinned_peak = 0u32;
+                for i in 0..12u32 {
+                    let text = cjk_text(0x4E00 + tid * 32 + i * 8, 8);
+                    let glyphs = gpu.text().glyphs();
+                    let hold = glyphs.hold(&gpu.device, &gpu.queue, &text, &def, 1.0);
+                    pinned_peak = pinned_peak.max(glyphs.stats().pinned_entries);
+                    let _ = glyphs.stats();
+                    let _ = glyphs.entries().len();
+                    drop(hold);
+                    // 一半线程顺手压一下预算淘汰。
+                    if i % 2 == 0 {
+                        glyphs.set_budget(Some(256 * 1024));
+                        let _ = glyphs.trim();
+                    }
+                }
+                pinned_peak
+            })
+        })
+        .collect();
+    let peaks: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let glyphs = gpu.text().glyphs();
+    let s = glyphs.stats();
+    assert_eq!(
+        s.pinned_entries, 0,
+        "并发结束后不该还有钉子（{}）",
+        s.pinned_entries
+    );
+    assert!(peaks.iter().any(|&p| p > 0), "并发期间应真的钉住过东西");
+    assert!(s.entries() > 0);
+    println!(
+        "  并发：4 线程 × 12 轮 {ms:.0} ms（峰值钉子 {:?}），结束后条目 {} / 占用 {} KiB / 钉住 0",
+        peaks,
+        s.entries(),
+        s.used_bytes() / 1024
+    );
 }

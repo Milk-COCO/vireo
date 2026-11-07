@@ -625,10 +625,14 @@ pub(crate) fn save(
     Ok(written)
 }
 
-/// 目标图集边长：装得下 `live` 字节的内容，并留一倍余量给后续增长。
+/// 目标图集边长：内容面积开方 × 1.2 余量，再向上取到 2 的幂。
+///
+/// 余量只要"够下一次增长前不立刻扩图"，不能大 —— 边长翻倍等于面积 ×4：
+/// 之前用 ×2（面积 ×4 余量）时，616 KiB 内容会装进 2048²（4 MiB）纹理，
+/// 比保存前还大（性能用例里直接量出来了）。
 fn pick_size(live: u64, bpp: u64, max: u32) -> u32 {
     let mut size = 256u32;
-    let side = (live as f64 / bpp as f64).sqrt() * 2.0;
+    let side = (live as f64 / bpp as f64).sqrt() * 1.2;
     while size < side.ceil() as u32 && size < max {
         size *= 2;
     }

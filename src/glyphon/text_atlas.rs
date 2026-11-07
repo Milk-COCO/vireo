@@ -417,8 +417,10 @@ impl InnerAtlas {
             self.grows = self.grows.saturating_add(1);
             return true;
         }
-        // 目标边长 = 2 × sqrt(内容面积)，向上取到 2 的幂；留一倍余量给后续增长。
-        let side = ((live_area as f64).sqrt() * 2.0).ceil() as u32;
+        // 目标边长 = 1.2 × sqrt(内容面积)，向上取到 2 的幂。
+        // 别留太大余量：边长翻倍 = 面积 ×4，616 KiB 内容会被装进 4 MiB 纹理
+        // （性能用例里量到过"compact 后反而比原来大"的那种反效果）。
+        let side = ((live_area as f64).sqrt() * 1.2).ceil() as u32;
         let mut target = MIN_SIZE;
         while target < side && target < self.max_texture_dimension_2d {
             target = (target * 2).min(self.max_texture_dimension_2d);
