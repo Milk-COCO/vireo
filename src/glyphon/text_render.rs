@@ -1161,7 +1161,9 @@ fn append_text_glyph<R>(
     style_index: u32,
     style_layers: u32,
     style_above_mask: u32,
-    sdf_band: f32,
+    // 兼容参数：样式文字的带宽现在按**生成尺寸**在内部推导（见尺寸阶梯）；
+    // 保留是为了不破坏既有调用签名（resolved 路径仍在用 `TextArea::sdf_band`）。
+    _sdf_band: f32,
     style_reach: f32,
     sdf_mode: crate::text::TextSdfMode,
     vector_stroke: Option<crate::text::TextStrokePx>,
@@ -1341,14 +1343,32 @@ where
                 em_px / em_gen,
             )
         }
-        None => (
-            GlyphonCacheKey::Styled {
-                base: physical_glyph.cache_key,
-                band_q: quantize_band(sdf_band),
-            },
-            sdf_band,
-            1.0,
-        ),
+        None => {
+            // **尺寸阶梯**：按 1.25× 步进取一个 >= 目标字号的生成尺寸，档内共用一份距离场，
+            // 用双线性缩放渲染。这样「同一档内改字号」不重建（和 MSDF 同样的收益），
+            // 但条目仍是 R8 单通道、无 range padding（只有 padding=band）。
+            let gen_px = crate::text::sdf_ladder_em(em_px);
+            let inv = if gen_px > 0.0 { em_px / gen_px } else { 1.0 };
+            let mut base = physical_glyph.cache_key;
+            base.font_size_bits = gen_px.to_bits();
+            base.x_bin = SubpixelBin::Zero;
+            base.y_bin = SubpixelBin::Zero;
+            // band 以**生成像素**计：外扩在生成空间里也要够长，才能等价覆盖目标空间的外扩
+            let reach_gen = if em_px > 0.0 {
+                style_reach * gen_px / em_px
+            } else {
+                style_reach
+            };
+            let band_gen = crate::text::band_for_reach(reach_gen);
+            (
+                GlyphonCacheKey::Styled {
+                    base,
+                    band_q: quantize_band(band_gen),
+                },
+                band_gen,
+                inv,
+            )
+        }
     };
     let mut emit = |pass: u32, sink: PassSink| -> Result<(), PrepareError> {
         let quad = prepare_glyph(

@@ -469,6 +469,30 @@ pub(crate) fn pick_msdf(mode: TextSdfMode, em_px: f32, reach_px: f32) -> Option<
     Some((crate::glyphon::msdf_pick_em(em_px), range_em))
 }
 
+/// **尺寸阶梯**：精确 SDF 的生成字号档（1.25× 步进，从 12px 到 256px）。
+///
+/// 为什么要有：精确 SDF 的缓存键含字号，改字号就得重栅格化。按阶梯取「不小于目标字号」
+/// 的一档生成、再双线性缩放到目标字号，就得到和 MSDF 一样的「档内改字号不重建」，
+/// 而条目仍是 R8 单通道、无 range padding。
+///
+/// 生成尺寸 ≥ 目标尺寸 ⇒ 永远是**缩小**采样（清晰度损失小于 1.25× 放大）；
+/// 代价是条目像素最多多 1.56×。
+pub(crate) const SDF_SIZE_LADDER: [f32; 32] = [
+    12.0, 15.0, 19.0, 24.0, 30.0, 37.0, 46.0, 57.0, 71.0, 89.0, 111.0, 139.0, 174.0, 218.0, 256.0,
+    256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0, 256.0,
+    256.0, 256.0, 256.0, 256.0,
+];
+
+/// 取「不小于 `em_px` 的最小阶梯尺寸」。超出最大档用最大档。
+pub(crate) fn sdf_ladder_em(em_px: f32) -> f32 {
+    for size in SDF_SIZE_LADDER {
+        if size >= em_px {
+            return size;
+        }
+    }
+    SDF_SIZE_LADDER[SDF_SIZE_LADDER.len() - 1]
+}
+
 /// 精确 SDF 的带宽档位。
 ///
 /// **为什么是档位而不是 `ceil(reach)`**：band 进了字形缓存键，任何一点变化都会让所有

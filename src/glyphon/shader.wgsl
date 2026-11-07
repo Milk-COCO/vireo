@@ -233,7 +233,7 @@ fn sample_d(
     return decode_sdf(
         textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x,
         d_range,
-    );
+    ) * msdf_scale;
 }
 
 /// 一条样式的某一层：取区间 → 偏移采样 → 合成。

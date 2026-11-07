@@ -6457,6 +6457,116 @@ fn text_style_steady_state_throughput() {
     }
 }
 
+/// **尺寸阶梯**：同一档内改字号不重建距离场（条目数不变）；跨档才新增条目。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_size_ladder_avoids_rebuild() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let c = OffscreenCanvas::new(&gpu, 400, 200);
+    let ink = Color::new(0.05, 0.06, 0.09, 1.0);
+
+    let draw = |font_size: f32| {
+        let mut b = DrawBatch::new();
+        for (i, ch) in ["国", "永", "光"].iter().enumerate() {
+            draw_text(
+                &mut b.texts,
+                ch,
+                Pos::new(20.0 + i as f32 * 110.0, 20.0),
+                TextDef {
+                    style: Some(Arc::new(
+                        TextStyle::outline(2.0, ink).with_fill(TextPaint::solid(WHITE)),
+                    )),
+                    ..TextDef::default().font_size(font_size)
+                },
+                TextOverride::from_color(WHITE),
+            );
+        }
+        c.draw(Some(BLACK), &[&b]);
+        let px = c.read_pixels();
+        let lit = px
+            .chunks(4)
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60)
+            .count();
+        (gpu.text_atlas_stats().mask_entries, lit)
+    };
+
+    // 44 与 40 都落在阶梯 46 这一档
+    let (e44, lit44) = draw(44.0);
+    let (e40, lit40) = draw(40.0);
+    println!("  44px: 条目 {e44}（{lit44} px）  40px: 条目 {e40}（{lit40} px）");
+    assert!(e44 > 0, "样式文字应生成距离场条目");
+    assert_eq!(e44, e40, "同一阶梯档内改字号不该新增条目");
+    assert!(
+        lit40 < lit44,
+        "40px 应比 44px 小（实际 {lit40} vs {lit44}）"
+    );
+
+    // 57 是下一档（46 与 57 的步进），会新增条目
+    let (e57, _) = draw(57.0);
+    println!("  57px: 条目 {e57}");
+    assert!(e57 > e44, "跨档应新增条目（46 档 -> 57 档）");
+}
+
+/// **尺寸阶梯**的边缘质量：阶梯生成 + 缩放后，轮廓仍应与覆盖度文字对齐（±2px）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn text_style_size_ladder_edges_align() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+
+    for font_size in [44.0f32, 30.0, 71.0] {
+        let edges = |styled: bool| -> Vec<u32> {
+            let c = OffscreenCanvas::new(&gpu, 300, 220);
+            let mut b = DrawBatch::new();
+            draw_text(
+                &mut b.texts,
+                "国",
+                Pos::new(40.0, 30.0),
+                TextDef {
+                    style: styled.then(|| Arc::new(TextStyle::outline(0.01, WHITE))),
+                    ..TextDef::default().font_size(font_size)
+                },
+                TextOverride::from_color(WHITE),
+            );
+            c.draw(Some(BLACK), &[&b]);
+            let px = c.read_pixels();
+            (0..220u32)
+                .map(|y| {
+                    (0..300u32)
+                        .find(|x| {
+                            let i = ((y * 300 + x) * 4) as usize;
+                            px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32 > 90
+                        })
+                        .unwrap_or(u32::MAX)
+                })
+                .filter(|v| *v != u32::MAX)
+                .collect()
+        };
+        let a = edges(false);
+        let b = edges(true);
+        let n = a.len().min(b.len());
+        let mut ok = 0;
+        for i in 0..n {
+            if (a[i] as i64 - b[i] as i64).abs() <= 2 {
+                ok += 1;
+            }
+        }
+        let ratio = ok as f64 / n.max(1) as f64;
+        println!(
+            "  {font_size}px: {ok}/{n} 行左边缘差 ≤2px（{:.0}%）",
+            ratio * 100.0
+        );
+        assert!(
+            ratio > 0.85,
+            "{font_size}px 阶梯缩放后轮廓应对齐（{:.0}%）",
+            ratio * 100.0
+        );
+    }
+}
+
 /// 稳态**确定性**：同一批内容连续帧必须逐像素一致（抖动/闪烁的底线检查）。
 ///
 /// 抖动通常来自「字形位置或图集条目取整在不同帧不一样」。这里用带样式文字 + 多行内容，
