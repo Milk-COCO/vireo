@@ -995,6 +995,28 @@ pub(crate) fn rasterize_glyph(
                 ),
                 band,
             )?;
+            if std::env::var_os("VIREO_TEXT_DEBUG").is_some() {
+                let (w, h) = (sdf.width as usize, sdf.height as usize);
+                let at = |x: usize, y: usize| sdf.data[y * w + x];
+                let (mut min, mut max) = (255u8, 0u8);
+                for &v in sdf.data.iter() {
+                    min = min.min(v);
+                    max = max.max(v);
+                }
+                eprintln!(
+                    "[sdf] band={} {}x{} q: min={} max={} 角=({},{},{},{}) 中心={}",
+                    band,
+                    w,
+                    h,
+                    min,
+                    max,
+                    at(0, 0),
+                    at(w - 1, 0),
+                    at(0, h - 1),
+                    at(w - 1, h - 1),
+                    at(w / 2, h / 2),
+                );
+            }
             Some(RasterizedGlyph {
                 content_type: ContentType::Sdf,
                 top: sdf.top,
