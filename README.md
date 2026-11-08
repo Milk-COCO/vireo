@@ -168,6 +168,16 @@ async fn main(app: App) {
   —— 矩形/圆/线段/折线的渐变、停点规则、强制 SDF 的取舍、降级与实测。
 - [折线逐点色](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/line-gradient.md)
   —— `draw_line_chain_colors`：沿弧长的逐点色与实测。
+- [文字](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text.md)
+  —— 索引：三层模型、术语、按主题分册（定义与绘制 / 缓存 / 字体 / 样式 / 性能）。
+- [文字：定义与绘制](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-api.md)
+  —— `TextDef` / `TextOverride` / `TextPart` / HUD 分段 / 绘制入口 / 裁剪与变换 / 度量 / `StableText`（实例固化）。
+- [文字：缓存](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-cache.md)
+  —— 排版与字形两层缓存的自动行为、预算（保留/硬）、自动压缩、钉子、预光栅化、跨进程持久化、诊断。
+- [文字：字体](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-fonts.md)
+  —— 系统字体、`load_font`、family/weight、fallback、Android 白名单、字体与持久化。
+- [文字：性能](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-perf.md)
+  —— CPU/GPU 双列实测、吞吐上限、瓶颈归因、自查流程与复现命令。
 - [文本样式](https://github.com/Milk-COCO/vireo/blob/master/docs/reference/text-style.md)
   —— 描边/投影/发光/内描边/内阴影的图层模型、像素意图与降级表。
 - [平台支持](https://github.com/Milk-COCO/vireo/blob/master/docs/platforms.md)

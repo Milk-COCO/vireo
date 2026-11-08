@@ -2,8 +2,9 @@
 
 > 面向 vireo 使用者。适用版本：0.2.0。
 >
-> 相关：[文字总览](text.md)（排版 / 字形缓存 / 度量）、[渐变](gradient.md)（形状渐变；
-> 文字填充的渐变排在后续版本）。
+> 相关：[文字总览](text.md)（索引 / 三层模型 / 术语）、[定义与绘制](text-api.md)
+> （`TextDef` / `TextOverride` / 分段）、[缓存](text-cache.md)、[字体](text-fonts.md)、
+> [性能](text-perf.md)、[渐变](gradient.md)（形状渐变；文字填充的渐变排在后续版本）。
 >
 > 术语：文字侧统一叫 **typeset / 排版**（旧名 `shape_cache_*` 已改名 `typeset_*`）；
 > UI 布局仍叫 layout，几何图形仍叫 shape。
@@ -189,7 +190,7 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 - **可观测**：`GpuContext::text_atlas_stats()` 返回 `TextAtlasStats`
   （`mask_size` / `color_size` / `mask_bytes` / `color_bytes` / `total_bytes()`）——
   样式文本不会进彩色图集（有 GPU 用例盯着这条不变量）。
-- **可管理**：样式条目和普通字形同住一张图集，所以 [`text().glyphs()`](text.md#6-字形缓存glyph-cache)
+- **可管理**：样式条目和普通字形同住一张图集，所以 [`text().glyphs()`](text-cache.md#2-字形缓存)
   的保留/硬预算、`prewarm`、`hold`、自动压缩与 `save` 对它们一视同仁。
 - 片元：每层一次采样（层数 ≤ 8），只在 `content_type == 2` 的分支里。
 - 生成成本：从轮廓算精确距离（线/二次/三次贝塞尔 Newton + 按段 bbox 剪枝），
@@ -224,4 +225,4 @@ prepare 阶段按 `dpi_scale` 折算成设备像素 ⇒ **DPI 变化时描边的
 渐变字 / emoji / 几何描边 / 全部），`1..9` + `0` 切组、`←→` 改描边宽度。
 
 字形缓存（预算 / 钉子 / 持久化）见 `cargo run --example text_cache` 与
-[text.md](text.md#6-字形缓存glyph-cache)。
+[text-cache.md](text-cache.md#2-字形缓存)。
