@@ -644,24 +644,47 @@ surface 建不出（`eglCreateWindowSurface`→`BAD_ALLOC`，477+ 次零成功�
 用例：`gpu_bench::arc_is_arc_only` / `arc_geometry_path` / `arc_degenerate_inputs`。
 对应外部 issue：`.dsh/docs/issues/arc-stroke.md`。
 
-### README 首屏没有画面（Demo GIF / 截图）
+### ~~`instance_*` 退化输入导致的栈溢出~~ ✅ **已定位并修复**（2026-11-08）
 
-2026-10-31 README 重构后仍然只有 `logo.png`：一个 2D 渲染库的 README 里没有任何
-「画出来长什么样」的证据，这是选型者流失的最大单一原因（外部无上下文评审的一致结论）。
+**根因**：`DrawBatch::instance_line_chain` 把三个条件合在一个 `if` 里回落到 `line_chain`：
 
-**为什么还没做**：需要真机录屏 + 把二进制资产提交进仓库，agent 侧做不到。
+```rust
+if self.sdf_feather.is_none() || points.len() < 2 || thickness == 0.0 {
+    self.line_chain(points, thickness, color);   // ← 递归入口
+    return;
+}
+```
 
-**做之前需要**：
+而 `line_chain` → `shapes::draw_line_chain` → `draw_shape`，在 `sdf_feather = Some` 时又
+路由回 `instance_shape` → `instance_line_chain` ⇒ **无限递归**。所以只要在默认批次上画一条
+`thickness == 0`（或点数 < 2）的折线，就会 `STATUS_STACK_OVERFLOW`（进程级、不可捕获）——
+**不是我新加弧线的问题，是既有 bug**，只是弧线的退化输入测试先踩到了它。
 
-1. 挑 3 个最能说明质量的场景：`mrt_liquid_glass`（MRT + 自定义材质）、
-   `line_gradient`（沿线渐变 + 文字）、`bench` / `frame_stats`（压力与诊断 HUD）。
-2. 录 5–8 秒、≤5MB 的 GIF（或 MP4 外链），放 `docs/images/`，README 首屏引用 1 个。
-3. 顺带补一张 `examples/android/` 的真机截图 —— Android 是它最大的差异点，却一张图都没有。
-4. 改完跑一遍 README 链接校验（绝对 URL 指向 `master`）。
+**修复**：拆开条件 —— `sdf_feather == None` 才回落到 `line_chain`（那时 `draw_shape` 会走
+geo 实例路径，终止）；`points.len() < 2 || thickness == 0.0` 直接丢弃（本来也画不出东西）。
+
+**回归用例**：`gpu_bench::line_chain_degenerate_does_not_recurse`（0 线宽 / 单点 / 空 /
+负线宽，同时覆盖 `draw_line_chain`、`batch.line_chain`、`instance_line_chain`、
+`draw_line_chain_colors`）。已验证：把修复回退后该用例立刻复现栈溢出。
+
+同类审计：其它 `instance_*` 只在 `push_sdf_instance` 返回 false 时回落，而它只在
+`sdf_feather == None` 时返回 false（那时路由到 geo 路径、终止），所以没有同类递归。
 
 ---
 
 ## 已完成 / 已否决
 
-见 [`docs/android-audit.md`](docs/android-audit.md) 的「P0 修复记录」与
-「P3 修复记录」两节 —— 含被否决的方案及**否决理由**（避免以后有人重提）。
+单项修复的详细过程见 [`docs/android-audit.md`](docs/android-audit.md) 的「P0 修复记录」与
+「P3 修复记录」。下面是**结论与理由**，避免以后有人重提：
+
+| 项 | 结论 | 理由 / 重启条件 |
+|---|---|---|
+| 用 WSA 替代真机测 Android | **放弃**（2026-10-06） | 宿主没把 GPU 透传给 guest，失败在内核层（`no adapter found`），vireo 侧绕不过；换有 GPU 直通的 Windows 才可重启（详见「环境」节） |
+| `onSaveInstanceState` / Bundle 机制 | **不实现**（2026-10-06） | 用户决定：vireo 侧没有需要序列化的状态 |
+| `singleTask` 启动模式 | **否决** | 属应用行为变更，不应由库决定；且自杀修复后重进必 fork 新进程，已无必要 |
+| `keyboard` configChange 的验证 | **关闭（不可验证）** | 无硬件键盘条件；manifest 已声明，机制与其它 flag 同源 |
+| API 31/32 分档（返回键 legacy） | **搁置**（2026-10-16） | 手上真机是 API 37，验不了；且 legacy `onBackPressed` 会被 GameTextInput 连接吃掉，修要改 Java 拦截 |
+| README 首屏 Demo GIF / 截图 | **已否决**（2026-11-08） | 受众是作者自己 + vault，README 已声明"不承诺生产可用"——GIF 是获客成本，现在不获客；且真机录屏要人工、二进制进 git 是永久体积。**重启条件**：真要对外发布/展示时再补（届时优先一张静帧 PNG，无头渲染即可产出；动图再按需加 `image` 的 `gif` 特性） |
+
+仍在推进（不是否决）的条目见上文：16K 页设备验证、MuMu12 EGL `BAD_ALLOC`、
+`instance_*` 非有限输入栈溢出的根因。

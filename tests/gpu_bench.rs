@@ -10305,3 +10305,69 @@ fn arc_degenerate_inputs() {
     assert_eq!(lit, 0, "退化输入不该画出任何东西（实际 {lit} 个像素）");
     println!("  弧线描边：退化输入不画、不 panic ✓");
 }
+
+/// 非有限坐标不该让折线/描边路径崩溃（也不该画出错位图元）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_non_finite_points() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 120, 120);
+    let nan = f32::NAN;
+    let inf = f32::INFINITY;
+    for pts in [
+        vec![(10.0, 10.0), (nan, 20.0), (30.0, 30.0)],
+        vec![(10.0, 10.0), (inf, 20.0), (30.0, 30.0)],
+        vec![(nan, nan), (nan, nan)],
+    ] {
+        let mut b = DrawBatch::new();
+        draw_line_chain(&mut b, &pts, 4.0, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b]);
+        let mut b2 = DrawBatch::new();
+        b2.instance_line_chain(&pts, 4.0, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b2]);
+    }
+    println!("  非有限坐标：折线路径不崩溃 ✓");
+}
+
+/// **退化折线不能递归**：`thickness = 0` 或点数 < 2 时，实例路径过去会回落到
+/// `line_chain`，而 `line_chain` 又按 `sdf_feather = Some` 路由回实例路径 —— 无限递归到
+/// 栈溢出（`STATUS_STACK_OVERFLOW`，无法捕获）。这条用例钉住"直接丢弃、不回落"。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_degenerate_does_not_recurse() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 120, 120);
+
+    for (points, thickness) in [
+        (vec![(10.0f32, 10.0f32), (100.0, 100.0)], 0.0f32), // 线宽为 0
+        (vec![(10.0, 10.0)], 4.0),                          // 单点
+        (vec![], 4.0),                                      // 空
+        (vec![(10.0, 10.0), (100.0, 100.0)], -2.0),         // 负线宽
+    ] {
+        let mut b = DrawBatch::new();
+        draw_line_chain(&mut b, &points, thickness, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b]);
+        let mut b2 = DrawBatch::new();
+        b2.line_chain(&points, thickness, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b2]);
+        let mut b3 = DrawBatch::new();
+        b3.instance_line_chain(&points, thickness, Some(WHITE));
+        canvas.draw(Some(BLACK), &[&b3]);
+        // 逐点色版本在退化输入上会委托给单色版本，同样不该递归。
+        let mut b4 = DrawBatch::new();
+        let colors = vec![WHITE; points.len() + 1];
+        draw_line_chain_colors(&mut b4, &points, thickness, &colors);
+        canvas.draw(Some(BLACK), &[&b4]);
+    }
+    let px = canvas.read_pixels();
+    let lit = px
+        .chunks(4)
+        .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+        .count();
+    assert_eq!(lit, 0, "退化折线不该画出任何东西（实际 {lit} 个像素）");
+    println!("  退化折线：直接丢弃、不递归、不崩溃 ✓");
+}

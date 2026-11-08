@@ -4187,8 +4187,16 @@ impl DrawBatch {
         thickness: f32,
         color: Option<crate::color::Color>,
     ) {
-        if self.sdf_feather.is_none() || points.len() < 2 || thickness == 0.0 {
+        if self.sdf_feather.is_none() {
+            // 几何模式：`draw_shape` 会按 `sdf_feather = None` 路由到 geo 实例路径，
+            // 不会再回到这里。
             self.line_chain(points, thickness, color);
+            return;
+        }
+        // 退化输入**直接丢掉**，绝不能回落到 `line_chain`：那会经 `draw_shape`
+        // 重新路由回 `instance_shape`（`sdf_feather` 仍是 `Some`），无限递归到栈溢出。
+        // 旧写法把三个条件放在同一个 `if` 里，于是 `thickness == 0` / 点数 < 2 时递归。
+        if points.len() < 2 || thickness == 0.0 {
             return;
         }
         if color.unwrap_or(self.color).a == 0.0 {
