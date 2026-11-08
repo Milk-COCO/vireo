@@ -216,3 +216,73 @@ batch.text_stable(&h, Pos::new(24.0, 64.0), TextOverride::default());
 - **样式带宽上限**：外扩超过约 1.45em 会被截断并 warn 一次，见 [text-style.md](text-style.md)。
 - **样式是逐段定型的**：`TextPart` 的段级 `TextDef` 决定该段的样式，同一行不同段可以有
   不同样式；但一段内部不能逐字换样式（要逐字就拆段）。
+
+## 10. 方法速查
+
+### `GpuContext`（文字相关）
+
+| 方法 | 作用 |
+|---|---|
+| `text() -> &TextSystem` | 文字系统的统一入口（下面 `TextSystem` 的所有方法都能从这里走） |
+| `measure_text(text, &def)` | 排版尺寸（逻辑像素） |
+| `measure_text_visual(text, &def)` | 视觉外框（含样式外扩） |
+| `text_atlas_stats()` | 图集尺寸/字节/条目数（`TextAtlasStats`） |
+| `load_font(bytes)` / `load_font_file(path)` | 加载自定义字体（会清排版与解析缓存） |
+| `make_stable_text(text, &def) -> StableText` | 创建稳定句柄 |
+| `preheat_text(&device, &queue, w, h)` | 首帧懒初始化（需 renderer 已 resize） |
+| `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` | 排版缓存旋钮 |
+| `clear_typeset_cache()` / `typeset_len()` / `typeset_held_count()` / `typeset_stats()` / `reset_typeset_stats()` | 排版缓存观测与清空 |
+| `clear_glyph_cache()` / `glyph_cache_len()` | **只清 `TextPart::Glyphs` 的逐字解析缓存**，不清图集 |
+
+### `TextSystem`（`gpu.text()`）
+
+| 方法 | 作用 |
+|---|---|
+| `measure(text, &def)` / `measure_visual(text, &def)` | 同 `GpuContext::measure_text*` |
+| `stable(text, &def)` | 同 `make_stable_text` |
+| `preheat(&device, &queue, w, h)` | 同 `preheat_text` |
+| `load_font(bytes)` | 同 `GpuContext::load_font` |
+| `glyphs() -> GlyphCache<'_>` | 字形缓存视图（见下） |
+| `atlas_stats()` | 同 `text_atlas_stats` |
+| `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` | 排版缓存旋钮 |
+| `clear_typeset_cache` / `typeset_len` / `typeset_held_count` / `typeset_stats` / `reset_typeset_stats` | 排版缓存观测与清空 |
+| `clear_resolved_glyph_cache` / `resolved_glyph_cache_len` | 逐字解析缓存（`TextPart::Glyphs` 用） |
+
+### `GlyphCache`（`gpu.text().glyphs()`）
+
+| 方法 | 作用 |
+|---|---|
+| `stats()` | O(1) 聚合（字段见 [text-cache.md §2.1](text-cache.md#21-观测)） |
+| `entries()` | O(n) 逐条快照（图集坐标、种类、字节、钉住、in_use、键） |
+| `pinned_count()` | 钉住的条目数 |
+| `set_retention_budget` / `set_hard_budget` / `retention_budget` / `hard_budget` / `effective_budget_bytes` | 预算（语义见 [text-cache.md §2.3](text-cache.md#23-预算保留-vs-硬)） |
+| `set_auto_compact` / `auto_compact` | 自动压缩开关 |
+| `prewarm(&device, &queue, text, &def, scale)` | 只填图集，返回新光栅化条目数 |
+| `hold(&device, &queue, text, &def, scale) -> GlyphHold` | 填图集 + 钉住（引用计数） |
+| `trim()` / `clear_unpinned()` / `clear()` | 按预算淘汰 / 清未钉住 / 全清 |
+| `compact(&device, &queue)` | 手动缩图集（放两帧之间） |
+| `save(&device, &queue, path)` / `load(&device, &queue, path)` | `VRTX` 跨进程持久化 |
+
+`stats()` 返回值上的便捷方法：`used_bytes()` / `texture_bytes()` / `entries() -> u32`；
+`GlyphHold` 上有 `len()` / `is_empty()` / `release()`（`drop` 即解钉）。
+
+### `StableText`
+
+| 方法 | 作用 |
+|---|---|
+| `bake(&gpu, scale)` | 预烘焙实例（返回实例数；加载阶段用） |
+| `bakes()` | 累计烘焙次数（稳态不该涨） |
+| `baked_instances()` | 当前块内实例数（`None` = 未烘） |
+| `invalidate_bake()` | 强制下次绘制重烘 |
+| `text()` / `font_size()` / `line_width()` / `line_count()` | 只读元信息 |
+
+### 分段与入队
+
+| 方法 | 作用 |
+|---|---|
+| `TextPart::normal` / `dynamic` / `glyphs` / `stable`（各有 `*_def` 变体） | 构造段 |
+| `split_hud(&str) -> Vec<TextPart>` | 按数字/非数字启发式切段 |
+| `HudLine::new()` + `.text` / `.dynamic` / `.glyphs` / `.set_text` / `.set_dynamic` / `.set_glyphs` / `.write_slot` / `.parts` / `.draw` | HUD 行 builder |
+| `TextEntryList::new` / `clear` / `new_from_entries` / `push` / `push_parts` / `push_stable` / `push_hud` / `draw` | 底层入队（`*_indexed` 版本可显式指定 `transform_index`） |
+| `DrawBatch::text` / `text_parts` / `text_stable` / `text_hud` / `hud_line` | 跟随批次变换的绘制 |
+| 自由函数 `draw_text` / `draw_text_parts` / `draw_text_hud` | 不吃批次变换的绘制 |

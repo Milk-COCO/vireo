@@ -74,7 +74,7 @@ win.draw(Color::new(0.06, 0.06, 0.08, 1.0), &[&batch]);
   `layout_scale()`（DPI）换算成物理像素。
 - `TextBounds`（`TextOverride::clip` 与 `DrawBatch::text_clip`）也是逻辑像素，默认值
   `i32::MIN..i32::MAX` 表示**不裁剪**。
-- 行距**固定**为 `font_size × 1.2`，当前没有可配入口（见 [text-api.md](text-api.md#已知限制)）。
+- 行距**固定**为 `font_size × 1.2`，当前没有可配入口（见 [text-api.md §9](text-api.md#9-已知限制)）。
 
 ## 相关示例
 
