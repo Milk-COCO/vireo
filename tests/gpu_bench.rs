@@ -5093,6 +5093,86 @@ fn line_chain_colors_premultiplied_mix() {
     println!("  预乘混合中点 rgB=({r},{g},{bl})，期望红≈{want} ok");
 }
 
+/// **`colors.len() != points.len()` 的降级**：按第一个颜色单色画，且与
+/// `draw_line_chain` 同色的结果**逐像素一致**；`colors` 为空时回落到 batch 颜色。
+///
+/// 这条守的是"宁可单色也不要画错图"的契约（几何路径同理）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn line_chain_colors_length_mismatch_falls_back_to_single() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 64, 64);
+    let pts = [(8.0f32, 32.0f32), (56.0, 32.0)];
+    let first = Color::new(1.0, 0.2, 0.1, 1.0);
+    let other = Color::new(0.1, 0.2, 1.0, 1.0);
+
+    // 参考：同一条链用单色画 → 降级结果应与它逐像素一致。
+    let single_reference = |color: Color, geometry: bool| -> Vec<u8> {
+        let mut b = DrawBatch::new();
+        if geometry {
+            b.clear_sdf_feather();
+        }
+        draw_line_chain(&mut b, &pts, 10.0, Some(color));
+        canvas.draw(Some(BLACK), &[&b]);
+        canvas.read_pixels()
+    };
+
+    for (label, colors) in [
+        ("多一个（3 vs 2）", vec![first, other, other]),
+        ("少一个（1 vs 2）", vec![first]),
+    ] {
+        let mut b = DrawBatch::new();
+        draw_line_chain_colors(&mut b, &pts, 10.0, &colors);
+        canvas.draw(Some(BLACK), &[&b]);
+        let px = canvas.read_pixels();
+        assert_eq!(
+            max_pixel_diff(&single_reference(first, false), &px),
+            0,
+            "{label}：应降级为**第一个颜色**单色绘制"
+        );
+    }
+
+    // 空 colors → 用 batch 颜色（`self.color`）。
+    let mut b = DrawBatch::new();
+    b.set_color(other);
+    draw_line_chain_colors(&mut b, &pts, 10.0, &[]);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    assert_eq!(
+        max_pixel_diff(&single_reference(other, false), &px),
+        0,
+        "空 colors 应回落到 batch 颜色"
+    );
+
+    // 几何路径（无 SDF）：逐点色做不了，同样降级为单色。
+    let mut b = DrawBatch::new();
+    b.clear_sdf_feather();
+    draw_line_chain_colors(&mut b, &pts, 10.0, &[first, other, other]);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    assert_eq!(
+        max_pixel_diff(&single_reference(first, true), &px),
+        0,
+        "几何路径应降级为第一个颜色单色绘制"
+    );
+
+    // 反证：长度**匹配**时应当真的画渐变（与单色参考不同）——否则上面的断言可能
+    // 因为"实现根本不画颜色"而假通过。
+    let mut b = DrawBatch::new();
+    draw_line_chain_colors(&mut b, &pts, 10.0, &[first, other]);
+    canvas.draw(Some(BLACK), &[&b]);
+    let px = canvas.read_pixels();
+    assert_ne!(
+        max_pixel_diff(&single_reference(first, false), &px),
+        0,
+        "长度匹配时应画渐变（与单色参考不同）"
+    );
+
+    println!("  逐点色降级：长度不匹配/空/几何路径都按单色绘制，逐像素一致 ✓");
+}
+
 /// 退化输入：不 panic、不出错图。
 #[test]
 #[ignore = "requires GPU; run with --ignored"]
