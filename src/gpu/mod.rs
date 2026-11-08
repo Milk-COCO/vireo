@@ -1204,55 +1204,6 @@ impl GpuContext {
         self.text_system.reset_typeset_stats();
     }
 
-    // ---- 兼容旧名（`shape_*` → `typeset_*`）：保留一个版本，之后删除 ----
-    //
-    // 术语：文字侧统一叫 typeset/排版；几何的 shape 与本组 API 无关。
-
-    /// 旧名，等价于 [`Self::set_typeset_ttl`]。
-    pub fn set_shape_cache_ttl(&self, ttl: Option<std::time::Duration>) {
-        self.set_typeset_ttl(ttl);
-    }
-
-    /// 旧名，等价于 [`Self::typeset_ttl`]。
-    pub fn shape_cache_ttl(&self) -> Option<std::time::Duration> {
-        self.typeset_ttl()
-    }
-
-    /// 旧名，等价于 [`Self::set_typeset_max_entries`]。
-    pub fn set_shape_cache_max_entries(&self, max: Option<usize>) {
-        self.set_typeset_max_entries(max);
-    }
-
-    /// 旧名，等价于 [`Self::typeset_max_entries`]。
-    pub fn shape_cache_max_entries(&self) -> Option<usize> {
-        self.typeset_max_entries()
-    }
-
-    /// 旧名，等价于 [`Self::clear_typeset_cache`]。
-    pub fn clear_shape_cache(&self) {
-        self.clear_typeset_cache();
-    }
-
-    /// 旧名，等价于 [`Self::typeset_len`]。
-    pub fn shape_cache_len(&self) -> usize {
-        self.typeset_len()
-    }
-
-    /// 旧名，等价于 [`Self::typeset_held_count`]。
-    pub fn shape_cache_held_count(&self) -> usize {
-        self.typeset_held_count()
-    }
-
-    /// 旧名，等价于 [`Self::typeset_stats`]。
-    pub fn shape_cache_stats(&self) -> crate::text::TypesetCacheStats {
-        self.typeset_stats()
-    }
-
-    /// 旧名，等价于 [`Self::reset_typeset_stats`]。
-    pub fn reset_shape_cache_stats(&self) {
-        self.reset_typeset_stats();
-    }
-
     /// 从文本创建 [`crate::text::StableText`]（预 shape，跨帧复用）。
     /// 只要返回的 `StableText` 存活，对应的 Buffer 不会被释放。
     ///

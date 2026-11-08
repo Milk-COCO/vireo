@@ -6,7 +6,7 @@
 > （`TextDef` / `TextOverride` / 分段）、[缓存](text-cache.md)、[字体](text-fonts.md)、
 > [性能](text-perf.md)、[渐变](gradient.md)（形状渐变；文字填充的渐变排在后续版本）。
 >
-> 术语：文字侧统一叫 **typeset / 排版**（旧名 `shape_cache_*` 已改名 `typeset_*`）；
+> 术语：文字侧统一叫 **typeset / 排版**（旧名 `shape_cache_*` 已改名 `typeset_*`，旧名已删除）；
 > UI 布局仍叫 layout，几何图形仍叫 shape。
 
 ## 1. 模型：一个原语 + 一个列表

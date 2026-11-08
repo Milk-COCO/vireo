@@ -19,7 +19,8 @@
   `GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
 - **「shape 缓存」改名「typeset / 排版缓存」**：文字侧统一用 `typeset`，因为 `shape`
   在本库里指几何图形、`layout` 指 UI 布局。`set_shape_cache_ttl` / `shape_cache_len` /
-  `clear_shape_cache` / `shape_cache_stats` 等旧名保留一个版本作为兼容壳，下一版删除。
+  `clear_shape_cache` / `shape_cache_stats` 等旧名**直接删除**（0.2.0 是 breaking 版本，
+  不保留兼容壳）。
   示例 `text_shape_cache` 同步改名为 `text_typeset_cache`。
 - **移除 MSDF 可选路径**：只保留「精确按尺寸 SDF + 尺寸阶梯」，`TextSdfMode` /
   `TextDef.sdf_mode` / `ContentType::Msdf` / 独立 MSDF 图集一并删除。评估结论：MSDF 面积比
