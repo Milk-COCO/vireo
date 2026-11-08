@@ -2977,7 +2977,9 @@ fn colr_v1_emoji_visible_end_to_end() {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
-    gpu.load_font_file(path).expect("load COLRv1 test font");
+    gpu.text()
+        .load_font_file(path)
+        .expect("load COLRv1 test font");
     let canvas = OffscreenCanvas::new(&gpu, 400, 300);
 
     let def = TextDef::default()
@@ -3017,7 +3019,9 @@ fn colr_v1_atlas_grow_keeps_glyphs() {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
-    gpu.load_font_file(path).expect("load COLRv1 test font");
+    gpu.text()
+        .load_font_file(path)
+        .expect("load COLRv1 test font");
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
     // 8 个经单元测试确认走 COLRv1 的字形（见 src/glyphon/colr.rs）。
@@ -3087,7 +3091,9 @@ fn colr_v1_perf_cold_vs_warm() {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
-    gpu.load_font_file(path).expect("load COLRv1 test font");
+    gpu.text()
+        .load_font_file(path)
+        .expect("load COLRv1 test font");
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
     // 8 个确认走 COLRv1 的字形 × 13 个字号 = 104 个独立 cache key。
@@ -7271,7 +7277,7 @@ fn text_style_size_ladder_avoids_rebuild() {
             .chunks(4)
             .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60)
             .count();
-        (gpu.text_atlas_stats().mask_entries, lit)
+        (gpu.text().atlas_stats().mask_entries, lit)
     };
 
     // 44 与 40 都落在阶梯 46 这一档
@@ -7526,9 +7532,9 @@ fn text_style_width_change_within_band_does_not_rebuild() {
     };
 
     let px_a = draw(2.0);
-    let stats_a = gpu.text_atlas_stats();
+    let stats_a = gpu.text().atlas_stats();
     let px_b = draw(3.5);
-    let stats_b = gpu.text_atlas_stats();
+    let stats_b = gpu.text().atlas_stats();
     println!(
         "  条目：w=2.0 mask={} / w=3.5 mask={}；像素 {px_a} / {px_b}",
         stats_a.mask_entries, stats_b.mask_entries
@@ -7561,7 +7567,7 @@ fn text_style_uses_mask_atlas_only() {
         TextOverride::from_color(WHITE),
     );
     canvas.draw(Some(BLACK), &[&plain]);
-    let before = gpu.text_atlas_stats();
+    let before = gpu.text().atlas_stats();
 
     let style = TextStyle::shadow((2.0, 2.0), 2.0, Color::new(0.0, 0.0, 0.0, 0.8))
         .with_layer(TextLayer::hard(2.0, TextPaint::solid(WHITE)));
@@ -7577,7 +7583,7 @@ fn text_style_uses_mask_atlas_only() {
         TextOverride::from_color(WHITE),
     );
     canvas.draw(Some(BLACK), &[&styled]);
-    let after = gpu.text_atlas_stats();
+    let after = gpu.text().atlas_stats();
 
     assert_eq!(
         before.color_size, after.color_size,
@@ -8456,7 +8462,7 @@ fn glyph_cache_prewarm_then_hit() {
     );
     println!(
         "  prewarm：首次 {n1} 条，图集 R8 {}² / {} 条 / {} 字节",
-        gpu.text_atlas_stats().mask_size,
+        gpu.text().atlas_stats().mask_size,
         s3.entries(),
         s3.used_bytes()
     );
@@ -9409,7 +9415,7 @@ fn stable_bake_pixels_match_normal() {
         // 参考：普通绘制。
         let normal = draw_text_pixels(&gpu, &canvas, &text, &def, pos, None);
         // 稳定句柄：首帧烘焙，之后复用。
-        let stable = gpu.make_stable_text(&text, &def);
+        let stable = gpu.text().stable(&text, &def);
         let mut reused = Vec::new();
         for _ in 0..3 {
             reused = draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
@@ -9437,7 +9443,7 @@ fn stable_bake_reuses_instances() {
     let canvas = OffscreenCanvas::new(&gpu, 420, 160);
     let text = cjk_text(0x4E00, 6);
     let def = TextDef::default().font_size(24.0);
-    let stable = gpu.make_stable_text(&text, &def);
+    let stable = gpu.text().stable(&text, &def);
 
     let base = Pos::new(10.0, 20.0);
     draw_stable_pixels(&gpu, &canvas, &stable, base, None);
@@ -9518,7 +9524,7 @@ fn stable_bake_invalidates_on_atlas_change() {
     let canvas = OffscreenCanvas::new(&gpu, 420, 160);
     let text = cjk_text(0x4E00, 6);
     let def = TextDef::default().font_size(24.0);
-    let stable = gpu.make_stable_text(&text, &def);
+    let stable = gpu.text().stable(&text, &def);
     let pos = Pos::new(10.0, 20.0);
 
     draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
@@ -9569,7 +9575,7 @@ fn stable_bake_prebake_avoids_first_draw() {
     let canvas = OffscreenCanvas::new(&gpu, 420, 160);
     let text = cjk_text(0x4E00, 6);
     let def = TextDef::default().font_size(24.0);
-    let stable = gpu.make_stable_text(&text, &def);
+    let stable = gpu.text().stable(&text, &def);
     let pos = Pos::new(10.0, 20.0);
 
     let n = stable.bake(&gpu, 1.0);
@@ -9628,7 +9634,7 @@ fn stable_bake_cost() {
     }
 
     // 稳定句柄：烘焙一次，之后每帧只拷贝实例。
-    let stable = gpu.make_stable_text(&text, &def);
+    let stable = gpu.text().stable(&text, &def);
     let stable_batch = {
         let mut b = DrawBatch::new();
         b.text_stable(&stable, pos, TextOverride::from_color(WHITE));

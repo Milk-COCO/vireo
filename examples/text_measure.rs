@@ -23,7 +23,7 @@ async fn main() {
         let gpu = win.gpu();
         let mut batch = DrawBatch::new();
 
-        let (tw, th) = gpu.measure_text(text, &opts);
+        let (tw, th) = gpu.text().measure(text, &opts);
 
         // 屏幕中心（使用实际窗口逻辑尺寸）
         let (lw, lh) = win.layout_size().logical();

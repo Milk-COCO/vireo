@@ -210,4 +210,12 @@ impl TextSystem {
         // 活跃 `StableText` 句柄故意保留：它们已经 shape 过并自己持有 Buffer。
         ctx.clear_typeset_cache();
     }
+
+    /// 从文件加载字体（TTF/OTF），等价于读文件后调用 [`Self::load_font`]。
+    pub fn load_font_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
+        let data =
+            std::fs::read(path.as_ref()).map_err(|e| format!("failed to read font file: {}", e))?;
+        self.load_font(&data);
+        Ok(())
+    }
 }

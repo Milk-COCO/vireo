@@ -616,7 +616,9 @@ mod tests {
     fn make_stable_liveness_drop_clears_held() {
         let gpu = make_test_gpu();
         assert_eq!(gpu.text().typeset_held_count(), 0);
-        let h = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
+        let h = gpu
+            .text()
+            .stable("hello", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.text().typeset_held_count(), 1);
         assert_eq!(gpu.text().typeset_len(), 1);
         drop(h);
@@ -651,7 +653,9 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn stable_text_direct_prepare_emits_instances() {
         let gpu = make_test_gpu();
-        let stable = gpu.make_stable_text("Stable 123 中文", &TextDef::default().font_size(20.0));
+        let stable = gpu
+            .text()
+            .stable("Stable 123 中文", &TextDef::default().font_size(20.0));
         let mut list = TextEntryList::new();
         list.push_stable(&stable, Pos::new(0.0, 0.0), TextOverride::default());
         let segments = list.prepare_texts(
@@ -672,8 +676,9 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn stable_text_part_direct_prepare_emits_instances() {
         let gpu = make_test_gpu();
-        let stable =
-            gpu.make_stable_text("Parts 中文 العربية", &TextDef::default().font_size(20.0));
+        let stable = gpu
+            .text()
+            .stable("Parts 中文 العربية", &TextDef::default().font_size(20.0));
         let mut list = TextEntryList::new();
         list.push_parts(
             &[TextPart::normal("prefix "), TextPart::stable(&stable)],
@@ -699,9 +704,13 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn make_stable_cache_hit_shares_liveness() {
         let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
+        let h1 = gpu
+            .text()
+            .stable("hello", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.text().typeset_held_count(), 1);
-        let h2 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
+        let h2 = gpu
+            .text()
+            .stable("hello", &TextDef::default().font_size(20.0));
         // 同文案 cache hit → count 仍为 1
         assert_eq!(gpu.text().typeset_held_count(), 1);
         assert_eq!(gpu.text().typeset_len(), 1);
@@ -719,8 +728,12 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn clear_typeset_preserves_held_slots() {
         let gpu = make_test_gpu();
-        let h1 = gpu.make_stable_text("keep", &TextDef::default().font_size(20.0));
-        let h2 = gpu.make_stable_text("drop", &TextDef::default().font_size(20.0));
+        let h1 = gpu
+            .text()
+            .stable("keep", &TextDef::default().font_size(20.0));
+        let h2 = gpu
+            .text()
+            .stable("drop", &TextDef::default().font_size(20.0));
         drop(h2); // "drop" is now dead
         assert_eq!(gpu.text().typeset_held_count(), 1);
 
@@ -780,9 +793,13 @@ mod tests {
         assert_eq!(gpu.text().typeset_len(), 1);
 
         // make_stable → 命中已有 slot，liveness = Some
-        let h1 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
+        let h1 = gpu
+            .text()
+            .stable("shared", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.text().typeset_held_count(), 1);
-        let h2 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
+        let h2 = gpu
+            .text()
+            .stable("shared", &TextDef::default().font_size(20.0));
         assert_eq!(gpu.text().typeset_held_count(), 1);
         // 共享 Arc
         assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));

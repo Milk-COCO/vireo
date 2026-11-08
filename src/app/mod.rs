@@ -885,11 +885,11 @@ impl App {
 
     /// 从随包资源加载字体文件。
     ///
-    /// 语义与 [`GpuContext::load_font_file`](crate::gpu::GpuContext::load_font_file)
+    /// 语义与 [`TextSystem::load_font_file`](crate::text::TextSystem::load_font_file)
     /// 一致，只是数据来源是 [`assets`](Self::assets) 而不是文件系统。
     pub fn load_font_asset(&self, name: &str) -> Result<(), String> {
         let bytes = self.assets().read(name).map_err(|e| e.to_string())?;
-        self.gpu.load_font(&bytes);
+        self.gpu.text().load_font(&bytes);
         Ok(())
     }
 

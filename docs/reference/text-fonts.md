@@ -18,12 +18,9 @@ fallback；全都没有该字符 → 画不出（空白或方块）。
 
 ```rust
 // 字节
-gpu.load_font(include_bytes!("assets/NotoSansSC-Regular.otf"));
+gpu.text().load_font(include_bytes!("assets/NotoSansSC-Regular.otf"));
 // 或路径（失败返回 Err(String)）
-gpu.load_font_file("assets/NotoSansSC-Regular.otf")?;
-
-// 也可以从 TextSystem 走（同一个实现）
-gpu.text().load_font(bytes);
+gpu.text().load_font_file("assets/NotoSansSC-Regular.otf")?;
 ```
 
 加载之后：

@@ -14,10 +14,17 @@
   `hard_budget_bytes` / `effective_budget_bytes` / `compacts` / `auto_compact`；
   `grows` 现在只统计扩容（之前 `compact` 会误加）。
 - **文字 API 归一到一个门面**：新增 `GpuContext::text() -> &TextSystem` 与
-  `TextSystem`（字体 / 排版缓存 / 字形图集 / 渲染器的统一入口）。`measure_text`、
-  `make_stable_text`、`load_font`、`text_atlas_stats`、`clear_glyph_cache` 等常用方法在
-  `GpuContext` 上保留为便捷转发。
-  `GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
+  `TextSystem`（字体 / 排版缓存 / 字形缓存 / 图集统计 / 度量 / 句柄 / 预热 / 渲染器的
+  统一入口）。`GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
+- **BREAKING：`GpuContext` 上不再转发任何文字方法，只留 `text()`**：删除
+  `measure_text` / `measure_text_visual` / `text_atlas_stats` / `load_font` /
+  `load_font_file` / `make_stable_text` / `preheat_text` / `clear_glyph_cache` /
+  `glyph_cache_len`，以及上一轮已删的 9 个 `typeset_*` 旋钮，全部改用
+  `gpu.text().<对应方法>()`（`measure_text`→`measure`、`measure_text_visual`→
+  `measure_visual`、`text_atlas_stats`→`atlas_stats`、`make_stable_text`→`stable`、
+  `preheat_text`→`preheat`、`clear_glyph_cache`→`clear_resolved_glyph_cache`、
+  `glyph_cache_len`→`resolved_glyph_cache_len`；`load_font_file` 移入 `TextSystem`）。
+  理由：两套入口只会让"该改哪个"变模糊，且转发层的文档/参数漂移没有收益。
 - **BREAKING：排版缓存旋钮只留在 `gpu.text()` 上**：删除 `GpuContext` 上的
   `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` /
   `clear_typeset_cache` / `typeset_len` / `typeset_held_count` / `typeset_stats` /

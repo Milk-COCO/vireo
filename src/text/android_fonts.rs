@@ -138,7 +138,7 @@ pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
 /// 三张内置表覆盖 AOSP/Pixel、小米、华为、OPPO、通用 Noto/思源，已知的主流
 /// OEM 都在内。真正的缺口是**没听说过的 ROM**：某台设备的正文字体命名既不落在
 /// 前缀表里、字体文件也不在系统目录里，用户就只能自己 `adb push` 再
-/// [`GpuContext::load_font_file`](crate::gpu::GpuContext::load_font_file)
+/// [`TextSystem::load_font_file`](crate::text::TextSystem::load_font_file)
 /// 手工加载——而那条路**钉不死 generic 家族**，于是「所有文字全大写、数字消失」
 /// 照旧。本配置就是把那三张表从编译期挪到运行期。
 ///

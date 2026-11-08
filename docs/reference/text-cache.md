@@ -145,7 +145,7 @@ vireo::init_logger();     // env_logger；RUST_LOG=warn 即可看到
 | 目标 | 默认行为够吗 | 要做什么 |
 |---|---|---|
 | 普通 UI / HUD | 够 | 什么都不做 |
-| 首帧卡一下（PSO/图集初始化） | 不够 | 启动时 `gpu.preheat_text(..)`；加载界面 `prewarm` |
+| 首帧卡一下（PSO/图集初始化） | 不够 | 启动时 `gpu.text().preheat(..)`；加载界面 `prewarm` |
 | 换场景后显存不降 | 部分 | 默认自动压缩已处理；大缓存手动 `compact()` |
 | 显存要钉死上限 | 不够 | `set_hard_budget`（接受掉帧）或保留预算 + 内容约束 |
 | 冷启动太慢 | 不够 | 跨进程 `save`/`load` |
@@ -156,7 +156,7 @@ vireo::init_logger();     // env_logger；RUST_LOG=warn 即可看到
 
 ```rust
 // 1) 字体/图集的懒初始化（用单字符跑一次 prepare；需 renderer 已 resize 过）
-gpu.preheat_text(&gpu.device, &gpu.queue, w, h);
+gpu.text().preheat(&gpu.device, &gpu.queue, w, h);
 // 2) 会出现的文案
 for (text, def) in catalog {
     gpu.text().glyphs().prewarm(&gpu.device, &gpu.queue, text, &def, scale);

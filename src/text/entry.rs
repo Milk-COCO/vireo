@@ -115,7 +115,7 @@ impl TextEntry {
         }
     }
 
-    /// 该条目的行级 `TextDef`（`Stable` 没有 —— 它在 `make_stable_text` 时定型）。
+    /// 该条目的行级 `TextDef`（`Stable` 没有 —— 它在 `text().stable` 时定型）。
     pub fn def(&self) -> Option<&crate::text::TextDef> {
         match self {
             TextEntry::Normal { def, .. }
@@ -331,7 +331,7 @@ impl TextEntryList {
     }
 
     /// 使用预 shape 的 [`StableText`] 直接添加条目（跳过 cache 查询）。
-    /// `def` 已在 `make_stable_text` 时定型，此处不需要。
+    /// `def` 已在 `text().stable` 时定型，此处不需要。
     pub fn push_stable(&mut self, stable: &StableText, pos: Pos, ov: TextOverride) {
         self.push_stable_indexed(stable, pos, ov, 0);
     }

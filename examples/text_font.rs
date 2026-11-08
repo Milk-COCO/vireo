@@ -5,7 +5,7 @@
 use vireo::prelude::*;
 
 fn try_load(app: &App, path: &str) -> bool {
-    match app.gpu.load_font_file(path) {
+    match app.gpu.text().load_font_file(path) {
         Ok(()) => {
             eprintln!("loaded font: {path}");
             true
@@ -25,7 +25,7 @@ async fn main() {
 
     // load_font：同一文件再走字节路径（演示 API；族名已在 db 中）
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\arial.ttf") {
-        app.gpu.load_font(&bytes);
+        app.gpu.text().load_font(&bytes);
         eprintln!("loaded font bytes: arial.ttf ({} bytes)", bytes.len());
     }
 

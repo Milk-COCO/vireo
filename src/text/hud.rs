@@ -42,9 +42,9 @@ pub(crate) fn is_hud_digit_char(ch: char) -> bool {
 /// - **Buffer 内存**：由 `StableText` 内的 `Arc<Buffer>` 保活；`drop` 后回收。
 /// - **Glyph 模板**：创建时从已 shaping 的 Buffer 提取，绘制时直接 physicalize，
 ///   保留连字、fallback、复杂脚本和多行布局，同时跳过重复的 layout-run 遍历。
-/// - **cache 槽**：[`crate::gpu::GpuContext::make_stable_text`] 把对应槽标为「live」(`liveness: Arc<()>`)，
+/// - **cache 槽**：[`crate::text::TextSystem::stable`] 把对应槽标为「live」(`liveness: Arc<()>`)，
 ///   **直至所有 `StableText` clone 均 drop** 才会变为可淘汰。
-///   同一文案的多次 `make_stable_text` 共享同一 liveness 标记（0→1 创建一次）。
+///   同一文案的多次 `text().stable` 共享同一 liveness 标记（0→1 创建一次）。
 ///   GC/evict/clear 使用 `Arc::strong_count` 探测 liveness 标记是否还活着：
 ///   `strong_count > 1` = 仍有 `StableText` 持有；`== 1` = 已死（`slot` 自身唯一持有），可淘汰。
 /// - **`Clone`**：复制 `Arc<Buffer>` 与 `Arc<()>`（liveness 标记），增加 `strong_count`。
@@ -53,7 +53,7 @@ pub(crate) fn is_hud_digit_char(ch: char) -> bool {
 /// ## 与 [`TextPart::Normal`]/[`TextPart::Dynamic`] 的差异
 /// | 维度 | `Normal`/`Dynamic` | `Stable` |
 /// |------|-------------------|----------|
-/// | 缓存条目 | `draw_text` 自动管 | 用户 `make_stable_text` 显式创建 |
+/// | 缓存条目 | `draw_text` 自动管 | 用户 `text().stable` 显式创建 |
 /// | 跨帧复用 | TTL/LRU 可能 evict | **所有 handle 均 drop 前**永不 evict |
 ///
 /// ## `max_width` / `align` 支持
@@ -65,11 +65,11 @@ pub(crate) fn is_hud_digit_char(ch: char) -> bool {
 ///   direct prepare。
 ///
 /// ## 绘制 API
-/// - [`crate::render::DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `make_stable_text` 时定型。
+/// - [`crate::render::DrawBatch::text_stable`]：每帧传 `pos + TextOverride`；其余已在 `text().stable` 时定型。
 /// - [`TextEntryList::push_stable`]：添加到 `TextEntryList`（与 `text_parts` 配合使用）。
 ///
 /// ```ignore
-/// let h = gpu.make_stable_text("Score: {}", TextOptions::default().font_size(20.0));
+/// let h = gpu.text().stable("Score: {}", TextOptions::default().font_size(20.0));
 /// batch.text_stable(&h, Pos::new(16.0, 16.0), TextOverride::from_color(WHITE));
 /// ```
 #[derive(Clone)]
@@ -173,7 +173,7 @@ impl BakedHandle {
 }
 
 impl StableText {
-    /// 原文案（`make_stable_text` 时传入的字符串）。
+    /// 原文案（`text().stable` 时传入的字符串）。
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -246,7 +246,7 @@ impl std::fmt::Debug for StableText {
 ///
 /// **`TextDef`**：`Normal` / `Dynamic` / `Glyphs` 的第二参数 `None` = 使用
 /// `draw_text_parts` / `push_parts` 的行级 `def`；`Some(def)` = 仅本段覆盖。
-/// [`TextPart::Stable`] 无此项（字号等已在 `make_stable_text` 时定型）。
+/// [`TextPart::Stable`] 无此项（字号等已在 `text().stable` 时定型）。
 ///
 /// 提交时传 [`&[TextPart]`](TextPart)（例如 `&vec[..]` / [`HudLine::parts`]）；
 /// 引擎 clone 进 [`crate::text::TextEntry::Parts`]。

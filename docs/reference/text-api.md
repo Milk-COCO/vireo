@@ -140,14 +140,14 @@ batch.hud_line(&line, pos, def, ov);
 ## 5. 度量
 
 ```rust
-let (w, h) = gpu.measure_text("Hello 世界", &def);        // 排版尺寸（逻辑像素）
-let (vw, vh) = gpu.measure_text_visual("Hello 世界", &def); // 视觉外框（含样式外扩）
+let (w, h) = gpu.text().measure("Hello 世界", &def);        // 排版尺寸（逻辑像素）
+let (vw, vh) = gpu.text().measure_visual("Hello 世界", &def); // 视觉外框（含样式外扩）
 ```
 
 | 方法 | 含义 |
 |---|---|
-| `gpu.measure_text(text, &def)` / `gpu.text().measure(..)` | 排版尺寸（逻辑像素，不含样式外扩） |
-| `gpu.measure_text_visual(text, &def)` / `gpu.text().measure_visual(..)` | 视觉外框（加上描边宽度 + 3σ 软边 + 偏移） |
+| `gpu.text().measure(text, &def)` | 排版尺寸（逻辑像素，不含样式外扩） |
+| `gpu.text().measure_visual(text, &def)` | 视觉外框（加上描边宽度 + 3σ 软边 + 偏移） |
 
 排版尺寸对 `max_width` 敏感（按折行算多行高度）；`measure_visual` 里的 `Px` 意图按 1:1 处理
 （没有 DPI 上下文），需要设备像素时自己乘 `layout_scale()`。两者都会把文字 shape 进缓存，
@@ -156,12 +156,12 @@ let (vw, vh) = gpu.measure_text_visual("Hello 世界", &def); // 视觉外框（
 ## 6. 稳定句柄：`StableText`
 
 ```rust
-let h = gpu.make_stable_text("很久不变的一大段文字", &TextDef::default().font_size(20.0));
+let h = gpu.text().stable("很久不变的一大段文字", &TextDef::default().font_size(20.0));
 h.bake(&gpu, win.layout_scale());            // 可选：加载阶段先烘焙实例
 batch.text_stable(&h, Pos::new(24.0, 64.0), TextOverride::default());
 ```
 
-别名：`gpu.text().stable(text, &def)`。
+（`stable` 是创建句柄的唯一入口。）
 
 **它缓存什么**：排版结果（`Buffer`）、解析后的字形列表、以及**烘焙好的渲染实例**。实例是
 **本地坐标**，每帧只做"拷实例 + 打补丁（整数位移 / 变换槽 / 颜色 / batch UV / 样式表下标）"。
@@ -221,29 +221,24 @@ batch.text_stable(&h, Pos::new(24.0, 64.0), TextOverride::default());
 
 ### `GpuContext`（文字相关）
 
+只有一个入口：
+
 | 方法 | 作用 |
 |---|---|
-| `text() -> &TextSystem` | 文字系统的统一入口（下面 `TextSystem` 的所有方法都能从这里走） |
-| `measure_text(text, &def)` | 排版尺寸（逻辑像素） |
-| `measure_text_visual(text, &def)` | 视觉外框（含样式外扩） |
-| `text_atlas_stats()` | 图集尺寸/字节/条目数（`TextAtlasStats`） |
-| `load_font(bytes)` / `load_font_file(path)` | 加载自定义字体（会清排版与解析缓存） |
-| `make_stable_text(text, &def) -> StableText` | 创建稳定句柄 |
-| `preheat_text(&device, &queue, w, h)` | 首帧懒初始化（需 renderer 已 resize） |
-| `clear_glyph_cache()` / `glyph_cache_len()` | **只清 `TextPart::Glyphs` 的逐字解析缓存**，不清图集 |
+| `text() -> &TextSystem` | 文字系统的统一入口 —— 字体、度量、缓存、句柄、预热、图集统计全部从这走 |
 
-> 排版缓存的旋钮与观测**只在 `gpu.text()` 上**（下面 `TextSystem`），`GpuContext` 不再转发。
+> `GpuContext` 上**不保留**任何文字方法的转发（0.2.0 起）。写 `gpu.text().<方法>` 即可。
 
 ### `TextSystem`（`gpu.text()`）
 
 | 方法 | 作用 |
 |---|---|
-| `measure(text, &def)` / `measure_visual(text, &def)` | 同 `GpuContext::measure_text*` |
-| `stable(text, &def)` | 同 `make_stable_text` |
-| `preheat(&device, &queue, w, h)` | 同 `preheat_text` |
-| `load_font(bytes)` | 同 `GpuContext::load_font` |
+| `measure(text, &def)` / `measure_visual(text, &def)` | 排版尺寸 / 视觉外框（含样式外扩） |
+| `stable(text, &def)` | 创建 `StableText` 句柄（预 shape，跨帧复用） |
+| `preheat(&device, &queue, w, h)` | 首帧懒初始化（需 renderer 已 resize） |
+| `load_font(bytes)` / `load_font_file(path)` | 加载自定义字体（会清排版与解析缓存） |
 | `glyphs() -> GlyphCache<'_>` | 字形缓存视图（见下） |
-| `atlas_stats()` | 同 `text_atlas_stats` |
+| `atlas_stats()` | 图集尺寸/字节/条目数（`TextAtlasStats`） |
 | `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` | 排版缓存旋钮 |
 | `clear_typeset_cache` / `typeset_len` / `typeset_held_count` / `typeset_stats` / `reset_typeset_stats` | 排版缓存观测与清空 |
 | `clear_resolved_glyph_cache` / `resolved_glyph_cache_len` | 逐字解析缓存（`TextPart::Glyphs` 用） |

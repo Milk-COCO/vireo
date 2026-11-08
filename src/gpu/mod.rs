@@ -1081,10 +1081,10 @@ impl GpuContext {
             .unwrap_or(1)
     }
 
-    /// 文字系统入口（字体、排版缓存、字形图集、渲染器）。
+    /// 文字系统入口（字体、排版缓存、字形缓存、图集统计、度量、句柄、预热）。
     ///
-    /// 需要 device/queue 的操作（`preheat`）仍走 `GpuContext` 上的同名便捷方法；
-    /// 其余（度量、缓存策略、句柄、字体加载）都从这里调。
+    /// `GpuContext` 上**不再**保留文字方法的转发 —— 一律从这里调，
+    /// 例如 `gpu.text().measure(..)` / `gpu.text().stable(..)`。
     pub fn text(&self) -> &TextSystem {
         &self.text_system
     }
@@ -1092,41 +1092,6 @@ impl GpuContext {
     /// crate 内部：拿文字运行时的互斥锁守卫（prepare / draw / pipeline 用）。
     pub(crate) fn text_ctx(&self) -> std::sync::MutexGuard<'_, TextContext> {
         self.text_system.ctx()
-    }
-
-    /// 测量文本尺寸（逻辑像素）。参数与 draw_text 一致。
-    pub fn measure_text(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
-        self.text_system.measure(text, options)
-    }
-
-    /// 文本图集的当前占用（覆盖度 / 距离场共用 R8 图 + 彩色图）。
-    ///
-    /// 带样式的字形把距离场存在同一张 R8 图集里，所以这个数字同时反映了样式文本的
-    /// 显存开销（32px 字形 + band 4 ≈ 1.6KB/字形）。
-    pub fn text_atlas_stats(&self) -> crate::glyphon::TextAtlasStats {
-        self.text_system.atlas_stats()
-    }
-
-    /// 文本的**视觉**包围盒（逻辑像素）：在 [`Self::measure_text`] 之上加上样式的溢出
-    /// （描边宽度 + 3σ 软边 + 偏移）。
-    ///
-    /// 排版仍然用 `measure_text` —— 这个只用于裁剪/居中这类"视觉外框"需求。
-    /// 注意：`Px` 意图在这里按 1:1 处理（没有 dpi 上下文），需要精确设备像素时自己换算。
-    pub fn measure_text_visual(&self, text: &str, options: &crate::text::TextDef) -> (f32, f32) {
-        self.text_system.measure_visual(text, options)
-    }
-
-    /// 从文件加载字体（TTF/OTF），使该字体可用于 TextOptions::with_family
-    pub fn load_font_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
-        let data =
-            std::fs::read(path.as_ref()).map_err(|e| format!("failed to read font file: {}", e))?;
-        self.load_font(&data);
-        Ok(())
-    }
-
-    /// 加载自定义字体（TTF/OTF 字节数据），使该字体可用于 TextOptions::with_family
-    pub fn load_font(&self, data: &[u8]) {
-        self.text_system.load_font(data);
     }
 
     /// 清空共享管线缓存表。`surface_format` 从默认值同步为窗口真实格式时调用，
@@ -1143,45 +1108,6 @@ impl GpuContext {
     /// 首次建窗时把真实 surface 格式同步进来（macOS Metal 为 Bgra8UnormSrgb）。
     pub(crate) fn set_surface_format(&self, fmt: wgpu::TextureFormat) {
         *self.surface_format.lock().unwrap() = fmt;
-    }
-
-    /// 清空 `TextPart::Glyphs` 的 resolved glyph 元数据缓存。
-    /// 不清空 glyph atlas 中已经光栅化的位图。
-    pub fn clear_glyph_cache(&self) {
-        self.text_system.clear_resolved_glyph_cache();
-    }
-
-    /// 当前 `TextPart::Glyphs` resolved glyph 元数据缓存条目数。
-    pub fn glyph_cache_len(&self) -> usize {
-        self.text_system.resolved_glyph_cache_len()
-    }
-
-    /// 从文本创建 [`crate::text::StableText`]（预 shape，跨帧复用）。
-    /// 只要返回的 `StableText` 存活，对应的 Buffer 不会被释放。
-    ///
-    /// **首帧性能提示**：首次 `make_stable_text` 会触发 `harfrust` shape 成本
-    /// （典型 ~5–30ms / 字符串）。建议在加载/初始化阶段预创建常用 handle，
-    /// 或先调 [`GpuContext::preheat_text`] 触发字体/atlas lazy init。
-    pub fn make_stable_text(
-        &self,
-        text: &str,
-        options: &crate::text::TextDef,
-    ) -> crate::text::StableText {
-        self.text_system.stable(text, options)
-    }
-
-    /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
-    /// 推荐在 `App` 启动后立即调用，避免首帧文字绘制卡顿。
-    /// 调前需 `Renderer` 存在并已 `resize` 至少一次（让 `viewport` 知道物理尺寸）。
-    pub fn preheat_text(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        physical_width: u32,
-        physical_height: u32,
-    ) {
-        self.text_system
-            .preheat(device, queue, physical_width, physical_height);
     }
 
     /// Creates a material with no group 3 resources.
