@@ -787,28 +787,46 @@ impl App {
         }
     }
 
-    /// 从文件加载贴图（`png` / `jpg` / `bmp`），返回**由调用方持有**的句柄。
+    /// 加载贴图（`png` / `jpg` / `bmp`），返回**由调用方持有**的句柄。
     ///
-    /// 引擎不再保存贴图表：`Arc<Texture>` 交给你，最后一个引用 drop 时显存随之释放。
+    /// 引擎不保存贴图表：`Arc<Texture>` 交给你，最后一个引用 drop 时显存随之释放。
     /// 需要在 `run` 闭包里长期使用时，把返回值 `clone()` 进闭包即可；
     /// 绘制时用 [`batch.set_texture`](crate::render::DrawBatch::set_texture) 传
     /// `&tex.view`。
     ///
-    /// 读失败时打 `error` 日志并返回一张 ffcc00/6699ff 棋盘 missing 纹理（不 panic）。
-    pub fn load_texture(&self, path: impl AsRef<std::path::Path>) -> Arc<Texture> {
-        Arc::new(Texture::from_file(path, &self.gpu))
+    /// 来源由 [`Source`](crate::asset::Source) 显式指定（随包资源 / 文件 / 字节）：
+    ///
+    /// ```ignore
+    /// let tex = app.load_texture(Source::asset("logo.png"))?;  // 安卓 APK / 桌面 asset root
+    /// let bg  = app.load_texture(Source::path("assets/bg.png"))?; // 文件系统
+    /// ```
+    ///
+    /// 失败返回 [`VireoError`]（读不到 / 解码失败）。要"失败也能画"（装饰贴图）用
+    /// [`load_texture_or_placeholder`](Self::load_texture_or_placeholder)。
+    pub fn load_texture(&self, src: crate::asset::Source<'_>) -> Result<Arc<Texture>, VireoError> {
+        let bytes = src.read()?;
+        let tex = Texture::from_bytes(&bytes, &self.gpu)?;
+        Ok(Arc::new(tex))
     }
 
-    // ---- 随包资源（assets）------------------------------------------------
-    //
-    // 与上面的 `load_texture` / `load_font_file` / `WindowDesc::icon_from_path`
-    // **刻意分开**：那几个是纯 `std::fs`（真实路径），这几个走 [`Assets`]
-    // （安卓 = APK 内的 assets，桌面 = `set_asset_root` 指定的目录）。
-    //
-    // 不做「相对路径自动回退到 assets」—— 那会让同一份代码在两个平台上资源来源
-    // 不同且不报错，排查成本极高。见 `crate::asset` 模块文档。
+    /// 加载贴图；失败时打 `log::error!` 并返回棋盘占位图（[`Texture::placeholder`]）。
+    ///
+    /// 名字写明"坏图也继续画"，所以静默不是意外：缺一张装饰贴图不该让应用白屏。
+    /// 需要程序化处理失败用 [`load_texture`](Self::load_texture) 或
+    /// [`Source::read`](crate::asset::Source::read) 自查。
+    pub fn load_texture_or_placeholder(&self, src: crate::asset::Source<'_>) -> Arc<Texture> {
+        match self.load_texture(src) {
+            Ok(tex) => tex,
+            Err(e) => {
+                log::error!("App::load_texture_or_placeholder: {e}");
+                Arc::new(Texture::placeholder(&self.gpu))
+            }
+        }
+    }
 
-    /// 随包只读资源的句柄。
+    // ---- 资源（assets）------------------------------------------------------
+
+    /// 随包只读资源的句柄（`exists` / `read` / `list`）。
     ///
     /// - 安卓：APK 内 `src/main/assets/` 打进的那份
     /// - 桌面：[`set_asset_root`](Self::set_asset_root) 指定的目录；未设则读不到
@@ -832,26 +850,17 @@ impl App {
     /// # }
     /// ```
     pub fn assets(&self) -> crate::asset::Assets {
-        // 安卓侧根目录恒为 None：资源由 APK 内的 AssetManager 定位，
-        // `set_asset_root` 记下的值只是用户意图，不参与读取。
-        #[cfg(target_os = "android")]
-        {
-            crate::asset::Assets::new(None)
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            crate::asset::Assets::new(crate::asset::current_root())
-        }
+        crate::asset::Assets::local()
     }
 
-    /// 设桌面的资产根目录（[`assets`](Self::assets) 相对于它解析）。
+    /// 设桌面的资产根目录（[`assets`](Self::assets) 与
+    /// [`Source::asset`](crate::asset::Source::asset) 相对于它解析）。
     ///
     /// **只在桌面有意义** —— 安卓的资源在 APK 内，根目录由构建期决定
     /// （`src/main/assets/`），这行是 no-op。
     ///
-    /// 必须在任何 [`load_texture_asset`](Self::load_texture_asset) /
-    /// [`load_font_asset`](Self::load_font_asset) / `icon_from_asset` 之前调用。
-    /// 重复调用以最后一次为准。
+    /// 必须在任何 [`load_texture`](Self::load_texture) / [`load_font`](Self::load_font)
+    /// 之前调用。重复调用以最后一次为准（进程级设置，多 `App` 共享）。
     ///
     /// ## Platform-specific
     ///
@@ -868,27 +877,21 @@ impl App {
         }
     }
 
-    /// 从随包资源加载贴图（png/jpg/bmp），返回**由调用方持有**的句柄。
+    /// 加载字体（TTF/OTF），来源由 [`Source`](crate::asset::Source) 指定。
     ///
-    /// 读失败时和 [`load_texture`](Self::load_texture) 一样：打 error 日志并
-    /// 返回一张 ffcc00/6699ff 棋盘 missing 纹理（不 panic）。
-    pub fn load_texture_asset(&self, name: &str) -> Arc<Texture> {
-        let tex = match self.assets().read(name) {
-            Ok(bytes) => Texture::from_bytes(&bytes, &self.gpu),
-            Err(e) => {
-                log::error!("App::load_texture_asset: {e}");
-                Texture::from_bytes(&[], &self.gpu)
-            }
-        };
-        Arc::new(tex)
-    }
-
-    /// 从随包资源加载字体文件。
+    /// ```ignore
+    /// app.load_font(Source::asset("NotoSansSC-Regular.otf"))?; // 随包资源
+    /// app.load_font(Source::path("/usr/share/fonts/x.ttf"))?;   // 文件系统
+    /// app.load_font(Source::bytes(&bytes))?;                    // 内存字节
+    /// ```
     ///
-    /// 语义与 [`TextSystem::load_font_file`](crate::text::TextSystem::load_font_file)
-    /// 一致，只是数据来源是 [`assets`](Self::assets) 而不是文件系统。
-    pub fn load_font_asset(&self, name: &str) -> Result<(), String> {
-        let bytes = self.assets().read(name).map_err(|e| e.to_string())?;
+    /// 之后用 `Family::Name("族名")` 指定。加载成功会清空排版缓存与逐字解析缓存
+    /// （fallback 可能变了），活跃 `StableText` 句柄不受影响。
+    ///
+    /// 与 [`TextSystem::load_font`](crate::text::TextSystem::load_font) 的关系：
+    /// 那个只收字节、不需要 `App`（无窗口/无头场景用它）；这里多一层来源解析。
+    pub fn load_font(&self, src: crate::asset::Source<'_>) -> Result<(), VireoError> {
+        let bytes = src.read()?;
         self.gpu.text().load_font(&bytes);
         Ok(())
     }
@@ -1283,7 +1286,10 @@ impl App {
     }
 
     /// 创建仅包含片段着色器的材质（内置 SDF/geo 实例化 vertex shader）。
-    pub fn material(&self, source: &str) -> Result<Arc<crate::material::Material>, String> {
+    pub fn material(
+        &self,
+        source: &str,
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu.create_material(source)
     }
 
@@ -1335,7 +1341,7 @@ impl App {
         source: &str,
         vertex_source: &str,
         layout: crate::gpu::ShapeVertexLayout,
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu
             .create_material_with_vertex_shader(source, vertex_source, layout)
     }
@@ -1345,7 +1351,7 @@ impl App {
         &self,
         source: &str,
         resources: crate::material::MaterialResources<'_>,
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu.create_material_with_resources(source, resources)
     }
 
@@ -1355,7 +1361,7 @@ impl App {
         vertex_source: &str,
         layout: crate::gpu::ShapeVertexLayout,
         resources: crate::material::MaterialResources<'_>,
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu.create_material_with_resources_and_vertex_shader(
             source,
             vertex_source,
@@ -1369,7 +1375,7 @@ impl App {
         &self,
         source: &str,
         bgl: &wgpu::BindGroupLayout,
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu.create_material_manual(source, bgl)
     }
 
@@ -1379,7 +1385,7 @@ impl App {
         vertex_source: &str,
         layout: crate::gpu::ShapeVertexLayout,
         bgl: &wgpu::BindGroupLayout,
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu
             .create_material_manual_with_vertex_shader(source, vertex_source, layout, bgl)
     }
@@ -1390,7 +1396,7 @@ impl App {
         &self,
         source: &str,
         entries: &[(u32, &wgpu::BindGroupLayout)],
-    ) -> Result<Arc<crate::material::Material>, String> {
+    ) -> Result<Arc<crate::material::Material>, crate::error::VireoError> {
         self.gpu.create_material_self_managed(source, entries)
     }
 

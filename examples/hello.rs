@@ -21,8 +21,9 @@ fn hue(h: f32) -> Color {
 
 #[vireo::main]
 async fn main() {
-    let logo = Some(app.load_texture("logo.png"));
-    let idx = app.window(WindowDesc::new("Ciallo, Vireo!", 640, 420).icon_from_path("logo.png"));
+    let logo = Some(app.load_texture_or_placeholder(Source::path("logo.png")));
+    let idx =
+        app.window(WindowDesc::new("Ciallo, Vireo!", 640, 420).icon_from(Source::path("logo.png")));
 
     let mut t: f32 = 0.0;
     app.run(move |ctx| {

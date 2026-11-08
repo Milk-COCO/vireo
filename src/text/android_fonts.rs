@@ -54,7 +54,7 @@
 //! 「所有文字全大写、数字消失」。
 //!
 //! [`configure`] 把这三张表从编译期挪到运行期（进程级，须在 `App::new()` 之前调用）。
-//! 这是唯一的用户侧逃生口；`load_font_file` 那条路能加字体文件但**钉不死
+//! 这是唯一的用户侧逃生口；`App::load_font` 那条路能加字体文件但**钉不死
 //! generic 家族**，救不了这个症状。
 //!
 //! 模块**无条件编译**（只有 `install` 及其 Android 依赖按 target 门控），
@@ -138,7 +138,7 @@ pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc"];
 /// 三张内置表覆盖 AOSP/Pixel、小米、华为、OPPO、通用 Noto/思源，已知的主流
 /// OEM 都在内。真正的缺口是**没听说过的 ROM**：某台设备的正文字体命名既不落在
 /// 前缀表里、字体文件也不在系统目录里，用户就只能自己 `adb push` 再
-/// [`TextSystem::load_font_file`](crate::text::TextSystem::load_font_file)
+/// [`App::load_font`](crate::App::load_font)（`Source::path`）
 /// 手工加载——而那条路**钉不死 generic 家族**，于是「所有文字全大写、数字消失」
 /// 照旧。本配置就是把那三张表从编译期挪到运行期。
 ///
@@ -199,7 +199,7 @@ pub struct AndroidFontConfig {
     /// 内置全 miss 时用户的规则就是唯一的兜底。
     ///
     /// 代价：填错成装饰体家族名会抢走默认位置。但那是**显式要求**（与
-    /// `load_font_file` 后指定家族名同性质），不算引擎的责任。
+    /// `App::load_font` 后指定家族名同性质），不算引擎的责任。
     pub extra_families: Vec<String>,
 }
 

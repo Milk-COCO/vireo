@@ -4,8 +4,8 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let logo = app.load_texture("logo.png");
-    let logo_bg = app.load_texture("logo_bg.png");
+    let logo = app.load_texture_or_placeholder(Source::path("logo.png"));
+    let logo_bg = app.load_texture_or_placeholder(Source::path("logo_bg.png"));
     let idx = app.window(WindowDesc::new("可是我觉得这很神圣啊", 600, 400));
 
     let mut angle: f32 = 0.0;

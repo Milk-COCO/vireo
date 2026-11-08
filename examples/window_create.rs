@@ -29,7 +29,7 @@
 //! ```
 //!
 //! 说明：
-//! - `icon_from_path("logo.png")` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
+//! - `icon_from(Source::path("logo.png"))` 需要工作目录下有图片文件，缺省自动跳过（返回 None）。
 //! - 逐窗口的关窗通知用 `app.on_closing(idx, ..)`（运行期也能挂）；三个窗口全部关闭后进程退出。
 //! - 键盘 `B`：在 W1 检测。在鼠标位置弹出一个无边框小窗（`FrameStyle::Frameless`），
 //!   在发送创建窗口的 1 秒后自动关闭。创建窗口到渲染实际内容有不定长的耗时，期间可能会闪白窗口。
@@ -59,7 +59,7 @@ async fn main() {
             .min_size(320, 240)
             .max_size(1600, 1200)
             .resize_increments(4, 4)
-            .icon_from_path("logo.png"),
+            .icon_from(Source::path("logo.png")),
     );
     app.on_closing(w1, || println!("W1 已关闭"));
 

@@ -160,6 +160,7 @@ pub mod prelude {
     pub use crate::area::Area;
     pub use crate::area::AreaGeom;
     pub use crate::asset::Assets;
+    pub use crate::asset::Source;
     pub use crate::clipboard::clipboard_html;
     pub use crate::clipboard::clipboard_text;
     pub use crate::clipboard::set_clipboard_html;

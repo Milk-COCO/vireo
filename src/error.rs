@@ -7,6 +7,21 @@
 //!
 //! 平台能力型 getter（`is_minimized` / `is_visible` / `fullscreen` / `theme` /
 //! `current_monitor` 等）仍返回 `Option`，因为那里的 `None` 语义是「平台不支持」，不是错误。
+//!
+//! # 失败契约
+//!
+//! **默认返回 `Result`**，静默降级必须由调用方显式选择（名字里写明）：
+//!
+//! | 场景 | 契约 | 例子 |
+//! |---|---|---|
+//! | 数据加载（文件/资源/解码/编译）失败 | `Result<_, VireoError>` | `App::load_texture`、`App::load_font`、材质/管线创建、`Assets::read`、`WindowDesc::try_icon_from` |
+//! | "坏图也要继续画" | 显式 opt-in 的名字，内部才吞错误 | `App::load_texture_or_placeholder` → `Texture::placeholder` |
+//! | 链式 builder 上的装饰性设置 | `log::warn` + 保持原状，并提供 `try_*` 供程序化判断 | `WindowDesc::icon_from` / `try_icon_from` |
+//! | 平台能力查询 | `Option`（`None` = 不支持，不是错误） | `is_minimized`、`theme` |
+//!
+//! **错误类型规则**：库自己的错误一律 [`VireoError`]（含材质/管线创建，诊断文本放在
+//! [`VireoError::Material`] 里）；`ExternalError` / `NotSupportedError` 只用于**透传
+//! winit 语义**的窗口操作（`set_cursor_grab` / `inner_position` 等），不包装。
 
 use std::fmt;
 
@@ -39,6 +54,11 @@ pub enum VireoError {
     /// 与返回 `Option` 的平台查询不同：这里是**动作**（发起选择器、打开 fd），
     /// 失败是错误而不是「无值」，所以用 `Result` + 本变体。
     Unsupported(&'static str),
+    /// 材质 / 计算管线创建失败（WGSL 编译、include 展开、布局不符、着色器入口缺失等）。
+    ///
+    /// 携带原始诊断文本（可能来自 naga / wgpu validation），用于人读；
+    /// **不要**用来写程序逻辑（匹配变体即可）。
+    Material(String),
     /// 其它未分类错误。
     Other(String),
 }
@@ -66,6 +86,7 @@ impl fmt::Display for VireoError {
             ),
             VireoError::UserCancelled => write!(f, "user cancelled the picker"),
             VireoError::Unsupported(what) => write!(f, "{what} is only supported on Android"),
+            VireoError::Material(msg) => write!(f, "material/pipeline creation failed: {msg}"),
             VireoError::Other(msg) => write!(f, "{msg}"),
         }
     }

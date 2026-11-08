@@ -17,11 +17,13 @@ fallback；全都没有该字符 → 画不出（空白或方块）。
 ## 2. 加载自己的字体
 
 ```rust
-// 字节
-gpu.text().load_font(include_bytes!("assets/NotoSansSC-Regular.otf"));
-// 或路径（失败返回 Err(String)）
-gpu.text().load_font_file("assets/NotoSansSC-Regular.otf")?;
+// 来源由 Source 指定（随包资源 / 文件系统 / 字节），三选一
+app.load_font(Source::asset("NotoSansSC-Regular.otf"))?;   // 安卓 APK / 桌面 asset root
+app.load_font(Source::path("assets/NotoSansSC-Regular.otf"))?; // 文件系统
+app.load_font(Source::bytes(&std::fs::read("x.otf")?))?;      // 已读好的字节
 ```
+
+无 `App` 的场景（无头测试等）直接给字节：`gpu.text().load_font(&bytes)`。
 
 加载之后：
 

@@ -4,7 +4,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let tex = Some(app.load_texture("logo.png"));
+    let tex = Some(app.load_texture_or_placeholder(Source::path("logo.png")));
 
     let idx = app.window(WindowDesc::new("Vireo Texture Demo", 800, 600).dpi_override(Some(1.0)));
 

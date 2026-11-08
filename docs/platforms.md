@@ -75,7 +75,7 @@ NDK 版本、16 KB page size 合规、`androidx.games:games-activity` AAR、JNI 
 
 - **默认字体来自系统**：`FontSystem::new()` + `load_system_fonts()`。Windows / macOS / Linux
   用系统字体（中文一般开箱可用），Android 按上面的白名单。
-- 自定义字体：`app.gpu.load_font_file(path)` / `app.gpu.load_font(&bytes)` / `app.load_font_asset(名字)`，
-  再按 `Family::Name` 指定族名。
+- 自定义字体：`app.load_font(Source::path(..))` / `app.load_font(Source::asset(名字))`
+  / `app.load_font(Source::bytes(&b))`（来源显式指定），再按 `Family::Name` 指定族名。
 - 文字是**灰度（或 COLRv1 彩色）图集**光栅化，不是 SDF 字形；缩放窗口时按新 scale 重新
   光栅化（图集有缓存与上限）。

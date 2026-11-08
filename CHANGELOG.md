@@ -18,13 +18,26 @@
   统一入口）。`GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
 - **BREAKING：`GpuContext` 上不再转发任何文字方法，只留 `text()`**：删除
   `measure_text` / `measure_text_visual` / `text_atlas_stats` / `load_font` /
-  `load_font_file` / `make_stable_text` / `preheat_text` / `clear_glyph_cache` /
-  `glyph_cache_len`，以及上一轮已删的 9 个 `typeset_*` 旋钮，全部改用
-  `gpu.text().<对应方法>()`（`measure_text`→`measure`、`measure_text_visual`→
-  `measure_visual`、`text_atlas_stats`→`atlas_stats`、`make_stable_text`→`stable`、
-  `preheat_text`→`preheat`、`clear_glyph_cache`→`clear_resolved_glyph_cache`、
-  `glyph_cache_len`→`resolved_glyph_cache_len`；`load_font_file` 移入 `TextSystem`）。
+  `make_stable_text` / `preheat_text` / `clear_glyph_cache` / `glyph_cache_len`，以及
+  9 个 `typeset_*` 旋钮，全部改用 `gpu.text().<对应方法>()`（`measure_text`→`measure`、
+  `measure_text_visual`→`measure_visual`、`text_atlas_stats`→`atlas_stats`、
+  `make_stable_text`→`stable`、`preheat_text`→`preheat`、`clear_glyph_cache`→
+  `clear_resolved_glyph_cache`、`glyph_cache_len`→`resolved_glyph_cache_len`）。
   理由：两套入口只会让"该改哪个"变模糊，且转发层的文档/参数漂移没有收益。
+- **BREAKING：资源加载统一成「来源 + 一个入口」**：新增
+  [`Source`](src/asset.rs)（`Asset(name)` / `Path(path)` / `Bytes(data)`，显式指定、
+  不自动回退），每个资源只保留一个加载方法：
+
+  | 资源 | 之前 | 现在 |
+  |---|---|---|
+  | 贴图 | `App::load_texture(path)` + `App::load_texture_asset(name)` | `App::load_texture(Source)` |
+  | 字体 | `TextSystem::load_font_file(path)` + `App::load_font_asset(name)` | `App::load_font(Source)`（无 `App` 时仍用 `Texture`/`TextSystem::load_font(bytes)`） |
+  | 窗口图标 | `WindowDesc::icon_from_path(path)` + `icon_from_asset(name)` | `WindowDesc::icon_from(Source)` |
+
+  同时 `Assets` 只有一条构造路径（`Assets::local`），修掉 `icon_from_asset` 曾经自己
+  拼 `Assets::new(current_root())` 绕过 `App::assets()` 的分叉。
+  理由：加载动作原先是"资源类型 × 来源"的笛卡尔积，且字体那条裂在两个类型上 ——
+  用户被迫记住哪个 API 属于谁；现在只需记住"哪种来源"。
 - **BREAKING：排版缓存旋钮只留在 `gpu.text()` 上**：删除 `GpuContext` 上的
   `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` /
   `clear_typeset_cache` / `typeset_len` / `typeset_held_count` / `typeset_stats` /
@@ -40,6 +53,24 @@
   精确 SDF 胖 **+1.5%~+4%**，但尖角并不更锐；每像素 4B 再加 range 补边，导致 **10–20×**
   内存；满屏实测 **821ms/帧**；而「改字号不重建」已由尺寸阶梯以约 1/10 内存实现。
   详见 `docs/reference/text-style.md` §5。
+- **BREAKING：库自己的错误统一为 `VireoError`**：材质 / 计算管线创建原本返回
+  `Result<_, String>`（`App::material` 与 `GpuContext::create_material*` /
+  `create_compute_pipeline`），现在返回 `Result<_, VireoError>`，诊断文本放在新增的
+  `VireoError::Material(..)` 里。`ExternalError` / `NotSupportedError` 只继续用于透传
+  winit 语义的窗口操作（`set_cursor_grab` / `inner_position` 等）。
+- **BREAKING：加载失败不再静默**：`App::load_texture` 现在返回
+  `Result<_, VireoError>`（读不到 / 解码失败），`Texture::from_file` / `from_bytes`
+  同理；「坏图也要继续画」变成显式 opt-in ——
+  `App::load_texture_or_placeholder(..)` → `Texture::placeholder(&gpu)`（棋盘占位图，
+  `Texture::is_placeholder()` 可自查）。`Texture::from_rgba` 的非法参数（宽高为 0、
+  缓冲区太短）从"静默给占位图"改成 `assert!`：那是调用方编程错误，不该被吞。
+  `Texture::wrap(..)` 成为外部构造 `Texture` 的唯一入口（结构体仍可读字段，
+  但不再允许字面量构造）。
+- **窗口图标：`icon_from` 保留最佳努力，新增 `try_icon_from`**：前者失败打 `log::warn`
+  并保持原图标（builder 链式调用不便返回错误），后者返回 `Result<Self, VireoError>`
+  供程序化判断 —— 两者共用同一份解码逻辑。
+- **失败契约写进文档**：`error.rs` 模块文档写明「默认返回 `Result`，静默降级必须由
+  调用方显式选择（名字里写明）」及其四种场景，避免以后按资源类型随手选。
 
 ### Fixed / 修复
 

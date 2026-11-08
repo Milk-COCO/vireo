@@ -14,6 +14,8 @@ pub struct Texture {
     /// 创建时格式。离屏画布据此检测 `GpuContext::surface_format` 漂移
     /// （GLES 首帧由默认 sRGB 翻为线性格式）并重建目标纹理。
     pub format: wgpu::TextureFormat,
+    /// 这张图是不是 [`Texture::placeholder`] 生成的棋盘占位图。
+    pub(crate) placeholder: bool,
 }
 
 impl Texture {
@@ -72,6 +74,30 @@ impl Texture {
             width,
             height,
             format,
+            placeholder: false,
+        }
+    }
+
+    /// 用现成的 wgpu 对象包装一张纹理（compute / 自建 pass / 外部管线产出）。
+    ///
+    /// 宽高从 `texture.size()` 取；`bind_group` 需按 `gpu.texture_bind_group_layout`
+    /// 建好（采样器槽在 binding 1）。这是外部构造 `Texture` 的**唯一**方式 ——
+    /// 结构体字段仍可读，但不再允许字面量构造（避免漏掉内部标记）。
+    pub fn wrap(
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        bind_group: wgpu::BindGroup,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let size = texture.size();
+        Self {
+            texture,
+            view,
+            bind_group,
+            width: size.width,
+            height: size.height,
+            format,
+            placeholder: false,
         }
     }
 
@@ -80,58 +106,63 @@ impl Texture {
         crate::render::RenderTarget::from_texture_view(self.view.clone())
     }
 
+    /// 这张纹理是不是 [`Texture::placeholder`] 生成的棋盘占位图。
+    ///
+    /// `from_file` / `from_bytes` 失败会返回 `Err`（不再静默变占位图）；占位图只由
+    /// 调用方**显式**要求（`Texture::placeholder` / `App::load_texture_or_placeholder`）
+    /// 时产生。本方法用来在调试/断言里确认没有把占位图当成真图用。
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
+    }
+
     // ---- 从文件/RGBA 加载 ----
 
     /// 从文件加载纹理（自动识别 png/jpg/bmp）。
-    /// 读取或解码失败时打印错误并返回 ffcc00/6699ff 棋盘 missing 纹理。
-    pub fn from_file(path: impl AsRef<std::path::Path>, gpu: &GpuContext) -> Self {
-        match std::fs::read(path.as_ref()) {
-            Ok(data) => Self::from_bytes(&data, gpu),
-            Err(e) => {
-                log::error!("Texture::from_file: failed to read file: {}", e);
-                create_missing_checker(gpu)
-            }
-        }
+    ///
+    /// 读文件或解码失败返回 [`VireoError`]；要"失败也能画"的行为用
+    /// [`App::load_texture_or_placeholder`](crate::App::load_texture_or_placeholder)
+    /// 或显式 [`Texture::placeholder`]。
+    pub fn from_file(
+        path: impl AsRef<std::path::Path>,
+        gpu: &GpuContext,
+    ) -> Result<Self, crate::error::VireoError> {
+        let data = std::fs::read(path.as_ref()).map_err(|e| {
+            crate::error::VireoError::Other(format!("read {}: {e}", path.as_ref().display()))
+        })?;
+        Self::from_bytes(&data, gpu)
     }
 
-    /// 从内存字节加载纹理（自动识别 png/jpg/bmp）。
-    /// 解码失败或数据非法时打印错误并返回 ffcc00/6699ff 棋盘 missing 纹理。
-    pub fn from_bytes(data: &[u8], gpu: &GpuContext) -> Self {
-        match image::load_from_memory(data) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (width, height) = rgba.dimensions();
-                Self::from_rgba(width, height, &rgba, gpu)
-            }
-            Err(e) => {
-                log::error!("Texture::from_bytes: failed to decode image: {}", e);
-                create_missing_checker(gpu)
-            }
-        }
+    /// 从内存字节加载纹理（自动识别 png/jpg/bmp）；解码失败返回 [`VireoError`]。
+    pub fn from_bytes(data: &[u8], gpu: &GpuContext) -> Result<Self, crate::error::VireoError> {
+        let img = image::load_from_memory(data).map_err(|e| {
+            crate::error::VireoError::Other(format!("decode image ({} bytes): {e}", data.len()))
+        })?;
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok(Self::from_rgba(width, height, &rgba, gpu))
+    }
+
+    /// 棋盘占位纹理（ffcc00/6699ff 8×8）。
+    ///
+    /// 加载失败但应用仍需继续画时**显式**用它 —— 不再有"静默变占位图"的路径。
+    pub fn placeholder(gpu: &GpuContext) -> Self {
+        create_missing_checker(gpu)
     }
 
     /// 从 RGBA 像素数据创建纹理。
-    /// 非法输入（宽高为0或数据长度不足）时打印错误并返回 ffcc00/6699ff 棋盘 missing 纹理。
+    ///
+    /// 宽高为 0 或数据不足属于**调用方编程错误**，直接 `assert!`（不是静默占位）。
     pub fn from_rgba(width: u32, height: u32, pixels: &[u8], gpu: &GpuContext) -> Self {
-        if width == 0 || height == 0 {
-            log::error!(
-                "Texture::from_rgba: width/height must be > 0 (got {}x{})",
-                width,
-                height
-            );
-            return create_missing_checker(gpu);
-        }
+        assert!(
+            width > 0 && height > 0,
+            "Texture::from_rgba: width/height must be > 0 (got {width}x{height})"
+        );
         let needed = (width as usize) * (height as usize) * 4;
-        if pixels.len() < needed {
-            log::error!(
-                "Texture::from_rgba: pixel buffer too short (need {} bytes for {}x{} RGBA, got {})",
-                needed,
-                width,
-                height,
-                pixels.len()
-            );
-            return create_missing_checker(gpu);
-        }
+        assert!(
+            pixels.len() >= needed,
+            "Texture::from_rgba: pixel buffer too short (need {needed} bytes for {width}x{height} RGBA, got {})",
+            pixels.len()
+        );
         let size = wgpu::Extent3d {
             width,
             height,
@@ -184,6 +215,7 @@ impl Texture {
             width,
             height,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            placeholder: false,
         }
     }
 
@@ -218,6 +250,7 @@ impl Texture {
             width: self.width,
             height: self.height,
             format: self.format,
+            placeholder: self.placeholder,
         }
     }
 
@@ -257,7 +290,9 @@ fn make_bind_group(
     })
 }
 
-/// 生成 ffcc00 / 6699ff 棋盘 missing 纹理（8x8）。
+/// 生成 ffcc00 / 6699ff 棋盘 missing 纹理（8x8），并标记为占位图。
+///
+/// 只由 [`Texture::placeholder`] 调用；`from_*` 不会再静默产出它。
 fn create_missing_checker(gpu: &GpuContext) -> Texture {
     const W: u32 = 8;
     const H: u32 = 8;
@@ -270,5 +305,7 @@ fn create_missing_checker(gpu: &GpuContext) -> Texture {
             data.extend_from_slice(&c);
         }
     }
-    Texture::from_rgba(W, H, &data, gpu)
+    let mut tex = Texture::from_rgba(W, H, &data, gpu);
+    tex.placeholder = true;
+    tex
 }

@@ -69,7 +69,7 @@ async fn main() {
     }
 
     // 随包贴图。桌面和安卓同一行 —— 差别只在文件放哪。
-    let tex = app.load_texture_asset("logo.png");
+    let tex = app.load_texture_or_placeholder(Source::asset("logo.png"));
 
     // ---- 写：三个可写目录 --------------------------------------------------
     lines.push(format!("[dir] storage_name = {:?}", app.storage_name()));
@@ -148,7 +148,7 @@ async fn main() {
         draw_text(
             &mut batch.texts,
             "assets/logo.png —— 桌面在 examples/assets/，安卓在 src/main/assets/\n\
-             同一行代码：app.load_texture_asset(\"logo.png\")",
+             同一行代码：app.load_texture_or_placeholder(Source::asset(\"logo.png\"))",
             Pos::new(160.0, logo_y + 30.0),
             TextDef::default().font_size(14.0),
             TextOverride::from_color(DIM),

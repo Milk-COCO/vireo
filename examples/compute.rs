@@ -106,14 +106,12 @@ async fn main() {
             },
         ],
     });
-    let field = Texture {
-        texture: storage_tex,
-        view: storage_view,
-        bind_group: display_bg,
-        width: SIZE,
-        height: SIZE,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-    };
+    let field = Texture::wrap(
+        storage_tex,
+        storage_view,
+        display_bg,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
 
     let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("compute params"),

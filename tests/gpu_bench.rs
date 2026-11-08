@@ -2978,8 +2978,7 @@ fn colr_v1_emoji_visible_end_to_end() {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     gpu.text()
-        .load_font_file(path)
-        .expect("load COLRv1 test font");
+        .load_font(&std::fs::read(path).expect("read COLRv1 test font"));
     let canvas = OffscreenCanvas::new(&gpu, 400, 300);
 
     let def = TextDef::default()
@@ -3020,8 +3019,7 @@ fn colr_v1_atlas_grow_keeps_glyphs() {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     gpu.text()
-        .load_font_file(path)
-        .expect("load COLRv1 test font");
+        .load_font(&std::fs::read(path).expect("read COLRv1 test font"));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
     // 8 个经单元测试确认走 COLRv1 的字形（见 src/glyphon/colr.rs）。
@@ -3092,8 +3090,7 @@ fn colr_v1_perf_cold_vs_warm() {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let gpu = Arc::new(GpuContext::new(&instance));
     gpu.text()
-        .load_font_file(path)
-        .expect("load COLRv1 test font");
+        .load_font(&std::fs::read(path).expect("read COLRv1 test font"));
     let canvas = OffscreenCanvas::new(&gpu, 900, 700);
 
     // 8 个确认走 COLRv1 的字形 × 13 个字号 = 104 个独立 cache key。
@@ -4528,14 +4525,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             },
         ],
     });
-    let field = Texture {
-        texture: tex,
-        view: view.clone(),
-        bind_group: display_bg,
-        width: size,
-        height: size,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-    };
+    let field = Texture::wrap(
+        tex,
+        view.clone(),
+        display_bg,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
 
     let bgl = gpu
         .device

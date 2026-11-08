@@ -6,7 +6,7 @@ use vireo::prelude::*;
 
 #[vireo::main]
 async fn main() {
-    let tex = app.load_texture("logo_bg.png");
+    let tex = app.load_texture_or_placeholder(Source::path("logo_bg.png"));
     let idx = app.window(WindowDesc::new("Texture Sub-Region", 450, 220));
 
     app.run(move |ctx| {

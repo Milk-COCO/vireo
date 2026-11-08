@@ -1,11 +1,11 @@
-//! 自定义字体：`load_font_file` / `load_font` + `Family::Name`
+//! 自定义字体：`app.load_font(Source::…)` + `Family::Name`
 //!
 //! 默认尝试加载系统 Consolas / Segoe UI；失败时回退到内置族名对比。
 
 use vireo::prelude::*;
 
 fn try_load(app: &App, path: &str) -> bool {
-    match app.gpu.text().load_font_file(path) {
+    match app.load_font(Source::path(path)) {
         Ok(()) => {
             eprintln!("loaded font: {path}");
             true
@@ -19,7 +19,7 @@ fn try_load(app: &App, path: &str) -> bool {
 
 #[vireo::main]
 async fn main() {
-    // load_font_file：系统 TTF
+    // 文件系统来源（Source::path）：系统 TTF
     let consolas = try_load(&app, r"C:\Windows\Fonts\consola.ttf");
     let segoe = try_load(&app, r"C:\Windows\Fonts\segoeui.ttf");
 
@@ -41,7 +41,7 @@ async fn main() {
 
         draw_text(
             &mut batch.texts,
-            "Custom fonts (load_font / load_font_file)",
+            "Custom fonts (Source::path / Source::asset)",
             Pos::new(24.0, 24.0),
             TextDef::default().font_size(22.0).with_weight(Weight::BOLD),
             TextOverride::from_color(GOLD),
@@ -98,7 +98,7 @@ async fn main() {
 
         draw_text(
             &mut batch.texts,
-            "Place/override with any TTF/OTF path in load_font_file.",
+            "Place/override with Source::path(..) or Source::asset(..).",
             Pos::new(24.0, y),
             TextDef::default().font_size(13.0),
             TextOverride::from_color(Color::new(0.5, 0.55, 0.65, 1.0)),

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::FxHashMap;
 use wgpu::util::DeviceExt;
 
+use crate::error::VireoError;
 use crate::glyphon::ColorMode;
 use crate::material::Material;
 use crate::text::{TextContext, TextSystem};
@@ -1117,8 +1118,12 @@ impl GpuContext {
     /// are available on the returned material.
     ///
     /// For group 3 resources, use [`create_material_with_resources`](Self::create_material_with_resources).
-    pub fn create_material(&self, source: &str) -> Result<Arc<Material>, String> {
+    ///
+    /// 失败返回 [`VireoError::Material`]（WGSL 编译 / include 展开 / 布局不符的诊断文本
+    /// 都在里面）。
+    pub fn create_material(&self, source: &str) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner(source, None, None, None)
+            .map_err(VireoError::Material)
     }
 
     /// Creates a material (no group 3) with a custom shape vertex shader.
@@ -1135,8 +1140,9 @@ impl GpuContext {
         source: &str,
         vertex_source: &str,
         layout: ShapeVertexLayout,
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner(source, Some(vertex_source.to_owned()), Some(layout), None)
+            .map_err(VireoError::Material)
     }
 
     /// Creates a material from resource descriptors (engine builds BGL, injects WGSL, AutoDefaults).
@@ -1144,8 +1150,9 @@ impl GpuContext {
         &self,
         source: &str,
         resources: crate::material::MaterialResources<'_>,
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner(source, None, None, Some(resources))
+            .map_err(VireoError::Material)
     }
 
     /// Creates a material from resource descriptors with custom vertex shader.
@@ -1156,13 +1163,14 @@ impl GpuContext {
         vertex_source: &str,
         layout: ShapeVertexLayout,
         resources: crate::material::MaterialResources<'_>,
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner(
             source,
             Some(vertex_source.to_owned()),
             Some(layout),
             Some(resources),
         )
+        .map_err(VireoError::Material)
     }
 
     /// Creates a material with user-provided BGL (caller must install `set_bind_group_provider` before draw).
@@ -1170,8 +1178,9 @@ impl GpuContext {
         &self,
         source: &str,
         bgl: &wgpu::BindGroupLayout,
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner_manual(source, None, None, bgl)
+            .map_err(VireoError::Material)
     }
 
     /// Creates a material with user-provided BGL and custom vertex shader.
@@ -1182,8 +1191,9 @@ impl GpuContext {
         vertex_source: &str,
         layout: ShapeVertexLayout,
         bgl: &wgpu::BindGroupLayout,
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         self.create_material_inner_manual(source, Some(vertex_source.to_owned()), Some(layout), bgl)
+            .map_err(VireoError::Material)
     }
 
     fn create_material_inner(
@@ -1484,11 +1494,13 @@ impl GpuContext {
         &self,
         source: &str,
         entries: &[(u32, &wgpu::BindGroupLayout)],
-    ) -> Result<Arc<Material>, String> {
+    ) -> Result<Arc<Material>, VireoError> {
         if entries.is_empty() {
-            return Err("create_material_self_managed: entries 不能为空".to_owned());
+            return Err(VireoError::Material(
+                "create_material_self_managed: entries 不能为空".to_owned(),
+            ));
         }
-        let source = crate::material::expand_includes(source)?;
+        let source = crate::material::expand_includes(source).map_err(VireoError::Material)?;
         let mut pipelines = FxHashMap::default();
 
         // 自管材质没有 custom VS：只探测一次（Mesh），保证 fragment shader 编不过时
@@ -1513,7 +1525,11 @@ impl GpuContext {
                 probe_layout,
                 &blends,
             )
-            .map_err(|err| format!("self-managed custom material failed to compile: {err}"))?;
+            .map_err(|err| {
+                VireoError::Material(format!(
+                    "self-managed custom material failed to compile: {err}"
+                ))
+            })?;
         pipelines.insert(
             (
                 material_pipeline_key(

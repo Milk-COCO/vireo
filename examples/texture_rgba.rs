@@ -44,10 +44,9 @@ async fn main() {
     let grad = Texture::from_rgba(128, 64, &gradient(128, 64), &app.gpu);
 
     // from_bytes：嵌入 PNG（若仓库有 logo.png）
-    let embedded = match std::fs::read("logo.png") {
-        Ok(bytes) => Some(Texture::from_bytes(&bytes, &app.gpu)),
-        Err(_) => None,
-    };
+    let embedded = std::fs::read("logo.png")
+        .ok()
+        .and_then(|bytes| Texture::from_bytes(&bytes, &app.gpu).ok());
 
     let idx = app.window(WindowDesc::new("Texture RGBA", 720, 420).dpi_override(Some(1.0)));
 

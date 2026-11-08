@@ -22,7 +22,7 @@
 | `text_hud` | HUD 分段：Normal / Dynamic / Glyphs + 自动切分（分数、计时等） |
 | `text_measure` | 文本测量：画 X 验证 bounding box 准确 |
 | `text_transform` | 文字跟随变换：旧 API（不吃变换）vs `batch.text(..)` |
-| `text_font` | 自定义字体：`load_font_file` / `load_font` + `Family::Name` |
+| `text_font` | 自定义字体：`app.load_font(Source::…)` + `Family::Name` |
 | `text_clip` | 文字裁切与对齐：`TextOverride::clip` + Justified / End / max_width |
 | `text_batch_clip` | 文字 + batch 裁切（单层，无嵌套） |
 | `text_typeset_cache` | 文字**排版缓存**压力：固定文案池 vs 每帧新串的命中率 + 动态 transform |

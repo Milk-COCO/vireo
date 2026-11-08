@@ -203,19 +203,15 @@ impl TextSystem {
     }
 
     /// 加载自定义字体（TTF/OTF 字节数据）。
+    ///
+    /// 需要从文件/随包资源加载时用 [`App::load_font`](crate::App::load_font)
+    /// （它接受 [`Source`](crate::asset::Source)）；无 `App` 的场景自己读字节
+    /// 后调用本方法。
     pub fn load_font(&self, data: &[u8]) {
         let mut ctx = self.ctx();
         ctx.font_system.db_mut().load_font_data(data.to_vec());
         // Font fallback 可能变化，排版缓存与 resolved glyph 必须重建。
         // 活跃 `StableText` 句柄故意保留：它们已经 shape 过并自己持有 Buffer。
         ctx.clear_typeset_cache();
-    }
-
-    /// 从文件加载字体（TTF/OTF），等价于读文件后调用 [`Self::load_font`]。
-    pub fn load_font_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
-        let data =
-            std::fs::read(path.as_ref()).map_err(|e| format!("failed to read font file: {}", e))?;
-        self.load_font(&data);
-        Ok(())
     }
 }

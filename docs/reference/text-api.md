@@ -236,7 +236,7 @@ batch.text_stable(&h, Pos::new(24.0, 64.0), TextOverride::default());
 | `measure(text, &def)` / `measure_visual(text, &def)` | 排版尺寸 / 视觉外框（含样式外扩） |
 | `stable(text, &def)` | 创建 `StableText` 句柄（预 shape，跨帧复用） |
 | `preheat(&device, &queue, w, h)` | 首帧懒初始化（需 renderer 已 resize） |
-| `load_font(bytes)` / `load_font_file(path)` | 加载自定义字体（会清排版与解析缓存） |
+| `load_font(bytes)` | 加载自定义字体（会清排版与解析缓存） |
 | `glyphs() -> GlyphCache<'_>` | 字形缓存视图（见下） |
 | `atlas_stats()` | 图集尺寸/字节/条目数（`TextAtlasStats`） |
 | `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` | 排版缓存旋钮 |

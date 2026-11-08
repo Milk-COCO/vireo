@@ -451,74 +451,52 @@ impl WindowDesc {
         self
     }
 
-    /// 从图片文件加载窗口图标（PNG/JPG/BMP）。任一步失败（读文件/解码/
-    /// `Icon` 构造）则打 `log::warn!` 并保持原图标不变。
+    /// 从图片加载窗口图标（PNG/JPG/BMP），来源由
+    /// [`Source`](crate::asset::Source) 指定。
+    ///
+    /// ```ignore
+    /// WindowDesc::new(..).icon_from(Source::asset("logo.png"))    // 随包资源（安卓可用）
+    /// WindowDesc::new(..).icon_from(Source::path("assets/a.png")) // 文件系统
+    /// ```
+    ///
+    /// 这是**最佳努力**版本：任一步失败（读/解码/`Icon` 构造）打 `log::warn!` 并保持
+    /// 原图标不变。需要程序化处理失败用 [`Self::try_icon_from`]（返回 `Result`）——
+    /// 两者共用同一份解码逻辑，只是错误去向不同。
     ///
     /// ## Platform-specific
     ///
-    /// - **Android：无效果**（同 [`Self::icon`]）—— 但**文件读取仍会执行**，
-    ///   所以路径错误依然会打 `log::warn!`，别把它当成 Android 上的可用 API。
-    pub fn icon_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
-        let path = path.as_ref();
-        match std::fs::read(path)
-            .map_err(|e| format!("read: {e:?}"))
-            .and_then(|data| image::load_from_memory(&data).map_err(|e| format!("decode: {e}")))
-            .and_then(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                Icon::from_rgba(rgba.into_raw(), w, h)
-                    .map_err(|e| format!("Icon::from_rgba: {e:?}"))
-            }) {
-            Ok(icon) => {
-                self.window_icon = Some(icon);
-            }
-            Err(stage) => {
-                log::warn!(
-                    "vireo icon_from_path({}) failed at {} — icon unchanged",
-                    path.display(),
-                    stage
-                );
+    /// - **Android：无效果**（同 [`Self::icon`]）—— 但**读取仍会执行**，所以错名依然
+    ///   会打 `log::warn!`，别把它当成 Android 上的可用 API。
+    pub fn icon_from(self, src: crate::asset::Source<'_>) -> Self {
+        match Self::decode_icon(src) {
+            Ok(icon) => self.icon(icon),
+            Err(e) => {
+                log::warn!("vireo WindowDesc::icon_from({src:?}) failed: {e} — icon unchanged");
+                self
             }
         }
-        self
     }
 
-    /// 从**随包资源**加载窗口图标（PNG/JPG/BMP）。
+    /// 从图片加载窗口图标，失败返回 [`VireoError`]（不打印、不改图标）。
     ///
-    /// 与 [`Self::icon_from_path`] 的区别是数据来源：那个读文件系统，这个读
-    /// [`App::assets`](crate::App::assets) —— 安卓 = APK 内的
-    /// `src/main/assets/`，桌面 = [`App::set_asset_root`](crate::App::set_asset_root)
-    /// 指定的目录。
-    ///
-    /// 安卓上想用图标**必须**用这个（`icon_from_path` 在安卓读不到 APK 内的文件）。
-    ///
-    /// 失败时打 `log::warn!` 并保持原图标不变。
-    ///
-    /// ## Platform-specific
-    ///
-    /// - **Android：有效**（`icon_from_path` 在此无效，见其文档）
-    /// - **其它平台：有效**，但等价于「按资产根目录拼路径再读」——
-    ///   桌面开发时把文件放 `./assets/`，安卓放 `src/main/assets/`，同一份代码。
-    pub fn icon_from_asset(mut self, name: &str) -> Self {
-        let assets = crate::asset::Assets::new(crate::asset::current_root());
-        match assets
-            .read(name)
-            .map_err(|e| format!("read: {e}"))
-            .and_then(|data| image::load_from_memory(&data).map_err(|e| format!("decode: {e}")))
-            .and_then(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                Icon::from_rgba(rgba.into_raw(), w, h)
-                    .map_err(|e| format!("Icon::from_rgba: {e:?}"))
-            }) {
-            Ok(icon) => {
-                self.window_icon = Some(icon);
-            }
-            Err(stage) => {
-                log::warn!("vireo icon_from_asset({name}) failed at {stage} — icon unchanged");
-            }
-        }
-        self
+    /// 语义与 [`Self::icon_from`] 相同，区别只在错误去向。
+    pub fn try_icon_from(
+        mut self,
+        src: crate::asset::Source<'_>,
+    ) -> Result<Self, crate::error::VireoError> {
+        let icon = Self::decode_icon(src)?;
+        self.window_icon = Some(icon);
+        Ok(self)
+    }
+
+    fn decode_icon(src: crate::asset::Source<'_>) -> Result<Icon, crate::error::VireoError> {
+        let data = src.read()?;
+        let img = image::load_from_memory(&data)
+            .map_err(|e| crate::error::VireoError::Other(format!("decode icon: {e}")))?;
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Icon::from_rgba(rgba.into_raw(), w, h)
+            .map_err(|e| crate::error::VireoError::Other(format!("Icon::from_rgba: {e:?}")))
     }
 
     pub fn theme(mut self, theme: winit::window::Theme) -> Self {

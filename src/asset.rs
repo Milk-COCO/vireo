@@ -4,20 +4,23 @@
 //!
 //! 安卓上「随安装包发布的图片/字体/关卡」**不在文件系统上** —— 它们是 APK 这个
 //! zip 包里的一项，必须经 `AssetManager` / `AAssetManager` 读取，`std::fs::read`
-//! **读不到**。所以桌面能跑的 `load_texture("bg.png")` 在安卓上必然失败。
+//! **读不到**。所以桌面能跑的 `load_texture(Source::path("bg.png"))` 在安卓上必然
+//! 失败。
 //!
-//! 本模块提供**显式**入口，不改动任何既有路径 API 的语义：
+//! 本模块提供**显式**来源：[`Source`] 只有三种取值 —— 随包资源 / 文件系统路径 /
+//! 已读好的字节。加载类 API（`App::load_texture` / `App::load_font` /
+//! `WindowDesc::icon_from`）都只收一个 [`Source`]，来源由调用方写明，引擎不猜。
 //!
-//! - [`App::load_texture`] / [`App::load_font_file`] / [`WindowDesc::icon_from_path`]
-//!   保持**纯 `std::fs`**：给真实路径，或安卓上你自己有权限的绝对路径。
-//! - [`Assets`] 是另一条路：安卓 = APK assets，桌面 = [`App::set_asset_root`]
+//! - [`Source::Asset`] 走 [`Assets`]：安卓 = APK assets，桌面 = [`App::set_asset_root`]
 //!   指定的目录。
+//! - [`Source::Path`] 是纯 `std::fs`：给真实路径，或安卓上你自己有权限的绝对路径。
+//! - [`Source::Bytes`] 直接用已有字节（下载/生成/嵌入的场景）。
 //!
 //! # 为什么不自动回退
 //!
 //! 曾经考虑「相对路径先查 assets 再查文件系统」。**否决**：那会让同一份代码在两个
 //! 平台上**资源来源不同且不报错** —— 桌面调通了，安卓静默换成另一张图，排查成本
-//! 极高。两条路各自显式，语义唯一。
+//! 极高。来源显式，语义唯一。
 //!
 //! # 目录约定
 //!
@@ -30,9 +33,9 @@
 //!
 //! [`App`]: crate::App
 //! [`App::load_texture`]: crate::App::load_texture
-//! [`App::load_font_file`]: crate::App::load_font_file
+//! [`App::load_font`]: crate::App::load_font
 //! [`App::set_asset_root`]: crate::App::set_asset_root
-//! [`WindowDesc::icon_from_path`]: crate::WindowDesc::icon_from_path
+//! [`WindowDesc::icon_from`]: crate::WindowDesc::icon_from
 
 use crate::error::VireoError;
 
@@ -119,6 +122,76 @@ impl Assets {
 impl std::fmt::Debug for Assets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Assets").field("root", &self.root).finish()
+    }
+}
+
+impl Assets {
+    /// 当前平台的资源句柄（安卓恒为 `None` 根；桌面取 `set_asset_root` 的目录）。
+    ///
+    /// 这是 `Assets` 的**唯一**构造路径 —— `App::assets`、`Source::read`、
+    /// `WindowDesc` 的图标加载都走它，避免"第二个构造点"在平台差异上分叉。
+    pub(crate) fn local() -> Self {
+        #[cfg(target_os = "android")]
+        {
+            Self::new(None)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Self::new(current_root())
+        }
+    }
+}
+
+/// 资源来源。
+///
+/// 三种来源互斥、**不做自动回退**：给了哪个就从哪读，读不到就是错误
+/// （理由见模块文档顶部「为什么不自动回退」）。
+///
+/// 用法：
+///
+/// ```ignore
+/// app.load_texture(Source::asset("logo.png"));     // 随包资源
+/// app.load_texture(Source::path("assets/bg.png")); // 文件系统
+/// app.load_texture(Source::bytes(&bytes));         // 已有的字节
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub enum Source<'a> {
+    /// 随包资源名（安卓 = APK 内 `assets/`，桌面 = `set_asset_root` 的目录）。
+    Asset(&'a str),
+    /// 文件系统路径。
+    Path(&'a std::path::Path),
+    /// 已经读好的字节。
+    Bytes(&'a [u8]),
+}
+
+impl<'a> Source<'a> {
+    /// 随包资源。
+    pub const fn asset(name: &'a str) -> Self {
+        Self::Asset(name)
+    }
+
+    /// 文件系统路径。
+    pub fn path<P: AsRef<std::path::Path> + ?Sized>(path: &'a P) -> Self {
+        Self::Path(path.as_ref())
+    }
+
+    /// 已读好的字节。
+    pub const fn bytes(data: &'a [u8]) -> Self {
+        Self::Bytes(data)
+    }
+
+    /// 读取全部字节。
+    ///
+    /// `Asset` 走平台资源读取（安卓 `AssetManager` / 桌面资产根），`Path` 走
+    /// `std::fs`，`Bytes` 直接借用（不复制）。
+    pub fn read(self) -> Result<std::borrow::Cow<'a, [u8]>, VireoError> {
+        match self {
+            Self::Asset(name) => Assets::local().read(name).map(std::borrow::Cow::Owned),
+            Self::Path(path) => std::fs::read(path)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| VireoError::Other(format!("read {}: {e}", path.display()))),
+            Self::Bytes(data) => Ok(std::borrow::Cow::Borrowed(data)),
+        }
     }
 }
 
@@ -288,11 +361,11 @@ fn list_impl(_root: Option<&std::path::Path>, dir: &str) -> Result<Vec<String>, 
 /// **是 `Mutex` 不是 `OnceLock`** —— 后者只能设一次，而 `set_asset_root` 的契约是
 /// 「重复调用以最后一次为准」。
 ///
-/// 进程级而非 `App` 字段的原因：[`WindowDesc::icon_from_asset`] 是**构建期**调用的
-/// （`App::window(WindowDesc::new(..).icon_from_asset(..))`），那时还没有可用的
-/// `App` 句柄。资产根必须是构建期就能读到的东西。
+/// 进程级而非 `App` 字段的原因：[`WindowDesc::icon_from`] 是**构建期**调用的
+/// （`App::window(WindowDesc::new(..).icon_from(Source::asset(..)))`），那时还没有
+/// 可用的 `App` 句柄。资产根必须是构建期就能读到的东西。
 ///
-/// [`WindowDesc::icon_from_asset`]: crate::WindowDesc::icon_from_asset
+/// [`WindowDesc::icon_from`]: crate::WindowDesc::icon_from
 #[cfg(not(target_os = "android"))]
 pub(crate) static ASSET_ROOT: parking_lot::Mutex<Option<std::path::PathBuf>> =
     parking_lot::Mutex::new(None);

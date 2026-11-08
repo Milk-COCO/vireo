@@ -71,7 +71,7 @@ fn draw_shapes(batch: &mut DrawBatch) {
 
 #[vireo::main]
 async fn main() {
-    let tex = Some(app.load_texture("logo_quad.png"));
+    let tex = Some(app.load_texture_or_placeholder(Source::path("logo_quad.png")));
 
     let idx = app.window(WindowDesc::new("Texture: Geometry vs SDF", 760, 380));
 
