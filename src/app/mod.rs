@@ -701,11 +701,11 @@ impl App {
         // 有没有图标，已删除）。
         let default_icon = {
             const LOGO: &[u8] = include_bytes!("../../logo.png");
-            image::load_from_memory(LOGO).ok().and_then(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                Icon::from_rgba(rgba.into_raw(), w, h).ok()
-            })
+            // 编译期嵌入的图标：解不出来是库自己的 bug，直接炸比"静默没图标"好排查。
+            let img = image::load_from_memory(LOGO).expect("embedded logo.png must decode");
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            Some(Icon::from_rgba(rgba.into_raw(), w, h).expect("embedded logo.png is a valid icon"))
         };
         let init_duration = init_start.elapsed().as_secs_f64();
 

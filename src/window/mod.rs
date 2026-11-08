@@ -1500,7 +1500,16 @@ impl VireoWindow {
 
     /// 用保留的 Instance + Window 重建 surface（`CurrentSurfaceTexture::Lost`）。
     fn recreate_surface(&self) -> Option<wgpu::Surface<'static>> {
-        self.instance.create_surface(self.inner.clone()).ok()
+        match self.instance.create_surface(self.inner.clone()) {
+            Ok(surface) => Some(surface),
+            Err(e) => {
+                log::warn!(
+                    "vireo: surface recreation failed ({e}) — this window stays without a \
+                     surface until the next attempt"
+                );
+                None
+            }
+        }
     }
 
     /// 上一帧 draw 阶段实际发出的 shape draw_indexed 调用次数（渲染器真实统计）。
