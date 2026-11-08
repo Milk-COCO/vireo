@@ -84,6 +84,92 @@ pub struct StableText {
     pub(crate) text: String,
     /// 实际 layout 行数（包含 `max_width` 自动折行后产生的多行）。culling 高度用。
     pub(crate) line_count: u32,
+    /// 创建时的完整定义（含样式）：实例固化要靠它复算样式参数。
+    pub(crate) def: TextDef,
+    /// 烘焙实例块（跨帧复用；失效时自动重烘）。
+    pub(crate) baked: Arc<BakedHandle>,
+}
+
+/// 烘焙实例的失效键。任一字段变化都要重烘。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BakeKey {
+    /// 图集布局代数（缩图集 / 重建 / 淘汰 / 清空 / 装载）。
+    pub(crate) mask_epoch: u64,
+    pub(crate) color_epoch: u64,
+    /// DPI（按位比较）。
+    pub(crate) scale_bits: u32,
+    /// 物理裁剪框。
+    pub(crate) bounds: [i32; 4],
+    /// 该条目是否走"带物理变换"的路径（clip 的处理方式随之不同）。
+    pub(crate) transform_is_zero: bool,
+}
+
+/// 烘焙实例里"跟随绘制颜色"的占位色。
+///
+/// 实例的 `color` 不是都该跟着 `TextOverride` 变：几何描边用它自己的颜色、逐字覆盖
+/// （`glyph.color_opt`）也各是各的。烘焙时把**等于条目颜色**的那些实例改写成这个哨兵，
+/// 复用打补丁时只把哨兵换成本帧颜色，其余原样保留。
+pub(crate) const BAKED_FILL_SENTINEL: u32 = 0x00AB_CDEF;
+
+/// 烘焙好的实例块：`StableText` 每帧只把它拷进帧实例数组并打几个补丁。
+pub(crate) struct BakedBlock {
+    /// 烘焙时的整数物理原点（`floor(pos × scale)`）。实例是**本地坐标**，
+    /// 绘制位置 = 本地 + 整数位移 + 变换槽里的平移量。
+    pub(crate) origin: (i32, i32),
+    pub(crate) instances: Vec<crate::glyphon::GlyphToRender>,
+    pub(crate) key: BakeKey,
+}
+
+/// 烘焙状态 + 计数。`stable` 句柄与它的每个 `TextEntry::Stable` 共享同一个实例。
+///
+/// 类型本身公开只是因为 `TextEntry::Stable` 的字段是公开枚举字段；字段与构造都是
+/// crate 内部使用，外部没有可用的方法。
+#[doc(hidden)]
+pub struct BakedHandle {
+    pub(crate) block: std::sync::Mutex<Option<BakedBlock>>,
+    /// 累计烘焙次数（观测 + 用例用）。
+    pub(crate) bakes: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for BakedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BakedHandle")
+            .field(
+                "instances",
+                &self.with_block(|b| b.map(|b| b.instances.len())),
+            )
+            .field("bakes", &self.bakes())
+            .finish()
+    }
+}
+
+impl Default for BakedHandle {
+    fn default() -> Self {
+        Self {
+            block: std::sync::Mutex::new(None),
+            bakes: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl BakedHandle {
+    /// 在持锁状态下读烘焙块（拷贝/判定都在锁内完成，不跨 prepare 调用）。
+    pub(crate) fn with_block<R>(&self, f: impl FnOnce(Option<&BakedBlock>) -> R) -> R {
+        let guard = self.block.lock().unwrap_or_else(|e| e.into_inner());
+        f(guard.as_ref())
+    }
+
+    /// 写入新的烘焙块并计数。
+    pub(crate) fn store(&self, block: Option<BakedBlock>) {
+        let mut guard = self.block.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = block;
+        self.bakes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn bakes(&self) -> u64 {
+        self.bakes.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl StableText {
@@ -105,6 +191,33 @@ impl StableText {
     /// 实际行数（≥ 1；`max_width` 折行后可能 > 1）。
     pub fn line_count(&self) -> u32 {
         self.line_count
+    }
+
+    /// 预烘焙实例（像 `prewarm` 一样，把"首次绘制"的成本提前付掉）。
+    ///
+    /// 实例固化是**自动**的：首次 `text_stable` 绘制就会烘焙；这个入口只是让加载界面
+    /// 承担那一次成本。返回本次烘焙的实例数（0 = 没有可画的字形）。
+    ///
+    /// 烘焙用的裁剪是"全屏"（`TextBounds::default()`）、变换取恒等、颜色取白 ——
+    /// 与不带 clip 的绘制一致；带 clip / 带变换的首帧会再烘焙一次。
+    pub fn bake(&self, gpu: &crate::gpu::GpuContext, scale: f32) -> usize {
+        gpu.text().bake_stable(gpu, self, scale)
+    }
+
+    /// 累计烘焙次数（诊断用：稳态下不该增长）。
+    pub fn bakes(&self) -> u64 {
+        self.baked.bakes()
+    }
+
+    /// 当前烘焙块里的实例数（`None` = 还没烘焙）。
+    pub fn baked_instances(&self) -> Option<usize> {
+        self.baked.with_block(|b| b.map(|b| b.instances.len()))
+    }
+
+    /// 丢掉烘焙块（强制下次绘制重烘）。一般不需要：失效条件会自动处理。
+    pub fn invalidate_bake(&self) {
+        let mut guard = self.baked.block.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
     }
 }
 

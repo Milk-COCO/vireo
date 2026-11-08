@@ -180,6 +180,16 @@ impl TextSystem {
         self.ctx().make_stable(text, options)
     }
 
+    /// 预烘焙一个 `StableText` 的实例块（[`StableText::bake`] 的实现）。
+    pub(crate) fn bake_stable(
+        &self,
+        gpu: &crate::gpu::GpuContext,
+        stable: &StableText,
+        scale: f32,
+    ) -> usize {
+        self.ctx().bake_stable(gpu, stable, scale)
+    }
+
     /// 预热文字管线：用单字符 "A" 跑一次 prepare，触发首帧字体/atlas lazy 初始化。
     pub fn preheat(
         &self,

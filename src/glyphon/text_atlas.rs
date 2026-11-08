@@ -6,6 +6,7 @@ use etagere::{Allocation, BucketedAtlasAllocator, size2};
 use lru::LruCache;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::hash::BuildHasherDefault;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use wgpu::{
     BindGroup, BlendState, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
@@ -14,6 +15,17 @@ use wgpu::{
 };
 
 type Hasher = BuildHasherDefault<FxHasher>;
+
+/// 全局单调递增的"图集布局代数"。
+///
+/// 用它而不是每张图集自己的计数器：图集满时会被整张重建（新 `InnerAtlas`），
+/// 自带计数器会从 0 重新开始，与旧的缓存键撞车。全局计数器保证任何一次
+/// 坐标失效都拿到一个新值。
+static LAYOUT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn next_layout_epoch() -> u64 {
+    LAYOUT_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
 
 /// 用户 `hold` 住的字形键 —— 这些条目不允许被淘汰。
 ///
@@ -84,6 +96,10 @@ pub(crate) struct InnerAtlas {
     pub compacts: u64,
     /// 当前条目占用字节（增量维护；见 `live_bytes()` 的注释）。
     pub live_bytes: u64,
+    /// 布局代数：条目坐标可能失效时递增（缩图集、重建、淘汰、清空、装载）。
+    ///
+    /// 与 `generation`（每帧 +1 的帧时钟）区别开：扩容保留原坐标，所以**不**递增。
+    pub layout_epoch: u64,
 }
 
 /// 一条图集条目占的字节数（`宽 × 高 × 每像素字节`）。
@@ -137,6 +153,7 @@ impl InnerAtlas {
             grows: 0,
             compacts: 0,
             live_bytes: 0,
+            layout_epoch: next_layout_epoch(),
         }
     }
 
@@ -199,6 +216,7 @@ impl InnerAtlas {
             self.packer.deallocate(id);
         }
         self.evictions = self.evictions.saturating_add(1);
+        self.layout_epoch = next_layout_epoch();
         Some(bytes)
     }
 
@@ -224,6 +242,9 @@ impl InnerAtlas {
             }
         }
         self.evictions = self.evictions.saturating_add(keys.len() as u64);
+        if !keys.is_empty() {
+            self.layout_epoch = next_layout_epoch();
+        }
         keys.len()
     }
 
@@ -235,6 +256,7 @@ impl InnerAtlas {
         self.packer = BucketedAtlasAllocator::new(size2(self.size as i32, self.size as i32));
         self.live_bytes = 0;
         self.evictions = self.evictions.saturating_add(n as u64);
+        self.layout_epoch = next_layout_epoch();
         n
     }
 
@@ -448,6 +470,7 @@ impl InnerAtlas {
             self.recreate(state, MIN_SIZE);
             self.packer = BucketedAtlasAllocator::new(size2(MIN_SIZE as i32, MIN_SIZE as i32));
             self.compacts = self.compacts.saturating_add(1);
+            self.layout_epoch = next_layout_epoch();
             return true;
         }
         // 目标边长 = 1.2 × sqrt(内容面积)，向上取到 2 的幂。
@@ -564,6 +587,7 @@ impl InnerAtlas {
         self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
         self.size = target;
         self.compacts = self.compacts.saturating_add(1);
+        self.layout_epoch = next_layout_epoch();
         log::debug!(
             "glyphon: {:?} atlas compacted to {}²（搬迁 {} 条条目）",
             self.kind,
@@ -576,6 +600,7 @@ impl InnerAtlas {
     pub(crate) fn recreate(&mut self, state: &State, size: u32) {
         // 换纹理 = 旧内容全部作废（装载路径会要求图集为空，然后逐条 note_entry_added）。
         self.live_bytes = 0;
+        self.layout_epoch = next_layout_epoch();
         self.texture = state.device.create_texture(&TextureDescriptor {
             label: Some("glyphon atlas"),
             size: Extent3d {
@@ -757,6 +782,13 @@ impl TextAtlas {
     /// 累计缩图集次数（两张图求和）。
     pub(crate) fn compact_count(&self) -> u64 {
         self.mask_atlas.compacts + self.color_atlas.compacts
+    }
+
+    /// 两张图的布局代数 `(mask, color)`：任何一次"条目坐标可能失效"都会改变它。
+    ///
+    /// 只有**烘焙实例**用它做失效判据 —— 不能拿 `generation`，那是每帧 +1 的帧时钟。
+    pub(crate) fn layout_epoch(&self) -> (u64, u64) {
+        (self.mask_atlas.layout_epoch, self.color_atlas.layout_epoch)
     }
 
     /// 保留预算淘汰「历史积压」时要求的**最小未使用帧数**。

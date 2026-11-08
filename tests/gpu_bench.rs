@@ -9209,9 +9209,388 @@ fn glyph_cache_auto_compact_off() {
     );
 }
 
+/// 两个 framebuffer 的最大逐像素差（只看 RGB）。
+fn max_pixel_diff(a: &[u8], b: &[u8]) -> i32 {
+    let mut worst = 0i32;
+    for (pa, pb) in a.chunks(4).zip(b.chunks(4)) {
+        let d = (pa[0] as i32 - pb[0] as i32)
+            .abs()
+            .max((pa[1] as i32 - pb[1] as i32).abs())
+            .max((pa[2] as i32 - pb[2] as i32).abs());
+        worst = worst.max(d);
+    }
+    worst
+}
+
+/// 非黑像素的最左上点（用来比"画在哪"，避免被抗锯齿相位差异干扰）。
+fn ink_origin(px: &[u8], width: usize) -> (i32, i32) {
+    let (mut x0, mut y0) = (i32::MAX, i32::MAX);
+    for (idx, p) in px.chunks(4).enumerate() {
+        if p[0] as u32 + p[1] as u32 + p[2] as u32 > 24 {
+            x0 = x0.min((idx % width) as i32);
+            y0 = y0.min((idx / width) as i32);
+        }
+    }
+    if x0 == i32::MAX {
+        (i32::MAX, i32::MAX)
+    } else {
+        (x0, y0)
+    }
+}
+
+/// 画一段文本（`stable` = 走 `b.text_stable`，否则走普通 `draw_text`），返回像素。
+fn draw_text_pixels(
+    _gpu: &Arc<GpuContext>,
+    canvas: &OffscreenCanvas,
+    text: &str,
+    def: &TextDef,
+    pos: Pos,
+    clip: Option<Option<vireo::glyphon::TextBounds>>,
+) -> Vec<u8> {
+    let mut b = DrawBatch::new();
+    match clip {
+        Some(c) => {
+            b.text_clip = c;
+        }
+        None => {}
+    }
+    draw_text(
+        &mut b.texts,
+        text,
+        pos,
+        def.clone(),
+        TextOverride::from_color(WHITE),
+    );
+    canvas.draw(Some(BLACK), &[&b]);
+    canvas.read_pixels()
+}
+
+fn draw_stable_pixels(
+    _gpu: &Arc<GpuContext>,
+    canvas: &OffscreenCanvas,
+    stable: &StableText,
+    pos: Pos,
+    clip: Option<Option<vireo::glyphon::TextBounds>>,
+) -> Vec<u8> {
+    let mut b = DrawBatch::new();
+    if let Some(c) = clip {
+        b.text_clip = c;
+    }
+    b.text_stable(stable, pos, TextOverride::from_color(WHITE));
+    canvas.draw(Some(BLACK), &[&b]);
+    canvas.read_pixels()
+}
+
+/// **实例固化必须与普通绘制逐像素一致**（无样式 / 距离场样式 / 几何描边）。
+///
+/// 这条用例同时锁住一个既有缺口：resolved 路径曾经把样式参数写死成 0/None，
+/// 于是 `b.text_stable` 画不出几何描边、SDF 图层带宽也不对。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn stable_bake_pixels_match_normal() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 420, 160);
+    let ink = Color::new(0.1, 0.1, 0.15, 1.0);
+    let red = Color::new(0.9, 0.2, 0.15, 1.0);
+    let text = cjk_text(0x4E00, 6);
+
+    let cases: Vec<(&str, TextDef)> = vec![
+        ("无样式", TextDef::default().font_size(28.0)),
+        (
+            "描边+投影",
+            TextDef {
+                style: Some(Arc::new(
+                    TextStyle::outline(3.0, ink)
+                        .with_layer(TextLayer::soft(
+                            4.0,
+                            4.0,
+                            TextPaint::solid(Color::new(0.1, 0.1, 0.2, 0.6)),
+                        ))
+                        .with_fill(TextPaint::solid(WHITE)),
+                )),
+                ..TextDef::default().font_size(28.0)
+            },
+        ),
+        (
+            "几何描边",
+            TextDef {
+                style: Some(Arc::new(TextStyle::vector_outline(TextStroke::new(
+                    4.0, red,
+                )))),
+                ..TextDef::default().font_size(28.0)
+            },
+        ),
+    ];
+
+    for (label, def) in cases {
+        let pos = Pos::new(12.0, 30.0);
+        // 参考：普通绘制。
+        let normal = draw_text_pixels(&gpu, &canvas, &text, &def, pos, None);
+        // 稳定句柄：首帧烘焙，之后复用。
+        let stable = gpu.make_stable_text(&text, &def);
+        let mut reused = Vec::new();
+        for _ in 0..3 {
+            reused = draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
+        }
+        let diff = max_pixel_diff(&normal, &reused);
+        assert_eq!(
+            diff, 0,
+            "{label}：StableText（复用烘焙实例）与普通绘制应逐像素一致（最大差 {diff}）"
+        );
+        println!(
+            "  {label}：像素一致，实例 {} 条，烘焙 {} 次",
+            stable.baked_instances().unwrap_or(0),
+            stable.bakes()
+        );
+    }
+}
+
+/// **整数位移不重烘、分数位移重烘**；裁剪变化也要重烘。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn stable_bake_reuses_instances() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 420, 160);
+    let text = cjk_text(0x4E00, 6);
+    let def = TextDef::default().font_size(24.0);
+    let stable = gpu.make_stable_text(&text, &def);
+
+    let base = Pos::new(10.0, 20.0);
+    draw_stable_pixels(&gpu, &canvas, &stable, base, None);
+    let baked = stable.bakes();
+    assert_eq!(baked, 1, "首次绘制应烘焙一次（实际 {baked}）");
+
+    // 整数位移：不重烘，且像素等于"直接画在新位置"。
+    for step in [1.0, 2.0, 7.0, 0.0] {
+        let pos = Pos::new(base.x + step, base.y + step);
+        let reused = draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
+        assert_eq!(
+            stable.bakes(),
+            baked,
+            "整数位移（+{step}）不该重烘（bakes={}）",
+            stable.bakes()
+        );
+        let normal = draw_text_pixels(&gpu, &canvas, &text, &def, pos, None);
+        assert_eq!(
+            max_pixel_diff(&normal, &reused),
+            0,
+            "整数位移 +{step} 后像素应仍然一致"
+        );
+    }
+
+    // 分数位移：位置靠变换槽给，不再重烘；像素差异只来自"抗锯齿相位固定在烘焙时"。
+    for (dx, dy) in [(0.5f32, 0.0f32), (0.0, 0.25), (0.37, 0.62)] {
+        let frac = Pos::new(base.x + dx, base.y + dy);
+        let reused = draw_stable_pixels(&gpu, &canvas, &stable, frac, None);
+        assert_eq!(
+            stable.bakes(),
+            baked,
+            "分数位移（+{dx},+{dy}）不该重烘（bakes={}）",
+            stable.bakes()
+        );
+        let normal = draw_text_pixels(&gpu, &canvas, &text, &def, frac, None);
+        let (nx, ny) = ink_origin(&normal, 420);
+        let (sx, sy) = ink_origin(&reused, 420);
+        println!(
+            "  分数位移（+{dx},+{dy}）：0 次重烘，墨迹原点差 ({}, {})，像素最大差 {}",
+            sx - nx,
+            sy - ny,
+            max_pixel_diff(&normal, &reused)
+        );
+        assert!(
+            (sx - nx).abs() <= 1 && (sy - ny).abs() <= 1,
+            "分数位移后绘制位置应与普通路径相差 ≤1px（实际 {sx}-{nx}, {sy}-{ny}）"
+        );
+    }
+
+    // 裁剪变化：裁剪是烘焙进去的，必须重烘。
+    let before_clip = stable.bakes();
+    let clip = vireo::glyphon::TextBounds {
+        left: 0,
+        top: 0,
+        right: 60,
+        bottom: 80,
+    };
+    let reused = draw_stable_pixels(&gpu, &canvas, &stable, base, Some(Some(clip)));
+    assert_eq!(
+        stable.bakes(),
+        before_clip + 1,
+        "裁剪变化应触发一次重烘（bakes={}）",
+        stable.bakes()
+    );
+    let normal = draw_text_pixels(&gpu, &canvas, &text, &def, base, Some(Some(clip)));
+    assert_eq!(max_pixel_diff(&normal, &reused), 0, "带裁剪时像素应一致");
+    println!("  复用/失效：整数与分数位移都 0 次重烘，裁剪变化 +1 ✓");
+}
+
+/// **图集布局变化后自动重烘**：把图集撑大（或淘汰条目）之后，复用旧坐标会画错，
+/// 必须重烘且像素仍然正确。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn stable_bake_invalidates_on_atlas_change() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 420, 160);
+    let text = cjk_text(0x4E00, 6);
+    let def = TextDef::default().font_size(24.0);
+    let stable = gpu.make_stable_text(&text, &def);
+    let pos = Pos::new(10.0, 20.0);
+
+    draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
+    let baked = stable.bakes();
+    assert_eq!(baked, 1);
+
+    // 用别的文案把图集撑大到 1024²：条目坐标会重排（compact / 重建路径）。
+    let glyphs = gpu.text().glyphs();
+    for i in 0..120u32 {
+        glyphs.prewarm(
+            &gpu.device,
+            &gpu.queue,
+            &cjk_text(0x6000 + i * 12, 12),
+            &TextDef::default().font_size(24.0),
+            1.0,
+        );
+    }
+    glyphs.clear_unpinned();
+
+    let px = draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
+    assert!(
+        stable.bakes() > baked,
+        "图集布局变化后应重烘（bakes {} → {}）",
+        baked,
+        stable.bakes()
+    );
+    let normal = draw_text_pixels(&gpu, &canvas, &text, &def, pos, None);
+    assert_eq!(
+        max_pixel_diff(&normal, &px),
+        0,
+        "图集重排后像素仍应与普通绘制一致"
+    );
+    println!(
+        "  图集变化：重烘 {} 次后像素一致（条目 {} / 纹理 {} KiB）",
+        stable.bakes(),
+        glyphs.stats().entries(),
+        glyphs.stats().texture_bytes() / 1024
+    );
+}
+
+/// **`bake()` 预烘焙**：加载阶段付掉首次成本，之后首次绘制不再重烘。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn stable_bake_prebake_avoids_first_draw() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 420, 160);
+    let text = cjk_text(0x4E00, 6);
+    let def = TextDef::default().font_size(24.0);
+    let stable = gpu.make_stable_text(&text, &def);
+    let pos = Pos::new(10.0, 20.0);
+
+    let n = stable.bake(&gpu, 1.0);
+    assert_eq!(stable.bakes(), 1, "bake() 应烘焙一次");
+    assert_eq!(
+        stable.baked_instances(),
+        Some(n),
+        "bake() 返回的实例数应与块内一致"
+    );
+    // 整数物理坐标的绘制直接命中预烘焙结果。
+    let px = draw_stable_pixels(&gpu, &canvas, &stable, pos, None);
+    assert_eq!(stable.bakes(), 1, "预烘焙后首次绘制不该再烘焙");
+    let normal = draw_text_pixels(&gpu, &canvas, &text, &def, pos, None);
+    assert_eq!(max_pixel_diff(&normal, &px), 0, "预烘焙后像素应一致");
+    println!("  预烘焙：{n} 条实例，首次绘制 0 次重烘，像素一致 ✓");
+}
+
+/// **实例固化的收益**：同一大段文字（12 000 字）每帧重画，比较
+/// 「排版缓存 + 逐字形 prepare」与「烘焙实例拷贝」的 CPU 成本。
+///
+/// 只打印数字、不做硬门限：这台机器噪声大；判据是复用路径应当明显低于 prepare 路径。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn stable_bake_cost() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    // 4096 宽 ⇒ 每行约 250 字；画布高 1000 容纳 ~48 行。12000 字约 48 行。
+    let canvas = OffscreenCanvas::new(&gpu, 4096, 1000);
+    let text = cjk_text(0x4E00, 12_000);
+    let def = TextDef::default().font_size(16.0).max_width(4000.0);
+    let pos = Pos::new(8.0, 8.0);
+
+    // 普通路径：整段 draw_text（排版缓存命中 + 每帧逐字形 prepare）。
+    let normal_batch = {
+        let mut b = DrawBatch::new();
+        draw_text(
+            &mut b.texts,
+            &text,
+            pos,
+            def.clone(),
+            TextOverride::from_color(WHITE),
+        );
+        b
+    };
+    for _ in 0..3 {
+        canvas.draw(Some(BLACK), &[&normal_batch]);
+    }
+    let mut normal_ms = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..5 {
+            canvas.draw(Some(BLACK), &[&normal_batch]);
+        }
+        normal_ms = normal_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+    }
+
+    // 稳定句柄：烘焙一次，之后每帧只拷贝实例。
+    let stable = gpu.make_stable_text(&text, &def);
+    let stable_batch = {
+        let mut b = DrawBatch::new();
+        b.text_stable(&stable, pos, TextOverride::from_color(WHITE));
+        b
+    };
+    for _ in 0..3 {
+        canvas.draw(Some(BLACK), &[&stable_batch]);
+    }
+    // 烘焙那帧会排一大堆纹理上传；先等 GPU 排空，否则下面的计时会把"等队列"算进来。
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let glyphs = gpu.text().glyphs();
+    let r_before = glyphs.stats().rasterizations;
+    let mut stable_ms = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..5 {
+            canvas.draw(Some(BLACK), &[&stable_batch]);
+        }
+        stable_ms = stable_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+    }
+    let rasters = glyphs.stats().rasterizations - r_before;
+    assert_eq!(rasters, 0, "复用阶段不该有任何光栅化（实际 {rasters}）");
+
+    let quads = stable.baked_instances().unwrap_or(0);
+    println!(
+        "  12 000 字块：prepare 路径 {normal_ms:.2} ms/帧，固化复用 {stable_ms:.2} ms/帧\
+         （{} 条实例，bakes={}）",
+        quads,
+        stable.bakes()
+    );
+    assert_eq!(stable.bakes(), 1, "稳态不该重烘");
+    assert!(
+        stable_ms < normal_ms,
+        "复用应当比逐字形 prepare 便宜（{stable_ms:.2} vs {normal_ms:.2} ms）"
+    );
+}
+
 /// 跨进程持久化：一个上下文 `save`，**另一个**上下文 `load` 后直接画出同样的像素，
 /// 且不重新光栅化（`rasterizations` 不涨）。
-///
 /// 两个上下文各有自己的 `FontSystem`，所以 `fontdb::ID` 必然不同 —— 这条用例同时验证
 /// "字体靠摘要认"是真的在起作用。
 #[test]

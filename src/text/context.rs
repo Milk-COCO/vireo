@@ -963,13 +963,122 @@ impl TextContext {
             liveness,
             text: text.to_string(),
             line_count: line_count.max(1),
+            def: opts,
+            baked: Arc::new(super::hud::BakedHandle::default()),
         }
+    }
+
+    /// 预烘焙一个 `StableText` 的实例块（[`super::StableText::bake`] 的实现）。
+    ///
+    /// 与"首次绘制"走同一条 resolved prepare，区别只是：用的位置是原点、裁剪是全屏、
+    /// 变换恒等、颜色白。得到的实例存进句柄，之后的绘制直接拷贝并打补丁。
+    pub(crate) fn bake_stable(
+        &mut self,
+        gpu: &crate::gpu::GpuContext,
+        stable: &super::StableText,
+        scale: f32,
+    ) -> usize {
+        use crate::glyphon::{Resolution, ResolvedGlyphArea, TextBounds};
+
+        // 视口还没建过（首帧之前）时给占位分辨率，与 `prewarm_text` 同策略。
+        let res = self.viewport.resolution();
+        if res.width == 0 || res.height == 0 {
+            self.viewport.update(
+                &gpu.queue,
+                Resolution {
+                    width: 1024,
+                    height: 1024,
+                },
+                scale,
+            );
+        }
+
+        let dpi = scale as f64;
+        let style = stable.def.style.as_ref();
+        let styled = style.is_some_and(|s| s.needs_style());
+        let mut style_table = crate::text::style::StyleTable::new();
+        let (style_index, sdf_band) = match style {
+            Some(s) if styled => style_table.register(s, dpi),
+            _ => (0, 0.0),
+        };
+        let style_layers = style.map(|s| s.layers.len().min(8) as u32).unwrap_or(0);
+        let style_above_mask = style.map(super::prepare::above_mask).unwrap_or(0);
+        let style_reach = style.map(|s| s.reach_px(dpi)).unwrap_or(0.0);
+        let vector_stroke = style.and_then(|s| super::prepare::stroke_px(s, dpi));
+        let bounds = TextBounds::default();
+
+        let start = self.text_renderer.glyph_vertex_count();
+        let glyphs = stable.resolved_glyphs.iter().map(|rg| ResolvedGlyphArea {
+            glyph: &rg.glyph,
+            line_y: rg.line_y,
+            line_top: rg.line_top,
+            line_height: rg.line_height,
+            left: 0.0,
+            top: 0.0,
+            scale,
+            bounds,
+            default_color: crate::glyphon::Color::rgb(255, 255, 255),
+            transform_index: 0,
+            base_uv_rect: [0.0, 0.0, 1.0, 1.0],
+            style_index,
+            sdf_band,
+            style_layers,
+            style_above_mask,
+            style_reach,
+            vector_stroke,
+        });
+        let result = self.text_renderer.prepare_resolved_glyphs(
+            &gpu.device,
+            &gpu.queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.viewport,
+            glyphs,
+            &mut self.swash_cache,
+        );
+        let mut instances = if result.is_ok() {
+            self.text_renderer.instances_since(start).to_vec()
+        } else {
+            Vec::new()
+        };
+        self.text_renderer.truncate_instances(start);
+        if result.is_err() {
+            log::warn!(
+                "vireo: StableText 预烘焙失败（{:?}），下次绘制会重试",
+                result.err()
+            );
+            return 0;
+        }
+
+        // 与绘制路径同一条规则：只把"跟随条目颜色"的实例改成哨兵。
+        // 预烘焙用白色当条目颜色（见上面的 `default_color`）。
+        let entry_color = crate::glyphon::Color::rgb(255, 255, 255).0;
+        for inst in &mut instances {
+            if inst.color == entry_color {
+                inst.color = super::hud::BAKED_FILL_SENTINEL;
+            }
+        }
+
+        // 键要在 prepare 之后取：prepare 过程中可能淘汰条目（布局代数随之变化）。
+        let (mask_epoch, color_epoch) = self.text_atlas.layout_epoch();
+        let n = instances.len();
+        stable.baked.store(Some(super::hud::BakedBlock {
+            origin: (0, 0),
+            instances,
+            key: super::hud::BakeKey {
+                mask_epoch,
+                color_epoch,
+                scale_bits: scale.to_bits(),
+                bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                transform_is_zero: true,
+            },
+        }));
+        n
     }
 
     pub(crate) fn peek_shape_slot(&self, key: &TypesetKey) -> Option<u32> {
         self.typeset_map.get(key).copied()
     }
-
     pub(crate) fn slot_line_width(&self, slot: u32) -> f32 {
         let i = slot as usize;
         if i >= self.typeset_slots.len() {

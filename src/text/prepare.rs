@@ -85,7 +85,22 @@ pub(super) fn stroke_px(
 pub(super) enum MetaBuf {
     Slot(u32),
     Stable(Arc<Buffer>),
-    Resolved(Arc<ResolvedTextGlyph>),
+    /// resolved 字形 + 它所属的烘焙块（`None` = 该条目没有固化句柄）。
+    ///
+    /// 只在**烘焙失效**的那一帧用：逐字形 prepare 一遍，顺便把实例捕获进块。
+    Resolved {
+        glyph: Arc<ResolvedTextGlyph>,
+        block: Option<Arc<super::hud::BakedHandle>>,
+    },
+    /// 命中烘焙块：整个块只占**一条** meta，拷贝时一次写完全部实例。
+    ///
+    /// `dx/dy` 是整数位移（加进实例坐标），`slot` 是"平移 × 批次变换"的变换槽下标。
+    Baked {
+        block: Arc<super::hud::BakedHandle>,
+        dx: i32,
+        dy: i32,
+        slot: u32,
+    },
 }
 
 /// 读取 transform_table[ti] 的列，越界返 None。
@@ -200,6 +215,183 @@ pub(super) fn transform_bounds(b: TextBounds, cols: ([f32; 3], [f32; 3], [f32; 3
     }
 }
 
+/// 图集布局代数（拿不到 `TextContext` 的全部借用时用）。
+fn text_atlas_epoch(ctx: &crate::text::TextContext) -> (u64, u64) {
+    ctx.text_atlas.layout_epoch()
+}
+
+/// 烘焙块是否**仍然有效**（DPI/裁剪/变换模式/图集布局都没变）；有效则返回它的整数原点。
+///
+/// 位置**不在**判定里：实例是本地坐标，绘制位置由平移变换槽给。
+fn baked_state(
+    handle: &super::hud::BakedHandle,
+    bounds: crate::glyphon::TextBounds,
+    transform_index: u32,
+    scale: f32,
+    epoch: (u64, u64),
+) -> Option<(i32, i32)> {
+    let key = super::hud::BakeKey {
+        mask_epoch: epoch.0,
+        color_epoch: epoch.1,
+        scale_bits: scale.to_bits(),
+        bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+        transform_is_zero: transform_index == 0,
+    };
+    handle.with_block(|block| {
+        let block = block?;
+        (block.key == key).then_some(block.origin)
+    })
+}
+
+/// 把"想画在 `(left, top)`"拆成：整数位移（加进实例坐标）+ 平移量（进变换槽）。
+///
+/// 烘焙块的原点是**整数物理像素**，所以平移量 = 原点 + 小数部分，最后落点
+/// `本地坐标 + 整数位移 + 平移量` 精确等于 `(left, top)`。
+fn translate_parts(left: f32, top: f32, origin: (i32, i32)) -> (i32, i32, f32, f32) {
+    let dx = left - origin.0 as f32;
+    let dy = top - origin.1 as f32;
+    let dxi = dx.floor();
+    let dyi = dy.floor();
+    (
+        dxi as i32,
+        dyi as i32,
+        origin.0 as f32 + (dx - dxi),
+        origin.1 as f32 + (dy - dyi),
+    )
+}
+
+/// 追加一个"平移 × 批次物理变换"的变换槽，返回下标。
+///
+/// 复用已有的 `global_transforms` 机制（每个条目本来就会 push 自己的槽），
+/// 所以任意小数位移都不需要重烘实例。
+fn push_translate_slot(
+    global_transforms: &mut Vec<f32>,
+    phys_cols: Option<([f32; 3], [f32; 3], [f32; 3])>,
+    tx: f32,
+    ty: f32,
+) -> u32 {
+    let mut cols = phys_cols.unwrap_or(([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]));
+    cols.2[0] += tx;
+    cols.2[1] += ty;
+    push_phys(global_transforms, cols)
+}
+
+/// 一个 meta 所属的烘焙句柄（只有 `TextEntry::Stable` / `TextPart::Stable` 有）。
+fn block_of(meta: &AreaMeta) -> Option<Arc<super::hud::BakedHandle>> {
+    match &meta.buf {
+        MetaBuf::Resolved { block, .. } => block.clone(),
+        _ => None,
+    }
+}
+
+fn same_handle(
+    a: &Option<Arc<super::hud::BakedHandle>>,
+    b: &Option<Arc<super::hud::BakedHandle>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// 一个 meta 属于哪条处理分支（用于把连续同类 meta 归成一个运行区间）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunKind {
+    Normal,
+    Resolved,
+    Baked,
+}
+
+fn run_kind(meta: &AreaMeta) -> RunKind {
+    match &meta.buf {
+        MetaBuf::Resolved { .. } => RunKind::Resolved,
+        MetaBuf::Baked { .. } => RunKind::Baked,
+        _ => RunKind::Normal,
+    }
+}
+
+/// 用一个 meta 的位置/裁剪/样式下标拼出烘焙失效键。
+fn bake_key_of(meta: &AreaMeta, scale: f32, epoch: (u64, u64)) -> super::hud::BakeKey {
+    super::hud::BakeKey {
+        mask_epoch: epoch.0,
+        color_epoch: epoch.1,
+        scale_bits: scale.to_bits(),
+        bounds: [
+            meta.bounds.left,
+            meta.bounds.top,
+            meta.bounds.right,
+            meta.bounds.bottom,
+        ],
+        transform_is_zero: meta.transform_index == 0,
+    }
+}
+
+/// 把一个烘焙块的实例拷进本帧实例数组并打补丁。
+///
+/// 实例是**本地坐标**：位置只加整数位移（`dx/dy`），小数部分由变换槽 `slot` 给，
+/// 所以任意小数位移都不用重烘。补丁：颜色（只改哨兵）、变换槽、batch UV、
+/// 样式表下标（只改"带样式"的那些，`pass` 位原样保留）。
+fn copy_baked_instances(
+    block: &super::hud::BakedBlock,
+    dx: i32,
+    dy: i32,
+    slot: u32,
+    color: u32,
+    base_uv_rect: [f32; 4],
+    style_index: u32,
+    text_renderer: &mut crate::glyphon::TextRenderer,
+) {
+    // 实例的 `style_index` = 帧内样式表下标 | (pass << PASS_SHIFT)：
+    // 下标要换成当前帧的，pass 位原样保留。填充/几何描边下标是 0，不动。
+    const PASS_MASK: u32 = 0xFF << crate::text::PASS_SHIFT;
+    let table_bits = !PASS_MASK;
+    text_renderer.reserve_instances(block.instances.len());
+    for src in &block.instances {
+        let mut inst = *src;
+        inst.pos[0] += dx;
+        inst.pos[1] += dy;
+        if inst.color == super::hud::BAKED_FILL_SENTINEL {
+            inst.color = color;
+        }
+        inst.transform_index = slot;
+        inst.base_uv_rect = base_uv_rect;
+        if inst.style_index & table_bits != 0 {
+            inst.style_index = (inst.style_index & PASS_MASK) | (style_index & table_bits);
+        }
+        text_renderer.push_instance(inst);
+    }
+}
+
+/// 命中块（整块一条 meta）时的拷贝。失效判定已在建 meta 时做过。
+fn append_baked_meta(meta: &AreaMeta, text_renderer: &mut crate::glyphon::TextRenderer) {
+    let MetaBuf::Baked {
+        block,
+        dx,
+        dy,
+        slot,
+    } = &meta.buf
+    else {
+        return;
+    };
+    let style_index = meta.style_index;
+    let color = meta.color.0;
+    let base_uv_rect = meta.base_uv_rect;
+    block.with_block(|block| {
+        let Some(block) = block else { return };
+        copy_baked_instances(
+            block,
+            *dx,
+            *dy,
+            *slot,
+            color,
+            base_uv_rect,
+            style_index,
+            text_renderer,
+        );
+    });
+}
+
 impl TextEntryList {
     /// 准备文本条目（glyphon prepare），按入队时冻结的贴图状态分段返回。
     ///
@@ -281,7 +473,7 @@ impl TextEntryList {
             );
             // clip：逻辑像素 → 物理（× scale）
             // clip：逻辑像素 → 物理（× scale），再过文字的物理变换 → 旋转/缩放下跟随文字
-            let (bounds, phys_idx) = {
+            let (bounds, phys_idx, phys_cols) = {
                 let raw_bounds = match entry.override_().clip {
                     Some(Some(b)) => scale_text_bounds(b, scale),
                     Some(None) => TextBounds::default(),
@@ -304,7 +496,7 @@ impl TextEntryList {
                     Some(cols) => push_phys(global_transforms, cols),
                     None => 0,
                 };
-                (new_bounds, idx)
+                (new_bounds, idx, phys_cols)
             };
             let top = entry.pos().y * scale;
 
@@ -333,15 +525,37 @@ impl TextEntryList {
             let mut vector_stroke = row_vector_stroke;
 
             match entry {
-                TextEntry::Stable { pos, .. } => {
+                TextEntry::Stable { pos, baked, .. } => {
                     if let TextEntry::Stable {
                         resolved_glyphs, ..
                     } = entry
                     {
-                        for glyph in resolved_glyphs.iter() {
+                        let left = pos.x * scale;
+                        // 命中烘焙块 ⇒ 整个块一条 meta（稳态不再逐字形建 AreaMeta）。
+                        // 位置**不进实例**：实例是本地坐标，位置由一次性的平移变换槽给，
+                        // 所以任意小数位移都不需要重烘。
+                        let hit = baked_state(
+                            baked,
+                            bounds,
+                            phys_idx,
+                            scale,
+                            text_atlas_epoch(&text_ctx),
+                        );
+                        if let Some(origin) = hit {
+                            let (dx, dy, tx, ty) = translate_parts(left, top, origin);
+                            let slot = if phys_cols.is_some() || tx != 0.0 || ty != 0.0 {
+                                push_translate_slot(global_transforms, phys_cols, tx, ty)
+                            } else {
+                                phys_idx
+                            };
                             metas.push(AreaMeta {
-                                buf: MetaBuf::Resolved(glyph.clone()),
-                                left: pos.x * scale,
+                                buf: MetaBuf::Baked {
+                                    block: baked.clone(),
+                                    dx,
+                                    dy,
+                                    slot,
+                                },
+                                left,
                                 top,
                                 color,
                                 bounds,
@@ -358,6 +572,31 @@ impl TextEntryList {
                                 style_reach,
                                 vector_stroke,
                             });
+                        } else {
+                            for glyph in resolved_glyphs.iter() {
+                                metas.push(AreaMeta {
+                                    buf: MetaBuf::Resolved {
+                                        glyph: glyph.clone(),
+                                        block: Some(baked.clone()),
+                                    },
+                                    left,
+                                    top,
+                                    color,
+                                    bounds,
+                                    transform_index: phys_idx,
+                                    base_uv_rect: batch_base_uv,
+                                    texture_state: texture_state.clone(),
+                                    blend: entry.blend(),
+                                    blend_constant: entry.blend_constant(),
+                                    style_index,
+                                    style_layers_only,
+                                    sdf_band,
+                                    style_layers,
+                                    style_above_mask,
+                                    style_reach,
+                                    vector_stroke,
+                                });
+                            }
                         }
                     }
                 }
@@ -534,7 +773,10 @@ impl TextEntryList {
                             TextPart::Stable(h) => {
                                 for glyph in h.resolved_glyphs.iter() {
                                     metas.push(AreaMeta {
-                                        buf: MetaBuf::Resolved(glyph.clone()),
+                                        buf: MetaBuf::Resolved {
+                                            glyph: glyph.clone(),
+                                            block: Some(h.baked.clone()),
+                                        },
                                         left: cursor_x * scale,
                                         top,
                                         color,
@@ -583,7 +825,10 @@ impl TextEntryList {
                                     let cluster = text_ctx.resolve_glyph(ch, pdef);
                                     for glyph in cluster.glyphs.iter() {
                                         metas.push(AreaMeta {
-                                            buf: MetaBuf::Resolved(glyph.clone()),
+                                            buf: MetaBuf::Resolved {
+                                                glyph: glyph.clone(),
+                                                block: None,
+                                            },
                                             left: cursor_x * scale,
                                             top,
                                             color,
@@ -670,64 +915,118 @@ impl TextEntryList {
                 let vertex_start = text_renderer.glyph_vertex_count();
                 let mut run_start = first;
                 while run_start < end {
-                    let resolved = matches!(metas[run_start].buf, MetaBuf::Resolved(_));
+                    let kind = run_kind(&metas[run_start]);
                     let mut run_end = run_start + 1;
-                    while run_end < end
-                        && matches!(metas[run_end].buf, MetaBuf::Resolved(_)) == resolved
-                    {
+                    while run_end < end && run_kind(&metas[run_end]) == kind {
                         run_end += 1;
                     }
 
-                    if resolved {
-                        let mut attempt = 0;
-                        loop {
-                            let glyphs = metas[run_start..run_end].iter().filter_map(|meta| {
-                                let MetaBuf::Resolved(resolved) = &meta.buf else {
-                                    return None;
-                                };
-                                Some(crate::glyphon::ResolvedGlyphArea {
-                                    glyph: &resolved.glyph,
-                                    line_y: resolved.line_y,
-                                    line_top: resolved.line_top,
-                                    line_height: resolved.line_height,
-                                    left: meta.left,
-                                    top: meta.top,
-                                    scale,
-                                    bounds: meta.bounds,
-                                    default_color: meta.color,
-                                    transform_index: meta.transform_index,
-                                    base_uv_rect: meta.base_uv_rect,
-                                    style_index: meta.style_index,
-                                    sdf_band: meta.sdf_band,
-                                })
-                            });
-                            match text_renderer.prepare_resolved_glyphs(
-                                &gpu.device,
-                                &gpu.queue,
-                                font_system,
-                                text_atlas,
-                                viewport,
-                                glyphs,
-                                swash_cache,
-                            ) {
-                                Ok(()) => break,
-                                Err(PrepareError::AtlasFull) if attempt == 0 => {
-                                    *text_atlas = TextAtlas::with_color_mode(
+                    if kind == RunKind::Baked {
+                        // 稳态快路径：整块一条 meta，直接拷实例。
+                        for meta in &metas[run_start..run_end] {
+                            append_baked_meta(meta, text_renderer);
+                        }
+                    } else if kind == RunKind::Resolved {
+                        // 再按"烘焙块句柄"切分：同一个 StableText 的连续字形一起处理。
+                        // 走到这里说明**烘焙失效或还没烘过**，所以一律 prepare 一遍并捕获。
+                        let mut sub = run_start;
+                        while sub < run_end {
+                            let handle = block_of(&metas[sub]);
+                            let mut sub_end = sub + 1;
+                            while sub_end < run_end
+                                && same_handle(&handle, &block_of(&metas[sub_end]))
+                            {
+                                sub_end += 1;
+                            }
+                            {
+                                let cap_start = text_renderer.glyph_vertex_count();
+                                let mut attempt = 0;
+                                loop {
+                                    let glyphs = metas[sub..sub_end].iter().filter_map(|meta| {
+                                        let MetaBuf::Resolved { glyph, .. } = &meta.buf else {
+                                            return None;
+                                        };
+                                        Some(crate::glyphon::ResolvedGlyphArea {
+                                            glyph: &glyph.glyph,
+                                            line_y: glyph.line_y,
+                                            line_top: glyph.line_top,
+                                            line_height: glyph.line_height,
+                                            left: meta.left,
+                                            top: meta.top,
+                                            scale,
+                                            bounds: meta.bounds,
+                                            default_color: meta.color,
+                                            transform_index: meta.transform_index,
+                                            base_uv_rect: meta.base_uv_rect,
+                                            style_index: meta.style_index,
+                                            sdf_band: meta.sdf_band,
+                                            style_layers: meta.style_layers,
+                                            style_above_mask: meta.style_above_mask,
+                                            style_reach: meta.style_reach,
+                                            vector_stroke: meta.vector_stroke,
+                                        })
+                                    });
+                                    match text_renderer.prepare_resolved_glyphs(
                                         &gpu.device,
                                         &gpu.queue,
-                                        cache,
-                                        text_atlas.format,
-                                        text_atlas.color_mode,
-                                        base_texture,
-                                        base_sampler,
-                                    );
-                                    attempt += 1;
+                                        font_system,
+                                        text_atlas,
+                                        viewport,
+                                        glyphs,
+                                        swash_cache,
+                                    ) {
+                                        Ok(()) => break,
+                                        Err(PrepareError::AtlasFull) if attempt == 0 => {
+                                            *text_atlas = TextAtlas::with_color_mode(
+                                                &gpu.device,
+                                                &gpu.queue,
+                                                cache,
+                                                text_atlas.format,
+                                                text_atlas.color_mode,
+                                                base_texture,
+                                                base_sampler,
+                                            );
+                                            attempt += 1;
+                                        }
+                                        Err(PrepareError::AtlasFull) => {
+                                            log::warn!(
+                                                "text atlas full after rebuild, skipping segment"
+                                            );
+                                            break;
+                                        }
+                                    }
                                 }
-                                Err(PrepareError::AtlasFull) => {
-                                    log::warn!("text atlas full after rebuild, skipping segment");
-                                    break;
+                                // 捕获刚产生的实例写进块（本次绘制直接用同一批实例）。
+                                if let Some(h) = &handle {
+                                    let first_meta = &metas[sub];
+                                    let key =
+                                        bake_key_of(first_meta, scale, text_atlas.layout_epoch());
+                                    let entry_color = first_meta.color.0;
+                                    // 转成**本地坐标**：减去整数原点。之后任何位置都靠
+                                    // "整数位移 + 平移变换槽"表达，实例不再依赖位置。
+                                    let ox = first_meta.left.floor() as i32;
+                                    let oy = first_meta.top.floor() as i32;
+                                    let mut instances =
+                                        text_renderer.instances_since(cap_start).to_vec();
+                                    // 只把"跟随条目颜色"的实例改成哨兵：几何描边用自己的颜色、
+                                    // 逐字覆盖（`color_opt`）也各是各的，复用不能一律覆盖。
+                                    for inst in &mut instances {
+                                        inst.pos[0] -= ox;
+                                        inst.pos[1] -= oy;
+                                        if inst.color == entry_color {
+                                            inst.color = super::hud::BAKED_FILL_SENTINEL;
+                                        }
+                                    }
+                                    if !instances.is_empty() {
+                                        h.store(Some(super::hud::BakedBlock {
+                                            origin: (ox, oy),
+                                            instances,
+                                            key,
+                                        }));
+                                    }
                                 }
                             }
+                            sub = sub_end;
                         }
                     } else {
                         let mut attempt = 0;
@@ -739,7 +1038,9 @@ impl TextEntryList {
                                         debug_assert!((*si as usize) < typeset_slots.len());
                                         &typeset_slots[*si as usize].buffer
                                     }
-                                    MetaBuf::Resolved(_) => return None,
+                                    MetaBuf::Resolved { .. } | MetaBuf::Baked { .. } => {
+                                        return None;
+                                    }
                                 };
                                 Some(TextArea {
                                     buffer: buf,

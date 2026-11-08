@@ -52,6 +52,10 @@ pub enum TextEntry {
         font_size: f32,
         line_width: f32,
         line_count: u32,
+        /// 创建时的完整定义（含样式）；实例固化与样式注册都要用。
+        def: crate::text::TextDef,
+        /// 烘焙实例块（跨帧复用）。
+        baked: Arc<crate::text::hud::BakedHandle>,
         /// 入队时冻结的 batch 贴图状态。
         texture_state: TextTextureState,
         /// 入队时冻结的 batch 混合状态（`DrawBatch::blend_state`）。
@@ -114,8 +118,9 @@ impl TextEntry {
     /// 该条目的行级 `TextDef`（`Stable` 没有 —— 它在 `make_stable_text` 时定型）。
     pub fn def(&self) -> Option<&crate::text::TextDef> {
         match self {
-            TextEntry::Normal { def, .. } | TextEntry::Parts { def, .. } => Some(def),
-            TextEntry::Stable { .. } => None,
+            TextEntry::Normal { def, .. }
+            | TextEntry::Parts { def, .. }
+            | TextEntry::Stable { def, .. } => Some(def),
         }
     }
 
@@ -347,6 +352,8 @@ impl TextEntryList {
             font_size: stable.font_size,
             line_width: stable.line_width,
             line_count: stable.line_count,
+            def: stable.def.clone(),
+            baked: stable.baked.clone(),
             texture_state: self.texture_state.clone(),
             blend: self.blend_state,
             blend_constant: self.blend_constant,

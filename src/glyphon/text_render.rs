@@ -344,8 +344,10 @@ impl TextRenderer {
         };
         let resolution = viewport.resolution();
 
+        // 整个调用共用一组桶：与普通路径一致，**按层跨字形排序**（相邻字形的半透明
+        // 投影/发光要按层取并集，逐字形 flush 会让后面的字形压住前一个的层）。
+        let mut buckets = QuadBuckets::default();
         for area in glyphs {
-            let mut buckets = QuadBuckets::default();
             let start_y = (area.top + area.line_top * area.scale) as i32;
             let end_y = start_y + (area.line_height * area.scale) as i32;
             if start_y > area.bounds.bottom || area.bounds.top > end_y {
@@ -365,19 +367,17 @@ impl TextRenderer {
                 area.transform_index,
                 area.base_uv_rect,
                 area.style_index,
-                0,
-                0,
+                area.style_layers,
+                area.style_above_mask,
                 area.sdf_band,
-                // resolved 路径拿不到样式的外扩量：强制按尺寸生成（行为与旧版一致）
-                0.0,
-                // resolved 路径不支持几何描边（没有 custom-glyph 光栅化器）
-                None,
+                area.style_reach,
+                area.vector_stroke,
                 zero_depth,
                 |_| None,
                 &mut buckets,
             )?;
-            buckets.flush_into(&mut self.glyph_vertices);
         }
+        buckets.flush_into(&mut self.glyph_vertices);
 
         if !self.defer_upload {
             self.upload(device, queue);
@@ -439,6 +439,26 @@ impl TextRenderer {
     /// Returns the number of prepared glyph vertices.
     pub fn glyph_vertex_count(&self) -> u32 {
         self.glyph_vertices.len() as u32
+    }
+
+    /// 本轮 prepare 从 `start` 起追加的实例（烘焙捕获用）。
+    pub(crate) fn instances_since(&self, start: u32) -> &[GlyphToRender] {
+        &self.glyph_vertices[start as usize..]
+    }
+
+    /// 追加一条实例（烘焙复用路径逐条打补丁后调用）。
+    pub(crate) fn push_instance(&mut self, instance: GlyphToRender) {
+        self.glyph_vertices.push(instance);
+    }
+
+    /// 把实例数组回滚到 `n` 条（烘焙取完快照后丢弃临时实例）。
+    pub(crate) fn truncate_instances(&mut self, n: u32) {
+        self.glyph_vertices.truncate(n as usize);
+    }
+
+    /// 预留实例容量，避免复用路径每帧再扩容。
+    pub(crate) fn reserve_instances(&mut self, extra: usize) {
+        self.glyph_vertices.reserve(extra);
     }
 
     /// Renders all layouts that were previously provided to `prepare`.

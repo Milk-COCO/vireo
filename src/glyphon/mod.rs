@@ -64,20 +64,20 @@ pub(crate) struct GlyphDetails {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GlyphToRender {
-    pos: [i32; 2],
-    dim: [u16; 2],
-    uv: [u16; 2],
-    color: u32,
-    content_type_with_srgb: [u16; 2],
-    depth: f32,
-    transform_index: u32,
-    base_uv_rect: [f32; 4],
+    pub(crate) pos: [i32; 2],
+    pub(crate) dim: [u16; 2],
+    pub(crate) uv: [u16; 2],
+    pub(crate) color: u32,
+    pub(crate) content_type_with_srgb: [u16; 2],
+    pub(crate) depth: f32,
+    pub(crate) transform_index: u32,
+    pub(crate) base_uv_rect: [f32; 4],
     /// 样式表下标 + 1（`0` = 无样式）。
-    style_index: u32,
+    pub(crate) style_index: u32,
     /// 该字形的距离场带宽（**设备或生成像素**，按 content_type 解释）。
-    sdf_band: f32,
+    pub(crate) sdf_band: f32,
     /// 图集里的 texel 尺寸 `(w<<16)|h`：尺寸阶梯的 quad 与 texel 不是 1:1 时用它算 UV 矩形。
-    entry_dim: u32,
+    pub(crate) entry_dim: u32,
 }
 
 /// The screen resolution to use when rendering text.
@@ -185,6 +185,14 @@ pub(crate) struct ResolvedGlyphArea<'a> {
     pub style_index: u32,
     /// 距离场带宽（设备像素）。
     pub sdf_band: f32,
+    /// 样式层数（0 = 无样式）。
+    pub style_layers: u32,
+    /// 第 i 层画在填充之上的位图。
+    pub style_above_mask: u32,
+    /// 样式外扩（设备像素）。0 = 拿不到样式，按尺寸生成。
+    pub style_reach: f32,
+    /// 几何描边（真 miter/bevel）。`None` = 没有。
+    pub vector_stroke: Option<crate::text::TextStrokePx>,
 }
 
 pub(crate) struct State<'a> {
