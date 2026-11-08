@@ -635,6 +635,16 @@ surface 建不出（`eglCreateWindowSurface`→`BAD_ALLOC`，477+ 次零成功�
 
 ## 非 Android
 
+### 弧线描边原语（外部 issue，2026-11-07）
+
+缺一个"只描弧、不含半径"的原语。现有三个各管一件事：`draw_arc` 是**实心扇形**、
+`draw_arc_outline` 是**描边扇形**（弧 + 两条半径）、`draw_circle_outline` 是**整环**。
+想要半弧描边只能自己采样折线（`draw_line_chain`），代价是与整环混用两种边缘算法
+（SDF vs 几何折线）、段数要下游维护。
+
+**做之前需要定**：是否闭合成弦、按角度裁剪 SDF 圆环还是继续走几何折线、`segments`
+参数是否暴露。详见 `.dsh/docs/issues/arc-stroke.md`。
+
 ### README 首屏没有画面（Demo GIF / 截图）
 
 2026-10-31 README 重构后仍然只有 `logo.png`：一个 2D 渲染库的 README 里没有任何
