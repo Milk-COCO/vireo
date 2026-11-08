@@ -83,7 +83,7 @@ async fn main() {
         canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
     }
 
-    gpu.reset_typeset_stats();
+    gpu.text().reset_typeset_stats();
 
     let t0 = Instant::now();
     for f in 0..frames {
@@ -96,7 +96,7 @@ async fn main() {
         canvas.draw(Some(Color::new(0.08, 0.08, 0.12, 1.0)), &[&b]);
     }
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let stats = gpu.typeset_stats();
+    let stats = gpu.text().typeset_stats();
     let total = stats.hits + stats.misses;
     let hit_pct = if total > 0 {
         100.0 * stats.hits as f64 / total as f64

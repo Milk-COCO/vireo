@@ -15,8 +15,14 @@
   `grows` 现在只统计扩容（之前 `compact` 会误加）。
 - **文字 API 归一到一个门面**：新增 `GpuContext::text() -> &TextSystem` 与
   `TextSystem`（字体 / 排版缓存 / 字形图集 / 渲染器的统一入口）。`measure_text`、
-  `typeset_*`、`make_stable_text`、`load_font` 等方法在 `GpuContext` 上保留为便捷转发。
+  `make_stable_text`、`load_font`、`text_atlas_stats`、`clear_glyph_cache` 等常用方法在
+  `GpuContext` 上保留为便捷转发。
   `GpuContext::text_ctx` 字段改为内部实现（用户不再需要碰互斥锁）。
+- **BREAKING：排版缓存旋钮只留在 `gpu.text()` 上**：删除 `GpuContext` 上的
+  `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` /
+  `clear_typeset_cache` / `typeset_len` / `typeset_held_count` / `typeset_stats` /
+  `reset_typeset_stats` 九个纯转发方法，改用 `gpu.text().<同名方法>()`。
+  理由：缓存调优是文字系统的职责，两套入口只会让"该改哪个"变模糊。
 - **「shape 缓存」改名「typeset / 排版缓存」**：文字侧统一用 `typeset`，因为 `shape`
   在本库里指几何图形、`layout` 指 UI 布局。`set_shape_cache_ttl` / `shape_cache_len` /
   `clear_shape_cache` / `shape_cache_stats` 等旧名**直接删除**（0.2.0 是 breaking 版本，

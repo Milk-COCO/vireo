@@ -1145,33 +1145,6 @@ impl GpuContext {
         *self.surface_format.lock().unwrap() = fmt;
     }
 
-    /// 设置排版缓存 TTL（`None` = 不自动按时间回收）。
-    pub fn set_typeset_ttl(&self, ttl: Option<std::time::Duration>) {
-        self.text_system.set_typeset_ttl(ttl);
-    }
-
-    /// 当前排版缓存 TTL（`None` = 不自动按时间回收）。
-    pub fn typeset_ttl(&self) -> Option<std::time::Duration> {
-        self.text_system.typeset_ttl()
-    }
-
-    /// 设置排版缓存最大条数。
-    /// - `Some(n)`：最多 n 条不同文案键，满则 LRU
-    /// - `None`：不限制条数
-    pub fn set_typeset_max_entries(&self, max: Option<usize>) {
-        self.text_system.set_typeset_max_entries(max);
-    }
-
-    /// 当前排版缓存最大条数（`None` = 不限制）。
-    pub fn typeset_max_entries(&self) -> Option<usize> {
-        self.text_system.typeset_max_entries()
-    }
-
-    /// 立即清空文字排版缓存。
-    pub fn clear_typeset_cache(&self) {
-        self.text_system.clear_typeset_cache();
-    }
-
     /// 清空 `TextPart::Glyphs` 的 resolved glyph 元数据缓存。
     /// 不清空 glyph atlas 中已经光栅化的位图。
     pub fn clear_glyph_cache(&self) {
@@ -1181,27 +1154,6 @@ impl GpuContext {
     /// 当前 `TextPart::Glyphs` resolved glyph 元数据缓存条目数。
     pub fn glyph_cache_len(&self) -> usize {
         self.text_system.resolved_glyph_cache_len()
-    }
-
-    /// 当前排版缓存条目数。
-    pub fn typeset_len(&self) -> usize {
-        self.text_system.typeset_len()
-    }
-
-    /// 缓存中由 [`crate::text::StableText`] 活跃持有的条目数。
-    /// 这些槽不会被 TTL/LRU/`clear_typeset_cache` 回收。
-    pub fn typeset_held_count(&self) -> usize {
-        self.text_system.typeset_held_count()
-    }
-
-    /// 排版缓存命中统计。
-    pub fn typeset_stats(&self) -> crate::text::TypesetCacheStats {
-        self.text_system.typeset_stats()
-    }
-
-    /// 重置排版缓存命中统计。
-    pub fn reset_typeset_stats(&self) {
-        self.text_system.reset_typeset_stats();
     }
 
     /// 从文本创建 [`crate::text::StableText`]（预 shape，跨帧复用）。

@@ -615,14 +615,14 @@ mod tests {
     #[ignore = "requires GPU; run with --ignored"]
     fn make_stable_liveness_drop_clears_held() {
         let gpu = make_test_gpu();
-        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_held_count(), 0);
         let h = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.typeset_held_count(), 1);
-        assert_eq!(gpu.typeset_len(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_len(), 1);
         drop(h);
         // GC scavenge 后 held_count 应归 0
-        assert_eq!(gpu.typeset_held_count(), 0);
-        assert_eq!(gpu.typeset_len(), 1); // 槽仍在，只是不再 held
+        assert_eq!(gpu.text().typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_len(), 1); // 槽仍在，只是不再 held
     }
 
     #[test]
@@ -700,19 +700,19 @@ mod tests {
     fn make_stable_cache_hit_shares_liveness() {
         let gpu = make_test_gpu();
         let h1 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
         let h2 = gpu.make_stable_text("hello", &TextDef::default().font_size(20.0));
         // 同文案 cache hit → count 仍为 1
-        assert_eq!(gpu.typeset_held_count(), 1);
-        assert_eq!(gpu.typeset_len(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_len(), 1);
         // 共享 liveness arc
         assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
         drop(h1);
         // 仍有 h2 存活 → count 保持 1
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
         drop(h2);
         // 全 drop → count 归 0
-        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_held_count(), 0);
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
         let h1 = gpu.make_stable_text("keep", &TextDef::default().font_size(20.0));
         let h2 = gpu.make_stable_text("drop", &TextDef::default().font_size(20.0));
         drop(h2); // "drop" is now dead
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
 
         // 加一个非 held 槽（用 draw_text 路径制造）
         let mut list = TextEntryList::new();
@@ -742,15 +742,15 @@ mod tests {
             None,
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
-        assert_eq!(gpu.typeset_len(), 3);
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_len(), 3);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
 
         // clear → 只清非 held + 死标记
-        gpu.clear_typeset_cache();
-        assert_eq!(gpu.typeset_len(), 1);
-        assert_eq!(gpu.typeset_held_count(), 1);
+        gpu.text().clear_typeset_cache();
+        assert_eq!(gpu.text().typeset_len(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
         drop(h1);
-        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_held_count(), 0);
     }
 
     #[test]
@@ -776,20 +776,20 @@ mod tests {
             Color::new(1.0, 1.0, 1.0, 1.0),
         );
         // 此时 cache 已有 "shared"，无 liveness
-        assert_eq!(gpu.typeset_held_count(), 0);
-        assert_eq!(gpu.typeset_len(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_len(), 1);
 
         // make_stable → 命中已有 slot，liveness = Some
         let h1 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
         let h2 = gpu.make_stable_text("shared", &TextDef::default().font_size(20.0));
-        assert_eq!(gpu.typeset_held_count(), 1);
+        assert_eq!(gpu.text().typeset_held_count(), 1);
         // 共享 Arc
         assert!(std::sync::Arc::ptr_eq(&h1.buffer, &h2.buffer));
         assert!(std::sync::Arc::ptr_eq(&h1.liveness, &h2.liveness));
         drop(h1);
         drop(h2);
         // 全 drop → held_count 归 0
-        assert_eq!(gpu.typeset_held_count(), 0);
+        assert_eq!(gpu.text().typeset_held_count(), 0);
     }
 }

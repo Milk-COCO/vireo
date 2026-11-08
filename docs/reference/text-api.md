@@ -230,9 +230,9 @@ batch.text_stable(&h, Pos::new(24.0, 64.0), TextOverride::default());
 | `load_font(bytes)` / `load_font_file(path)` | 加载自定义字体（会清排版与解析缓存） |
 | `make_stable_text(text, &def) -> StableText` | 创建稳定句柄 |
 | `preheat_text(&device, &queue, w, h)` | 首帧懒初始化（需 renderer 已 resize） |
-| `set_typeset_ttl` / `typeset_ttl` / `set_typeset_max_entries` / `typeset_max_entries` | 排版缓存旋钮 |
-| `clear_typeset_cache()` / `typeset_len()` / `typeset_held_count()` / `typeset_stats()` / `reset_typeset_stats()` | 排版缓存观测与清空 |
 | `clear_glyph_cache()` / `glyph_cache_len()` | **只清 `TextPart::Glyphs` 的逐字解析缓存**，不清图集 |
+
+> 排版缓存的旋钮与观测**只在 `gpu.text()` 上**（下面 `TextSystem`），`GpuContext` 不再转发。
 
 ### `TextSystem`（`gpu.text()`）
 

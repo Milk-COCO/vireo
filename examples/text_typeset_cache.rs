@@ -65,8 +65,8 @@ const FONT_SIZES: &[f32] = &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0];
 async fn main() {
     let idx = app.window(WindowDesc::new("Text Typeset Cache Stress", 960, 640));
 
-    app.gpu.set_typeset_ttl(Some(Duration::from_secs(2)));
-    app.gpu.set_typeset_max_entries(Some(4096));
+    app.gpu.text().set_typeset_ttl(Some(Duration::from_secs(2)));
+    app.gpu.text().set_typeset_max_entries(Some(4096));
 
     let mut dynamic = false;
     let mut frame: u32 = 0;
@@ -88,34 +88,34 @@ async fn main() {
         let t = t0.elapsed().as_secs_f32();
 
         if win.key_down(KeyCode::Digit1) {
-            ctx.app().gpu.set_typeset_ttl(Some(Duration::from_secs(2)));
+            ctx.app().gpu.text().set_typeset_ttl(Some(Duration::from_secs(2)));
             ttl_label = "TTL=2s";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit2) {
-            ctx.app().gpu.set_typeset_ttl(None);
+            ctx.app().gpu.text().set_typeset_ttl(None);
             ttl_label = "TTL=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit3) {
-            ctx.app().gpu.set_typeset_max_entries(Some(64));
+            ctx.app().gpu.text().set_typeset_max_entries(Some(64));
             max_label = "max=64";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::Digit4) {
-            ctx.app().gpu.set_typeset_max_entries(None);
+            ctx.app().gpu.text().set_typeset_max_entries(None);
             max_label = "max=None";
             cfg_dirty = true;
         }
         if win.key_down(KeyCode::KeyC) {
-            ctx.app().gpu.clear_typeset_cache();
-            ctx.app().gpu.reset_typeset_stats();
+            ctx.app().gpu.text().clear_typeset_cache();
+            ctx.app().gpu.text().reset_typeset_stats();
             eprintln!("[text_typeset_cache] cache cleared");
         }
         if win.key_down(KeyCode::Space) {
             dynamic = !dynamic;
-            ctx.app().gpu.clear_typeset_cache();
-            ctx.app().gpu.reset_typeset_stats();
+            ctx.app().gpu.text().clear_typeset_cache();
+            ctx.app().gpu.text().reset_typeset_stats();
             cfg_dirty = true;
             eprintln!(
                 "[text_typeset_cache] mode => {}",
@@ -131,8 +131,8 @@ async fn main() {
 
         // 每秒终端输出（不画动态数字 HUD）
         if last_log.elapsed() >= Duration::from_secs(1) {
-            let n = ctx.app().gpu.typeset_len();
-            let stats = ctx.app().gpu.typeset_stats();
+            let n = ctx.app().gpu.text().typeset_len();
+            let stats = ctx.app().gpu.text().typeset_stats();
             let total = stats.hits + stats.misses;
             let hit_pct = if total > 0 {
                 100.0 * stats.hits as f64 / total as f64
