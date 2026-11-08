@@ -198,7 +198,7 @@ pub(crate) fn geo_emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], col
     batch.geo_emit_template(k, |b| emit_polygon(b, &pts, color), color);
 }
 
-pub(crate) fn geo_emit_arc(
+pub(crate) fn geo_emit_sector(
     batch: &mut DrawBatch,
     r: f32,
     start_angle: f32,
@@ -217,7 +217,11 @@ pub(crate) fn geo_emit_arc(
     k = mix_key(k, start_angle);
     k = mix_key(k, end_angle);
     k ^= uv_key(&batch.uv);
-    batch.geo_emit_template(k, |b| emit_arc(b, r, start_angle, end_angle, color), color);
+    batch.geo_emit_template(
+        k,
+        |b| emit_sector(b, r, start_angle, end_angle, color),
+        color,
+    );
 }
 
 pub(crate) fn geo_emit_rect_outline(
@@ -385,7 +389,7 @@ pub(crate) fn geo_emit_polygon_outline(
     geo_emit_line_chain(batch, &closed, thickness, color);
 }
 
-pub(crate) fn geo_emit_arc_outline(
+pub(crate) fn geo_emit_sector_outline(
     batch: &mut DrawBatch,
     r: f32,
     start_angle: f32,
@@ -412,5 +416,35 @@ pub(crate) fn geo_emit_arc_outline(
     }
     points.push((ex, ey));
     points.push((0.0, 0.0));
+    geo_emit_line_chain(batch, &points, thickness, color);
+}
+
+/// 弧线描边（只有弧，不含圆心与两条半径）的几何模板路径。
+pub(crate) fn geo_emit_arc(
+    batch: &mut DrawBatch,
+    r: f32,
+    start_angle: f32,
+    end_angle: f32,
+    thickness: f32,
+    color: Color,
+    segments: u32,
+) {
+    if !r.is_finite()
+        || !thickness.is_finite()
+        || !start_angle.is_finite()
+        || !end_angle.is_finite()
+        || r <= 0.0
+        || thickness <= 0.0
+        || color.a == 0.0
+    {
+        return;
+    }
+    let segments = segments.max(2);
+    let mut points: Vec<(f32, f32)> = Vec::with_capacity(segments as usize + 1);
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let angle = start_angle + t * (end_angle - start_angle);
+        points.push((r * angle.cos(), r * angle.sin()));
+    }
     geo_emit_line_chain(batch, &points, thickness, color);
 }

@@ -60,6 +60,15 @@
 
 ### Added / 新增
 
+- **弧线描边 `draw_arc` / `Shape::Arc`**：只描给定的角度范围、**不含**圆心到两端的半径
+  （对比 `draw_sector_outline` 的描边扇形、`draw_circle_outline` 的整环）。沿弧采样折线，
+  默认走折线 SDF 距离场（边缘抗锯齿与圆环一致），`clear_sdf_feather()` 后退化为几何模板；
+  整圈（`0..=TAU`）与 `draw_circle_outline` 逐像素一致。两端是平头、不闭合。
+- **BREAKING：`arc` 回归曲线含义，填充的弧改名 `sector`**：`draw_arc` → `draw_sector`、
+  `draw_arc_outline` → `draw_sector_outline`、`Shape::Arc` → `Shape::Sector`、
+  `Shape::ArcOutline` → `Shape::SectorOutline`（`DrawBatch::arc` / `arc_outline` 同样改为
+  `sector` / `sector_outline`，另加 `DrawBatch::arc` 画弧线描边）。改名理由：`arc` 在图形学
+  里指曲线，填充的弧其实是扇形；旧名字让 `draw_arc_outline` 看起来像"描一条弧"。
 - **文字参考文档按主题分册**：`docs/reference/text.md` 改为索引（三层模型 / 术语 / 学习路径），
   内容拆成可单独阅读的几篇 —— `text-api.md`（`TextDef` / `TextOverride` / `TextPart` /
   HUD 分段 / 绘制入口 / 裁剪与变换 / 度量 / `StableText`）、`text-cache.md`（两层缓存的

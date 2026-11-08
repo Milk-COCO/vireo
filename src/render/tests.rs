@@ -283,7 +283,7 @@ fn extended_sdf_instances_do_not_expand_vertices() {
     batch.instance_rounded_rect(Pos::new(1.0, 2.0), 20.0, 10.0, 3.0, Some(WHITE));
     batch.instance_line(0.0, 0.0, 10.0, 5.0, 2.0, Some(WHITE));
     batch.instance_triangle(0.0, 0.0, 10.0, 0.0, 5.0, 8.0, Some(WHITE));
-    batch.instance_arc(
+    batch.instance_sector(
         Pos::new(20.0, 20.0),
         8.0,
         0.0,

@@ -12,7 +12,7 @@ fn draw_shapes(batch: &mut DrawBatch) {
     draw_triangle(batch, 240.0, 75.0, 280.0, 10.0, 320.0, 75.0, Some(WHITE));
     draw_circle(batch, Pos::new(390.0, 42.0), 32.0, Some(WHITE));
     draw_ellipse(batch, Pos::new(480.0, 42.0), 45.0, 28.0, Some(WHITE));
-    draw_arc(
+    draw_sector(
         batch,
         Pos::new(580.0, 42.0),
         32.0,
@@ -46,7 +46,7 @@ fn draw_shapes(batch: &mut DrawBatch) {
         8,
     );
     draw_circle_outline(batch, Pos::new(560.0, 112.0), 22.0, 3.0, Some(WHITE), 32);
-    draw_arc_outline(
+    draw_sector_outline(
         batch,
         Pos::new(630.0, 112.0),
         25.0,

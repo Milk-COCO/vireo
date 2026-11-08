@@ -185,7 +185,7 @@ async fn main() {
             // 主动持续更新：卡片中心的旋转弧 + 弧端的光点。
             if spin {
                 let ang = now.duration_since(spin_t0).as_secs_f32() * 2.6;
-                draw_arc_outline(
+                draw_sector_outline(
                     &mut batch,
                     Pos::new(card_cx, card_cy),
                     62.0,

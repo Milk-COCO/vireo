@@ -635,15 +635,14 @@ surface 建不出（`eglCreateWindowSurface`→`BAD_ALLOC`，477+ 次零成功�
 
 ## 非 Android
 
-### 弧线描边原语（外部 issue，2026-11-07）
+### ~~弧线描边原语~~ ✅ **已完成**（`draw_arc` / `Shape::Arc`）
 
-缺一个"只描弧、不含半径"的原语。现有三个各管一件事：`draw_arc` 是**实心扇形**、
-`draw_arc_outline` 是**描边扇形**（弧 + 两条半径）、`draw_circle_outline` 是**整环**。
-想要半弧描边只能自己采样折线（`draw_line_chain`），代价是与整环混用两种边缘算法
-（SDF vs 几何折线）、段数要下游维护。
-
-**做之前需要定**：是否闭合成弦、按角度裁剪 SDF 圆环还是继续走几何折线、`segments`
-参数是否暴露。详见 `.dsh/docs/issues/arc-stroke.md`。
+只描给定角度范围、不含两条半径；沿弧采样折线，默认走 SDF 距离场（与圆环同一套抗锯齿），
+`clear_sdf_feather()` 后走几何模板；整圈与 `draw_circle_outline` 逐像素一致。
+同一轮里把扇形家族改名为 `sector`（`draw_arc`→`draw_sector`、`draw_arc_outline`→
+`draw_sector_outline`），`arc` 让给曲线本身。
+用例：`gpu_bench::arc_is_arc_only` / `arc_geometry_path` / `arc_degenerate_inputs`。
+对应外部 issue：`.dsh/docs/issues/arc-stroke.md`。
 
 ### README 首屏没有画面（Demo GIF / 截图）
 

@@ -267,7 +267,7 @@ fn polygon_too_few_points_skipped() {
 #[test]
 fn arc_geometry_produces_fan() {
     let mut batch = test_batch();
-    draw_arc(
+    draw_sector(
         &mut batch,
         Pos::new(0.0, 0.0),
         50.0,
@@ -283,7 +283,7 @@ fn arc_geometry_produces_fan() {
 fn arc_sdf_produces_quad() {
     let mut batch = test_batch();
     batch.sdf_feather = Some(1.0);
-    draw_arc(
+    draw_sector(
         &mut batch,
         Pos::new(0.0, 0.0),
         50.0,
@@ -298,15 +298,15 @@ fn arc_sdf_produces_quad() {
 #[test]
 fn arc_zero_radius_skipped() {
     let mut batch = test_batch();
-    draw_arc(&mut batch, Pos::new(0.0, 0.0), 0.0, 0.0, 1.0, Some(RED));
+    draw_sector(&mut batch, Pos::new(0.0, 0.0), 0.0, 0.0, 1.0, Some(RED));
     assert!(batch.geo_instances.is_empty());
 }
 
 #[test]
 fn arc_zero_radius_and_span_skipped_in_default_sdf_mode() {
     let mut batch = DrawBatch::new();
-    draw_arc(&mut batch, Pos::ZERO, 0.0, 0.0, 1.0, Some(RED));
-    draw_arc(&mut batch, Pos::ZERO, 10.0, 1.0, 1.0, Some(RED));
+    draw_sector(&mut batch, Pos::ZERO, 0.0, 0.0, 1.0, Some(RED));
+    draw_sector(&mut batch, Pos::ZERO, 10.0, 1.0, 1.0, Some(RED));
     assert!(batch.instance_data.is_empty());
 }
 
@@ -316,7 +316,7 @@ fn negative_radius_and_size_skipped() {
     draw_circle(&mut batch, Pos::new(0.0, 0.0), -5.0, Some(RED));
     draw_ellipse(&mut batch, Pos::new(0.0, 0.0), -3.0, 5.0, Some(RED));
     draw_rectangle(&mut batch, Pos::new(0.0, 0.0), -10.0, 10.0, Some(RED));
-    draw_arc(&mut batch, Pos::new(0.0, 0.0), -5.0, 0.0, 1.0, Some(RED));
+    draw_sector(&mut batch, Pos::new(0.0, 0.0), -5.0, 0.0, 1.0, Some(RED));
     assert!(batch.instance_data.is_empty());
     assert!(batch.geo_instances.is_empty());
 }

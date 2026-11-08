@@ -60,7 +60,8 @@ pub enum Shape<'a> {
     Polygon {
         points: &'a [(f32, f32)],
     },
-    Arc {
+    /// 实心扇形（圆心 + 弧围成的面）。
+    Sector {
         pos: Pos,
         r: f32,
         start: f32,
@@ -106,7 +107,17 @@ pub enum Shape<'a> {
         points: &'a [(f32, f32)],
         thickness: f32,
     },
-    ArcOutline {
+    /// 描边扇形（弧 + 两条半径）。
+    SectorOutline {
+        pos: Pos,
+        r: f32,
+        start: f32,
+        end: f32,
+        thickness: f32,
+        segments: u32,
+    },
+    /// 弧线描边：**只有弧**，不含圆心到两端的连线（对比 [`Shape::SectorOutline`]）。
+    Arc {
         pos: Pos,
         r: f32,
         start: f32,
@@ -124,12 +135,13 @@ impl<'a> Shape<'a> {
             | Shape::RoundedRect { pos, .. }
             | Shape::Circle { pos, .. }
             | Shape::Ellipse { pos, .. }
-            | Shape::Arc { pos, .. }
+            | Shape::Sector { pos, .. }
             | Shape::RectOutline { pos, .. }
             | Shape::CircleOutline { pos, .. }
             | Shape::EllipseOutline { pos, .. }
             | Shape::RoundedRectOutline { pos, .. }
-            | Shape::ArcOutline { pos, .. } => Some(pos),
+            | Shape::SectorOutline { pos, .. }
+            | Shape::Arc { pos, .. } => Some(pos),
             Shape::Line { .. }
             | Shape::LineChain { .. }
             | Shape::Triangle { .. }
@@ -268,7 +280,7 @@ impl<'a> Shape<'a> {
                 y3,
             } => emit_triangle(batch, x1, y1, x2, y2, x3, y3, color),
             Shape::Polygon { points } => emit_polygon(batch, points, color),
-            Shape::Arc { r, start, end, .. } => emit_arc(batch, r, start, end, color),
+            Shape::Sector { r, start, end, .. } => emit_sector(batch, r, start, end, color),
             Shape::RectOutline {
                 w, h, thickness, ..
             } => emit_rect_outline(batch, w, h, thickness, color),
@@ -305,14 +317,22 @@ impl<'a> Shape<'a> {
             Shape::PolygonOutline { points, thickness } => {
                 emit_polygon_outline(batch, points, thickness, color)
             }
-            Shape::ArcOutline {
+            Shape::SectorOutline {
                 r,
                 start,
                 end,
                 thickness,
                 segments,
                 ..
-            } => emit_arc_outline(batch, r, start, end, thickness, color, segments),
+            } => emit_sector_outline(batch, r, start, end, thickness, color, segments),
+            Shape::Arc {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => emit_arc(batch, r, start, end, thickness, color, segments),
         }
     }
 }
@@ -442,8 +462,8 @@ pub fn draw_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: Option<
     );
 }
 
-/// 绘制弧线/扇形（shader SDF）。
-pub fn draw_arc(
+/// 绘制**实心扇形**（圆心 + 弧围成的面）。
+pub fn draw_sector(
     batch: &mut DrawBatch,
     pos: Pos,
     r: f32,
@@ -453,7 +473,7 @@ pub fn draw_arc(
 ) {
     draw_shape(
         batch,
-        &Shape::Arc {
+        &Shape::Sector {
             pos,
             r,
             start: start_angle,
@@ -636,7 +656,7 @@ pub fn draw_polygon_outline(
 }
 
 /// 描边扇形（弧线 + 圆心到两端的连线）
-pub fn draw_arc_outline(
+pub fn draw_sector_outline(
     batch: &mut DrawBatch,
     pos: Pos,
     r: f32,
@@ -648,7 +668,7 @@ pub fn draw_arc_outline(
 ) {
     draw_shape(
         batch,
-        &Shape::ArcOutline {
+        &Shape::SectorOutline {
             pos,
             r,
             start: start_angle,
@@ -660,7 +680,37 @@ pub fn draw_arc_outline(
     );
 }
 
-// ======================= 渐变（逐像素，沿形状自身或指定轴） =======================
+/// 弧线描边：**只有弧**，不含圆心到两端的连线。
+///
+/// 与 [`draw_sector_outline`]（描边扇形：弧 + 两条半径）和 [`draw_circle_outline`]（整环）
+/// 互补。两端是**平头**（butt），不闭合、不加圆角；`segments` 是弧被切分的段数
+/// （越大越圆，默认由调用方给，建议按 `半径 × 弧度 / 2px` 估）。
+///
+/// 走的是与圆环/折线同一套实现（SDF 折线距离场 → 边缘抗锯齿；`clear_sdf_feather()`
+/// 之后退化为几何三角形）。整圈（`0 ..= TAU`）与 `draw_circle_outline` 同形。
+pub fn draw_arc(
+    batch: &mut DrawBatch,
+    pos: Pos,
+    r: f32,
+    start_angle: f32,
+    end_angle: f32,
+    thickness: f32,
+    color: Option<Color>,
+    segments: u32,
+) {
+    draw_shape(
+        batch,
+        &Shape::Arc {
+            pos,
+            r,
+            start: start_angle,
+            end: end_angle,
+            thickness,
+            segments,
+        },
+        ShapeOverride::from_color(color),
+    );
+}
 
 /// 一个渐变停点：`at` 是沿渐变坐标的归一化位置（0 = 起点，1 = 终点）。
 ///

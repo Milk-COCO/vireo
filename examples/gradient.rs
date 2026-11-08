@@ -175,7 +175,7 @@ async fn main(app: App) {
         b.set_position(0.0, 0.0);
 
         b.shape_gradient(
-            &Shape::Arc {
+            &Shape::Sector {
                 pos: Pos::new(760.0, 186.0),
                 r: 38.0,
                 start: 0.5,

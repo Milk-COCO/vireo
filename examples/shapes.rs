@@ -57,7 +57,7 @@ async fn main() {
             ],
             Some(PURPLE),
         );
-        draw_arc(
+        draw_sector(
             &mut batch,
             Pos::new(930.0, 60.0),
             50.0,
@@ -133,7 +133,7 @@ async fn main() {
             4.0,
             Some(PURPLE),
         );
-        draw_arc_outline(
+        draw_sector_outline(
             &mut batch,
             Pos::new(930.0, y + 40.0),
             50.0,

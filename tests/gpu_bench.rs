@@ -696,7 +696,7 @@ fn instanced_shape_and_stencil_paths() {
     child.instance_rounded_rect(Pos::new(220.0, 24.0), 64.0, 30.0, 8.0, Some(WHITE));
     child.instance_line(210.0, 72.0, 292.0, 98.0, 3.0, Some(RED));
     child.instance_triangle(220.0, 110.0, 280.0, 110.0, 250.0, 150.0, Some(GREEN));
-    child.instance_arc(
+    child.instance_sector(
         Pos::new(250.0, 142.0),
         22.0,
         0.0,
@@ -732,7 +732,7 @@ fn instanced_shape_and_stencil_paths() {
         2.0,
         Some(RED),
     );
-    child.instance_arc_outline(
+    child.instance_sector_outline(
         Pos::new(290.0, 76.0),
         12.0,
         0.0,
@@ -5299,8 +5299,8 @@ fn gradient_uniform_matches_solid() {
             },
         ),
         (
-            "arc",
-            Shape::Arc {
+            "sector",
+            Shape::Sector {
                 pos: Pos::new(48.0, 48.0),
                 r: 30.0,
                 start: 0.2,
@@ -10151,4 +10151,157 @@ fn glyph_cache_concurrent_access() {
         s.entries(),
         s.used_bytes() / 1024
     );
+}
+
+/// 画一条弧线描边，返回画布像素。
+fn arc_pixels(
+    gpu: &Arc<GpuContext>,
+    canvas: &OffscreenCanvas,
+    pos: Pos,
+    r: f32,
+    start: f32,
+    end: f32,
+    thickness: f32,
+    segments: u32,
+    geometry_path: bool,
+) -> Vec<u8> {
+    let _ = gpu;
+    let mut b = DrawBatch::new();
+    if geometry_path {
+        b.clear_sdf_feather();
+    }
+    draw_arc(&mut b, pos, r, start, end, thickness, Some(WHITE), segments);
+    canvas.draw(Some(BLACK), &[&b]);
+    canvas.read_pixels()
+}
+
+fn pixel_at(px: &[u8], width: usize, x: usize, y: usize) -> u32 {
+    let i = (y * width + x) * 4;
+    px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32
+}
+
+/// **`draw_arc`：整圈与圆环同形，半圈不含圆心与半径。**
+///
+/// 回归点：弧线描边只能沿弧采样折线（**不**加圆心与两条半径），否则就退化成
+/// `draw_sector_outline`（描边扇形）。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn arc_is_arc_only() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 200, 200);
+    let pos = Pos::new(100.0, 100.0);
+    let pi = std::f32::consts::PI;
+
+    // 整圈：应与 `draw_circle_outline` 逐像素一致（同一条折线 + SDF 距离场）。
+    let full = arc_pixels(
+        &gpu,
+        &canvas,
+        pos,
+        60.0,
+        0.0,
+        std::f32::consts::TAU,
+        8.0,
+        96,
+        false,
+    );
+    let mut ring_batch = DrawBatch::new();
+    draw_circle_outline(&mut ring_batch, pos, 60.0, 8.0, Some(WHITE), 96);
+    canvas.draw(Some(BLACK), &[&ring_batch]);
+    let ring = canvas.read_pixels();
+    assert_eq!(
+        max_pixel_diff(&full, &ring),
+        0,
+        "整圈弧线应与圆环描边逐像素一致"
+    );
+
+    // 半圈（0..PI）：屏幕 y 向下 ⇒ 只有下半圈有墨；圆心与上半圈必须为空。
+    let half = arc_pixels(&gpu, &canvas, pos, 60.0, 0.0, pi, 8.0, 96, false);
+    assert!(
+        pixel_at(&half, 200, 100, 158) > 0,
+        "下半圈应有墨迹（y = 圆心 + 半径）"
+    );
+    assert_eq!(
+        pixel_at(&half, 200, 100, 42),
+        0,
+        "上半圈不该有墨迹（只画给定的角度范围）"
+    );
+    assert_eq!(
+        pixel_at(&half, 200, 100, 100),
+        0,
+        "圆心不该有墨迹（弧线描边没有半径）"
+    );
+    assert_eq!(
+        pixel_at(&half, 200, 130, 100),
+        0,
+        "半径方向（角度 0 处）不该有墨迹"
+    );
+
+    // 对照：描边扇形在半径上有墨。
+    let mut sector = DrawBatch::new();
+    draw_sector_outline(&mut sector, pos, 60.0, 0.0, pi, 8.0, Some(WHITE), 96);
+    canvas.draw(Some(BLACK), &[&sector]);
+    let sector_px = canvas.read_pixels();
+    assert!(
+        pixel_at(&sector_px, 200, 130, 100) > 0,
+        "对照失败：描边扇形应在半径上有墨迹"
+    );
+    println!("  弧线描边：整圈 == 圆环，半圈无半径、圆心为空 ✓");
+}
+
+/// 几何模板路径（`clear_sdf_feather()`）也能画弧线描边。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn arc_geometry_path() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 200, 200);
+    let pos = Pos::new(100.0, 100.0);
+    let half = arc_pixels(
+        &gpu,
+        &canvas,
+        pos,
+        60.0,
+        0.0,
+        std::f32::consts::PI,
+        8.0,
+        32,
+        true,
+    );
+    assert!(pixel_at(&half, 200, 100, 158) > 0, "几何路径下半圈应有墨迹");
+    assert_eq!(pixel_at(&half, 200, 100, 42), 0, "几何路径上半圈应为空");
+    assert_eq!(pixel_at(&half, 200, 100, 100), 0, "几何路径也没有半径");
+    println!("  弧线描边的几何模板路径同样只有弧 ✓");
+}
+
+/// 退化输入（半径/线宽为 0、角度跨度为 0）不 panic 也不画。
+#[test]
+#[ignore = "requires GPU; run with --ignored"]
+fn arc_degenerate_inputs() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Arc::new(GpuContext::new(&instance));
+    let canvas = OffscreenCanvas::new(&gpu, 120, 120);
+    let pos = Pos::new(60.0, 60.0);
+    let pi = std::f32::consts::PI;
+    for (r, thickness, start, end) in [
+        (0.0f32, 8.0f32, 0.0f32, pi),
+        (40.0, 0.0, 0.0, pi),
+        (40.0, 8.0, 1.0, 1.0),
+        (f32::NAN, 8.0, 0.0, pi),
+        (40.0, f32::INFINITY, 0.0, pi),
+    ] {
+        let mut b = DrawBatch::new();
+        draw_arc(&mut b, pos, r, start, end, thickness, Some(WHITE), 16);
+        canvas.draw(Some(BLACK), &[&b]);
+    }
+    let px = canvas.read_pixels();
+    let lit = px
+        .chunks(4)
+        .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+        .count();
+    assert_eq!(lit, 0, "退化输入不该画出任何东西（实际 {lit} 个像素）");
+    println!("  弧线描边：退化输入不画、不 panic ✓");
 }

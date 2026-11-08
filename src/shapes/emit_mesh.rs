@@ -605,7 +605,7 @@ pub(super) fn emit_polygon(batch: &mut DrawBatch, points: &[(f32, f32)], color: 
     }
 }
 
-pub(super) fn emit_arc(
+pub(super) fn emit_sector(
     batch: &mut DrawBatch,
     r: f32,
     start_angle: f32,
@@ -1048,7 +1048,7 @@ pub(super) fn emit_polygon_outline(
     emit_line_chain(batch, &closed, thickness, color);
 }
 
-pub(super) fn emit_arc_outline(
+pub(super) fn emit_sector_outline(
     batch: &mut DrawBatch,
     r: f32,
     start_angle: f32,
@@ -1076,5 +1076,45 @@ pub(super) fn emit_arc_outline(
     }
     points.push((ex, ey));
     points.push((0.0, 0.0));
+    emit_line_chain(batch, &points, thickness, color);
+}
+
+/// 弧线描边：只沿弧采样折线，**不**加圆心与两条半径。
+///
+/// 与 `emit_circle_outline` 同一条实现路径（折线 → `emit_line_chain`），所以：
+/// - 默认（`sdf_feather = Some`）走折线 SDF 距离场，边缘抗锯齿与圆环一致；
+/// - 整圈（`|end - start| ≈ TAU`）时首尾点重合，`emit_line_chain` 会按闭合链处理，
+///   结果与 `emit_circle_outline` 同形。
+pub(super) fn emit_arc(
+    batch: &mut DrawBatch,
+    r: f32,
+    start_angle: f32,
+    end_angle: f32,
+    thickness: f32,
+    color: Color,
+    segments: u32,
+) {
+    if !r.is_finite()
+        || !thickness.is_finite()
+        || !start_angle.is_finite()
+        || !end_angle.is_finite()
+        || r <= 0.0
+        || thickness <= 0.0
+        || color.a == 0.0
+    {
+        return;
+    }
+    // 弧长为 0（或整圈退化成一点）时没有可画的链。
+    let span = end_angle - start_angle;
+    if !span.is_finite() || span.abs() * r < 1e-4 {
+        return;
+    }
+    let segments = segments.max(2);
+    let mut points: Vec<(f32, f32)> = Vec::with_capacity(segments as usize + 1);
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let angle = start_angle + t * span;
+        points.push((r * angle.cos(), r * angle.sin()));
+    }
     emit_line_chain(batch, &points, thickness, color);
 }

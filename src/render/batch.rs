@@ -4113,7 +4113,7 @@ impl DrawBatch {
     }
 
     /// Add an instanced SDF arc.
-    pub fn instance_arc(
+    pub fn instance_sector(
         &mut self,
         pos: Pos,
         r: f32,
@@ -4135,7 +4135,7 @@ impl DrawBatch {
             [start_angle, end_angle],
             color,
         ) {
-            self.arc(pos, r, start_angle, end_angle, color);
+            self.sector(pos, r, start_angle, end_angle, color);
         }
     }
 
@@ -4622,7 +4622,7 @@ impl DrawBatch {
     }
 
     /// Add an instanced arc outline.
-    pub fn instance_arc_outline(
+    pub fn instance_sector_outline(
         &mut self,
         pos: Pos,
         r: f32,
@@ -4640,6 +4640,49 @@ impl DrawBatch {
             points.push((r * angle.cos(), r * angle.sin()));
         }
         points.push((0.0, 0.0));
+        let saved = self.transform;
+        self.transform = Some(match saved {
+            Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
+            None => Transform::translation(pos.x, pos.y),
+        });
+        self.invalidate_transform_cache();
+        self.instance_line_chain(&points, thickness, color);
+        self.transform = saved;
+        self.invalidate_transform_cache();
+    }
+
+    /// 弧线描边（只有弧，不含两条半径）：沿弧采样折线交给 [`Self::instance_line_chain`]。
+    ///
+    /// 与 [`Self::instance_sector_outline`] 同一套实现，只是不加圆心与半径两点。
+    pub fn instance_arc(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        start_angle: f32,
+        end_angle: f32,
+        thickness: f32,
+        color: Option<crate::color::Color>,
+        segments: u32,
+    ) {
+        if !r.is_finite()
+            || !thickness.is_finite()
+            || !start_angle.is_finite()
+            || !end_angle.is_finite()
+            || r <= 0.0
+            || thickness <= 0.0
+        {
+            return;
+        }
+        let span = end_angle - start_angle;
+        if span.abs() * r < 1e-4 {
+            return;
+        }
+        let n = segments.max(2);
+        let mut points = Vec::with_capacity(n as usize + 1);
+        for i in 0..=n {
+            let angle = start_angle + (end_angle - start_angle) * i as f32 / n as f32;
+            points.push((r * angle.cos(), r * angle.sin()));
+        }
         let saved = self.transform;
         self.transform = Some(match saved {
             Some(transform) => transform.then(&Transform::translation(pos.x, pos.y)),
@@ -4729,8 +4772,8 @@ impl DrawBatch {
                 y3,
             } => self.instance_triangle(*x1, *y1, *x2, *y2, *x3, *y3, color),
             crate::shapes::Shape::Polygon { points } => self.instance_polygon(points, color),
-            crate::shapes::Shape::Arc { r, start, end, .. } => {
-                self.instance_arc(Pos::ZERO, *r, *start, *end, color)
+            crate::shapes::Shape::Sector { r, start, end, .. } => {
+                self.instance_sector(Pos::ZERO, *r, *start, *end, color)
             }
             crate::shapes::Shape::RectOutline {
                 w, h, thickness, ..
@@ -4776,16 +4819,30 @@ impl DrawBatch {
             crate::shapes::Shape::PolygonOutline { points, thickness } => {
                 self.instance_polygon_outline(points, *thickness, color)
             }
-            crate::shapes::Shape::ArcOutline {
+            crate::shapes::Shape::SectorOutline {
                 r,
                 start,
                 end,
                 thickness,
                 segments,
                 ..
-            } => {
-                self.instance_arc_outline(Pos::ZERO, *r, *start, *end, *thickness, color, *segments)
-            }
+            } => self.instance_sector_outline(
+                Pos::ZERO,
+                *r,
+                *start,
+                *end,
+                *thickness,
+                color,
+                *segments,
+            ),
+            crate::shapes::Shape::Arc {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => self.instance_arc(Pos::ZERO, *r, *start, *end, *thickness, color, *segments),
         }
 
         if texture_overridden {
@@ -4895,8 +4952,8 @@ impl DrawBatch {
             crate::shapes::Shape::Polygon { points } => {
                 crate::shapes::geo_emit_polygon(self, points, color)
             }
-            crate::shapes::Shape::Arc { r, start, end, .. } => {
-                crate::shapes::geo_emit_arc(self, *r, *start, *end, color)
+            crate::shapes::Shape::Sector { r, start, end, .. } => {
+                crate::shapes::geo_emit_sector(self, *r, *start, *end, color)
             }
             crate::shapes::Shape::RectOutline {
                 w, h, thickness, ..
@@ -4946,16 +5003,24 @@ impl DrawBatch {
             crate::shapes::Shape::PolygonOutline { points, thickness } => {
                 crate::shapes::geo_emit_polygon_outline(self, points, *thickness, color)
             }
-            crate::shapes::Shape::ArcOutline {
+            crate::shapes::Shape::SectorOutline {
                 r,
                 start,
                 end,
                 thickness,
                 segments,
                 ..
-            } => crate::shapes::geo_emit_arc_outline(
+            } => crate::shapes::geo_emit_sector_outline(
                 self, *r, *start, *end, *thickness, color, *segments,
             ),
+            crate::shapes::Shape::Arc {
+                r,
+                start,
+                end,
+                thickness,
+                segments,
+                ..
+            } => crate::shapes::geo_emit_arc(self, *r, *start, *end, *thickness, color, *segments),
         }
 
         if texture_overridden {
@@ -5018,8 +5083,8 @@ impl DrawBatch {
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: Option<crate::color::Color>) {
         crate::shapes::draw_polygon(self, pts, c);
     }
-    pub fn arc(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) {
-        crate::shapes::draw_arc(self, pos, r, sa, ea, c);
+    pub fn sector(&mut self, pos: Pos, r: f32, sa: f32, ea: f32, c: Option<crate::color::Color>) {
+        crate::shapes::draw_sector(self, pos, r, sa, ea, c);
     }
     pub fn rect_outline(
         &mut self,
@@ -5087,7 +5152,7 @@ impl DrawBatch {
     pub fn polygon_outline(&mut self, pts: &[(f32, f32)], t: f32, c: Option<crate::color::Color>) {
         crate::shapes::draw_polygon_outline(self, pts, t, c);
     }
-    pub fn arc_outline(
+    pub fn sector_outline(
         &mut self,
         pos: Pos,
         r: f32,
@@ -5097,7 +5162,20 @@ impl DrawBatch {
         c: Option<crate::color::Color>,
         seg: u32,
     ) {
-        crate::shapes::draw_arc_outline(self, pos, r, sa, ea, t, c, seg);
+        crate::shapes::draw_sector_outline(self, pos, r, sa, ea, t, c, seg);
+    }
+    /// 弧线描边（只有弧，不含两条半径）。语义见 [`crate::shapes::draw_arc`]。
+    pub fn arc(
+        &mut self,
+        pos: Pos,
+        r: f32,
+        sa: f32,
+        ea: f32,
+        t: f32,
+        c: Option<crate::color::Color>,
+        seg: u32,
+    ) {
+        crate::shapes::draw_arc(self, pos, r, sa, ea, t, c, seg);
     }
     pub fn shape(&mut self, shape: &crate::shapes::Shape<'_>, opts: crate::shapes::ShapeOverride) {
         crate::shapes::draw_shape(self, shape, opts);
