@@ -153,7 +153,7 @@ async fn main(app: App) {
 | `mrt` | 一次提交写多张颜色附件 |
 | `bench` | 压测 + draw call 统计 |
 
-完整清单（72 个，按主题分类）见
+完整清单（75 个，按主题分类）见
 [`docs/EXAMPLES.md`](https://github.com/Milk-COCO/vireo/blob/master/docs/EXAMPLES.md)。
 
 ## 深入阅读

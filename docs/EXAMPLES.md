@@ -25,7 +25,8 @@
 | `text_font` | 自定义字体：`load_font_file` / `load_font` + `Family::Name` |
 | `text_clip` | 文字裁切与对齐：`TextOverride::clip` + Justified / End / max_width |
 | `text_batch_clip` | 文字 + batch 裁切（单层，无嵌套） |
-| `text_shape_cache` | 文字 shape 缓存压力 + 动态 transform |
+| `text_typeset_cache` | 文字**排版缓存**压力：固定文案池 vs 每帧新串的命中率 + 动态 transform |
+| `text_cache` | 文字**字形缓存**：预算 / 预光栅化 / `hold` / `trim` / `compact` / 持久化 / 自动压缩 |
 | `text_profile` | 文字路径剖析：无头跑固定帧后退出，便于 `cargo flamegraph` |
 | `text_stress` | 文本极端情况压测（超长、空串、混合脚本等） |
 | `text_style` | 文本样式画廊：描边 / 多层描边 / 软投影 / 发光 / 内描边 / 内阴影 / 渐变字 / emoji / 几何 miter 描边（`1..9` + `0` 切组，`←→` 改宽度） |
